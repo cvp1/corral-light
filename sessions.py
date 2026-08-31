@@ -143,6 +143,7 @@ AGENTS = {
         "argv": [str(ADAPTER)],
         "requires": (str(ADAPTER),),
         "posture_via_config_dir": True,
+        "tools": True,
     },
     "codex": {
         # ChatGPT via OpenAI's codex, over the ACP-org adapter
@@ -157,6 +158,7 @@ AGENTS = {
         "label": "ChatGPT (Codex)",
         "argv": [sys.executable, str(ROOT / "codex_launcher.py")],
         "posture_via_config_dir": False,
+        "tools": True,
         "needs": "needs ChatGPT login (device-auth) — see codex_launcher.py",
     },
     "grok": {
@@ -166,6 +168,7 @@ AGENTS = {
         "argv": [sys.executable, str(GROK_LAUNCHER)],
         "requires": (str(GROK_LAUNCHER),),
         "posture_via_config_dir": False,
+        "tools": True,
         "needs": "needs Grok CLI authentication",
     },
     "gemini": {
@@ -182,6 +185,7 @@ AGENTS = {
                      str(NATIVE_ANTIGRAVITY_BIN),
                      str(NATIVE_ANTIGRAVITY_HELPER)),
         "posture_via_config_dir": False,
+        "tools": True,
         "needs": "official Google native ACP — authenticated by Antigravity OAuth",
     },
     "ollama": {
@@ -195,6 +199,10 @@ AGENTS = {
         "argv": ["/usr/bin/env", "python3", str(OLLAMA_ACP)],
         "requires": (str(OLLAMA_ACP),),
         "posture_via_config_dir": False,
+        # The one lane that cannot read a file for itself. Attaching a note to
+        # a pane here has to QUOTE it, because handing a path to an agent with
+        # no filesystem is a dead end that looks like a working feature.
+        "tools": False,
         "needs": "answers from the local Ollama — no key, works offline; "
                  "chat only, no tools and no permission rail",
         "catalog_probe": lambda: _probe_ollama(),
@@ -311,7 +319,8 @@ def available_agents():
             grok = resolve_grok()
             out.append({"key": key, "label": spec["label"], "available": bool(grok),
                         "why": "" if grok else "Grok CLI not installed",
-                        "postureEnforced": bool(spec["posture_via_config_dir"])})
+                        "postureEnforced": bool(spec["posture_via_config_dir"]),
+                        "tools": bool(spec.get("tools"))})
             continue
         # codex availability is adapter-present AND logged-in, both resolved at
         # call time by its launcher — refuse in the picker with the exact login
@@ -321,7 +330,8 @@ def available_agents():
             reason = unavailable_reason()
             out.append({"key": key, "label": spec["label"],
                         "available": reason is None, "why": reason or "",
-                        "postureEnforced": bool(spec["posture_via_config_dir"])})
+                        "postureEnforced": bool(spec["posture_via_config_dir"]),
+                        "tools": bool(spec.get("tools"))})
             continue
         # ollama needs a RUNNING SERVER, not just a file on disk: the adapter
         # is always present, so the generic exists() check below would call the
@@ -335,7 +345,8 @@ def available_agents():
             out.append({"key": key, "label": spec["label"],
                         "available": reason is None,
                         "why": reason or spec.get("needs", ""),
-                        "postureEnforced": bool(spec["posture_via_config_dir"])})
+                        "postureEnforced": bool(spec["posture_via_config_dir"]),
+                        "tools": bool(spec.get("tools"))})
             continue
         if spec.get("unavailable"):
             ok, why = False, spec["unavailable"]
@@ -347,7 +358,8 @@ def available_agents():
             ok, why = True, spec.get("needs", "")
         out.append({"key": key, "label": spec["label"], "available": ok, "why": why,
                     # So the dialog can stop OFFERING a posture it cannot set.
-                    "postureEnforced": bool(spec["posture_via_config_dir"])})
+                    "postureEnforced": bool(spec["posture_via_config_dir"]),
+                    "tools": bool(spec.get("tools"))})
     # One pass over every append site above, so a lane added later cannot miss
     # its group by being appended somewhere this was forgotten.
     for item in out:
@@ -1462,6 +1474,9 @@ class Pane:
             # read `strict` while nothing had made it strict — a UI asserting a
             # safety property it never established.
             "postureEnforced": bool(AGENTS[self.agent]["posture_via_config_dir"]),
+            # Whether this lane can read a file itself — what attaching a note
+            # to it means (a reference, or a quoted excerpt).
+            "tools": bool(AGENTS[self.agent].get("tools")),
             "state": state, "error": self.error, "created": self.created,
             "pending": list(self.pending.keys()),
             "usage": self.usage, "alive": alive,

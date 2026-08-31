@@ -989,3 +989,35 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
   border-radius:999px;
   color:var(--dim);
 }
+
+/* ── palette: attach, not browse ─────────────────────────────────────────
+ * Most of the palette's chrome (.paldlg/.palres/.palrow/.pill.corp) is the
+ * full Corral's, unchanged, so the two surfaces still look like one product.
+ * These are the parts Light's palette needs and the room-based one did not:
+ * it carries a snippet and a per-row hint, because a row here does something
+ * (attaches a note to a conversation) rather than navigating somewhere.
+ */
+.search-trigger{
+  /* In the left rail under New, not in a room nav — Light has no room nav.
+     Same width as the button above it so the two read as one control group. */
+  width:calc(100% - 28px);margin:0 14px 12px;justify-content:space-between;
+}
+.palrow{align-items:flex-start}
+.palt{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.palt .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.palsnip{
+  font-size:11.5px;color:var(--dim);line-height:1.45;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.palhint{
+  flex:none;margin-left:auto;align-self:center;
+  font-family:var(--mono);font-size:10px;color:var(--faint);white-space:nowrap;
+}
+.palrow.on .palhint{color:var(--dim)}
+/* An index problem is a NOTE, not a result and not a silent degrade: FTS5
+   missing on a box means ranking quietly got worse, and that has to be
+   readable rather than inferred from results feeling off. */
+.palnote{
+  font-size:11.5px;color:var(--gold);padding:6px 8px;margin-bottom:4px;
+  border-left:2px solid var(--gold);background:var(--raise);border-radius:0 6px 6px 0;
+}

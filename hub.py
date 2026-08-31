@@ -82,6 +82,11 @@ COOKIE = "corral_light"          # its own cookie name, so a browser paired to
                                  # its session silently overwritten by this one
 SSE_PING = 20                    # keep proxies and sleeping laptops honest
 MAX_BODY = 1 << 20
+# How much of a note a chat-only lane gets quoted into its composer. Bounded
+# (P8) and deliberately modest: this text goes into a context window, it is
+# visible in the box before anything is sent, and a note that does not fit is
+# a note to open in a lane that can read files.
+ATTACH_EXCERPT_CHARS = 6000
 
 MGR = sessions.Manager()
 
@@ -215,6 +220,19 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             return self._json({"error": "not paired"}, 401)
 
+        if p == "/api/search":
+            # Content search for the palette. Additive: a broken or missing
+            # index degrades to an error string IN the payload and an empty
+            # hit list, never a non-200 that would make the palette look
+            # broken when only one of its four sources is.
+            import content
+            return self._json(content.search((q.get("q") or [""])[0]))
+        if p == "/api/content/status":
+            # What the index knows — for the palette's empty state, so "no
+            # results" can distinguish "nothing matches" from "you have not
+            # pointed this at anything yet".
+            import content
+            return self._json(content.status())
         if p == "/api/session/history":
             # Transcript paging: events OLDER than `before` from the on-disk
             # log — the ring in /api/state holds only the tail.
@@ -294,6 +312,46 @@ class Handler(BaseHTTPRequestHandler):
                                   (b.get("model") or "").strip() or None,
                                   (b.get("effort") or "").strip() or None)
                 return self._json({"ok": True, "pane": pane.snapshot()})
+            if p == "/api/content/attach":
+                # What "attach a note to a pane" MEANS lives here, in one
+                # place, because it is not the same thing for every lane and
+                # the difference is load-bearing:
+                #
+                #   a lane WITH tools  -> a reference. The agent opens the file
+                #       itself, through its own permission gate, so the bytes
+                #       reach the model the same way any other file it reads
+                #       does — visible in the transcript, refusable in the
+                #       rail. Corral does not smuggle file contents into a
+                #       prompt behind the gate's back.
+                #   a lane WITHOUT    -> a quoted excerpt, bounded and clearly
+                #       fenced. A path handed to an agent with no filesystem
+                #       is a dead end that looks like a working feature.
+                #
+                # Returning TEXT (not markup, not a command) keeps this a
+                # composer convenience: it lands in the box, Craig reads it,
+                # and nothing is sent until he presses send. The attach itself
+                # authorizes nothing (P17).
+                import content
+                item = content.get((b.get("id") or "").strip())
+                if item is None:
+                    raise ValueError("that page is not in the index any more")
+                pane = MGR.get(b.get("pane", "")) if b.get("pane") else None
+                has_tools = bool(pane and sessions.AGENTS.get(pane.agent, {})
+                                 .get("tools"))
+                if has_tools:
+                    text = f"{item['path']}\n\n"
+                    mode = "reference"
+                else:
+                    body = (item["body"] or "")[:ATTACH_EXCERPT_CHARS]
+                    clipped = len(item["body"] or "") > ATTACH_EXCERPT_CHARS
+                    text = (f"From my notes — {item['title']} "
+                            f"({item['rel']}):\n\n\"\"\"\n{body}"
+                            f"{chr(10) + '[…truncated]' if clipped else ''}"
+                            f"\n\"\"\"\n\n")
+                    mode = "excerpt"
+                return self._json({"ok": True, "mode": mode, "text": text,
+                                   "title": item["title"], "path": item["path"],
+                                   "dir": str(Path(item["path"]).parent)})
             if p == "/api/session/send":
                 MGR.get(b.get("pane", "")).send(b.get("text", ""))
                 return self._json({"ok": True})

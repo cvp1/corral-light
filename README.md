@@ -15,11 +15,19 @@ essentially the functions in the Live tab — a lightweight multi-model
 interface."*
 
 Everything ranch-server's Corral grew because it sits on the fleet is gone:
-Today, Mail, Fleet, Delegates, FinOps, the Library, the scheduler, the run
-registry, the attention queue, push notifications, tmux adoption, the AI-OS
-slash commands, ssh-shell lanes, delegate-box lanes. Not disabled — **gone**. A
-light build carrying dead branches is the heavy build with a smaller menu, and
-a route that answers "unavailable" is still a surface to maintain.
+Today, Mail, Fleet, Delegates, FinOps, the scheduler, the run registry, the
+attention queue, push notifications, tmux adoption, the AI-OS slash commands,
+ssh-shell lanes, delegate-box lanes. Not disabled — **gone**. A light build
+carrying dead branches is the heavy build with a smaller menu, and a route that
+answers "unavailable" is still a surface to maintain.
+
+The Library is the one that came back, and it came back **reimagined rather
+than ported** — as ⌘K + attach, not as a room. See below.
+
+**The definition, so it stops moving:** Light is *conversations, with your
+content reachable from the composer*. That is the product. Every room upstream
+has is a candidate for "just this one more", and each would be defensible on
+its own; the line is here.
 
 **A fork, deliberately, not a shared tree with a flag.** Fleet doctrine is that
 capability moves by install seed, never by synced trees (`FLEET.md`), and the
@@ -46,8 +54,65 @@ way back to heavy.
   Corral owns, so only that lane's permission pill is a claim Corral can back.
   Every other pane says `agent-set` instead of displaying a safety property
   nobody established.
+- **⌘K over everything** — see below.
 - Markdown rendering, find-in-conversation, copy-on-select, minimize, pin,
   reorder, rename, archive/reopen, seven measured themes, PWA install.
+
+## ⌘K — your content, reachable from the composer
+
+The full Corral has a **Library**: a room you navigate to, browse, and read a
+rendered page in. Light does not port it, because that shape is navigation
+scaffolding for a building with seven floors and Light has one. Inverted
+instead — content is not a place you go, it is something you *attach*:
+
+    ⌘K  →  type  →  ↵ attach to this conversation
+                    ⇧↵ open a new pane where that file lives
+
+One ranked list over **open panes, archived conversations, and your notes**.
+In a one-room app the palette *is* the navigation, so it searches everything;
+local matches are instant, content folds in when the index answers (~2 ms
+against 683 pages here).
+
+**What "attach" inserts depends on the lane, and the difference is the point:**
+
+| lane | inserts | why |
+|---|---|---|
+| has tools (Claude, Codex, Grok, Antigravity) | the file **path** | the agent opens it *itself*, through its own permission gate — visible in the transcript, refusable in the rail. Corral does not smuggle file contents past the gate |
+| no tools (Ollama) | a bounded **quoted excerpt** | a path handed to an agent with no filesystem is a dead end that looks like a working feature |
+
+Either way it lands in the composer and **nothing is sent** — you read it, add
+your question, and press send. Attaching authorizes nothing (P17).
+
+### What it indexes
+
+Whatever `~/.config/corral-light/content.json` names; `~/notes` by default if
+that file is absent and the directory exists:
+
+```json
+[{"key": "vault", "label": "notes", "root": "~/notes"},
+ {"key": "work",  "label": "work",  "root": "~/Documents/work"}]
+```
+
+Never a hardcoded corpus list — a config shipping five directories nobody has
+is a feature broken on arrival. `.md`/`.markdown`/`.txt`, dot-dirs and
+`node_modules` pruned, symlinks that escape a root not followed, bounded at
+20k files per root and 200 KB per file. The index (`content.db`, SQLite FTS5)
+is **derived and disposable** — delete it and it rebuilds; nothing in it is a
+system of record. No FTS5 on your sqlite? It degrades to a substring scan and
+*says so in the palette* rather than quietly getting worse.
+
+Inspect it without the browser: `python3 content.py status | search <q> | refresh`.
+
+### The security dividend
+
+Upstream needs `mdview.py` — 217 lines of escape-everything, emit-only-tags-we-
+spell-out — precisely *because* it renders vault pages, and vault notes carry
+pasted third-party content on an authed control surface (P20). Light never
+renders your content in the browser at all, so that renderer stays deleted and
+the surface it defends goes with it. The FTS snippet is the only file-derived
+string that reaches the page, and it is set as `textContent`. A test enforces
+this: if a markdown renderer ever comes back, the escaping argument has to come
+back with it.
 
 ## Lanes
 
@@ -134,6 +199,7 @@ root would hand a browser a root shell behind a pairing gate.
 | `CORRAL_LIGHT_STATE` | `~/.local/share/corral-light` | panes, transcripts, the session key |
 | `CORRAL_OLLAMA_URL` | `http://127.0.0.1:11434` | point elsewhere to borrow another node's models |
 | `CORRAL_CLAUDE_ADAPTER` | `spike/node_modules/.bin/claude-agent-acp` | |
+| `CORRAL_CONTENT_CONFIG` | `~/.config/corral-light/content.json` | which directories ⌘K indexes |
 | `CORRAL_NODE_BIN` | `~/.hermes/node/bin` *if it exists* | ignored when absent, so a stock Mac's PATH node wins |
 
 **Why loopback by default.** Ranch's Corral binds `0.0.0.0` on the argument
@@ -165,6 +231,15 @@ Not "the tests pass" — run end to end against real agents before this shipped
   rows, transcripts intact.
 - **Browser** — pairing screen → paired → app renders, one JS bundle, no
   console errors beyond the expected pre-pairing 401.
+- **⌘K + attach** — indexed the real vault (683 pages, FTS5, 2 ms queries);
+  ⌘K in the browser → `ranch letter` → ↵ put the note's **path** into a Claude
+  pane's composer; the same hit into an **Ollama** pane quoted a 2,798-char
+  excerpt instead, and that chat-only lane — which cannot read a file — then
+  answered a question about the note correctly from the quoted text alone.
+  Nothing was sent in either case until the composer was submitted by hand.
+  Fixed while testing: with exactly one pane open, every hit offered "open a
+  new pane" because `S.focus` is only set by clicking a roster row — an attach
+  target that ignores the only conversation on screen.
 - **Clean room** — the tracked tree copied to an empty directory with an empty
   `HOME` under `env -i`: hub started, browser paired, "New conversation"
   defaulted its Directory to that box's own home, opened an Ollama pane and
