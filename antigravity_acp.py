@@ -28,8 +28,18 @@ SESSIONS: dict[str, dict] = {}
 RUNNING: dict[str, subprocess.Popen] = {}
 LOCK = threading.RLock()
 WRITE_LOCK = threading.Lock()
+# CORRAL_LIGHT_STATE, not CORRAL_STATE. This module arrived from the full
+# Corral still reading ITS state dir, which on a host running both builds is a
+# genuine cross-wire and not a cosmetic one: this lane's session records would
+# land in the other product's directory, and CATALOG below is the OTHER
+# Corral's `catalog.json` — so Light's Antigravity picker would be seeded from
+# a model list a different hub negotiated, on a different account, possibly
+# with a different vendor build. Found 2026-08-31 by auditing exactly the
+# question "can both run on one host"; the separate port, cookie, MCP config
+# and codex home were all already right, and this one was not.
 SESSION_DIR = Path(os.environ.get(
-    "CORRAL_STATE", str(Path.home() / ".local/share/corral"))) / "agy-sessions"
+    "CORRAL_LIGHT_STATE",
+    str(Path.home() / ".local/share/corral-light"))) / "agy-sessions"
 CATALOG = SESSION_DIR.parent / "catalog.json"
 
 

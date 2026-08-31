@@ -211,9 +211,48 @@ context, so the PWA install prompt actually appears. Setting
 `CORRAL_LIGHT_BIND=0.0.0.0` is a decision to make deliberately, not a default
 to inherit.
 
-Light and full Corral use different ports, different state dirs, different
-cookie names, and different CLI names, so both can run on one host without
-either corrupting the other's panes or minting a cookie the other accepts.
+## Running both on one host
+
+Yes — Light is built to sit next to the full Corral on the same machine, and
+the separation is audited by a test rather than asserted here.
+
+| | full Corral | Light |
+|---|---|---|
+| port | 8099 | **8098** |
+| state | `~/.local/share/corral` | `~/.local/share/corral-light` |
+| cookie | `corral` | `corral_light` |
+| MCP config | `~/.config/corral/mcp.json` | `~/.config/corral-light/mcp.json` |
+| codex home | `~/.config/corral/codex-home` | `~/.config/corral-light/codex-home` |
+| CLI | `corral` | `corral-light` |
+| unit | `corral.service` | `corral-light.service` / the plist |
+
+Separate state dirs matter more than they look: they hold the **session key**,
+so a shared one would let either hub mint a cookie the other accepts, and each
+would restore the other's panes with lanes it does not have.
+
+**What they genuinely share, and what that costs:**
+
+- **Vendor logins.** Grok's CLI state and Antigravity's OAuth are the vendor's,
+  not Corral's — one login serves both, which is the good case. The Antigravity
+  *binary* is shared too (`~/.local/lib/corral/antigravity-acp`), so installing
+  it from either build is enough.
+- **Codex is the exception**: separate `CODEX_HOME`s means a separate
+  `codex login --device-auth` for each. Deliberate — a shared codex home is
+  how a pane ends up talking to whatever model the *other* config pinned.
+- **Claude credentials — the one to actually watch.** Both builds copy
+  `~/.claude/.credentials.json` into each pane's own config dir at pane
+  creation, and that copy cannot be refreshed from the original. Two hubs means
+  more independent copies of one rotating OAuth token, alongside your terminal
+  Claude Code as a third. Observed live 2026-08-31: a fresh pane died with
+  `OAuth session expired and could not be refreshed` twenty-eight seconds after
+  the host credential's own `expiresAt`. This is inherited upstream behaviour,
+  not something Light introduced, and it is not made *worse* by a second hub so
+  much as made more likely to be noticed. If a Claude pane dies this way, the
+  fix is to refresh the login on the host and start a new pane.
+- **Env var NAMES overlap** (`CORRAL_CODEX_HOME`, `CORRAL_MCP_CONFIG`,
+  `CORRAL_NODE_BIN`, `CORRAL_CLAUDE_ADAPTER`, `CORRAL_OLLAMA_URL`). The
+  *defaults* differ correctly, but exporting one in a shell that launches both
+  points both at the same thing. Set them in the unit file, not in `.bashrc`.
 
 ## Verified live, 2026-08-31
 
