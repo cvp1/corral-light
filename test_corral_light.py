@@ -1280,6 +1280,104 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
         self.assertIn("CLAUDE_CONFIG_DIR", out)
 
 
+class EveryUiCallHasADefinition(unittest.TestCase):
+    """A function called from a click handler but never defined does not
+    throw at build time — `node --check` only parses syntax, it does not run
+    the file — so it ships silently and dies the first time someone clicks.
+
+    Measured 2026-08-31: `setMin` is called from five places (the roster row,
+    the pane header, the minbar chip, the rail's restore action, the palette
+    focus fallback) and was defined in NONE of them. It sat right next to
+    loadAttention/loadFleet/askResolve in the full Corral's app.js, and the
+    cut that removed those three took setMin with them while leaving every
+    caller intact. "Can't minimize panes" was the first anyone noticed.
+
+    THIS TEST'S OWN FIRST VERSION HAD THE SAME CLASS OF BUG IT WAS BUILT TO
+    CATCH. It stripped string and template literals with a regex
+    (`` `(?:[^`\\]|\\.)*` ``) that is not safe against this file's own
+    content — one unbalanced or nested backtick collapses the match across
+    everything between two UNRELATED template literals, and here it ate 85%
+    of the file (65,044 -> 10,171 chars) on the first real run. Verified by
+    deliberately re-deleting setMin: that version reported zero problems: a
+    passing test that could not have failed is worse than no test, because it
+    is trusted. Rebuilt WITHOUT string/template stripping — false positives
+    from a stray "word(" inside a string are cheap to allowlist by hand;
+    false negatives from over-eager stripping are silent. Re-verified the
+    same way: with setMin actually deleted, this version reports exactly
+    `['setMin']`.
+    """
+
+    # JS builtins/globals this scan does not otherwise track.
+    KNOWN_GLOBALS = {
+        "if", "for", "while", "switch", "catch", "function", "return",
+        "typeof", "new", "document", "window", "location", "console",
+        "fetch", "JSON", "Math", "Date", "Array", "Object", "Promise",
+        "Set", "Map", "String", "Number", "Boolean", "requestAnimationFrame",
+        "setTimeout", "setInterval", "clearInterval", "clearTimeout",
+        "navigator", "localStorage", "URL", "Event", "EventSource",
+        "AbortController", "structuredClone", "Intl", "RegExp",
+        "encodeURIComponent", "decodeURIComponent", "parseInt", "parseFloat",
+        "isNaN", "globalThis", "Symbol", "self", "alert", "confirm",
+        "prompt", "atob", "btoa", "async",
+    }
+    # Confirmed by hand, one at a time, to be "word(" appearing inside a
+    # STRING (a button title, a template-literal sentence) rather than a
+    # real call with no definition — never added blind. `close` and `match`
+    # have ZERO bare (non-dot) occurrences anywhere in the file, proven by
+    # `grep -n '[^.]close(' | grep -v '\.close('` before either was added
+    # here; `earlier` and `minimize` only ever appear as "...earlier (" and
+    # "minimize (keeps running)" inside strings.
+    KNOWN_LOCAL_FALSE_POSITIVES = {"close", "earlier", "match", "minimize"}
+
+    def test_every_bare_call_has_a_matching_definition(self):
+        import re
+        src = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        # Only comments are stripped, and only the two forms that cannot
+        # runaway-match in this language: block comments (non-nesting in JS)
+        # and full line comments. String and template-literal content is
+        # LEFT IN on purpose — see the class docstring for why stripping it
+        # was the more dangerous choice, measured, not assumed.
+        src = re.sub(r"/\*[\s\S]*?\*/", "", src)
+        src = re.sub(r"(?<!:)//.*", "", src)   # skip `://` inside URL strings
+
+        defined = set(re.findall(r"\bfunction (\w+)", src))
+        defined |= set(re.findall(
+            r"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", src))
+        defined |= set(re.findall(
+            r"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function", src))
+        # Single bare-param arrows: `const name = x => {`, no parens around
+        # the parameter. Several real definitions in this file are shaped
+        # this way (accept, answer, paneRow, planNode, pushStep, set,
+        # stepNode) and were false positives here before this line existed.
+        defined |= set(re.findall(
+            r"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?"
+            r"[a-zA-Z_$][\w$]*\s*=>", src))
+        known = defined | self.KNOWN_GLOBALS | self.KNOWN_LOCAL_FALSE_POSITIVES
+
+        # Bare calls only: NOT preceded by `.` (a method call on some
+        # object, which this file does not define and should not have to),
+        # and not the `function name(` at a definition site itself.
+        bare = []
+        for m in re.finditer(r"(?<![.\w$])([a-zA-Z_$][\w$]*)\s*\(", src):
+            before = src[max(0, m.start() - 12):m.start()]
+            if re.search(r"function\s*$", before):
+                continue
+            bare.append(m.group(1))
+
+        missing = sorted({name for name in bare
+                          if name not in known
+                          and not name[0].isupper()   # constructors: too noisy
+                          and len(name) > 2})
+        self.assertEqual(missing, [],
+                         f"app.js calls these as functions with no visible "
+                         f"definition: {missing} — either define them or "
+                         f"add them to KNOWN_LOCAL_FALSE_POSITIVES with a "
+                         f"reason (confirmed by hand, not assumed — see the "
+                         f"class docstring for why), the way setMin's "
+                         f"absence should have been caught before a click "
+                         f"found it")
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

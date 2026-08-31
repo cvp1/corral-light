@@ -1551,6 +1551,22 @@ function render() {
   if (!items) n.appendChild(el('div', 'calm', 'Nothing. Quiet is the steady state.'));
   railFold(items, panes.reduce((a, p) => a + p.pending.length, 0));
 }
+
+// Every minimize/restore click goes through here — the roster row, the pane
+// header's own button, the minbar chip, and the rail's "restore" action all
+// call it. Dropped during the trim that cut this file from the full Corral's
+// app.js (loadAttention/loadFleet/askResolve sat right next to it and the cut
+// boundary took setMin with them); every CALLER survived the trim, so every
+// click threw a silent ReferenceError in the console instead of doing
+// anything — `node --check` catches a syntax error, not a missing runtime
+// reference, so this shipped unnoticed until Craig actually clicked minimize.
+async function setMin(p, flag) {
+  try {
+    await api('/api/session/minimize', { pane: p.id, minimized: flag });
+    p.minimized = flag; render();
+  } catch (e) { toast(e.message, true); }
+}
+
 /* ── the needs-you rail folds ─────────────────────────────────────────────
  * Craig, 2026-08-01: "needs to be collapsible and collapse when nothing is in
  * it. More screenspace for reading is always appreciated."
