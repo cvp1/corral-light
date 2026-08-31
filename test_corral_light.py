@@ -1114,6 +1114,91 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
             Path.home = real
 
 
+class TheStaleCopyTheoryWasWrong(unittest.TestCase):
+    """Recorded honestly: fix #2 (stale-copy resync) did not resolve Craig's
+    failure. His `expiresAt` was IDENTICAL across the run before and after
+    that fix shipped — proof the source token had not rotated at all, so
+    there was nothing for a resync to fix. The mechanism was never staleness.
+
+    What survived: byte-identical, valid-looking credentials, still failing
+    ONLY when read through the private config dir rather than ~/.claude
+    directly. That points at the directory, not the file's content — so the
+    next instruments are a permission audit and a content-equality proof,
+    and the next code change (locking the dir to 0700) is defensive
+    hardening offered honestly as unproven, not as another confident theory.
+    """
+
+    def test_the_config_dir_is_locked_to_the_owner(self):
+        """Measured 2026-08-31: plain mkdir left it at 0o775 on this host —
+        group AND world read/execute on a directory built to carry a copied
+        OAuth token. Some credential-handling CLIs refuse to trust a token in
+        a loosely-permissioned directory even when the file itself is
+        locked down, the way ssh refuses a loose ~/.ssh."""
+        import sessions
+        home = Path(tempfile.mkdtemp())
+        (home / ".claude").mkdir()
+        (home / ".claude" / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": "a" * 108}}))
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            d = sessions.seed_config_dir(home / "cfg", "auto")
+            self.assertEqual(oct(d.stat().st_mode & 0o777), "0o700")
+        finally:
+            Path.home = real
+
+    def test_locking_the_dir_does_not_disturb_an_existing_wider_one(self):
+        """chmod must not raise if it cannot apply — a dir on a filesystem
+        that ignores POSIX modes (some network mounts) must not brick a
+        pane over a permission bit nobody can set anyway."""
+        import sessions
+        home = Path(tempfile.mkdtemp())
+        (home / ".claude").mkdir()
+        (home / ".claude" / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": "a" * 108}}))
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            d = sessions.seed_config_dir(home / "cfg", "auto")
+            d.chmod(0o777)                          # simulate a loose dir
+            d2 = sessions.seed_config_dir(home / "cfg", "auto")  # called again
+            self.assertEqual(oct(d2.stat().st_mode & 0o777), "0o700",
+                             "a call on an already-existing loose dir must "
+                             "still tighten it")
+        finally:
+            Path.home = real
+
+
+class DiagnoseAuditsPermissionsAndContent(unittest.TestCase):
+    """The instruments built after fix #2 turned out not to be the answer."""
+
+    def test_it_compares_real_and_private_permissions(self):
+        import diagnose, inspect
+        src = inspect.getsource(diagnose)
+        self.assertIn("_permission_audit", src)
+        self.assertIn("_content_equality", src)
+
+    def test_content_equality_never_prints_the_hash_or_the_bytes(self):
+        import diagnose, tempfile as tf, io, contextlib
+        a = Path(tf.mkdtemp()) / "a.json"; a.write_text("secret-value-a")
+        b = Path(tf.mkdtemp()) / "b.json"; b.write_text("secret-value-a")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            diagnose._content_equality(a, b)
+        out = buf.getvalue()
+        self.assertIn("yes", out)
+        self.assertNotIn("secret-value-a", out)
+
+    def test_content_equality_detects_a_real_difference(self):
+        import diagnose, tempfile as tf, io, contextlib
+        a = Path(tf.mkdtemp()) / "a.json"; a.write_text("one")
+        b = Path(tf.mkdtemp()) / "b.json"; b.write_text("two")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            diagnose._content_equality(a, b)
+        self.assertIn("DIFFERS", buf.getvalue())
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

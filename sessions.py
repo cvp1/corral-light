@@ -328,6 +328,18 @@ def seed_config_dir(d, posture):
     d = Path(d)
     real = Path.home() / ".claude"
     d.mkdir(parents=True, exist_ok=True)
+    # Locked to the owner. Never proven as THE cause of anything, but cheap,
+    # strictly safer than the umask-default mode plain mkdir leaves (measured
+    # 2026-08-31: 0o775 on this host — group AND world read/execute on a
+    # directory built to carry a copied OAuth token), and the kind of thing a
+    # security-conscious CLI can reasonably refuse to trust a credential
+    # inside of, the way ssh refuses a loose ~/.ssh. Applied every call, not
+    # only on creation, so a directory made before this line existed still
+    # gets fixed the next time a pane using it starts or resumes.
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
     # THE CREDENTIAL DECIDES WHETHER A PRIVATE DIR IS POSSIBLE AT ALL.
     #
     # Measured on dogma-2, 2026-08-31: a pane died with `Authentication

@@ -184,6 +184,45 @@ def _control(spec, cwd, config_dir, prompt):
             print(f"  | {ln}", flush=True)
 
 
+def _mode(path):
+    try:
+        return oct(path.stat().st_mode & 0o777)
+    except OSError:
+        return "?"
+
+
+def _permission_audit(real_dir, config_dir):
+    """Directory modes, real vs. private. Some credential-handling CLIs
+    refuse to trust a token sitting in a loosely-permissioned directory even
+    when the file itself is locked down — the way ssh refuses a loose
+    ~/.ssh. This is the cheapest way to rule that class of cause in or out:
+    no content is read, only os.stat.
+    """
+    print("\n  permission audit (owner/group/other, octal)", flush=True)
+    _line("    real ~/.claude", _mode(real_dir))
+    _line("    real .credentials.json", _mode(real_dir / ".credentials.json"))
+    _line("    private config dir", _mode(config_dir))
+    _line("    private .credentials.json", _mode(config_dir / ".credentials.json"))
+    home = Path.home()
+    _line(f"    {home}", _mode(home))
+
+
+def _content_equality(src, dst):
+    """Is the copy actually byte-identical to the source? A hash, never the
+    bytes — this only answers equal/not-equal, which is all the question
+    needs. If this ever says 'DIFFERS', that is worth chasing on its own:
+    the copy mechanism itself would be the bug, not what surrounds it.
+    """
+    import hashlib
+    try:
+        a = hashlib.sha256(Path(src).read_bytes()).hexdigest()
+        b = hashlib.sha256(Path(dst).read_bytes()).hexdigest()
+    except OSError as e:
+        _line("  copy identical to source?", f"could not check: {e}")
+        return
+    _line("  copy identical to source?", "yes" if a == b else "NO — DIFFERS")
+
+
 def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK"):
     spec = sessions.AGENTS.get(key)
     if not spec:
@@ -223,6 +262,9 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
         if config_dir:
             names = sorted(p.name for p in Path(config_dir).iterdir())
             _line("  contents", ", ".join(names))
+            _permission_audit(real, Path(config_dir))
+            _content_equality(real / ".credentials.json",
+                              Path(config_dir) / ".credentials.json")
     _line("posture enforceable", sessions.posture_enforceable(spec))
 
     env = sessions.spawn_env(spec, config_dir)
