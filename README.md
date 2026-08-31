@@ -190,7 +190,7 @@ config dir was used or refused, which environment variables reach the agent
 failure **the adapter's own stderr**, which `acp.py` has always captured and
 until now only ever used one line of.
 
-**Two measured causes, both fixed 2026-08-31, found in this order:**
+**Two measured causes fixed, one theory retracted, 2026-08-31:**
 
 1. An empty-string token. `~/.claude/.credentials.json` can exist, parse, and
    carry every expected key with the values `""` — complete by every
@@ -209,10 +209,27 @@ until now only ever used one line of.
    overwriting that with an older file would break a working pane to fix one
    that already recovered on its own.
 
-If your terminal `claude` works and panes do not, `diagnose` — including its
-positive control, which pinpointed cause #2 by proving the token itself was
-real — is the fastest way to find out which of these it is, or whether it is
-a third thing neither of these fixes.
+**The resync fix for #2 did not resolve the case it was written for.**
+Said plainly rather than left to be discovered: re-running `diagnose` after
+that fix shipped showed the same failure with the exact same `expiresAt` as
+before — proof the token had never rotated between runs, so there was
+nothing for a resync to fix. What survived: a byte-identical, valid-looking
+credential still failing only when read through the private config dir
+rather than `~/.claude` directly. That points at the directory, not the
+file's content.
+
+Two things followed from that, offered as an audit and a hardening rather
+than a fourth confident theory: `diagnose` now compares the real and private
+directories' Unix permissions (plain `mkdir` can leave a directory at `0o775`
+— group- and world-readable, which some credential-handling CLIs refuse to
+trust a token inside of), and confirms the copy is byte-identical to the
+source by hash. `seed_config_dir()` now locks the private directory to
+`0o700` on every call — cheap, cannot hurt, not yet proven to be the actual
+cause of anything.
+
+If your terminal `claude` works and panes do not, run `diagnose` and read the
+whole report, including the permission audit — that is where the next answer
+is most likely to be.
 
 Then check this:
 
