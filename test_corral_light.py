@@ -504,6 +504,39 @@ class PlatformHonesty(unittest.TestCase):
         self.assertIn("platform_problem", sess)
 
 
+class PrintedCommandsWork(unittest.TestCase):
+    """A command shown to a human is a promise that running it does the thing.
+
+    Measured on dogma-2, 2026-08-31: `doctor` told Craig to run
+    `CODEX_HOME=… codex login --device-auth`, and codex refused —
+    "CODEX_HOME points to '…', but that path does not exist". The directory is
+    only created at pane-spawn time, which cannot have happened yet, because
+    not being logged in is exactly why the message is on screen. The lane
+    printed an instruction that could never work as pasted.
+    """
+
+    def test_the_codex_login_command_creates_its_own_home(self):
+        import codex_launcher
+        cmd = codex_launcher.login_command()
+        self.assertIn("mkdir -p", cmd)
+        self.assertIn("login --device-auth", cmd)
+        # The mkdir must come FIRST — after the login it is decoration.
+        self.assertLess(cmd.index("mkdir -p"), cmd.index("login --device-auth"))
+        self.assertIn(str(codex_launcher.CODEX_HOME), cmd)
+
+    def test_the_unavailable_reason_carries_that_command(self):
+        """The reason string is what the picker and `doctor` actually show."""
+        import codex_launcher
+        real = codex_launcher.auth_present
+        try:
+            codex_launcher.auth_present = lambda: False
+            reason = codex_launcher.unavailable_reason()
+        finally:
+            codex_launcher.auth_present = real
+        if reason and "not logged in" in reason:
+            self.assertIn("mkdir -p", reason)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

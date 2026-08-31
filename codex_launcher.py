@@ -67,8 +67,22 @@ def auth_present() -> bool:
 
 
 def login_command() -> str:
+    """The exact shell line to paste — INCLUDING creating CODEX_HOME.
+
+    The mkdir is not decoration. codex refuses to start when CODEX_HOME does
+    not exist ('Error loading configuration: CODEX_HOME points to "…", but
+    that path does not exist'), and this directory only gets created by
+    main() at pane-spawn time — which cannot have happened yet, because not
+    being logged in is precisely why you are reading this. So the command
+    this lane printed was one that could never work as pasted: it told the
+    operator to log in and then failed on the login. Measured on dogma-2,
+    2026-08-31, from a clean install.
+
+    A command shown to a human is a promise that running it does the thing.
+    """
     codex = BUNDLED_CODEX if BUNDLED_CODEX.is_file() else Path("codex")
-    return f"CODEX_HOME={CODEX_HOME} {codex} login --device-auth"
+    return (f"mkdir -p {CODEX_HOME} && "
+            f"CODEX_HOME={CODEX_HOME} {codex} login --device-auth")
 
 
 # Vars this launcher's own docstring promises never reach the process --
