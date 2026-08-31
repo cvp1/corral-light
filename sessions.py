@@ -144,6 +144,17 @@ AGENTS = {
         "requires": (str(ADAPTER),),
         "posture_via_config_dir": True,
         "tools": True,
+        # KNOWN GAP, left open deliberately. Every other lane refuses at pick
+        # time when its credential is missing; this one cannot check cheaply
+        # without risking the opposite lie. A pane seeds its config dir from
+        # `~/.claude/.credentials.json`, so testing for that file looks like
+        # the obvious probe — but on macOS Claude Code can keep its
+        # credential in the Keychain instead, where an absent file proves
+        # nothing. Refusing a lane that works is the same class of wrong as
+        # offering one that doesn't, so until there is a real check (asking
+        # the CLI, not guessing at a path), this lane stays optimistic and an
+        # unauthenticated pane fails at its first prompt with the vendor's own
+        # message.
     },
     "codex": {
         # ChatGPT via OpenAI's codex, over the ACP-org adapter
@@ -313,12 +324,18 @@ def available_agents():
         missing = [p for p in spec.get("requires", ()) if not Path(p).exists()]
         # grok resolves its binary at call time (PATH, AIOS_GROK_BIN, or the
         # CLI's default install dirs), so a static argv[0] check cannot answer
-        # "is it installed" for this lane. Ask the launcher instead.
+        # "is it installed" for this lane. And installed is not the question
+        # anyway: this asked only resolve_grok(), which documents itself as
+        # returning a path "without probing auth", so a host with the CLI
+        # present but never signed in reported the lane AVAILABLE and the pane
+        # died on its first prompt with `Authentication required` (dogma-2,
+        # 2026-08-31). Ask the launcher for the whole answer, as codex and
+        # ollama already do.
         if key == "grok":
-            from grok_launcher import resolve_grok
-            grok = resolve_grok()
-            out.append({"key": key, "label": spec["label"], "available": bool(grok),
-                        "why": "" if grok else "Grok CLI not installed",
+            from grok_launcher import unavailable_reason
+            reason = unavailable_reason()
+            out.append({"key": key, "label": spec["label"],
+                        "available": reason is None, "why": reason or "",
                         "postureEnforced": bool(spec["posture_via_config_dir"]),
                         "tools": bool(spec.get("tools"))})
             continue

@@ -537,6 +537,49 @@ class PrintedCommandsWork(unittest.TestCase):
             self.assertIn("mkdir -p", reason)
 
 
+class LanesRefuseAtPickTime(unittest.TestCase):
+    """Installed is not the same question as usable.
+
+    Three separate times this build shipped a lane that reported available
+    and then died on its first prompt — antigravity (wrong platform), codex
+    (a login command that could not run), and grok (`ok` from a resolver whose
+    own docstring says it does not probe auth; Craig hit `Authentication
+    required` on dogma-2, 2026-08-31). available_agents() exists to stop a
+    picker listing a binary that is not installed; a binary that is installed
+    and cannot authenticate is the same lie one layer in.
+    """
+
+    CREDENTIALED = ("codex", "grok")     # lanes gated on a vendor login
+
+    def test_each_credentialed_lane_exposes_a_real_probe(self):
+        import importlib
+        for lane in self.CREDENTIALED:
+            with self.subTest(lane=lane):
+                mod = importlib.import_module(f"{lane}_launcher")
+                self.assertTrue(hasattr(mod, "unavailable_reason"),
+                                f"{lane} has no unavailable_reason()")
+                self.assertTrue(hasattr(mod, "auth_present"),
+                                f"{lane} cannot tell whether it is logged in")
+
+    def test_the_picker_asks_that_probe_not_just_the_filesystem(self):
+        sess = (ROOT / "sessions.py").read_text(encoding="utf-8")
+        for lane in self.CREDENTIALED:
+            self.assertIn(f"from {lane}_launcher import unavailable_reason", sess,
+                          f"the {lane} lane is judged without its auth probe")
+
+    def test_a_missing_login_names_the_command_that_fixes_it(self):
+        """'not logged in' with no remedy is a dead end, not a diagnosis."""
+        import grok_launcher
+        real = grok_launcher.auth_present
+        try:
+            grok_launcher.auth_present = lambda: False
+            reason = grok_launcher.unavailable_reason()
+        finally:
+            grok_launcher.auth_present = real
+        if reason and "not logged in" in reason:
+            self.assertIn("login", reason)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

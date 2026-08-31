@@ -45,6 +45,42 @@ def resolve_grok(explicit: str | None = None) -> str | None:
     return None
 
 
+# Where the Grok CLI keeps its own credential. Same shape as codex's
+# auth.json, which is why the same check was available all along and simply
+# was not made.
+GROK_HOME = Path(os.environ.get("CORRAL_GROK_HOME", Path.home() / ".grok"))
+
+
+def auth_present() -> bool:
+    return (GROK_HOME / "auth.json").is_file()
+
+
+def login_command(grok: str | None = None) -> str:
+    return f"{grok or 'grok'} login"
+
+
+def unavailable_reason() -> str | None:
+    """Why this lane cannot open right now, or None if it can.
+
+    WHY THIS EXISTS (2026-08-31, dogma-2): `resolve_grok()` says in its own
+    docstring that it returns a path "without probing auth", and the picker
+    was calling ONLY that — so a host with the Grok CLI installed but never
+    signed in reported `ok Grok`, and the pane died on its first prompt with
+    `Authentication required`. Craig hit exactly that.
+
+    available_agents() exists to stop a picker listing a binary that isn't
+    installed; a binary that is installed and cannot authenticate is the same
+    lie one layer in. Codex and Ollama already refused at pick time with the
+    exact remedy — this lane just never learned to.
+    """
+    grok = resolve_grok()
+    if not grok:
+        return "Grok CLI not installed"
+    if not auth_present():
+        return f"not logged in — run: {login_command(grok)}"
+    return None
+
+
 def build_argv(grok: str, model: str | None = None) -> list[str]:
     # --model belongs to `grok agent`, not `grok agent stdio` -- it is a
     # Clap option on the PARENT command and must appear before the
