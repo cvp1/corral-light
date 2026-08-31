@@ -410,16 +410,44 @@ def seed_config_dir(d, posture):
 # Fail safe: strip by default, and SAY SO in the picker rather than silently
 # — someone deliberately using an API key deserves to learn that we removed
 # it, not to debug why. CORRAL_LIGHT_ALLOW_VENDOR_ENV=1 keeps them.
+# Vendor credentials, plus — MEASURED 2026-08-31, and the first thing in this
+# whole investigation that was measured rather than proposed — the variables a
+# Claude Code session exports into its own children. Running
+# `corral-light diagnose` from inside a Claude Code session showed ELEVEN of
+# them reaching the spawned agent:
+#
+#   CLAUDECODE, CLAUDE_CODE_SESSION_ID, CLAUDE_CODE_CHILD_SESSION,
+#   CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_EXECPATH, CLAUDE_AGENT_SDK_VERSION,
+#   CLAUDE_PID, CLAUDE_EFFORT, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, … and
+#   CLAUDE_CONFIG_DIR.
+#
+# That last one is the sharp edge. Corral sets CLAUDE_CONFIG_DIR when it can
+# impose a posture, and deliberately does NOT set it when it cannot (the
+# credential-not-in-a-file fallback). In exactly that fallback case, an
+# INHERITED CLAUDE_CONFIG_DIR wins — so a hub started from inside a Claude
+# Code session would hand every pane the parent session's config directory,
+# which is the one thing the whole mechanism exists to prevent. "Do not set
+# it" only means "use the default" if nothing else is setting it.
+#
+# So a pane never inherits another Claude Code session's identity. Our own
+# overrides are applied AFTER the strip, so setting CLAUDE_CONFIG_DIR
+# deliberately still works.
 STRIP_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_API",
-                      "XAI_", "GROK_", "CLAUDE_CODE_OAUTH")
+                      "XAI_", "GROK_",
+                      "CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR",
+                      "CLAUDE_AGENT_SDK", "CLAUDE_PID", "CLAUDE_EFFORT",
+                      "CLAUDE_AUTOCOMPACT")
 
 
 def vendor_env_present():
     """Vendor credential vars in this process's environment, if any."""
     if os.environ.get("CORRAL_LIGHT_ALLOW_VENDOR_ENV") == "1":
         return []
-    return sorted(k for k in os.environ
-                  if k.startswith(STRIP_ENV_PREFIXES))
+    # Only CREDENTIALS are worth a note. The Claude Code session variables are
+    # stripped too, but nobody exported those on purpose and saying so on
+    # every lane would be noise that trains the eye to skip the line.
+    creds = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_API", "XAI_", "GROK_")
+    return sorted(k for k in os.environ if k.startswith(creds))
 
 
 def strip_prefixes():

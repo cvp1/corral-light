@@ -3,6 +3,7 @@
 #   corral-light pair ABC-123   authorize the browser showing that code
 #   corral-light serve          run the hub in the foreground
 #   corral-light doctor         say which lanes can start here, and why not
+#   corral-light diagnose       run one lane end to end and report everything
 #
 # /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (dogma-2), which
 # has no /usr/bin/bash. The same shebang mistake shipped once in the full
@@ -22,5 +23,6 @@ for a in lanes:
 note = (lanes[0].get('envNote') if lanes else None)
 if note: print('\n  !   ' + note)
 " ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor}"; exit 2 ;;
+  diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]}"; exit 2 ;;
 esac
