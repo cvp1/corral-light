@@ -75,11 +75,13 @@ def main(argv=None):
     if args.health:
         ok, detail = health()
         print(("native Antigravity ACP ready: " if ok else "native Antigravity ACP unavailable: ")
-              + detail)
+              + detail, flush=True)
         return 0 if ok else 1
     problem = unavailable_reason()
     if problem:
-        print(f"corral: {problem}", file=sys.stderr)
+        # flush=True: the last words before exit 127, and acp.py reports the
+        # stderr tail as the pane's death reason.
+        print(f"corral-light: {problem}", file=sys.stderr, flush=True)
         return 127
     # The vendor creates conversation transcripts itself.  Its default process
     # umask inherited the login shell (002), leaving those files group-readable.

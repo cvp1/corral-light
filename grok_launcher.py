@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     grok = resolve_grok()
     if not grok:
-        print(unavailable_message(), file=sys.stderr)
+        print(unavailable_message(), file=sys.stderr, flush=True)
         return 127
     # Set by sessions.py's Pane.start()/resume() from self.want_model, only
     # when Craig actually requested one in the new-pane dialog -- absent,
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     # existed, and the CLI's own default (grok-4.6) applies.
     command = build_argv(grok, os.environ.get("CORRAL_GROK_MODEL") or None)
     if args.print_argv:
-        print(" ".join(command))
+        print(" ".join(command), flush=True)
         return 0
     os.execv(command[0], command)
     return 127

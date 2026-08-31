@@ -132,7 +132,8 @@ def _probe_ollama():
         tags = ollama_acp.list_models()
         return (tags, tags[0]) if tags else None
     except Exception as e:  # noqa: BLE001 — a probe is a nicety, never a blocker
-        print(f"corral-light: ollama catalog probe skipped: {e}", file=sys.stderr)
+        print(f"corral-light: ollama catalog probe skipped: {e}",
+              file=sys.stderr, flush=True)
         return None
 
 
@@ -1519,8 +1520,8 @@ class Manager:
             try:
                 got = probe()
             except Exception as e:  # noqa: BLE001 — never break startup
-                print(f"corral: catalog probe for {agent} failed: {e}",
-                      file=sys.stderr)
+                print(f"corral-light: catalog probe for {agent} failed: {e}",
+                      file=sys.stderr, flush=True)
                 continue
             if not got:
                 continue

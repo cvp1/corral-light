@@ -153,6 +153,35 @@ class StructuralIndependence(unittest.TestCase):
                 self.assertNotIn('.config/corral/', s,
                                  f"{name}:{i} shares the full Corral's config")
 
+    def test_every_print_flushes(self):
+        """Under a service manager, stdout is block-buffered, not line-buffered.
+
+        The startup banner — the one signal that the server bound its port —
+        sat in an 8 KB buffer and never reached the log. Measured from a fresh
+        clone: a healthy server with a zero-byte log file, which reads exactly
+        like a server that failed to start. Every diagnostic print here is
+        read by someone through `systemctl --user status` or a log file, never
+        through a terminal.
+        """
+        # ast, not string matching. The first cut walked the source counting
+        # parentheses and its depth counter was already 0 before it reached
+        # the opening one, so every call "ended" at the word `print` and the
+        # check compared the flag against the literal string 'print'. It
+        # failed loudly here rather than passing vacuously, which is the only
+        # reason it got fixed instead of shipped.
+        import ast
+        for f in self.PY_FILES:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "print"):
+                    continue
+                flush = next((k for k in node.keywords if k.arg == "flush"), None)
+                self.assertTrue(
+                    flush is not None and getattr(flush.value, "value", None) is True,
+                    f"{f.name}:{node.lineno} prints without flush=True")
+
     def test_state_dir_is_not_the_full_corrals(self):
         """Two hubs sharing one state dir share panes and the session key."""
         for name in ("sessions.py", "auth.py"):

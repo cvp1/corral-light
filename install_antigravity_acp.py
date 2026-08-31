@@ -88,11 +88,11 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true", help="check whether the runtime is present")
     args = parser.parse_args(argv)
     if args.install:
-        print(install())
+        print(install(), flush=True)
         return 0
     if args.check:
         ok = installed_ok()
-        print("installed" if ok else "missing")
+        print("installed" if ok else "missing", flush=True)
         return 0 if ok else 1
     parser.error("choose --install or --check")
 

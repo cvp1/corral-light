@@ -351,7 +351,13 @@ def serve(bind=BIND, port=PORT):
     threading.Thread(target=_observe_loop, daemon=True).start()
     httpd = ThreadingHTTPServer((bind, port), Handler)
     httpd.daemon_threads = True
-    print(f"corral-light: http://{bind}:{port}/")
+    # flush=True, and it is not cosmetic. Python line-buffers stdout only when
+    # it is a TTY; under systemd, launchd, or `> log 2>&1` it is block-buffered,
+    # so this line — the ONE signal that the server bound its port — sat in a
+    # 8 KB buffer and never appeared. Measured 2026-08-31 from a fresh clone:
+    # the service was up and healthy with a zero-byte log, which reads exactly
+    # like a service that failed to start.
+    print(f"corral-light: http://{bind}:{port}/", flush=True)
     httpd.serve_forever()
 
 

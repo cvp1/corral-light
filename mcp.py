@@ -355,7 +355,7 @@ def main(argv=None):
     reg = Registry()
     try:
         if args.action == "list":
-            print(json.dumps(reg.list(), indent=2))
+            print(json.dumps(reg.list(), indent=2), flush=True)
         elif args.action == "add":
             if bool(args.stdio) == bool(args.url):
                 ap.error("choose exactly one of --stdio or --url")
@@ -366,35 +366,35 @@ def main(argv=None):
                 item["url"] = args.url
             if args.auth_ref:
                 item["auth_ref"] = args.auth_ref
-            print(json.dumps(reg.add(args.name, item), indent=2))
+            print(json.dumps(reg.add(args.name, item), indent=2), flush=True)
         elif args.action == "remove":
             reg.remove(args.name)
-            print(f"removed {args.name}")
+            print(f"removed {args.name}", flush=True)
         elif args.action == "serve":
             serve(args.name)
         elif args.action == "auth":
             reg.set_auth(args.name, args.handle)
-            print(f"bound {args.handle} to {args.name}")
+            print(f"bound {args.handle} to {args.name}", flush=True)
         elif args.action == "enable":
             reg.set_enabled(args.name, True)
-            print(f"enabled {args.name}")
+            print(f"enabled {args.name}", flush=True)
         elif args.action == "disable":
             reg.set_enabled(args.name, False)
-            print(f"disabled {args.name}")
+            print(f"disabled {args.name}", flush=True)
         elif args.action == "call":
             try:
                 params = {"name": args.tool, "arguments": json.loads(args.arguments)}
             except ValueError as e:
                 raise McpError(f"--arguments must be JSON: {e}")
             result = Proxy(reg.get(args.name)).request("tools/call", params)
-            print(json.dumps(result, indent=2))
+            print(json.dumps(result, indent=2), flush=True)
         else:
             result = reg.probe(args.name)
-            print(json.dumps(result, indent=2))
+            print(json.dumps(result, indent=2), flush=True)
             if not result["ok"]:
                 return 1
     except McpError as e:
-        print(f"corral mcp: {e}", file=sys.stderr)
+        print(f"corral mcp: {e}", file=sys.stderr, flush=True)
         return 2
     return 0
 
