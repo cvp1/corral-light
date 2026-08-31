@@ -299,7 +299,11 @@ def _handle(msg, agy: str):
 def main() -> int:
     agy = resolve_agy()
     if not agy:
-        print("Antigravity unavailable: official agy binary not installed", file=sys.stderr)
+        # flush=True: this is the last thing the process says before exiting
+        # 127, and acp.py surfaces the stderr tail as the pane's death reason.
+        # A refusal the operator cannot read is indistinguishable from a crash.
+        print("Antigravity unavailable: official agy binary not installed",
+              file=sys.stderr, flush=True)
         return 127
     for line in sys.stdin:
         try:

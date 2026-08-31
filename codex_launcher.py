@@ -109,11 +109,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     reason = unavailable_reason()
     if reason:
-        print(f"ChatGPT (Codex) unavailable: {reason}", file=sys.stderr)
+        print(f"ChatGPT (Codex) unavailable: {reason}", file=sys.stderr, flush=True)
         return 127
     adapter = resolve_adapter()
     if args.print_argv:
-        print(adapter)
+        print(adapter, flush=True)
         return 0
     CODEX_HOME.mkdir(parents=True, exist_ok=True)
     CODEX_HOME.chmod(0o700)
