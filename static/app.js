@@ -1629,6 +1629,7 @@ async function refresh() {
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
+  S.cwdSuggestions = d.cwdSuggestions || S.cwdSuggestions || [];
   S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
   const next = new Map();
@@ -1806,6 +1807,14 @@ function wireDialog() {
                   || [...(sel.options || [])].find(o => !o.disabled);
     if (firstOpt) sel.value = firstOpt.value;
     $('#f-cwd').value = S.lastCwd || S.defaultCwd || '~';
+    // Real directories on the host, so choosing one does not require already
+    // knowing its absolute path. The input stays free text — this only means
+    // the common cases are one click away instead of typed from memory.
+    const dl = $('#cwdlist'); dl.innerHTML = '';
+    for (const d of S.cwdSuggestions || []) {
+      const o = document.createElement('option'); o.value = d;
+      dl.appendChild(o);
+    }
     // Model/effort options come from the server's remembered catalog for the
     // SELECTED agent, not from a live pane. Scraping a live pane meant that
     // with nothing running -- i.e. every fresh start -- the pickers offered
