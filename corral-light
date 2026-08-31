@@ -13,6 +13,14 @@ PY="${CORRAL_LIGHT_PYTHON:-python3}"
 case "${1:-}" in
   pair)  exec "$PY" -c "import sys;sys.path.insert(0,'$D');import auth;ok,msg=auth.approve('${2:-}');print(msg);sys.exit(0 if ok else 2)" ;;
   serve) exec "$PY" "$D/hub.py" ;;
-  doctor) exec "$PY" -c "import sys;sys.path.insert(0,'$D');import sessions;[print(('  ok  ' if a['available'] else '  --  ')+a['label']+(' — '+a['why'] if a['why'] else '')) for a in sessions.available_agents()]" ;;
+  doctor) exec "$PY" -c "
+import sys; sys.path.insert(0,'$D')
+import sessions
+lanes = sessions.available_agents()
+for a in lanes:
+    print(('  ok  ' if a['available'] else '  --  ')+a['label']+(' — '+a['why'] if a['why'] else ''))
+note = (lanes[0].get('envNote') if lanes else None)
+if note: print('\n  !   ' + note)
+" ;;
   *)     echo "usage: corral-light {pair <code>|serve|doctor}"; exit 2 ;;
 esac

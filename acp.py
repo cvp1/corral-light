@@ -98,7 +98,8 @@ class AgentError(Exception):
 class AcpClient:
     """One agent subprocess. Thread-safe for one writer per method."""
 
-    def __init__(self, argv, cwd, env=None, on_event=None, on_permission=None):
+    def __init__(self, argv, cwd, env=None, on_event=None, on_permission=None,
+                 strip_env=()):
         self.argv = list(argv)
         self.cwd = str(cwd)
         self.on_event = on_event or (lambda kind, payload: None)
@@ -114,7 +115,16 @@ class AcpClient:
         self.stderr_tail = []
         self._closed = False       # set by close(): a deliberate stop
 
-        full_env = {**os.environ, **(env or {})}
+        # The child inherits this process's whole environment, which is what
+        # you want for PATH and HOME and what you very much do not want for a
+        # vendor credential: an ANTHROPIC_API_KEY exported in the shell that
+        # started the hub silently OUTRANKS the login the operator just
+        # verified, and the agent then runs as a different identity than the
+        # one the picker described. `strip_env` names the prefixes the caller
+        # will not let through.
+        full_env = {k: v for k, v in os.environ.items()
+                    if not (strip_env and k.startswith(tuple(strip_env)))}
+        full_env.update(env or {})
         try:
             self.p = subprocess.Popen(
                 self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

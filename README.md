@@ -180,7 +180,22 @@ None of that is Corral-specific state to reproduce — it is each vendor's norma
 login on that machine. If the CLI works in a terminal there, the lane works.
 
 **If Claude panes die with `Authentication required` while `claude` works in
-your terminal**, that is the private-config-dir case: a pane runs under a
+your terminal**, check this first:
+
+```bash
+env | grep -iE 'ANTHROPIC|OPENAI|GEMINI|XAI|GROK'
+```
+
+A vendor key exported in the shell that started the hub silently **outranks**
+the login you verified — the agent runs as a different identity than the one
+the picker described, and `/usage` shows token statistics instead of your
+subscription page because it is in API-key mode. Since 2026-08-31 panes strip
+`ANTHROPIC_*`, `OPENAI_*`, `GEMINI_*`, `GOOGLE_API*`, `XAI_*`, `GROK_*` and
+`CLAUDE_CODE_OAUTH*` from the agent's environment and `doctor` says so when it
+does. `CORRAL_LIGHT_ALLOW_VENDOR_ENV=1` keeps them if API-key auth is what you
+want.
+
+The second thing to check is the private-config-dir case: a pane runs under a
 `CLAUDE_CONFIG_DIR` Corral owns (that is what carries the per-pane permission
 posture), seeded by copying `~/.claude/.credentials.json`. On macOS that file
 need not exist — Claude Code can keep the OAuth in the Keychain — so the

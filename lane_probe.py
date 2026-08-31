@@ -80,7 +80,9 @@ def probe(key, cwd=None, force=False):
 def _handshake(spec, cwd):
     client = None
     try:
-        client = acp.AcpClient(spec["argv"], cwd, env=sessions_env(spec))
+        import sessions
+        client = acp.AcpClient(spec["argv"], cwd, env=sessions_env(spec),
+                               strip_env=sessions.strip_prefixes())
         client.initialize()
         # session/new is where auth actually surfaces for most adapters, and
         # it is also the ONLY place the model catalog comes from. The same
