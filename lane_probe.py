@@ -113,12 +113,27 @@ def _handshake(spec, cwd):
 
 
 def sessions_env(spec):
+    """The environment a PANE would get — private config dir included.
+
+    The first version of this deliberately passed config_dir=None, reasoning
+    that "the probe asks whether the lane works as the user has it, not under
+    a pane's private posture directory". That reasoning produced a probe that
+    could not see the exact failure it was written to catch: on dogma-2 it
+    reported `ok Claude Code` while every pane died at its first prompt with
+    `Authentication required`, because the probe ran under ~/.claude (which
+    works) and the pane ran under a private CLAUDE_CONFIG_DIR holding no
+    credential (which does not).
+
+    A probe that does not run the way the real thing runs is not evidence
+    about the real thing. It is a second, easier question that happens to
+    have a nicer answer — the definition of a green light you cannot trust.
+    """
     import sessions
-    # No CLAUDE_CONFIG_DIR: the probe asks whether the lane works AS THE USER
-    # HAS IT, not under a pane's private posture directory. Seeding that dir
-    # is a per-pane concern and doing it here would make the probe's answer
-    # depend on machinery the question is not about.
-    return sessions.spawn_env(spec, None)
+    config_dir = None
+    if spec.get("posture_via_config_dir"):
+        config_dir = sessions.seed_config_dir(
+            sessions.STATE / "probe-config", sessions.DEFAULT_POSTURE)
+    return sessions.spawn_env(spec, config_dir)
 
 
 def catalog_probe(key):

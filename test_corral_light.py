@@ -690,6 +690,82 @@ class QuietOnlyWhereItIsNotAnError(unittest.TestCase):
                 f"{exc_type.__name__} is not a 'the peer left' exception")
 
 
+class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
+    """The directory that gives a pane its posture must not cost it its login.
+
+    dogma-2, 2026-08-31: `claude` worked in a terminal, and every Corral pane
+    died at its first prompt with `Authentication required`. A pane runs under
+    a private CLAUDE_CONFIG_DIR seeded by copying
+    ~/.claude/.credentials.json — and on macOS that file need not exist, because
+    Claude Code can keep the OAuth in the Keychain. So the private dir was
+    created with no credential in it and the agent could not authenticate. The
+    pane was broken by the very mechanism that exists to give it a posture.
+    """
+
+    def _fake_home(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        (home / ".claude").mkdir()
+        return home
+
+    def test_no_credential_file_means_no_private_dir(self):
+        """Refuse the dir rather than hand back one that cannot authenticate."""
+        import sessions
+        home = self._fake_home()                     # ~/.claude, no credentials
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            self.assertIsNone(sessions.seed_config_dir(home / "cfg", "auto"))
+        finally:
+            Path.home = real
+
+    def test_a_none_config_dir_means_inherit_not_crash(self):
+        import sessions
+        env = sessions.spawn_env(sessions.AGENTS["claude"], None)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env,
+                         "a pane that cannot have a private config dir must "
+                         "run under the user's own, not under a broken one")
+
+    def test_posture_is_not_claimed_when_it_cannot_be_imposed(self):
+        """The pane must wear `agent-set`, not a posture nobody established."""
+        import sessions
+        home = self._fake_home()
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            self.assertFalse(
+                sessions.posture_enforceable(sessions.AGENTS["claude"]))
+        finally:
+            Path.home = real
+
+    def test_a_credential_file_still_gets_a_private_dir(self):
+        """The normal path must be unchanged — this is a fallback, not a
+        replacement for the posture mechanism."""
+        import sessions
+        home = self._fake_home()
+        (home / ".claude" / ".credentials.json").write_text("{}")
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            d = sessions.seed_config_dir(home / "cfg", "auto")
+            self.assertIsNotNone(d)
+            self.assertTrue((Path(d) / ".credentials.json").is_file())
+            self.assertTrue((Path(d) / "settings.json").is_file())
+            self.assertTrue(
+                sessions.posture_enforceable(sessions.AGENTS["claude"]))
+        finally:
+            Path.home = real
+
+    def test_the_probe_runs_the_way_a_pane_runs(self):
+        """A probe that does not reproduce the pane's environment is a second,
+        easier question that happens to have a nicer answer."""
+        import lane_probe, inspect
+        src = inspect.getsource(lane_probe.sessions_env)
+        self.assertIn("seed_config_dir", src)
+        self.assertNotIn("spawn_env(spec, None)", src)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

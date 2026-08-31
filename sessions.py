@@ -288,6 +288,109 @@ def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def seed_config_dir(d, posture):
+    """A config dir Corral owns, carrying THIS pane's posture.
+
+    ONLY the permission policy is meant to be ours. Everything else must
+    be the config Craig actually uses, and the first cut got that wrong:
+    an isolated dir holding nothing but credentials meant a pane had none
+    of his 27 personal skills, none of his subagents or plugins, and not
+    even ~/.claude/CLAUDE.md — so the whole prompt stack was absent from
+    every conversation. Craig: "skills don't work in corral."
+
+    Measured 2026-08-01, `claude -p` under each config dir:
+      bare dir              -> 11 built-in skills, "NO CONTEXT"
+      dir + skills/CLAUDE.md -> 38 skills, and it knows the ranch's name
+
+    Capability directories are SYMLINKED, not copied: 27 skills copied per
+    pane go stale the moment he edits one, and this dir is created fresh
+    for every pane.
+
+    Credentials AND ~/.claude.json are seeded from the real config so no
+    second login is needed and the account's full entitlements apply. Both
+    files are copied, never read into memory or logged. ~/.claude.json
+    stays a COPY on purpose where the rest are links — Claude Code writes
+    to it continuously, and several panes writing through to his real one
+    is a corruption race for no gain.
+
+    .claude.json is not optional. Measured 2026-08-01: a config dir holding
+    only credentials offered ['default','opus[1m]','sonnet','haiku'] --
+    Fable was MISSING -- while the same dir plus ~/.claude.json offered
+    claude-fable-5[1m] as well. Craig noticed before I did ("why is fable
+    not in the list"). Whatever entitlement state the model list is derived
+    from lives in that file, so an isolated config dir that omits it
+    silently downgrades which models the account can reach.
+    Returns the directory, or None when this host keeps its Claude credential
+    somewhere a file copy cannot reach (see below) — in which case the caller
+    must let the agent use the user's own ~/.claude and stop claiming a
+    posture it did not impose.
+    """
+    d = Path(d)
+    real = Path.home() / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    # THE CREDENTIAL DECIDES WHETHER A PRIVATE DIR IS POSSIBLE AT ALL.
+    #
+    # Measured on dogma-2, 2026-08-31: a pane died with `Authentication
+    # required` on session/prompt while `claude` worked fine in a terminal on
+    # the same machine. On macOS Claude Code can keep its OAuth in the
+    # Keychain rather than in ~/.claude/.credentials.json — so there is no
+    # file to copy, the private dir is created with no credential in it, and
+    # the agent under CLAUDE_CONFIG_DIR cannot authenticate. The pane was
+    # broken by the very directory that exists to give it a posture.
+    #
+    # So: seed if we can, and if we cannot, say so and let the caller fall
+    # back to the user's own config. Losing the per-pane posture is a real
+    # cost and it is the SMALLER one — a pane that cannot run has no posture
+    # either. What must never happen is the third option: run under the
+    # private dir anyway and let the operator find out at the first prompt.
+    if not (d / ".credentials.json").is_file():
+        if (real / ".credentials.json").is_file():
+            try:
+                shutil.copy2(real / ".credentials.json", d / ".credentials.json")
+                (d / ".credentials.json").chmod(0o600)
+            except OSError:
+                pass
+        else:
+            return None            # no credential to carry; caller inherits
+    src = Path.home() / ".claude.json"
+    if src.is_file() and not (d / src.name).is_file():
+        try:
+            shutil.copy2(src, d / src.name)
+            (d / src.name).chmod(0o600)
+        except OSError:
+            pass          # a missing seed costs models, never correctness
+    for name in LINKED_CONFIG:
+        src, dst = real / name, d / name
+        if not src.exists():
+            continue
+        try:
+            if dst.is_symlink():
+                if dst.readlink() == src:
+                    continue
+                dst.unlink()
+            elif dst.exists():
+                continue                  # something real is there; leave it
+            dst.symlink_to(src)
+        except OSError:
+            pass          # a missing link costs a capability, never safety
+
+    try:
+        base = json.loads((real / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        base = {}
+    merged = {k: v for k, v in base.items() if k not in SETTINGS_DROPPED}
+    # Keep any allow/deny he has set; the pane owns defaultMode and nothing
+    # else. Overwriting the whole permissions block would silently discard
+    # a deny rule the day he writes one.
+    perm = dict(base.get("permissions") or {})
+    perm.update(POSTURES[posture])
+    perm.setdefault("allow", [])
+    perm.setdefault("deny", [])
+    merged["permissions"] = perm
+    (d / "settings.json").write_text(json.dumps(merged, indent=1), encoding="utf-8")
+    return d
+
+
 def spawn_env(spec, config_dir=None):
     """The environment ONE agent process launches under.
 
@@ -299,9 +402,22 @@ def spawn_env(spec, config_dir=None):
     if NODE_BIN:
         env["PATH"] = f"{NODE_BIN}:{os.environ.get('PATH', '')}"
     env.update(spec.get("env") or {})
+    # config_dir None = seed_config_dir() could not carry a credential into a
+    # private directory on this host, so the agent runs under the user's own
+    # ~/.claude. The pane then reports postureEnforced: false and wears the
+    # `agent-set` pill, because whatever the host's ambient defaultMode is, is
+    # what you get — and claiming a posture nobody imposed is the one failure
+    # this whole mechanism exists to prevent.
     if spec["posture_via_config_dir"] and config_dir is not None:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     return env
+
+
+def posture_enforceable(spec):
+    """Can Corral actually impose a posture on this lane, on THIS host?"""
+    if not spec.get("posture_via_config_dir"):
+        return False
+    return ((Path.home() / ".claude" / ".credentials.json").is_file())
 
 
 def _skill_commands(agent):
@@ -456,7 +572,7 @@ def available_agents():
             out.append({"key": key, "label": spec["label"],
                         "available": bool(r["ok"]),
                         "why": r["error"] or spec.get("needs", ""),
-                        "postureEnforced": bool(spec["posture_via_config_dir"]),
+                        "postureEnforced": posture_enforceable(spec),
                         "tools": bool(spec.get("tools"))})
             continue
         if spec.get("unavailable"):
@@ -469,7 +585,11 @@ def available_agents():
             ok, why = True, spec.get("needs", "")
         out.append({"key": key, "label": spec["label"], "available": ok, "why": why,
                     # So the dialog can stop OFFERING a posture it cannot set.
-                    "postureEnforced": bool(spec["posture_via_config_dir"]),
+                    # Asks the HOST, not just the lane: on a machine whose
+                    # Claude credential lives outside a file, the private
+                    # config dir cannot be used and the posture is the user's
+                    # ambient one whatever this dialog says.
+                    "postureEnforced": posture_enforceable(spec),
                     "tools": bool(spec.get("tools"))})
     # One pass over every append site above, so a lane added later cannot miss
     # its group by being appended somewhere this was forgotten.
@@ -1175,80 +1295,7 @@ class Pane:
         return self.config.get(config_id)
 
     def _config_dir(self):
-        """A config dir Corral owns, carrying THIS pane's posture.
-
-        ONLY the permission policy is meant to be ours. Everything else must
-        be the config Craig actually uses, and the first cut got that wrong:
-        an isolated dir holding nothing but credentials meant a pane had none
-        of his 27 personal skills, none of his subagents or plugins, and not
-        even ~/.claude/CLAUDE.md — so the whole prompt stack was absent from
-        every conversation. Craig: "skills don't work in corral."
-
-        Measured 2026-08-01, `claude -p` under each config dir:
-          bare dir              -> 11 built-in skills, "NO CONTEXT"
-          dir + skills/CLAUDE.md -> 38 skills, and it knows the ranch's name
-
-        Capability directories are SYMLINKED, not copied: 27 skills copied per
-        pane go stale the moment he edits one, and this dir is created fresh
-        for every pane.
-
-        Credentials AND ~/.claude.json are seeded from the real config so no
-        second login is needed and the account's full entitlements apply. Both
-        files are copied, never read into memory or logged. ~/.claude.json
-        stays a COPY on purpose where the rest are links — Claude Code writes
-        to it continuously, and several panes writing through to his real one
-        is a corruption race for no gain.
-
-        .claude.json is not optional. Measured 2026-08-01: a config dir holding
-        only credentials offered ['default','opus[1m]','sonnet','haiku'] --
-        Fable was MISSING -- while the same dir plus ~/.claude.json offered
-        claude-fable-5[1m] as well. Craig noticed before I did ("why is fable
-        not in the list"). Whatever entitlement state the model list is derived
-        from lives in that file, so an isolated config dir that omits it
-        silently downgrades which models the account can reach.
-        """
-        d = self.dir / "config"
-        d.mkdir(parents=True, exist_ok=True)
-        for src in (Path.home() / ".claude" / ".credentials.json",
-                    Path.home() / ".claude.json"):
-            dst = d / src.name
-            if src.is_file() and not dst.is_file():
-                try:
-                    shutil.copy2(src, dst)
-                    dst.chmod(0o600)
-                except OSError:
-                    pass      # a missing seed costs models, never correctness
-        real = Path.home() / ".claude"
-        for name in LINKED_CONFIG:
-            src, dst = real / name, d / name
-            if not src.exists():
-                continue
-            try:
-                if dst.is_symlink():
-                    if dst.readlink() == src:
-                        continue
-                    dst.unlink()
-                elif dst.exists():
-                    continue                  # something real is there; leave it
-                dst.symlink_to(src)
-            except OSError:
-                pass          # a missing link costs a capability, never safety
-
-        try:
-            base = json.loads((real / "settings.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            base = {}
-        merged = {k: v for k, v in base.items() if k not in SETTINGS_DROPPED}
-        # Keep any allow/deny he has set; the pane owns defaultMode and nothing
-        # else. Overwriting the whole permissions block would silently discard
-        # a deny rule the day he writes one.
-        perm = dict(base.get("permissions") or {})
-        perm.update(POSTURES[self.posture])
-        perm.setdefault("allow", [])
-        perm.setdefault("deny", [])
-        merged["permissions"] = perm
-        (d / "settings.json").write_text(json.dumps(merged, indent=1), encoding="utf-8")
-        return d
+        return seed_config_dir(self.dir / "config", self.posture)
 
     def send(self, text):
         if self.state == "detached":
@@ -1584,7 +1631,7 @@ class Pane:
             # the pill displayed the choice regardless, so a Grok pane could
             # read `strict` while nothing had made it strict — a UI asserting a
             # safety property it never established.
-            "postureEnforced": bool(AGENTS[self.agent]["posture_via_config_dir"]),
+            "postureEnforced": posture_enforceable(AGENTS[self.agent]),
             # Whether this lane can read a file itself — what attaching a note
             # to it means (a reference, or a quoted excerpt).
             "tools": bool(AGENTS[self.agent].get("tools")),
