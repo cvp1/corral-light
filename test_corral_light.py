@@ -741,10 +741,18 @@ class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
 
     def test_a_credential_file_still_gets_a_private_dir(self):
         """The normal path must be unchanged — this is a fallback, not a
-        replacement for the posture mechanism."""
+        replacement for the posture mechanism.
+
+        Note the payload: `{}` used to be enough here, because the rule was
+        "the file exists". It is now "the file carries a token", so this test
+        had to say what a real credential looks like. That is the contract
+        change made visible, which is what a test is for.
+        """
         import sessions
         home = self._fake_home()
-        (home / ".claude" / ".credentials.json").write_text("{}")
+        (home / ".claude" / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "a" * 108,
+                                          "refreshToken": "r" * 108}}))
         real = Path.home
         try:
             Path.home = staticmethod(lambda: home)
@@ -948,6 +956,80 @@ class DiagnoseIsSafeToPaste(unittest.TestCase):
         # Names and lengths only — no dict dump of the environment anywhere.
         self.assertNotIn("json.dumps(dict(os.environ", src)
         self.assertNotIn("print(os.environ", src)
+
+
+class AnEmptyTokenIsNotACredential(unittest.TestCase):
+    """The measured root cause, found on ranch-server 2026-08-31.
+
+    ~/.claude/.credentials.json existed, parsed, and carried every expected
+    key — accessToken, refreshToken, expiresAt, scopes, subscriptionType —
+    with accessToken="" , refreshToken="" and expiresAt=0. A file that is
+    complete by every structural test and authenticates nothing.
+
+    That defeats every check this build made before it. `is_file()` passes.
+    The copy into the pane's private CLAUDE_CONFIG_DIR succeeds. The
+    directory then LOOKS credentialed, the handshake succeeds because it does
+    not authenticate, and the first prompt fails. Four theories died on this
+    because all four asked whether the file was THERE.
+    """
+
+    def _cred(self, payload):
+        d = Path(tempfile.mkdtemp()) / ".credentials.json"
+        d.write_text(json.dumps(payload))
+        return d
+
+    def test_empty_tokens_are_not_usable(self):
+        import sessions
+        self.assertFalse(sessions.usable_credential(self._cred(
+            {"claudeAiOauth": {"accessToken": "", "refreshToken": "",
+                               "expiresAt": 0, "subscriptionType": "max"}})))
+
+    def test_a_real_token_is_usable(self):
+        import sessions
+        self.assertTrue(sessions.usable_credential(self._cred(
+            {"claudeAiOauth": {"accessToken": "x" * 108,
+                               "refreshToken": "y" * 108}})))
+        # Either one alone is enough — a refresh token can mint an access one.
+        self.assertTrue(sessions.usable_credential(self._cred(
+            {"claudeAiOauth": {"refreshToken": "y" * 108}})))
+
+    def test_a_metadata_only_stub_is_not_usable(self):
+        """macOS shape: the secret is in the Keychain, the file is metadata."""
+        import sessions
+        self.assertFalse(sessions.usable_credential(self._cred(
+            {"claudeAiOauth": {"expiresAt": 1, "scopes": ["a"],
+                               "subscriptionType": "max"}})))
+
+    def test_missing_or_unparseable_is_not_usable(self):
+        import sessions
+        self.assertFalse(sessions.usable_credential(Path("/nope/none.json")))
+        bad = Path(tempfile.mkdtemp()) / "c.json"
+        bad.write_text("{ not json")
+        self.assertFalse(sessions.usable_credential(bad))
+
+    def test_token_names_are_matched_at_any_depth(self):
+        """The vendor's key names and nesting are theirs to change; asserting
+        a shape would be one more guess of the kind that cost four rounds."""
+        import sessions
+        self.assertTrue(sessions.usable_credential(self._cred(
+            {"a": {"b": {"c": {"access_token": "z" * 40}}}})))
+
+    def test_an_unusable_credential_means_no_private_config_dir(self):
+        """The whole point: refuse the directory rather than build one that
+        only looks credentialed."""
+        import sessions
+        home = Path(tempfile.mkdtemp())
+        (home / ".claude").mkdir()
+        (home / ".claude" / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": ""}}))
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            self.assertIsNone(sessions.seed_config_dir(home / "cfg", "auto"))
+            self.assertFalse(
+                sessions.posture_enforceable(sessions.AGENTS["claude"]))
+        finally:
+            Path.home = real
 
 
 class StaticPathContainment(unittest.TestCase):

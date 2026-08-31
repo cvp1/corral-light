@@ -103,10 +103,20 @@ def _credential_shape(path):
     walk(doc if isinstance(doc, dict) else {"<not an object>": str(type(doc))})
     _line("  credential fields", ", ".join(rows) or "(empty)")
     # The two that decide whether an isolated config dir can authenticate.
+    # Absent AND empty both matter, and empty is the one that fools every
+    # check that came before: the key is there, the file parses, the copy
+    # succeeds, and the token is "". Measured on ranch-server 2026-08-31 —
+    # accessToken="" , refreshToken="", expiresAt=0, in a file that looks
+    # complete by every structural test.
     flat = " ".join(rows)
     for field in ("accessToken", "refreshToken"):
         if field not in flat:
             _line("  ⚠ MISSING", f"{field} is not in this file")
+        elif f"{field}=<0 chars>" in flat:
+            _line("  ⚠ EMPTY",
+                  f"{field} is present but EMPTY — this file authenticates "
+                  f"nothing, and copying it into an isolated config dir "
+                  f"produces a directory that only looks credentialed")
 
 
 def _run_once(spec, cwd, config_dir, prompt, label):

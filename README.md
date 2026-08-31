@@ -190,6 +190,18 @@ config dir was used or refused, which environment variables reach the agent
 failure **the adapter's own stderr**, which `acp.py` has always captured and
 until now only ever used one line of.
 
+**The known cause, measured 2026-08-31:** `~/.claude/.credentials.json` can
+exist, parse, and carry every expected key — `accessToken`, `refreshToken`,
+`expiresAt`, `scopes` — with the token values **empty strings**. A file that
+is complete by every structural test and authenticates nothing. Copying it
+into a pane's private `CLAUDE_CONFIG_DIR` produces a directory that only
+*looks* credentialed: the handshake succeeds (it does not authenticate) and
+the first prompt fails. Corral now tests whether the file carries a non-empty
+token, not whether it exists, and falls back to your own `~/.claude` when it
+does not — reporting `postureEnforced: false` rather than claiming a posture.
+If your terminal `claude` works and panes do not, this is the first thing
+`diagnose` will show you.
+
 Then check this:
 
 ```bash

@@ -344,14 +344,28 @@ def seed_config_dir(d, posture):
     # either. What must never happen is the third option: run under the
     # private dir anyway and let the operator find out at the first prompt.
     if not (d / ".credentials.json").is_file():
-        if (real / ".credentials.json").is_file():
+        src = real / ".credentials.json"
+        # EXISTS is the wrong question; CARRIES A TOKEN is the right one.
+        #
+        # Measured on dogma-2, 2026-08-31: the file is there (322 bytes) and
+        # the copy lands, and the pane still cannot authenticate while the
+        # terminal works. A complete file on Linux is ~508 bytes carrying
+        # accessToken(108) + refreshToken(108); 322 is that file minus a
+        # token. On macOS the real secret can live in the Keychain, leaving a
+        # metadata-only stub behind — and copying a stub into an isolated
+        # config dir produces a directory that LOOKS credentialed and is not.
+        #
+        # So check for the token itself. Parsed only to test for the key's
+        # presence: no value is read into a variable, logged, or returned
+        # (P14 — secrets never touch the transcript).
+        if usable_credential(src):
             try:
-                shutil.copy2(real / ".credentials.json", d / ".credentials.json")
+                shutil.copy2(src, d / ".credentials.json")
                 (d / ".credentials.json").chmod(0o600)
             except OSError:
                 pass
         else:
-            return None            # no credential to carry; caller inherits
+            return None            # nothing usable to carry; caller inherits
     src = Path.home() / ".claude.json"
     if src.is_file() and not (d / src.name).is_file():
         try:
@@ -479,11 +493,48 @@ def spawn_env(spec, config_dir=None):
     return env
 
 
+def usable_credential(path):
+    """Does this credentials file actually carry a token we could copy?
+
+    Presence of the FILE proves nothing: a metadata-only stub (macOS, where
+    the secret is in the Keychain) parses fine, copies fine, and authenticates
+    nothing. Looks for a non-empty accessToken or refreshToken anywhere in the
+    document, at any nesting depth, because the vendor's key names are theirs
+    to change and a shape assertion would be one more guess.
+
+    Reads only to test for presence — no secret value is bound to a name,
+    returned, or logged.
+    """
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+
+    def has_token(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if (k in ("accessToken", "refreshToken", "access_token",
+                          "refresh_token")
+                        and isinstance(v, str) and v.strip()):
+                    return True
+                if has_token(v):
+                    return True
+        elif isinstance(o, list):
+            return any(has_token(x) for x in o)
+        return False
+
+    return has_token(doc)
+
+
 def posture_enforceable(spec):
-    """Can Corral actually impose a posture on this lane, on THIS host?"""
+    """Can Corral actually impose a posture on this lane, on THIS host?
+
+    Only if a private config dir can be given a working credential — which is
+    a question about the credential's CONTENT, not about a path existing.
+    """
     if not spec.get("posture_via_config_dir"):
         return False
-    return ((Path.home() / ".claude" / ".credentials.json").is_file())
+    return usable_credential(Path.home() / ".claude" / ".credentials.json")
 
 
 def _skill_commands(agent):
