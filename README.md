@@ -171,13 +171,24 @@ lane at all** until you add one. Cheapest first:
 | to get | install on the box | notes |
 |---|---|---|
 | **Local (Ollama)** | `ollama`, then `ollama pull <model>` | works immediately; or set `CORRAL_OLLAMA_URL` to borrow another machine's models |
-| **Claude Code** | `node`, then `cd spike && npm install` | also needs Claude Code's own login there: the pane copies `~/.claude/.credentials.json` and `~/.claude.json` into its config dir, and symlinks `~/.claude/{skills,agents,commands,plugins,prompts,CLAUDE.md}` so a pane has the same capability the terminal does |
+| **Claude Code** | `node`, then `cd spike && npm install` | **`doctor` cannot verify this one's login** — see the note below. Also needs Claude Code's own login there: the pane copies `~/.claude/.credentials.json` and `~/.claude.json` into its config dir, and symlinks `~/.claude/{skills,agents,commands,plugins,prompts,CLAUDE.md}` so a pane has the same capability the terminal does |
 | **ChatGPT (Codex)** | the same `npm install` | then log in — run the exact command `doctor` prints (it creates `CODEX_HOME` and logs in, in one paste). The separate `CODEX_HOME` is deliberate: a shared one is how a pane ends up on whatever model another config pinned, so this is a separate login from any codex you already use |
-| **Grok** | the Grok CLI, authenticated | the CLI owns auth; nothing here touches the credential |
+| **Grok** | the Grok CLI, then `grok login` | the CLI owns auth; nothing here touches the credential. `doctor` checks `~/.grok/auth.json` and prints the login command |
 | **Antigravity** | `python3 install_antigravity_acp.py --install` | **Linux x86-64 only** — see below |
 
 None of that is Corral-specific state to reproduce — it is each vendor's normal
 login on that machine. If the CLI works in a terminal there, the lane works.
+
+**One lane `doctor` cannot fully vouch for: Claude Code.** Every other lane
+refuses at pick time when its credential is missing — codex and grok check
+their `auth.json` and print the login command, ollama checks the server
+answers, antigravity checks the platform. Claude is left optimistic on
+purpose: a pane seeds its config from `~/.claude/.credentials.json`, so
+testing for that file looks like the obvious probe, but on macOS Claude Code
+can keep its credential in the Keychain, where an absent file proves nothing.
+Refusing a lane that works is the same class of wrong as offering one that
+doesn't. So if a Claude pane dies with an auth error, run `claude` once in a
+terminal on that host and start a new pane.
 
 **Antigravity is Linux x86-64 only.** Google publishes this ACP server under
 `.../releases/linux/`; the darwin and mac paths 404 (probed 2026-08-31). The
