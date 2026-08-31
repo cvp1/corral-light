@@ -179,6 +179,18 @@ lane at all** until you add one. Cheapest first:
 None of that is Corral-specific state to reproduce — it is each vendor's normal
 login on that machine. If the CLI works in a terminal there, the lane works.
 
+**If Claude panes die with `Authentication required` while `claude` works in
+your terminal**, that is the private-config-dir case: a pane runs under a
+`CLAUDE_CONFIG_DIR` Corral owns (that is what carries the per-pane permission
+posture), seeded by copying `~/.claude/.credentials.json`. On macOS that file
+need not exist — Claude Code can keep the OAuth in the Keychain — so the
+private directory got created with no credential in it. Since 2026-08-31 the
+seeding refuses in that case and the pane runs under your own `~/.claude`
+instead; it then reports `postureEnforced: false` and wears the `agent-set`
+pill, because whatever your ambient `defaultMode` is, is what you get. Losing
+the per-pane posture is a real cost and it is the smaller one — a pane that
+cannot run has no posture either.
+
 **The Claude lane is probed live, not guessed at.** Every other lane is gated
 on a credential file — which is a guess about where a vendor keeps its secret,
 and for Claude on macOS that guess is wrong (the login can live in the
