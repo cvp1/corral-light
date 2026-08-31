@@ -183,6 +183,31 @@ class StructuralIndependence(unittest.TestCase):
                     flush is not None and getattr(flush.value, "value", None) is True,
                     f"{f.name}:{node.lineno} prints without flush=True")
 
+    def test_nothing_reads_or_writes_the_full_corrals_state(self):
+        """Both builds must be able to run on ONE host without touching.
+
+        Ports, cookies, MCP config and codex home were all namespaced from the
+        start; `antigravity_acp.py` was not. It arrived from upstream still
+        reading CORRAL_STATE and deriving CATALOG from it — so on a host
+        running both, this lane wrote its session records into the OTHER
+        product's directory and seeded its model picker from the OTHER hub's
+        negotiated catalog. Found 2026-08-31 by auditing that exact question.
+
+        Checks the whole tree, because the leak came in with a vendored file
+        and the next one will too.
+        """
+        for f in self.PY_FILES:
+            if f.name == Path(__file__).name:
+                continue
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                self.assertNotIn('"CORRAL_STATE"', s,
+                                 f"{f.name}:{i} reads the full Corral's state var")
+                self.assertNotIn('.local/share/corral"', s,
+                                 f"{f.name}:{i} points at the full Corral's state dir")
+
     def test_state_dir_is_not_the_full_corrals(self):
         """Two hubs sharing one state dir share panes and the session key."""
         for name in ("sessions.py", "auth.py"):
