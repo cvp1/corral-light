@@ -103,6 +103,56 @@ class StructuralIndependence(unittest.TestCase):
             self.assertIn(f'"{path}"', hub,
                           f"app.js calls {path}, which hub.py does not serve")
 
+    def test_nothing_hardcodes_a_path_from_the_machine_it_was_built_on(self):
+        """No `/home/<someone>`, no `/Users/<someone>`, outside the plist.
+
+        This is the whole "does it work on a blank box" question in one test.
+        It was NOT hypothetical: app.js shipped `S.lastCwd ||
+        '/home/cvande/Github/CC'` as the new-conversation default, inherited
+        from the full Corral, so the first thing a fresh install did was refuse
+        to start a pane in a directory that does not exist there. The host
+        knows its own home; nothing here should be guessing at it.
+        """
+        import re
+        # This file is excluded, and only this file: it is the one place whose
+        # CONTENT is the rule, so it quotes the literal it forbids. Same trap
+        # the CC-workspace scanner fell into — a check that cannot survive its
+        # own documentation gets deleted the first time it cries wolf.
+        checked = [f for f in self.PY_FILES if f.name != Path(__file__).name]
+        checked += [ROOT / "static" / "app.js", ROOT / "static" / "index.html",
+                    ROOT / "corral-light"]
+        pattern = re.compile(r"/(?:home|Users)/[a-z]")
+        for f in checked:
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                s = line.strip()
+                if s.startswith(("#", "//", "*", "<!--")):
+                    continue            # prose about paths is fine
+                if pattern.search(s):
+                    self.fail(f"{f.name}:{i} hardcodes a path from the build "
+                              f"machine: {s[:90]}")
+
+    def test_the_new_conversation_default_comes_from_the_server(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("S.defaultCwd", js)
+        sess = (ROOT / "sessions.py").read_text(encoding="utf-8")
+        self.assertIn('"defaultCwd"', sess)
+
+    def test_config_dirs_are_not_the_full_corrals(self):
+        """Every per-user config path is corral-light's own.
+
+        A shared MCP config would mean a server added on the fleet host
+        silently appears in every pane here, on a machine that may have
+        neither its credential nor a network path to it.
+        """
+        for name in ("mcp.py", "codex_launcher.py"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            for i, line in enumerate(text.splitlines(), 1):
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                self.assertNotIn('.config/corral/', s,
+                                 f"{name}:{i} shares the full Corral's config")
+
     def test_state_dir_is_not_the_full_corrals(self):
         """Two hubs sharing one state dir share panes and the session key."""
         for name in ("sessions.py", "auth.py"):

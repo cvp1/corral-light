@@ -1,0 +1,41 @@
+# Corral Light — systemd USER unit, for a Linux box.
+# (The macOS equivalent is com.cvande.corral-light.plist.)
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   sed "s|%HERE%|$PWD|" corral-light.service > ~/.config/systemd/user/corral-light.service
+#   systemctl --user daemon-reload && systemctl --user enable --now corral-light
+#   systemctl --user status corral-light
+#
+# On a headless box you also want the unit to survive logout:
+#   loginctl enable-linger $USER
+#
+# A USER unit, not a system service, on purpose: every lane authenticates as
+# the logged-in user (Claude's credentials, the Grok CLI's own state,
+# Antigravity's OAuth, the codex device-auth token) and every pane runs with
+# that user's filesystem access. Running this as root would hand a browser on
+# the network a root shell behind a pairing gate.
+
+[Unit]
+Description=Corral Light — multi-model agent workspace
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %HERE%/hub.py
+WorkingDirectory=%HERE%
+
+# Loopback. This is the default in hub.py too; it is restated here because a
+# unit file is where someone looks to change it, and the reasoning should be
+# where the knob is: a machine that moves between networks has not earned the
+# ranch LAN's "the pairing gate is the boundary" ruling. To expose it, set
+# 0.0.0.0 and mean it.
+Environment=CORRAL_LIGHT_BIND=127.0.0.1
+Environment=CORRAL_LIGHT_PORT=8098
+Environment=CORRAL_OLLAMA_URL=http://127.0.0.1:11434
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

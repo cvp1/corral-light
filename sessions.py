@@ -1834,6 +1834,14 @@ class Manager:
                 # with a group it had no label for (found live, 2026-08-31).
                 "agentGroups": agent_groups(),
                 "postures": sorted(POSTURES),
+                # Where a new conversation starts, when nothing else is
+                # remembered. The BROWSER used to carry this as a literal
+                # ('/home/cvande/Github/CC'), inherited from the full Corral —
+                # which on any other machine is a directory that does not
+                # exist, so the first thing a new install did was refuse to
+                # start a pane. The host knows its own home; the client should
+                # not be guessing at it.
+                "defaultCwd": str(Path.home()),
                 "catalog": self.catalog,
                 "archived": self.archived(),
                 # Panes the cap kept from being restored. They are still on

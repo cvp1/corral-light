@@ -72,21 +72,54 @@ through an interpreter, so `argv[0]` is `python3` and exists everywhere;
 without `requires`, availability is judged by a check that cannot fail.
 `test_corral_light.py` enforces this.
 
-## Install (dogma-2, macOS)
+## Install on a blank box
+
+Verified 2026-08-31 by actually doing it: a fresh copy of this tree, an empty
+`HOME`, `env -i` (no inherited environment at all), `PATH=/usr/bin:/bin`. It
+came up, paired, opened a pane from the browser and answered — with nothing
+installed but `python3` and an Ollama to talk to.
+
+**The floor is `python3` 3.9+ and nothing else.** No venv, no pip, no node, no
+`_lib`, no CC workspace. `hub.py` refuses to start on 3.8 naming the reason,
+rather than failing later inside a request handler.
 
 ```bash
-git clone <this repo>/corral-light ~/Github/CC/corral-light
-cd ~/Github/CC/corral-light/spike && npm install     # the two node ACP adapters
-cd .. && ./corral-light doctor                        # see what is live
-cp com.cvande.corral-light.plist ~/Library/LaunchAgents/
-launchctl load -w ~/Library/LaunchAgents/com.cvande.corral-light.plist
-open http://127.0.0.1:8098/
-./corral-light pair <the code the page shows>
+git clone <repo> corral-light && cd corral-light
+./corral-light doctor       # says which lanes work here, and why the rest don't
+./corral-light serve        # http://127.0.0.1:8098
+./corral-light pair ABC-DEF # the code the page shows
 ```
 
-Only `python3` (3.9+, the system one is fine) and — for the Claude and Codex
-lanes only — `node`. No venv, no pip, no `_lib`, no CC workspace: the
-structural tests prove it stays that way.
+That is the whole install. It creates `~/.local/share/corral-light` on first
+run and needs no other setup.
+
+### What a truly blank box gets you
+
+Lanes are the box's own software, not this repo's — so on a bare machine
+`doctor` correctly greys out all four vendor lanes and you have **no working
+lane at all** until you add one. Cheapest first:
+
+| to get | install on the box | notes |
+|---|---|---|
+| **Local (Ollama)** | `ollama`, then `ollama pull <model>` | works immediately; or set `CORRAL_OLLAMA_URL` to borrow another machine's models |
+| **Claude Code** | `node`, then `cd spike && npm install` | also needs Claude Code's own login there: the pane copies `~/.claude/.credentials.json` and `~/.claude.json` into its config dir, and symlinks `~/.claude/{skills,agents,commands,plugins,prompts,CLAUDE.md}` so a pane has the same capability the terminal does |
+| **ChatGPT (Codex)** | the same `npm install` | `CODEX_HOME=~/.config/corral-light/codex-home codex login --device-auth` — the exact command `doctor` prints |
+| **Grok** | the Grok CLI, authenticated | the CLI owns auth; nothing here touches the credential |
+| **Antigravity** | `python3 install_antigravity_acp.py --install` | then Antigravity's own OAuth |
+
+None of that is Corral-specific state to reproduce — it is each vendor's normal
+login on that machine. If the CLI works in a terminal there, the lane works.
+
+### Run it as a service
+
+- **Linux:** `corral-light.service` — a systemd *user* unit; its header carries
+  the three install commands, plus `loginctl enable-linger` for a headless box.
+- **macOS:** `com.cvande.corral-light.plist` — a launchd user agent. Edit the
+  two `/Users/cvande` paths for another account.
+
+Both are USER services on purpose. Every lane authenticates as the logged-in
+user and every pane runs with that user's filesystem access, so running this as
+root would hand a browser a root shell behind a pairing gate.
 
 ## Configuration
 
@@ -114,8 +147,8 @@ either corrupting the other's panes or minting a cookie the other accepts.
 
 ## Verified live, 2026-08-31
 
-Not "the tests pass" — run end to end against real agents on ranch-server
-before this shipped (P13):
+Not "the tests pass" — run end to end against real agents before this shipped
+(P13):
 
 - **Ollama lane** — pane opened against the .21 node, catalog seeded with its 19
   real models, prompt sent, answer streamed back and rendered as markdown in the
@@ -128,6 +161,13 @@ before this shipped (P13):
   rows, transcripts intact.
 - **Browser** — pairing screen → paired → app renders, one JS bundle, no
   console errors beyond the expected pre-pairing 401.
+- **Clean room** — the tracked tree copied to an empty directory with an empty
+  `HOME` under `env -i`: hub started, browser paired, "New conversation"
+  defaulted its Directory to that box's own home, opened an Ollama pane and
+  answered. Two bugs this caught, both invisible from the build machine: the
+  new-conversation dialog hardcoded `/home/cvande/Github/CC` (a directory that
+  exists on exactly one computer), and `mcp.py` still read the FULL Corral's
+  `~/.config/corral/mcp.json`. Both are now covered by tests.
 
 ## Tests
 

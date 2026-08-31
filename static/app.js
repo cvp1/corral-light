@@ -1628,6 +1628,7 @@ async function refresh() {
   S.agents = d.agents || [];
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
+  S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
   S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
   const next = new Map();
@@ -1804,7 +1805,7 @@ function wireDialog() {
     const firstOpt = sel.options?.find?.(o => !o.disabled)
                   || [...(sel.options || [])].find(o => !o.disabled);
     if (firstOpt) sel.value = firstOpt.value;
-    $('#f-cwd').value = S.lastCwd || '/home/cvande/Github/CC';
+    $('#f-cwd').value = S.lastCwd || S.defaultCwd || '~';
     // Model/effort options come from the server's remembered catalog for the
     // SELECTED agent, not from a live pane. Scraping a live pane meant that
     // with nothing running -- i.e. every fresh start -- the pickers offered
