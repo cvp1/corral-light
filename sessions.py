@@ -391,6 +391,44 @@ def seed_config_dir(d, posture):
     return d
 
 
+# A vendor credential exported in the shell that started the hub silently
+# OUTRANKS the login the operator verified — the agent runs as a different
+# identity than the one the picker described, and the failure arrives later
+# and elsewhere.
+#
+# Craig, dogma-2, 2026-08-31, in the order he found them: logged in; verified
+# he was logged in; ran /usage and got token STATISTICS instead of the
+# subscription usage page; the next prompt failed `Authentication required`.
+# A statistics page rather than a subscription page is what API-key mode
+# looks like — i.e. the agent was never using the login he had just checked.
+#
+# codex_launcher has stripped exactly these prefixes since 2026-08-23, with a
+# comment naming the case ("a dev shell with a key exported for something
+# unrelated"). The Claude lane, which is the one everybody actually uses,
+# never got the same guard.
+#
+# Fail safe: strip by default, and SAY SO in the picker rather than silently
+# — someone deliberately using an API key deserves to learn that we removed
+# it, not to debug why. CORRAL_LIGHT_ALLOW_VENDOR_ENV=1 keeps them.
+STRIP_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_API",
+                      "XAI_", "GROK_", "CLAUDE_CODE_OAUTH")
+
+
+def vendor_env_present():
+    """Vendor credential vars in this process's environment, if any."""
+    if os.environ.get("CORRAL_LIGHT_ALLOW_VENDOR_ENV") == "1":
+        return []
+    return sorted(k for k in os.environ
+                  if k.startswith(STRIP_ENV_PREFIXES))
+
+
+def strip_prefixes():
+    """() when the operator has explicitly opted into ambient vendor auth."""
+    if os.environ.get("CORRAL_LIGHT_ALLOW_VENDOR_ENV") == "1":
+        return ()
+    return STRIP_ENV_PREFIXES
+
+
 def spawn_env(spec, config_dir=None):
     """The environment ONE agent process launches under.
 
@@ -495,6 +533,10 @@ def available_agents():
     """Only offer what actually exists on this host — an agent picker listing a
     binary that isn't installed is a button that lies."""
     out = []
+    # Reported on every lane rather than logged once at boot: this changes
+    # which IDENTITY an agent runs as, and the place that matters is the
+    # picker the operator is reading when they choose one.
+    stripped = vendor_env_present()
     for key, spec in AGENTS.items():
         exe = Path(spec["argv"][0])
         # argv[0] alone can lie for interpreter-launched lanes: python3 exists
@@ -591,6 +633,12 @@ def available_agents():
                     # ambient one whatever this dialog says.
                     "postureEnforced": posture_enforceable(spec),
                     "tools": bool(spec.get("tools"))})
+    if stripped:
+        note = (f"ignoring {', '.join(stripped)} from this environment — panes "
+                f"use the login on this host, not an ambient key. Unset it, or "
+                f"set CORRAL_LIGHT_ALLOW_VENDOR_ENV=1 to use it.")
+        for item in out:
+            item["envNote"] = note
     # One pass over every append site above, so a lane added later cannot miss
     # its group by being appended somewhere this was forgotten.
     for item in out:
@@ -905,7 +953,8 @@ class Pane:
         try:
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         on_event=self._on_event,
-                                        on_permission=self._on_permission)
+                                        on_permission=self._on_permission,
+                                        strip_env=strip_prefixes())
             self.client.initialize()
             # The agent replays the whole transcript on load. We already have
             # it; emitting it again would double the conversation on screen.
@@ -1161,7 +1210,8 @@ class Pane:
         try:
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         on_event=self._on_event,
-                                        on_permission=self._on_permission)
+                                        on_permission=self._on_permission,
+                                        strip_env=strip_prefixes())
             info = self.client.initialize()
             new = self.client.new_session_full(self.cwd, self._mcp_servers())
             self.acp_session = new.get("sessionId")

@@ -766,6 +766,83 @@ class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
         self.assertNotIn("spawn_env(spec, None)", src)
 
 
+class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
+    """The login the operator verified must be the one the agent uses.
+
+    dogma-2, 2026-08-31, in the order Craig found them: logged in; verified he
+    was logged in; ran /usage and got token STATISTICS instead of the
+    subscription usage page; the next prompt failed `Authentication required`.
+    A statistics page instead of a subscription page is what API-key mode
+    looks like — the agent was never using the login he had just checked.
+
+    acp.AcpClient merges this process's whole environment into the child,
+    which is right for PATH and HOME and wrong for a credential: an
+    ANTHROPIC_API_KEY exported in the shell that started the hub outranks the
+    OAuth login silently. codex_launcher has stripped these prefixes since
+    2026-08-23 with a comment naming the case; the Claude lane — the one
+    everybody uses — never got the same guard.
+    """
+
+    def test_stripped_vars_do_not_reach_the_child_process(self):
+        """Measured at the process boundary, not asserted about a dict."""
+        import acp, sessions, tempfile, sys as _sys, time
+        spy = Path(tempfile.mkdtemp()) / "spy.py"
+        spy.write_text(
+            "import json,os,sys\n"
+            "sys.stderr.write(json.dumps(sorted(k for k in os.environ "
+            "if k.startswith(('ANTHROPIC_','OPENAI_'))))+chr(10))\n"
+            "sys.stderr.flush()\n")
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+        try:
+            c = acp.AcpClient([_sys.executable, str(spy)], "/tmp", env={},
+                              strip_env=sessions.STRIP_ENV_PREFIXES)
+            time.sleep(1.0)
+            leaked = "".join(c.stderr_tail)
+            c.close()
+            self.assertIn("[]", leaked, f"a credential leaked: {leaked}")
+        finally:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+
+    def test_both_spawn_sites_strip(self):
+        """start() and resume() are two doors into the same room; a guard on
+        one of them is a guard on neither."""
+        sess = (ROOT / "sessions.py").read_text(encoding="utf-8")
+        self.assertEqual(sess.count("strip_env=strip_prefixes()"), 2,
+                         "start() and resume() must both strip")
+
+    def test_the_probe_strips_too(self):
+        lp = (ROOT / "lane_probe.py").read_text(encoding="utf-8")
+        self.assertIn("strip_env=", lp,
+                      "a probe running under different credentials than a "
+                      "pane is not evidence about the pane")
+
+    def test_stripping_is_announced_not_silent(self):
+        """Someone deliberately using an API key deserves to learn we removed
+        it, not to debug why their key is ignored."""
+        import sessions
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+        try:
+            self.assertIn("ANTHROPIC_API_KEY", sessions.vendor_env_present())
+            note = next((a.get("envNote") for a in sessions.available_agents()
+                         if a.get("envNote")), "")
+            self.assertIn("ANTHROPIC_API_KEY", note)
+            self.assertIn("CORRAL_LIGHT_ALLOW_VENDOR_ENV", note)
+        finally:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+
+    def test_there_is_an_opt_in_escape_hatch(self):
+        """Fail safe, not fail closed-forever: API-key auth is legitimate."""
+        import sessions
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+        os.environ["CORRAL_LIGHT_ALLOW_VENDOR_ENV"] = "1"
+        try:
+            self.assertEqual(sessions.strip_prefixes(), ())
+            self.assertEqual(sessions.vendor_env_present(), [])
+        finally:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("CORRAL_LIGHT_ALLOW_VENDOR_ENV", None)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 
