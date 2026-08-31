@@ -6,6 +6,7 @@ anything needing you is visible without hunting for it. That is all it is.
     corral-light serve                 # http://127.0.0.1:8098
     corral-light pair ABC-DEF          # authorize the browser showing that code
     corral-light doctor                # which lanes can start here, and why not
+    corral-light diagnose [lane]       # run one lane end to end and show everything
 
 ## What this is
 
@@ -179,8 +180,17 @@ lane at all** until you add one. Cheapest first:
 None of that is Corral-specific state to reproduce — it is each vendor's normal
 login on that machine. If the CLI works in a terminal there, the lane works.
 
-**If Claude panes die with `Authentication required` while `claude` works in
-your terminal**, check this first:
+**When a pane fails, run `corral-light diagnose` first.** `doctor` answers
+"can this lane start"; that question kept saying `ok` while every conversation
+died, because the failure is one step further in — the handshake succeeds and
+the first *prompt* fails. `diagnose` sends a real prompt and prints the whole
+delta between a pane and your terminal: the resolved argv, whether a private
+config dir was used or refused, which environment variables reach the agent
+(names only — values are never printed, so it is safe to paste), and on
+failure **the adapter's own stderr**, which `acp.py` has always captured and
+until now only ever used one line of.
+
+Then check this:
 
 ```bash
 env | grep -iE 'ANTHROPIC|OPENAI|GEMINI|XAI|GROK'

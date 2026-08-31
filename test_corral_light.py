@@ -843,6 +843,78 @@ class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
             os.environ.pop("CORRAL_LIGHT_ALLOW_VENDOR_ENV", None)
 
 
+class NoParentSessionLeaksIntoAPane(unittest.TestCase):
+    """A pane must not inherit another Claude Code session's identity.
+
+    MEASURED 2026-08-31 — the first thing in this investigation that was
+    measured rather than proposed. Running `corral-light diagnose` from inside
+    a Claude Code session showed eleven CLAUDE_* variables from the PARENT
+    session reaching the spawned agent, CLAUDE_CONFIG_DIR among them.
+
+    That last one is the sharp edge, and it interacts with the fallback added
+    two commits earlier: Corral sets CLAUDE_CONFIG_DIR when it can impose a
+    posture and deliberately does NOT set it when it cannot. In exactly that
+    case an inherited value wins — so a hub started from inside a Claude Code
+    session would hand every pane the parent's config directory. "Do not set
+    it" only means "use the default" when nothing else is setting it.
+    """
+
+    PARENT_VARS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
+                   "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION",
+                   "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_PID", "CLAUDE_EFFORT",
+                   "CLAUDE_CONFIG_DIR")
+
+    def test_every_parent_session_var_is_stripped(self):
+        import sessions
+        for var in self.PARENT_VARS:
+            with self.subTest(var=var):
+                self.assertTrue(var.startswith(sessions.STRIP_ENV_PREFIXES),
+                                f"{var} would leak into a pane")
+
+    def test_our_own_config_dir_still_wins_after_stripping(self):
+        """The strip must not defeat the mechanism it protects: overrides are
+        applied AFTER, so setting CLAUDE_CONFIG_DIR deliberately still works."""
+        import sessions
+        env = sessions.spawn_env(sessions.AGENTS["claude"], "/tmp/some-config")
+        self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), "/tmp/some-config")
+
+    def test_the_note_does_not_nag_about_session_vars(self):
+        """Only credentials are worth a picker note. Warning about variables
+        nobody exported on purpose trains the eye to skip the line."""
+        import sessions
+        os.environ["CLAUDECODE"] = "1"
+        try:
+            self.assertEqual(sessions.vendor_env_present(), [])
+        finally:
+            os.environ.pop("CLAUDECODE", None)
+
+
+class DiagnoseIsSafeToPaste(unittest.TestCase):
+    """The instrument built after three unmeasured theories in a row."""
+
+    def test_it_prompts_which_is_the_step_doctor_skips(self):
+        import diagnose, inspect
+        src = inspect.getsource(diagnose.diagnose)
+        self.assertIn("client.prompt", src,
+                      "doctor already answers 'can it start'; this command "
+                      "exists to answer 'does a turn run'")
+
+    def test_it_surfaces_adapter_stderr(self):
+        """acp.py has always captured this and only ever used the last line
+        inside an exit reason — the detail behind every failure in this saga
+        was collected and thrown away."""
+        import diagnose, inspect
+        self.assertIn("stderr_tail", inspect.getsource(diagnose.diagnose))
+
+    def test_it_never_prints_a_secret_value(self):
+        import diagnose, inspect
+        src = inspect.getsource(diagnose)
+        self.assertIn("value not shown", src)
+        # Names and lengths only — no dict dump of the environment anywhere.
+        self.assertNotIn("json.dumps(dict(os.environ", src)
+        self.assertNotIn("print(os.environ", src)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 
