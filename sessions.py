@@ -327,6 +327,8 @@ def seed_config_dir(d, posture):
     """
     d = Path(d)
     real = Path.home() / ".claude"
+    if darwin_keychain_blocks_isolation():
+        return None            # platform fact, not a credential-content one
     d.mkdir(parents=True, exist_ok=True)
     # Locked to the owner. Never proven as THE cause of anything, but cheap,
     # strictly safer than the umask-default mode plain mkdir leaves (measured
@@ -518,6 +520,44 @@ def spawn_env(spec, config_dir=None):
     return env
 
 
+def darwin_keychain_blocks_isolation():
+    """True when this platform's Claude Code makes per-pane isolation via
+    CLAUDE_CONFIG_DIR structurally unworkable, independent of what this repo
+    does with .credentials.json.
+
+    READ FROM THE VENDOR'S OWN SOURCE, not inferred — the fifth and last
+    theory in a long chain of wrong ones, this time settled by looking:
+
+        spike/node_modules/@anthropic-ai/claude-agent-sdk/cli.js
+        function Kg(A=""){
+          let q=O8();
+          let Y = !process.env.CLAUDE_CONFIG_DIR ? "" :
+                  `-${sha256(q).digest('hex').substring(0,8)}`;
+          return `Claude Code${D4().OAUTH_FILE_SUFFIX}${A}${Y}`
+        }
+
+    That is the macOS Keychain service-name generator this SDK uses with
+    `security find-generic-password`. Simply setting CLAUDE_CONFIG_DIR — to
+    ANY value — switches the lookup to a suffixed service name that no
+    interactive `claude login` has ever provisioned, because that login only
+    ever runs with the variable unset. A byte-identical, correctly-
+    permissioned copy of .credentials.json in the isolated directory does not
+    rescue this: it was never a credential-CONTENT problem, which is exactly
+    why the two content-focused fixes before this one (empty-token check,
+    stale-copy resync) measurably did nothing on dogma-2, 2026-08-31 — the
+    positive control that found this proved the token was real and identical
+    on both sides, and it still failed only with CLAUDE_CONFIG_DIR set.
+
+    So: give up the per-pane posture on this platform, the same fallback
+    already used when no credential can be found at all. Provisioning a
+    matching Keychain entry per pane is possible in principle but means
+    Corral writing OAuth tokens into the OS Keychain under synthetic
+    identities — a materially bigger, riskier change than anything else here,
+    and a decision for Craig, not a silent code change.
+    """
+    return sys.platform == "darwin"
+
+
 def usable_credential(path):
     """Does this credentials file actually carry a token we could copy?
 
@@ -558,6 +598,8 @@ def posture_enforceable(spec):
     a question about the credential's CONTENT, not about a path existing.
     """
     if not spec.get("posture_via_config_dir"):
+        return False
+    if darwin_keychain_blocks_isolation():
         return False
     return usable_credential(Path.home() / ".claude" / ".credentials.json")
 

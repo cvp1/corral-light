@@ -1199,6 +1199,87 @@ class DiagnoseAuditsPermissionsAndContent(unittest.TestCase):
         self.assertIn("DIFFERS", buf.getvalue())
 
 
+class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
+    """The confirmed root cause — read from the vendor's own source, not
+    inferred, after five theories that were.
+
+    spike/node_modules/@anthropic-ai/claude-agent-sdk/cli.js:
+
+        function Kg(A=""){
+          let q=O8();
+          let Y = !process.env.CLAUDE_CONFIG_DIR ? "" :
+                  `-${sha256(q).digest('hex').substring(0,8)}`;
+          return `Claude Code${D4().OAUTH_FILE_SUFFIX}${A}${Y}`
+        }
+
+    the macOS Keychain service-name generator used with
+    `security find-generic-password`. Setting CLAUDE_CONFIG_DIR — to ANY
+    value — switches the lookup to a suffixed service name no interactive
+    `claude login` has ever provisioned. Craig's positive control proved the
+    credential ITSELF was real and byte-identical on both sides of the
+    failure; this is why that made no difference — it was never a
+    credential-content problem. This finding is what the empty-token and
+    stale-copy fixes, both plausible and both wrong, were reaching for.
+    """
+
+    def _patch_darwin(self):
+        import sessions
+        real = sessions.sys.platform
+        sessions.sys.platform = "darwin"
+        self.addCleanup(lambda: setattr(sessions.sys, "platform", real))
+
+    def _fake_home_with_real_credential(self):
+        home = Path(tempfile.mkdtemp())
+        (home / ".claude").mkdir()
+        (home / ".claude" / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": "a" * 108,
+                               "refreshToken": "b" * 108,
+                               "expiresAt": 9999999999999}}))
+        real_home = Path.home
+        Path.home = staticmethod(lambda: home)
+        self.addCleanup(lambda: setattr(Path, "home", real_home))
+        return home
+
+    def test_darwin_refuses_isolation_even_with_a_real_credential(self):
+        """The whole point: a perfectly valid, non-empty, freshly-copyable
+        token must NOT be enough on this platform."""
+        import sessions
+        self._patch_darwin()
+        self._fake_home_with_real_credential()
+        self.assertIsNone(sessions.seed_config_dir(
+            Path(tempfile.mkdtemp()) / "cfg", "auto"))
+        self.assertFalse(
+            sessions.posture_enforceable(sessions.AGENTS["claude"]))
+
+    def test_linux_is_unaffected(self):
+        """The fix must be scoped to the platform that actually has this
+        Keychain quirk — not a blanket new restriction everywhere."""
+        import sessions
+        self.assertEqual(sessions.sys.platform, "linux",
+                         "this suite runs on Linux; if that ever changes, "
+                         "this test needs a real non-darwin patch instead")
+        self._fake_home_with_real_credential()
+        self.assertIsNotNone(sessions.seed_config_dir(
+            Path(tempfile.mkdtemp()) / "cfg", "auto"))
+        self.assertTrue(
+            sessions.posture_enforceable(sessions.AGENTS["claude"]))
+
+    def test_diagnose_explains_the_mechanism_not_just_the_verdict(self):
+        import diagnose, io, contextlib
+        self._patch_darwin()
+        self._fake_home_with_real_credential()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                diagnose.diagnose("claude", cwd="/tmp")
+            except Exception:
+                pass          # the handshake itself will fail in this sandbox;
+                              # only the CREDENTIAL/CONFIG section is under test
+        out = buf.getvalue()
+        self.assertIn("Keychain", out)
+        self.assertIn("CLAUDE_CONFIG_DIR", out)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

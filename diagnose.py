@@ -254,11 +254,18 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
 
     config_dir = None
     if spec.get("posture_via_config_dir"):
+        if sessions.darwin_keychain_blocks_isolation():
+            _line("private config dir",
+                  "REFUSED — macOS Claude Code stores its OAuth session in "
+                  "the Keychain under a service name that CLAUDE_CONFIG_DIR "
+                  "itself changes (read from cli.js's own Kg() function); no "
+                  "copy of .credentials.json fixes this → agent uses "
+                  "~/.claude")
         config_dir = sessions.seed_config_dir(
             sessions.STATE / "diagnose-config", sessions.DEFAULT_POSTURE)
-        _line("private config dir",
-              str(config_dir) if config_dir else
-              "REFUSED (no credential to carry) → agent uses ~/.claude")
+        if config_dir is None and not sessions.darwin_keychain_blocks_isolation():
+            _line("private config dir",
+                  "REFUSED (no usable credential to carry) → agent uses ~/.claude")
         if config_dir:
             names = sorted(p.name for p in Path(config_dir).iterdir())
             _line("  contents", ", ".join(names))
