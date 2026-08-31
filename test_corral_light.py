@@ -1032,6 +1032,88 @@ class AnEmptyTokenIsNotACredential(unittest.TestCase):
             Path.home = real
 
 
+class TheCopiedCredentialResyncs(unittest.TestCase):
+    """The measured root cause, round two — found by the positive control.
+
+    dogma-2, 2026-08-31: the control settled that this WAS the private config
+    dir, but the credential in the copy was real (108 chars, a genuine future
+    expiresAt) — ruling out both earlier theories (missing file, empty
+    token). What was left: seed_config_dir() copied the credential exactly
+    ONCE, ever, guarded by `if not dst.is_file()`. diagnose and the picker's
+    probe both reuse ONE FIXED directory across every invocation, so a copy
+    made the first time that directory existed is frozen from that moment —
+    and Claude Code rotates OAuth tokens (Craig's own terminal: "login
+    expires in 2 days"), so a frozen copy's refresh token goes invalid at the
+    auth server while looking, structurally, exactly like a working one.
+    """
+
+    def _home_with_cred(self, token="a"):
+        home = Path(tempfile.mkdtemp())
+        (home / ".claude").mkdir()
+        cred = home / ".claude" / ".credentials.json"
+        cred.write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": token * 108,
+                               "refreshToken": token * 108}}))
+        return home, cred
+
+    def test_a_rotated_token_is_picked_up_on_the_next_seed(self):
+        import sessions, time
+        home, cred = self._home_with_cred("a")
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            d = sessions.seed_config_dir(home / "cfg", "auto")
+            self.assertIn("a" * 20, (d / ".credentials.json").read_text())
+
+            time.sleep(1.1)   # a distinguishable mtime, like copy2 relies on
+            cred.write_text(json.dumps(
+                {"claudeAiOauth": {"accessToken": "b" * 108,
+                                   "refreshToken": "b" * 108}}))
+            d2 = sessions.seed_config_dir(home / "cfg", "auto")
+            self.assertIn("b" * 20, (d2 / ".credentials.json").read_text(),
+                          "the copy did not resync after the source rotated")
+        finally:
+            Path.home = real
+
+    def test_an_unrotated_source_is_left_alone(self):
+        """Re-copying on every call, unconditionally, would be simpler and
+        wrong: a running pane may have refreshed ITS OWN copy more recently
+        than the source, and clobbering that with an older global file would
+        actively break a working pane."""
+        import sessions
+        home, cred = self._home_with_cred("a")
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            d = sessions.seed_config_dir(home / "cfg", "auto")
+            before = (d / ".credentials.json").stat().st_mtime
+            sessions.seed_config_dir(home / "cfg", "auto")   # called again
+            after = (d / ".credentials.json").stat().st_mtime
+            self.assertEqual(before, after, "an unchanged source was re-copied")
+        finally:
+            Path.home = real
+
+    def test_a_transient_bad_read_does_not_discard_a_working_copy(self):
+        """If the source is mid-write when we happen to look, keep the
+        already-validated copy rather than treating a bad snapshot as ground
+        truth and returning None."""
+        import sessions, time
+        home, cred = self._home_with_cred("a")
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            d = sessions.seed_config_dir(home / "cfg", "auto")
+            self.assertIsNotNone(d)
+            time.sleep(1.1)
+            cred.write_text("{ mid-write, not valid json")   # newer, broken
+            d2 = sessions.seed_config_dir(home / "cfg", "auto")
+            self.assertIsNotNone(d2, "a transient bad source read bricked "
+                                     "an already-working pane")
+            self.assertIn("a" * 20, (d2 / ".credentials.json").read_text())
+        finally:
+            Path.home = real
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

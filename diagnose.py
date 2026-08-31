@@ -163,12 +163,15 @@ def _control(spec, cwd, config_dir, prompt):
     ok, err, tail = _run_once(spec, cwd, None, prompt, "control")
     if ok:
         print("\n  ✓ IT WORKS without the private config dir.\n", flush=True)
-        print("  So: this host's credential cannot be carried into an isolated\n"
-              "  CLAUDE_CONFIG_DIR by copying the file, even though the file\n"
-              "  exists. Corral's per-pane permission posture is what that\n"
-              "  directory buys, so the fix is to give it up on this host and\n"
-              "  SAY so (postureEnforced: false, `agent-set` on the pane)\n"
-              "  rather than hand you a pane that cannot talk.\n", flush=True)
+        print("  This was the STALE-COPY bug (fixed 2026-08-31): the private\n"
+              "  config dir copies your credential once and, before this fix,\n"
+              "  never again — so a rotated token left the copy permanently\n"
+              "  behind the real one. seed_config_dir() now re-copies whenever\n"
+              "  the source is newer than the copy. Re-run `diagnose` (or just\n"
+              "  retry the pane): the next attempt should resync and pass.\n"
+              "  If it still fails, the private-config-dir mechanism itself\n"
+              "  has a different problem on this host and this control has\n"
+              "  correctly told you where to keep looking.\n", flush=True)
     else:
         _line("control also failed", err)
         print("\n  So the private config dir is NOT the difference — the lane\n"

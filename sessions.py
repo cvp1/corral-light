@@ -343,29 +343,42 @@ def seed_config_dir(d, posture):
     # cost and it is the SMALLER one — a pane that cannot run has no posture
     # either. What must never happen is the third option: run under the
     # private dir anyway and let the operator find out at the first prompt.
-    if not (d / ".credentials.json").is_file():
-        src = real / ".credentials.json"
-        # EXISTS is the wrong question; CARRIES A TOKEN is the right one.
-        #
-        # Measured on dogma-2, 2026-08-31: the file is there (322 bytes) and
-        # the copy lands, and the pane still cannot authenticate while the
-        # terminal works. A complete file on Linux is ~508 bytes carrying
-        # accessToken(108) + refreshToken(108); 322 is that file minus a
-        # token. On macOS the real secret can live in the Keychain, leaving a
-        # metadata-only stub behind — and copying a stub into an isolated
-        # config dir produces a directory that LOOKS credentialed and is not.
-        #
-        # So check for the token itself. Parsed only to test for the key's
-        # presence: no value is read into a variable, logged, or returned
-        # (P14 — secrets never touch the transcript).
-        if usable_credential(src):
+    cred_dst = d / ".credentials.json"
+    cred_src = real / ".credentials.json"
+    # RE-CHECK EVERY TIME, not only when the copy is missing.
+    #
+    # Measured on dogma-2, 2026-08-31, by the positive control: the terminal
+    # `claude` (a real, valid, unexpired token) worked; the identical prompt
+    # through a private config dir failed `Authentication required`. The
+    # token in the COPY was real too — the control ruled out "no token" and
+    # "empty token" both. What was left: the copy was STALE. Claude Code
+    # rotates OAuth tokens (Craig's own terminal banner: "login expires in 2
+    # days"), and `diagnose`/the picker's probe reuse ONE FIXED directory
+    # across every run — so a copy made once, the first time that directory
+    # was ever seeded, is frozen from that moment on. A rotated refresh token
+    # is invalid at the auth server even though it is 108 real characters.
+    #
+    # copy2 preserves the source's mtime onto the copy, so comparing mtimes
+    # detects drift cheaply without reading either file's content.
+    stale = cred_dst.is_file() and cred_src.is_file() and (
+        cred_src.stat().st_mtime > cred_dst.stat().st_mtime)
+    if not cred_dst.is_file() or stale:
+        # EXISTS is the wrong question; CARRIES A TOKEN is the right one —
+        # the earlier finding this fix does not replace. A metadata-only stub
+        # (macOS Keychain-backed accounts) or an empty-token file (a mid-
+        # refresh snapshot) must not overwrite a working copy, and must not
+        # be treated as a credential when there was never a copy at all.
+        if usable_credential(cred_src):
             try:
-                shutil.copy2(src, d / ".credentials.json")
-                (d / ".credentials.json").chmod(0o600)
+                shutil.copy2(cred_src, cred_dst)
+                cred_dst.chmod(0o600)
             except OSError:
                 pass
-        else:
-            return None            # nothing usable to carry; caller inherits
+        elif not cred_dst.is_file():
+            return None             # nothing usable, and nothing to fall back on
+        # else: source looked unusable just now (e.g. mid-rewrite) but a
+        # working copy already exists — keep it rather than discard it on a
+        # transient bad read.
     src = Path.home() / ".claude.json"
     if src.is_file() and not (d / src.name).is_file():
         try:
