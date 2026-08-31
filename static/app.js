@@ -1909,9 +1909,247 @@ function wireDialog() {
     try {
       const d = await api('/api/session/new', common);
       S.panes.set(d.pane.id, d.pane);
+      // Starting a conversation IS focusing it — otherwise the pane you just
+      // opened is not the one ⌘K would attach a note to.
+      S.focus = d.pane.id;
       render();
       if (d.pane.state === 'dead') toast('agent failed to start: ' + (d.pane.error || ''), true);
     } catch (e) { toast(e.message, true); }
+  });
+}
+
+/* ── ⌘K — the one way to get anywhere ──────────────────────────────────────
+ * Light has ONE room, so the palette is not a shortcut past a nav bar the way
+ * it is in the full Corral — it IS the navigation. That means it has to search
+ * everything in one ranked list: the panes you have open, the conversations
+ * you closed, and your own notes.
+ *
+ * Local sources match with zero latency because they are already in memory;
+ * content is debounced and folds in when it lands, so typing never waits on
+ * the index. A dropped or slow /api/search degrades the palette to its local
+ * matches instead of emptying it.
+ *
+ * WHAT ACTIVATING A CONTENT HIT DOES — and why it isn't "open the page":
+ * upstream's Library renders the note in a room. Light never renders your
+ * content in the browser at all (see content.py's docstring: that is what
+ * lets the whole escape-everything renderer stay deleted). So a hit ATTACHES
+ * instead — the server decides whether that means a path reference or a
+ * quoted excerpt, based on whether the target lane can read a file itself.
+ *   Enter       attach to the focused pane's composer
+ *   ⇧Enter      open a NEW pane in that file's directory, then attach
+ * Nothing is sent either way. It lands in the box; you read it and press send.
+ */
+const PAL = { sel: 0, rows: [], t: null, seq: 0, status: null };
+
+function openPalette() {
+  const q = $('#pal-q');
+  q.value = '';
+  paletteResults('');
+  $('#palette').showModal();
+  requestAnimationFrame(() => q.focus());
+  // Fetched once per open, not per keystroke: it is only needed to explain an
+  // EMPTY result, and explaining that badly ("no results") is the whole
+  // difference between "nothing matches" and "you never pointed me at
+  // anything".
+  api('/api/content/status').then(s => { PAL.status = s; }).catch(() => {});
+}
+
+/* Which pane an attach lands in.
+ *
+ * S.focus alone is wrong, and measured wrong: it is only set by clicking a
+ * roster row, so with exactly one conversation open — the overwhelmingly
+ * common case, and the whole shape of a one-room app — every content hit
+ * offered "open a new pane" while the pane you were plainly looking at sat
+ * right there. An attach target that ignores the only pane on screen is a
+ * feature explaining itself to a user who can see the answer.
+ *
+ * A minimized or dead pane is never the target: attaching into a composer
+ * that is not on screen is a message you cannot see and did not send.
+ */
+function attachTarget() {
+  const focused = S.panes.get(S.focus);
+  if (focused && !focused.minimized && focused.state !== 'dead') return focused;
+  const shown = [...S.panes.values()]
+    .filter(p => !p.minimized && p.state !== 'dead');
+  return shown.length === 1 ? shown[0] : null;
+}
+
+function paletteResults(query) {
+  const needle = query.trim().toLowerCase();
+  const rows = [];
+  const focused = attachTarget();
+
+  for (const [id, p] of S.panes || []) {
+    const label = p.title || p.label;
+    if (!needle || label.toLowerCase().includes(needle)
+        || (p.cwd || '').toLowerCase().includes(needle)) {
+      rows.push({ kind: 'pane', label, paneId: id,
+                  sub: p.state + ' · ' + ((p.cwd || '').split('/').pop() || '') });
+    }
+  }
+  for (const a of S.archived || []) {
+    const label = a.title || a.id;
+    if (needle && !label.toLowerCase().includes(needle)) continue;
+    rows.push({ kind: 'archived', label, paneId: a.id, sub: 'archived' });
+  }
+  if (!needle || 'new conversation'.includes(needle)) {
+    rows.push({ kind: 'action', label: 'New conversation', sub: 'action' });
+  }
+
+  renderPalette(rows.slice(0, 30), needle);
+  if (needle.length < 2) return;
+
+  // Debounced, and guarded by a sequence number: keystrokes outrun the
+  // network, and an older response landing after a newer one would repaint
+  // the list with results for a query that is no longer in the box.
+  const seq = ++PAL.seq;
+  clearTimeout(PAL.t);
+  PAL.t = setTimeout(async () => {
+    let d;
+    try { d = await api('/api/search?q=' + encodeURIComponent(needle)); }
+    catch (e) { return; }                  // degrade to local matches only
+    if (seq !== PAL.seq) return;
+    const hits = (d.hits || []).map(h => ({
+      kind: 'content', label: h.title, id: h.id,
+      sub: h.corpus, snippet: h.snippet,
+      // The pane this would attach to, decided when the row is BUILT so the
+      // row can say what it will do. `focused` may be undefined — the row
+      // then offers to open a pane, which is the honest fallback.
+      pane: focused }));
+    renderPalette([...rows, ...hits].slice(0, 40), needle, d.error);
+  }, 160);
+}
+
+function renderPalette(rows, needle, contentError) {
+  PAL.rows = rows; PAL.sel = 0;
+  const res = $('#pal-res');
+  res.innerHTML = '';
+  if (contentError) res.appendChild(el('div', 'palnote', contentError));
+  if (!rows.length) {
+    // An empty palette has two very different causes and they need different
+    // sentences. A bare "Nothing matches." on a box with no configured roots
+    // is a lie by omission — it says your query failed when the truth is the
+    // index is empty.
+    const s = PAL.status;
+    if (s && !(s.roots || []).length) {
+      res.appendChild(el('div', 'calm', s.error
+        || 'No content roots configured yet.'));
+    } else if (s && !s.pages) {
+      res.appendChild(el('div', 'calm',
+        'The index is empty — nothing indexable under the configured roots.'));
+    } else {
+      res.appendChild(el('div', 'calm', 'Nothing matches.'));
+    }
+    return;
+  }
+  rows.forEach((r, i) => {
+    const row = el('div', 'palrow' + (i === 0 ? ' on' : ''));
+    row.appendChild(el('span', 'pill corp', r.sub));
+    const t = el('div', 'palt');
+    t.appendChild(el('span', 't', r.label));
+    // The snippet is FILE-DERIVED TEXT on an authed control surface, so it is
+    // set as textContent by el() and never parsed as markup (P20). This is
+    // the only content-derived string the page renders at all.
+    if (r.snippet) t.appendChild(el('span', 'palsnip', r.snippet));
+    row.appendChild(t);
+    if (r.kind === 'content') {
+      row.appendChild(el('span', 'palhint',
+        r.pane ? '↵ attach · ⇧↵ new pane' : '↵ new pane here'));
+    }
+    row.onmousedown = e => e.preventDefault();      // keep focus in the input
+    row.onclick = e => activatePalette(r, e.shiftKey);
+    res.appendChild(row);
+  });
+}
+
+async function activatePalette(row, newPane) {
+  $('#palette').close();
+  if (row.kind === 'action') return $('#new').click();
+  if (row.kind === 'pane') return focusPane(row.paneId);
+  if (row.kind === 'archived') {
+    try {
+      await api('/api/session/reopen', { pane: row.paneId });
+      await refresh();
+      focusPane(row.paneId);
+    } catch (e) { toast(e.message, true); }
+    return;
+  }
+  if (row.kind !== 'content') return;
+  await attachContent(row.id, newPane || !row.pane ? null : row.pane.id);
+}
+
+/* Attach a note to a pane's composer — or to a new pane opened where it
+ * lives. The SERVER decides what the inserted text is (a path for a lane with
+ * tools, a quoted excerpt for one without); this only has to put it in the
+ * right box and leave the cursor after it. */
+async function attachContent(id, paneId) {
+  let d;
+  try { d = await api('/api/content/attach', { id, pane: paneId || '' }); }
+  catch (e) { return toast(e.message, true); }
+  if (!paneId) {
+    // No pane to attach to (none focused, or ⇧↵). Open one where the file
+    // lives — the directory is the context an agent with tools actually
+    // needs, and it is the same create a click on New makes.
+    try {
+      const r = await api('/api/session/new',
+                          { agent: 'claude', cwd: d.dir,
+                            posture: localStorage.getItem('corral.posture') || 'auto' });
+      S.panes.set(r.pane.id, r.pane);
+      paneId = r.pane.id;
+      render();
+      // The new pane is a different LANE from the one the text was computed
+      // for, so ask again rather than pasting an excerpt into a pane that can
+      // read the file perfectly well (or a bare path into one that cannot).
+      d = await api('/api/content/attach', { id, pane: paneId });
+    } catch (e) { return toast(e.message, true); }
+  }
+  focusPane(paneId);
+  requestAnimationFrame(() => {
+    const box = document.querySelector(`[data-pane="${paneId}"] .composer textarea`)
+             || document.querySelector(`[data-pane="${paneId}"] .composer input`);
+    if (!box) return toast('attached, but that pane has no composer', true);
+    box.value = d.text + (box.value || '');
+    box.focus();
+    // Cursor AFTER the inserted text: you are about to type the question, and
+    // landing at position 0 means typing in front of your own attachment.
+    const at = d.text.length;
+    box.setSelectionRange(at, at);
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    toast(d.mode === 'excerpt'
+      ? `quoted "${d.title}" — this lane has no tools, so the text came along`
+      : `referenced "${d.title}" — the agent will read it through its own gate`);
+  });
+}
+
+function movePaletteSel(delta) {
+  if (!PAL.rows.length) return;
+  const rows = [...$('#pal-res').children].filter(n => n.classList.contains('palrow'));
+  rows[PAL.sel]?.classList.remove('on');
+  PAL.sel = (PAL.sel + delta + PAL.rows.length) % PAL.rows.length;
+  rows[PAL.sel]?.classList.add('on');
+  rows[PAL.sel]?.scrollIntoView({ block: 'nearest' });
+}
+
+function wirePalette() {
+  const q = $('#pal-q');
+  $('#search-trigger').onclick = openPalette;
+  q.oninput = () => paletteResults(q.value);
+  q.onkeydown = e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); movePaletteSel(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); movePaletteSel(-1); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (PAL.rows[PAL.sel]) activatePalette(PAL.rows[PAL.sel], e.shiftKey);
+    }
+  };
+  // Global, and deliberately NOT swallowed inside a composer: ⌘K is how you
+  // reach a note while writing the message that needs it, which is the whole
+  // point of attach. Escape is the dialog's own.
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      $('#palette').open ? $('#palette').close() : openPalette();
+    }
   });
 }
 
@@ -1949,6 +2187,7 @@ async function start() {
   wireDialog();
   wireRail();
   wireCopySelect();
+  wirePalette();
   // Stream FIRST, then snapshot. The reverse order left a window between the
   // snapshot and the EventSource opening in which every event was dropped and
   // never recoverable — the actual cause of "reload loses running work".

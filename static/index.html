@@ -28,6 +28,10 @@
   <aside class="rail left">
     <div class="brand">Corral <span class="lightmark">light</span></div>
     <button class="new" id="new">＋ New conversation</button>
+    <button class="search-trigger" id="search-trigger" type="button"
+            aria-label="Search panes and notes">
+      <span>Search</span><kbd>⌘K</kbd>
+    </button>
     <div class="lab">Conversations</div>
     <div id="roster" class="roster"></div>
     <div class="foot"><span id="conn" class="conn">connecting…</span><div class="themes" id="themes"></div></div>
@@ -83,6 +87,14 @@
       <button value="ok" class="btn go" id="f-go">Start</button>
     </menu>
   </form>
+</dialog>
+
+<dialog id="palette">
+  <div class="paldlg">
+    <input id="pal-q" type="text" spellcheck="false" autocomplete="off"
+           placeholder="Jump to a conversation, or find a note to attach…">
+    <div id="pal-res" class="palres"></div>
+  </div>
 </dialog>
 
 <div id="toast" class="toast"></div>

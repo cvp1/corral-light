@@ -78,9 +78,10 @@ class StructuralIndependence(unittest.TestCase):
         text = (ROOT / "hub.py").read_text(encoding="utf-8")
         import re
         routes = set(re.findall(r'p == "(/[^"]*)"', text))
-        allowed_prefixes = ("/api/session/", "/api/pair/")
+        allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/")
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
-                         "/manifest.json", "/api/state", "/api/stream"}
+                         "/manifest.json", "/api/state", "/api/stream",
+                         "/api/search"}
         for r in routes:
             if r in allowed_exact or r.startswith(allowed_prefixes):
                 continue
@@ -296,6 +297,138 @@ class OllamaAdapter(unittest.TestCase):
                              "turn count alone is not a bound: one pasted file "
                              "blows the window in three messages")
         self.assertGreaterEqual(len(h), 1, "trimming must never empty history")
+
+
+class ContentIndex(unittest.TestCase):
+    """The index behind ⌘K. Runs against a scratch tree, never the real vault."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        (base / "state").mkdir()
+        self.notes = base / "notes"
+        (self.notes / "sub").mkdir(parents=True)
+        (self.notes / "alpha.md").write_text(
+            "# Alpha Note\n\nThe quick brown fox jumps over the lazy dog.\n")
+        (self.notes / "sub" / "beta.md").write_text(
+            "# Beta Note\n\nA note about hydroponics and lettuce.\n")
+        (self.notes / "ignored.png").write_bytes(b"\x89PNG not indexable")
+        (self.notes / ".hidden").mkdir()
+        (self.notes / ".hidden" / "secret.md").write_text("# Secret\n\nfox\n")
+        cfg = base / "content.json"
+        cfg.write_text(json.dumps(
+            [{"key": "notes", "label": "notes", "root": str(self.notes)}]))
+
+        import importlib, content
+        os.environ["CORRAL_LIGHT_STATE"] = str(base / "state")
+        os.environ["CORRAL_CONTENT_CONFIG"] = str(cfg)
+        self.content = importlib.reload(content)
+
+    def tearDown(self):
+        for k in ("CORRAL_CONTENT_CONFIG",):
+            os.environ.pop(k, None)
+        self.tmp.cleanup()
+
+    def test_indexes_markdown_and_finds_it(self):
+        hits = self.content.search("fox")["hits"]
+        self.assertEqual([h["title"] for h in hits], ["Alpha Note"])
+        self.assertIn("fox", hits[0]["snippet"].lower())
+
+    def test_dotdirs_are_not_indexed(self):
+        """A `.hidden/secret.md` matching the query must not surface.
+
+        Vaults carry `.obsidian`, `.trash` and `.git`; indexing those puts
+        deleted notes and plugin config into a search box that looks like it
+        is showing you your notes.
+        """
+        titles = [h["title"] for h in self.content.search("fox")["hits"]]
+        self.assertNotIn("Secret", titles)
+
+    def test_a_symlink_escaping_the_root_is_not_followed(self):
+        """Otherwise a link in a vault indexes the whole filesystem."""
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "leak.md").write_text("# Leak\n\nfox outside the root\n")
+        try:
+            (self.notes / "link.md").symlink_to(outside / "leak.md")
+        except OSError:
+            self.skipTest("no symlink support here")
+        self.content.refresh(force=True)
+        self.assertNotIn("Leak",
+                         [h["title"] for h in self.content.search("fox")["hits"]])
+
+    def test_deleted_files_leave_the_index(self):
+        """Eviction is accretion's other half (P23) — a store that only grows
+        keeps answering with files that are gone."""
+        self.assertTrue(self.content.search("hydroponics")["hits"])
+        (self.notes / "sub" / "beta.md").unlink()
+        self.content.refresh(force=True)
+        self.assertFalse(self.content.search("hydroponics")["hits"])
+
+    def test_user_text_is_never_fts_syntax(self):
+        """`C++ (notes)` or a bare `*` must be a SEARCH, not a syntax error
+        and not a query meaning something nobody typed."""
+        for q in ("C++ (notes)", '"', "*", "fox OR NOT bar", "a AND"):
+            with self.subTest(q=q):
+                r = self.content.search(q)
+                self.assertIsInstance(r["hits"], list)
+                self.assertNotIn("syntax", r["error"].lower())
+
+    def test_a_malformed_config_is_an_error_not_a_silent_default(self):
+        """A typo must not look identical to having no config at all."""
+        Path(os.environ["CORRAL_CONTENT_CONFIG"]).write_text("{ not json")
+        roots, err = self.content.roots()
+        self.assertEqual(roots, [])
+        self.assertIn("unreadable", err)
+
+    def test_status_explains_an_empty_index(self):
+        Path(os.environ["CORRAL_CONTENT_CONFIG"]).unlink()
+        import importlib
+        c = importlib.reload(self.content)
+        st = c.status()
+        # With no config and (in this scratch HOME) no ~/notes, the empty
+        # state must SAY what to do, not just report zero.
+        if not st["roots"]:
+            self.assertTrue(st["error"], "an empty index with no explanation")
+
+
+class AttachSemantics(unittest.TestCase):
+    """What attaching a note MEANS is decided by the lane, in one place."""
+
+    def test_the_rule_is_stated_where_it_is_enforced(self):
+        hub = (ROOT / "hub.py").read_text(encoding="utf-8")
+        self.assertIn("/api/content/attach", hub)
+        # A lane with tools gets a reference; one without gets an excerpt.
+        self.assertIn('"tools"', hub)
+        self.assertIn("ATTACH_EXCERPT_CHARS", hub)
+
+    def test_the_excerpt_is_bounded(self):
+        import hub
+        self.assertLessEqual(hub.ATTACH_EXCERPT_CHARS, 20000)
+
+    def test_every_lane_declares_whether_it_has_tools(self):
+        """Undeclared reads as False, which would silently quote a whole note
+        into a lane that could have read the file itself."""
+        import sessions
+        for key, spec in sessions.AGENTS.items():
+            self.assertIn("tools", spec,
+                          f"{key} does not say whether it can read a file")
+
+    def test_the_browser_never_renders_content_as_markup(self):
+        """The reason mdview.py could stay deleted.
+
+        Notes carry pasted third-party text and this is an authed control
+        surface (P20). The snippet is the only file-derived string that
+        reaches the page, and el() sets textContent — so an innerHTML
+        assignment fed by a hit would be the whole argument collapsing.
+        """
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        for bad in ("innerHTML = r.snippet", "innerHTML = h.snippet",
+                    "innerHTML = d.text", "insertAdjacentHTML"):
+            self.assertNotIn(bad, js)
+        self.assertFalse((ROOT / "mdview.py").exists(),
+                         "a markdown renderer is back; if content is rendered "
+                         "again, the P20 escaping argument has to come with it")
 
 
 class StaticPathContainment(unittest.TestCase):
