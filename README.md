@@ -172,7 +172,7 @@ lane at all** until you add one. Cheapest first:
 |---|---|---|
 | **Local (Ollama)** | `ollama`, then `ollama pull <model>` | works immediately; or set `CORRAL_OLLAMA_URL` to borrow another machine's models |
 | **Claude Code** | `node`, then `cd spike && npm install` | also needs Claude Code's own login there: the pane copies `~/.claude/.credentials.json` and `~/.claude.json` into its config dir, and symlinks `~/.claude/{skills,agents,commands,plugins,prompts,CLAUDE.md}` so a pane has the same capability the terminal does |
-| **ChatGPT (Codex)** | the same `npm install` | `CODEX_HOME=~/.config/corral-light/codex-home codex login --device-auth` — the exact command `doctor` prints |
+| **ChatGPT (Codex)** | the same `npm install` | then log in — run the exact command `doctor` prints (it creates `CODEX_HOME` and logs in, in one paste). The separate `CODEX_HOME` is deliberate: a shared one is how a pane ends up on whatever model another config pinned, so this is a separate login from any codex you already use |
 | **Grok** | the Grok CLI, authenticated | the CLI owns auth; nothing here touches the credential |
 | **Antigravity** | `python3 install_antigravity_acp.py --install` | **Linux x86-64 only** — see below |
 
