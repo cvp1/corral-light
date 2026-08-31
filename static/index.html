@@ -69,7 +69,12 @@
          writes to but the document lacks fails silently. -->
     <label id="hostrow" class="hide">Host<select id="f-host"></select></label>
     <p class="hint" id="hosthint"></p>
-    <label>Directory<input id="f-cwd" spellcheck="false"></label>
+    <!-- A datalist, not a <select>: these are SUGGESTIONS. Any path on this
+         host is a valid place to open a conversation, and a dropdown would
+         quietly turn a helpful list into the only allowed answers. -->
+    <label>Directory<input id="f-cwd" spellcheck="false" list="cwdlist"
+                           autocomplete="off"></label>
+    <datalist id="cwdlist"></datalist>
     <label>Model<select id="f-model"></select></label>
     <p class="hint" id="modelhint"></p>
     <label>Effort<select id="f-effort"></select></label>

@@ -179,16 +179,21 @@ lane at all** until you add one. Cheapest first:
 None of that is Corral-specific state to reproduce — it is each vendor's normal
 login on that machine. If the CLI works in a terminal there, the lane works.
 
-**One lane `doctor` cannot fully vouch for: Claude Code.** Every other lane
-refuses at pick time when its credential is missing — codex and grok check
-their `auth.json` and print the login command, ollama checks the server
-answers, antigravity checks the platform. Claude is left optimistic on
-purpose: a pane seeds its config from `~/.claude/.credentials.json`, so
-testing for that file looks like the obvious probe, but on macOS Claude Code
-can keep its credential in the Keychain, where an absent file proves nothing.
-Refusing a lane that works is the same class of wrong as offering one that
-doesn't. So if a Claude pane dies with an auth error, run `claude` once in a
-terminal on that host and start a new pane.
+**The Claude lane is probed live, not guessed at.** Every other lane is gated
+on a credential file — which is a guess about where a vendor keeps its secret,
+and for Claude on macOS that guess is wrong (the login can live in the
+Keychain). So instead of a better guess, `doctor` and the picker run the real
+handshake: spawn the adapter, `initialize`, `session/new`, read what comes
+back, kill it. Cached 120 s, ~2 s cold.
+
+That one call answers both questions that matter, which is why it exists:
+**can this lane authenticate here**, and **what models and effort levels does
+it offer** — because a lane's model/effort lists come from nowhere else but a
+completed `session/new`. Before this, a lane that could not authenticate could
+never fill its own pickers, so a fresh box showed a disabled "Default (agent
+decides)" for both and there was no way to choose Opus or an effort level
+until some session had already succeeded. If the handshake fails, the picker
+shows **the vendor's own words** ("Authentication required"), not a paraphrase.
 
 **Antigravity is Linux x86-64 only.** Google publishes this ACP server under
 `.../releases/linux/`; the darwin and mac paths 404 (probed 2026-08-31). The

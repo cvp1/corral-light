@@ -580,6 +580,65 @@ class LanesRefuseAtPickTime(unittest.TestCase):
             self.assertIn("login", reason)
 
 
+class DialogIsUsableOnDayOne(unittest.TestCase):
+    """The new-conversation dialog must work BEFORE anything has run.
+
+    All three of Craig's dogma-2 symptoms on 2026-08-31 were this: a Claude
+    pane that died with `Authentication required`, no model to pick, no effort
+    to pick. One cause — a lane's model/effort lists come only from a
+    completed session/new, so a lane that cannot authenticate can never fill
+    its own pickers, and the first thing an operator does on a new box is open
+    that dialog.
+    """
+
+    def test_the_claude_lane_is_probed_live_not_guessed_at(self):
+        """A credential-FILE check is a guess about where a vendor keeps its
+        secret, and for Claude on macOS that guess is wrong (Keychain). The
+        only portable answer is to run the handshake."""
+        import sessions
+        spec = sessions.AGENTS["claude"]
+        self.assertTrue(spec.get("live_probe"))
+        self.assertTrue(spec.get("catalog_probe"))
+
+    def test_the_probe_answers_both_questions_from_one_handshake(self):
+        import lane_probe, inspect
+        src = inspect.getsource(lane_probe._handshake)
+        self.assertIn("new_session_full", src,
+                      "session/new is where auth surfaces AND where the model "
+                      "catalog comes from; a probe that stops at initialize "
+                      "answers neither")
+        self.assertIn("client.close", src, "a probe must not leak a process")
+
+    def test_the_probe_is_cached(self):
+        """Otherwise the picker spawns a subprocess per render."""
+        import lane_probe
+        self.assertGreaterEqual(lane_probe.CACHE_S, 30)
+
+    def test_directory_suggestions_are_real_and_bounded(self):
+        import sessions
+        s = sessions.cwd_suggestions(["/tmp"])
+        self.assertLessEqual(len(s), sessions.MAX_CWD_SUGGESTIONS)
+        self.assertEqual(len(s), len(set(s)), "duplicate suggestions")
+        for d in s:
+            self.assertTrue(Path(d).is_dir(),
+                            f"suggested {d}, which is not a directory — the "
+                            f"picker lying in miniature")
+
+    def test_a_nonexistent_recent_cwd_is_not_suggested(self):
+        import sessions
+        s = sessions.cwd_suggestions(["/nope/not/here"])
+        self.assertNotIn("/nope/not/here", s)
+
+    def test_the_directory_field_stays_free_text(self):
+        """A datalist, never a <select>. Any path on the host is valid; a
+        dropdown would turn a helpful list into the only allowed answers."""
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="f-cwd"', html)
+        self.assertIn('list="cwdlist"', html)
+        self.assertIn('<datalist id="cwdlist">', html)
+        self.assertNotIn('<select id="f-cwd"', html)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

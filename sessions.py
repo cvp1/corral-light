@@ -144,6 +144,14 @@ AGENTS = {
         "requires": (str(ADAPTER),),
         "posture_via_config_dir": True,
         "tools": True,
+        # A LIVE handshake, not a guess at where a vendor keeps its secret.
+        # This lane cannot be credential-file-checked portably (macOS Claude
+        # Code can keep its login in the Keychain), and its model/effort lists
+        # exist nowhere but a completed session/new — so one real handshake
+        # answers "does this work here" and "what does it offer" at once.
+        "catalog_probe": lambda: __import__("lane_probe").catalog_probe("claude"),
+        "probe_config": lambda a: __import__("lane_probe").full_config(a),
+        "live_probe": True,
         # KNOWN GAP, left open deliberately. Every other lane refuses at pick
         # time when its credential is missing; this one cannot check cheaply
         # without risking the opposite lie. A pane seeds its config dir from
@@ -219,6 +227,61 @@ AGENTS = {
         "catalog_probe": lambda: _probe_ollama(),
     },
 }
+
+
+MAX_CWD_SUGGESTIONS = 24
+
+
+def cwd_suggestions(recent=()):
+    """Real directories worth opening a conversation in, best first.
+
+    Ordered by how likely it is to be what you meant: where conversations are
+    already open, then checkouts (a `.git` is the strongest signal a directory
+    is a place you work), then the usual containers under home. Bounded (P8),
+    deduped, and existence-checked — a suggestion list that offers a directory
+    that is not there would be the picker lying in miniature.
+    """
+    out, seen = [], set()
+
+    def add(path):
+        try:
+            p = Path(path).expanduser()
+            s = str(p)
+        except (OSError, ValueError):
+            return
+        if s in seen or not p.is_dir():
+            return
+        seen.add(s)
+        out.append(s)
+
+    for c in recent:                       # panes already open here
+        add(c)
+    home = Path.home()
+    add(home)
+    containers = []
+    for name in ("Github", "github", "Projects", "projects", "src", "code",
+                 "dev", "Developer", "Documents", "repos", "work", "notes"):
+        d = home / name
+        if d.is_dir():
+            containers.append(d)
+    for d in containers:
+        add(d)
+    # One level inside each container, checkouts first. Not recursive: a deep
+    # walk of a home directory is slow, unbounded, and mostly noise.
+    for d in containers:
+        try:
+            children = sorted(x for x in d.iterdir()
+                              if x.is_dir() and not x.name.startswith("."))
+        except OSError:
+            continue
+        for x in children:
+            if (x / ".git").exists():
+                add(x)
+        for x in children:
+            add(x)
+        if len(out) >= MAX_CWD_SUGGESTIONS:
+            break
+    return out[:MAX_CWD_SUGGESTIONS]
 
 
 def _now():
@@ -381,6 +444,21 @@ def available_agents():
                             "postureEnforced": False,
                             "tools": bool(spec.get("tools"))})
                 continue
+        # A lane that declares live_probe is judged by a REAL handshake, not
+        # by files on disk. That is the only portable way to answer "will this
+        # authenticate here" for a vendor whose credential store we must not
+        # guess at — and it is the same call that fills the model/effort
+        # pickers, so the honest answer and the useful one arrive together.
+        # Cached (lane_probe.CACHE_S), so this is not a process per render.
+        if spec.get("live_probe") and not missing:
+            import lane_probe
+            r = lane_probe.probe(key)
+            out.append({"key": key, "label": spec["label"],
+                        "available": bool(r["ok"]),
+                        "why": r["error"] or spec.get("needs", ""),
+                        "postureEnforced": bool(spec["posture_via_config_dir"]),
+                        "tools": bool(spec.get("tools"))})
+            continue
         if spec.get("unavailable"):
             ok, why = False, spec["unavailable"]
         elif not exe.exists():
@@ -1574,11 +1652,24 @@ class Manager:
             if not got:
                 continue
             values, default = got
-            self.remember_catalog(agent, {"model": {
+            seeded = {"model": {
                 "name": "Model", "realId": "model",
                 "value": default if default in values else values[0],
                 "options": [{"value": v, "name": v, "description": ""}
-                            for v in values]}})
+                            for v in values]}}
+            # A handshake probe already holds the agent's WHOLE configOptions
+            # response, and effort is the other half of what a fresh box's
+            # dialog is missing. Fold it in rather than throwing it away and
+            # leaving Effort disabled until the first real session.
+            if spec.get("probe_config"):
+                try:
+                    seeded.update({k: v for k, v in
+                                   spec["probe_config"](agent).items()
+                                   if k != "model"})
+                except Exception as e:  # noqa: BLE001
+                    print(f"corral-light: effort seed for {agent} skipped: {e}",
+                          file=sys.stderr, flush=True)
+            self.remember_catalog(agent, seeded)
 
     @staticmethod
     def _load_catalog():
@@ -1891,6 +1982,16 @@ class Manager:
                 # start a pane. The host knows its own home; the client should
                 # not be guessing at it.
                 "defaultCwd": str(Path.home()),
+                # Somewhere to START from. The field was free text with one
+                # default, so choosing a directory meant knowing and typing an
+                # absolute path — on a new machine, the one thing you do not
+                # have to hand (Craig, dogma-2, 2026-08-31: "I can't seem to
+                # pick the directory I want to start in"). These are REAL
+                # directories on this host, offered as a datalist so the field
+                # stays typeable: nothing here is a restriction on where a
+                # conversation may open.
+                "cwdSuggestions": cwd_suggestions(
+                    [p.cwd for p in list(self.panes.values())]),
                 "catalog": self.catalog,
                 "archived": self.archived(),
                 # Panes the cap kept from being restored. They are still on
