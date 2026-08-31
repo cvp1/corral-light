@@ -190,17 +190,29 @@ config dir was used or refused, which environment variables reach the agent
 failure **the adapter's own stderr**, which `acp.py` has always captured and
 until now only ever used one line of.
 
-**The known cause, measured 2026-08-31:** `~/.claude/.credentials.json` can
-exist, parse, and carry every expected key — `accessToken`, `refreshToken`,
-`expiresAt`, `scopes` — with the token values **empty strings**. A file that
-is complete by every structural test and authenticates nothing. Copying it
-into a pane's private `CLAUDE_CONFIG_DIR` produces a directory that only
-*looks* credentialed: the handshake succeeds (it does not authenticate) and
-the first prompt fails. Corral now tests whether the file carries a non-empty
-token, not whether it exists, and falls back to your own `~/.claude` when it
-does not — reporting `postureEnforced: false` rather than claiming a posture.
-If your terminal `claude` works and panes do not, this is the first thing
-`diagnose` will show you.
+**Two measured causes, both fixed 2026-08-31, found in this order:**
+
+1. An empty-string token. `~/.claude/.credentials.json` can exist, parse, and
+   carry every expected key with the values `""` — complete by every
+   structural test, authenticating nothing. Fixed by checking for a non-empty
+   token rather than for the file's existence.
+2. **A stale copy.** The private config dir copies your credential once and,
+   until this fix, never again. Claude Code rotates OAuth tokens — if yours
+   rotates while a pane (or `diagnose`, which reuses one fixed directory
+   across every run) is holding an older copy, that copy's refresh token goes
+   invalid at the auth server while looking, structurally, exactly like a
+   working one: real length, a real future `expiresAt`. `seed_config_dir()`
+   now re-copies whenever the source credential is newer than the copy
+   (compared by mtime, cheap, no file contents read to decide). It will not
+   clobber a copy that is currently newer than the source — a running pane
+   may have refreshed its own copy more recently than your terminal did, and
+   overwriting that with an older file would break a working pane to fix one
+   that already recovered on its own.
+
+If your terminal `claude` works and panes do not, `diagnose` — including its
+positive control, which pinpointed cause #2 by proving the token itself was
+real — is the fastest way to find out which of these it is, or whether it is
+a third thing neither of these fixes.
 
 Then check this:
 
