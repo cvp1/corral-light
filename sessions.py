@@ -348,6 +348,22 @@ def available_agents():
                         "postureEnforced": bool(spec["posture_via_config_dir"]),
                         "tools": bool(spec.get("tools"))})
             continue
+        # The Antigravity runtime is a PINNED LINUX x86-64 binary. Files
+        # existing on disk is the wrong question for it: a Linux .par sitting
+        # in ~/.local/lib on a Mac satisfies `requires` perfectly and the pane
+        # then dies at exec. The installer refuses to put it there, but a hand
+        # copy or a synced home directory can, so the picker asks the platform
+        # too rather than trusting the filesystem alone.
+        if key == "gemini" and not missing:
+            from install_antigravity_acp import platform_problem
+            problem = platform_problem()
+            if problem:
+                out.append({"key": key, "label": spec["label"],
+                            "available": False,
+                            "why": problem.split("\n")[0],
+                            "postureEnforced": False,
+                            "tools": bool(spec.get("tools"))})
+                continue
         if spec.get("unavailable"):
             ok, why = False, spec["unavailable"]
         elif not exe.exists():

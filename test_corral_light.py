@@ -456,6 +456,54 @@ class AttachSemantics(unittest.TestCase):
                          "again, the P20 escaping argument has to come with it")
 
 
+class PlatformHonesty(unittest.TestCase):
+    """A lane must not report available on a host that cannot run it.
+
+    Craig ran `doctor` on a Mac 2026-08-31; Antigravity showed the honest
+    "not installed". The obvious next step — `install_antigravity_acp.py
+    --install` — would have downloaded the pinned LINUX x86-64 archive,
+    verified its SHA correctly, installed it, and then doctor would have
+    reported the lane **ok** for a binary that cannot exec there. Worse than
+    the honest failure it replaced, because the operator stops looking.
+    """
+
+    def test_the_pinned_release_names_its_platform(self):
+        import install_antigravity_acp as m
+        self.assertEqual(m.PLATFORM, ("Linux", "x86_64"))
+        self.assertIn("linux", m.URL)
+
+    def test_install_refuses_on_the_wrong_platform(self):
+        import install_antigravity_acp as m
+        real_system, real_machine = m.platform.system, m.platform.machine
+        try:
+            m.platform.system, m.platform.machine = (lambda: "Darwin"), (lambda: "arm64")
+            self.assertIsNotNone(m.platform_problem())
+            with self.assertRaises(RuntimeError) as cm:
+                m.install(Path(tempfile.gettempdir()) / "corral-light-never")
+            self.assertIn("Darwin", str(cm.exception))
+        finally:
+            m.platform.system, m.platform.machine = real_system, real_machine
+
+    def test_amd64_and_x86_64_are_the_same_platform(self):
+        """Windows/WSL and some BSDs report AMD64; refusing there would be a
+        guard that lies in the other direction."""
+        import install_antigravity_acp as m
+        real_system, real_machine = m.platform.system, m.platform.machine
+        try:
+            m.platform.system = lambda: "Linux"
+            for name in ("x86_64", "amd64", "AMD64"):
+                m.platform.machine = (lambda n=name: n)
+                self.assertIsNone(m.platform_problem(), name)
+        finally:
+            m.platform.system, m.platform.machine = real_system, real_machine
+
+    def test_the_picker_asks_the_platform_not_just_the_filesystem(self):
+        """Belt and braces: the installer refuses, but a hand copy or a synced
+        home directory can still put the files there."""
+        sess = (ROOT / "sessions.py").read_text(encoding="utf-8")
+        self.assertIn("platform_problem", sess)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 
