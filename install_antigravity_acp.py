@@ -8,6 +8,7 @@ in a working tree.
 import argparse
 import hashlib
 import os
+import platform
 from pathlib import Path
 import shutil
 import tempfile
@@ -15,6 +16,21 @@ import urllib.request
 import zipfile
 
 
+# THE PINNED RELEASE IS LINUX x86-64. THERE IS NO OTHER ONE HERE.
+#
+# Google publishes this server under .../releases/linux/; the analogous
+# darwin/arm64, darwin/x86_64 and mac/ paths all 404 (probed 2026-08-31).
+# Before this guard existed, running --install on a Mac downloaded the Linux
+# archive, verified its SHA correctly, installed it — and `corral-light doctor`
+# then reported the Antigravity lane as **ok**, because availability is
+# "the files exist on disk". The pane would die at exec.
+#
+# That is the exact failure this whole codebase argues against: a picker
+# listing a binary that cannot run is a button that lies, and it is WORSE than
+# the honest "not installed" it replaced, because the operator has stopped
+# looking. Refuse at install, where the platform is knowable and the message
+# can say why (P4: degrade toward safety, loudly).
+PLATFORM = ("Linux", "x86_64")
 RELEASE = "agy_acp_server_20260818_01_RC01-linux-x86_64"
 URL = ("https://dl.google.com/agy-extensions/releases/linux/"
        f"agy-acp-server-{RELEASE}.zip")
@@ -51,11 +67,32 @@ def download(url, destination):
             out.write(chunk)
 
 
+def platform_problem():
+    """Why this host cannot run the pinned release, or None. See PLATFORM."""
+    system, machine = platform.system(), platform.machine()
+    # x86_64/AMD64 are the same thing under different reporting conventions.
+    normalized = "x86_64" if machine in ("x86_64", "amd64", "AMD64") else machine
+    if (system, normalized) == PLATFORM:
+        return None
+    return (f"the pinned Antigravity ACP release is {PLATFORM[0]} "
+            f"{PLATFORM[1]}, and this host is {system} {machine}. Google "
+            f"publishes this server under .../releases/linux/ only — the "
+            f"darwin and mac paths 404 (probed 2026-08-31). Installing it "
+            f"here would put a binary on disk that cannot execute, and the "
+            f"lane would then report as available. Refusing.\n"
+            f"  If a build for this platform now exists, pinning it is an "
+            f"operator decision: set RELEASE, URL and ARCHIVE_SHA256 in this "
+            f"file to the real archive and its verified digest.")
+
+
 def install(destination=RUNTIME):
     """Download, verify and install if absent. Existing runtime is untouched."""
     destination = Path(destination)
     if installed_ok(destination):
         return f"already installed: {destination}"
+    problem = platform_problem()
+    if problem:
+        raise RuntimeError(problem)
     if destination.exists():
         raise RuntimeError(f"refusing to replace incomplete runtime: {destination}")
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -92,7 +129,15 @@ def main(argv=None):
         return 0
     if args.check:
         ok = installed_ok()
-        print("installed" if ok else "missing", flush=True)
+        problem = platform_problem()
+        if ok and problem:
+            # Installed AND wrong-platform: the files are there, so
+            # `installed_ok` is true and the lane reads available — say the
+            # thing that actually matters instead of the reassuring half.
+            print(f"installed, but UNRUNNABLE here — {problem}", flush=True)
+            return 1
+        print("installed" if ok else f"missing ({problem})" if problem
+              else "missing", flush=True)
         return 0 if ok else 1
     parser.error("choose --install or --check")
 

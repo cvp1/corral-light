@@ -174,10 +174,21 @@ lane at all** until you add one. Cheapest first:
 | **Claude Code** | `node`, then `cd spike && npm install` | also needs Claude Code's own login there: the pane copies `~/.claude/.credentials.json` and `~/.claude.json` into its config dir, and symlinks `~/.claude/{skills,agents,commands,plugins,prompts,CLAUDE.md}` so a pane has the same capability the terminal does |
 | **ChatGPT (Codex)** | the same `npm install` | `CODEX_HOME=~/.config/corral-light/codex-home codex login --device-auth` — the exact command `doctor` prints |
 | **Grok** | the Grok CLI, authenticated | the CLI owns auth; nothing here touches the credential |
-| **Antigravity** | `python3 install_antigravity_acp.py --install` | then Antigravity's own OAuth |
+| **Antigravity** | `python3 install_antigravity_acp.py --install` | **Linux x86-64 only** — see below |
 
 None of that is Corral-specific state to reproduce — it is each vendor's normal
 login on that machine. If the CLI works in a terminal there, the lane works.
+
+**Antigravity is Linux x86-64 only.** Google publishes this ACP server under
+`.../releases/linux/`; the darwin and mac paths 404 (probed 2026-08-31). The
+installer refuses on any other platform rather than putting a binary on disk
+that cannot exec — because `--install` succeeding is what would then make
+`doctor` report the lane **ok**, which is worse than the honest "not
+installed" it replaced. The picker checks the platform too, so a hand-copied
+or home-synced binary cannot produce a lying lane either. If a build for your
+platform appears, pinning it is an operator decision: set `RELEASE`, `URL` and
+`ARCHIVE_SHA256` in `install_antigravity_acp.py` to the real archive and its
+verified digest.
 
 ### Run it as a service
 
