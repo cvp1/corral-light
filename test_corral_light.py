@@ -906,6 +906,41 @@ class DiagnoseIsSafeToPaste(unittest.TestCase):
         import diagnose, inspect
         self.assertIn("stderr_tail", inspect.getsource(diagnose.diagnose))
 
+    def test_it_runs_a_positive_control(self):
+        """Narrowing suspects is not the same as settling the question. The
+        control re-runs with ONE variable removed — the private config dir,
+        which is the only thing Corral adds to a terminal that already works."""
+        import diagnose, inspect
+        src = inspect.getsource(diagnose._control)
+        self.assertIn("_run_once(spec, cwd, None", src,
+                      "the control must run WITHOUT the private config dir")
+
+    def test_the_credential_shape_reports_lengths_not_values(self):
+        """A token's LENGTH is diagnostic; its content is not. Craig's file is
+        322 bytes where a working one is 508 — knowing which field is missing
+        is the difference between a theory and a fact."""
+        import diagnose, tempfile, io, contextlib
+        d = Path(tempfile.mkdtemp()) / "c.json"
+        d.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "SUPERSECRETVALUE" * 4, "expiresAt": 123}}))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            diagnose._credential_shape(d)
+        out = buf.getvalue()
+        self.assertNotIn("SUPERSECRETVALUE", out, "a token value was printed")
+        self.assertIn("accessToken=<64 chars>", out)
+
+    def test_a_missing_token_field_is_called_out(self):
+        import diagnose, tempfile, io, contextlib
+        d = Path(tempfile.mkdtemp()) / "c.json"
+        d.write_text(json.dumps({"claudeAiOauth": {"expiresAt": 1}}))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            diagnose._credential_shape(d)
+        out = buf.getvalue()
+        self.assertIn("MISSING", out)
+        self.assertIn("accessToken", out)
+
     def test_it_never_prints_a_secret_value(self):
         import diagnose, inspect
         src = inspect.getsource(diagnose)
