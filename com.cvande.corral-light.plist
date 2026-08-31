@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Corral Light — launchd user agent, for dogma-2 (macOS).
+
+  Install:
+    cp com.cvande.corral-light.plist ~/Library/LaunchAgents/
+    launchctl load  -w ~/Library/LaunchAgents/com.cvande.corral-light.plist
+    launchctl kickstart -k gui/$(id -u)/com.cvande.corral-light   # after an edit
+
+  A USER agent, not a system daemon, on purpose: every lane authenticates as
+  the logged-in user (Claude's credentials, the Grok CLI's own state,
+  Antigravity's OAuth, the codex device-auth token) and every pane runs with
+  that user's filesystem access. Running this as root would give a browser on
+  the LAN a root shell behind a pairing gate.
+
+  RunAtLoad + KeepAlive, but NOT a launchd-managed restart on config change:
+  a pane's transcript survives a restart (it is on disk) and the pane comes
+  back detached, so a crash-loop is loud rather than destructive.
+
+  Paths are absolute because launchd inherits almost no environment — in
+  particular, PATH here is not the shell's, which is why hub.py resolves
+  node itself rather than trusting one to be found.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cvande.corral-light</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/cvande/Github/CC/corral-light/hub.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/cvande/Github/CC/corral-light</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Loopback, deliberately. This machine moves between networks; the
+         pairing gate should not be the only thing between an arbitrary wifi
+         and an agent holding tools in a working tree. Reach it from another
+         ranch machine with `ssh -N -L 8098:127.0.0.1:8098 dogma-2`, which
+         also makes it a secure context so the PWA install prompt appears.
+         Set 0.0.0.0 here only if you decide the LAN is trusted. -->
+    <key>CORRAL_LIGHT_BIND</key>
+    <string>127.0.0.1</string>
+    <key>CORRAL_LIGHT_PORT</key>
+    <string>8098</string>
+    <!-- The local Ollama this host runs. Point it elsewhere (e.g. the .21
+         node) if this machine is not the one holding the models. -->
+    <key>CORRAL_OLLAMA_URL</key>
+    <string>http://127.0.0.1:11434</string>
+    <!-- Homebrew node, for the two npm-installed ACP adapters. launchd's
+         PATH is /usr/bin:/bin:/usr/sbin:/sbin and nothing else. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/cvande/Library/Logs/corral-light.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/cvande/Library/Logs/corral-light.log</string>
+</dict>
+</plist>

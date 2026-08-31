@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corral Light</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="theme-color" content="#0a0c10">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="pair" class="pair hide">
+  <div class="pairbox">
+    <h1>Corral Light</h1>
+    <p class="sub">Pair this browser with your account.</p>
+    <div class="code" id="paircode">····</div>
+    <p class="how">Run this in a shell you trust:</p>
+    <pre class="cmd" id="paircmd">corral-light pair ···</pre>
+    <p class="note" id="pairnote">Waiting… the code expires in <span id="pairttl">5:00</span>.</p>
+  </div>
+</div>
+
+<div id="app" class="app hide">
+
+  <aside class="rail left">
+    <div class="brand">Corral <span class="lightmark">light</span></div>
+    <button class="new" id="new">＋ New conversation</button>
+    <div class="lab">Conversations</div>
+    <div id="roster" class="roster"></div>
+    <div class="foot"><span id="conn" class="conn">connecting…</span><div class="themes" id="themes"></div></div>
+  </aside>
+
+  <!-- No room nav. Light is one room; a tab bar with a single tab is chrome
+       that teaches the wrong shape. The full Corral's Today / Mail / Fleet /
+       Delegates / FinOps / Library live on ranch-server, where their sources
+       are. -->
+  <main class="center">
+    <div id="grid" class="grid"></div>
+  </main>
+
+  <aside id="rrail" class="rail right">
+    <!-- Collapsed, the rail becomes this strip. It is a strip and not
+         `display:none` on purpose: whatever is waiting still shows its count
+         here, so folding the rail buys screen space and never buys silence. -->
+    <button class="railtab" id="railtab" title="Needs you">
+      <span class="railtabnum" id="railtabnum"></span>
+      <span class="railtabtxt">needs you</span>
+    </button>
+    <div class="lab clicky" id="railhead">Needs you</div>
+    <div id="needs" class="needs"></div>
+  </aside>
+
+</div>
+
+<dialog id="newdlg">
+  <form method="dialog" class="dlg">
+    <h2>New conversation</h2>
+    <label>Agent<select id="f-agent"></select></label>
+    <!-- Shown only when the chosen agent is a GROUP. Light ships one group, so
+         this stays hidden — it is kept because the picker code that fills and
+         reads it is shared with the grouped case, and a field the script
+         writes to but the document lacks fails silently. -->
+    <label id="hostrow" class="hide">Host<select id="f-host"></select></label>
+    <p class="hint" id="hosthint"></p>
+    <label>Directory<input id="f-cwd" spellcheck="false"></label>
+    <label>Model<select id="f-model"></select></label>
+    <p class="hint" id="modelhint"></p>
+    <label>Effort<select id="f-effort"></select></label>
+    <p class="hint" id="efforthint"></p>
+    <label>Permissions
+      <select id="f-posture">
+        <option value="auto">Auto — a classifier handles routine prompts</option>
+        <option value="edits">Edits — auto-accept file edits, ask for the rest</option>
+        <option value="strict">Strict — prompt on dangerous operations</option>
+      </select>
+    </label>
+    <p class="hint" id="posturehint"></p>
+    <menu>
+      <button value="cancel" class="btn">Cancel</button>
+      <button value="ok" class="btn go" id="f-go">Start</button>
+    </menu>
+  </form>
+</dialog>
+
+<div id="toast" class="toast"></div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

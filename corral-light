@@ -1,0 +1,18 @@
+#!/bin/bash
+# corral-light — pair a client, or run the server.
+#   corral-light pair ABC-123   authorize the browser showing that code
+#   corral-light serve          run the hub in the foreground
+#   corral-light doctor         say which lanes can start here, and why not
+#
+# /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (dogma-2), which
+# has no /usr/bin/bash. The same shebang mistake shipped once in the full
+# Corral and only failed after a merge reached the Mac.
+set -euo pipefail
+D="$(cd "$(dirname "$0")" && pwd)"
+PY="${CORRAL_LIGHT_PYTHON:-python3}"
+case "${1:-}" in
+  pair)  exec "$PY" -c "import sys;sys.path.insert(0,'$D');import auth;ok,msg=auth.approve('${2:-}');print(msg);sys.exit(0 if ok else 2)" ;;
+  serve) exec "$PY" "$D/hub.py" ;;
+  doctor) exec "$PY" -c "import sys;sys.path.insert(0,'$D');import sessions;[print(('  ok  ' if a['available'] else '  --  ')+a['label']+(' — '+a['why'] if a['why'] else '')) for a in sessions.available_agents()]" ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor}"; exit 2 ;;
+esac
