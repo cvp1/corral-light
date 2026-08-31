@@ -15,8 +15,12 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+# corral-light, NOT corral: sharing one MCP config with the full build would
+# mean a server added on ranch silently appears in every pane here, on a host
+# that may not have its credential or its network path. Same reasoning as the
+# separate state dir.
 CONFIG = Path(os.environ.get("CORRAL_MCP_CONFIG",
-                             Path.home() / ".config/corral/mcp.json"))
+                             Path.home() / ".config/corral-light/mcp.json"))
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 

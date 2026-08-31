@@ -27,12 +27,24 @@ import json
 import mimetypes
 import os
 import queue
+import sys
 import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+# Checked HERE, before anything imports, because the alternative is worse than
+# a hard exit: on 3.8 the static-path containment check (`Path.is_relative_to`,
+# 3.9+) raises AttributeError inside a request handler — a route that 500s
+# rather than a startup that refuses, i.e. a security check failing OPEN-ish on
+# a version nobody tested. Degrade toward safety, loudly (P4).
+if sys.version_info < (3, 9):
+    raise SystemExit(
+        f"corral-light needs Python 3.9 or newer; this is "
+        f"{sys.version.split()[0]}. (Path.is_relative_to, used by the "
+        f"static-file containment check, arrived in 3.9.)")
 
 import auth
 import sessions
