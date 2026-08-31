@@ -72,6 +72,105 @@ def _env_report(env_overrides, strip):
             _line(f"  {k}", f"<set, {len(child[k])} chars — value not shown>")
 
 
+def _credential_shape(path):
+    """Which fields the credential file carries, and how long they are.
+
+    NEVER the values. A token's LENGTH is diagnostic and its content is not:
+    a working file on a Linux host carries accessToken(108) +
+    refreshToken(108); a file that is materially smaller is missing something,
+    and knowing WHICH field is the difference between a theory and a fact.
+    """
+    if not path.is_file():
+        return
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        _line("  credential shape", f"unparseable: {e}")
+        return
+    rows = []
+
+    def walk(o, pre=""):
+        for k, v in sorted(o.items()):
+            if isinstance(v, dict):
+                walk(v, pre + k + ".")
+            elif isinstance(v, str):
+                rows.append(f"{pre}{k}=<{len(v)} chars>")
+            elif isinstance(v, list):
+                rows.append(f"{pre}{k}=[{len(v)} items]")
+            else:
+                rows.append(f"{pre}{k}={v}")
+
+    walk(doc if isinstance(doc, dict) else {"<not an object>": str(type(doc))})
+    _line("  credential fields", ", ".join(rows) or "(empty)")
+    # The two that decide whether an isolated config dir can authenticate.
+    flat = " ".join(rows)
+    for field in ("accessToken", "refreshToken"):
+        if field not in flat:
+            _line("  ⚠ MISSING", f"{field} is not in this file")
+
+
+def _run_once(spec, cwd, config_dir, prompt, label):
+    """One full handshake+prompt. Returns (ok, error, stderr_tail)."""
+    import sessions as _s
+    env = _s.spawn_env(spec, config_dir)
+    strip = _s.strip_prefixes()
+    client = None
+    try:
+        client = acp.AcpClient(spec["argv"], cwd, env=env, strip_env=strip)
+        client.initialize()
+        new = client.new_session_full(cwd, []) or {}
+        client.prompt(new.get("sessionId"), prompt)
+        return True, "", list(getattr(client, "stderr_tail", []))
+    except Exception as e:                          # noqa: BLE001
+        return False, str(e)[:300], list(getattr(client, "stderr_tail", []))
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:                       # noqa: BLE001
+                pass
+
+
+def _control(spec, cwd, config_dir, prompt):
+    """THE POSITIVE CONTROL. Re-run with the ONE variable removed.
+
+    Everything before this narrows the suspect list. This settles it: the same
+    lane, the same prompt, the same machine, differing only in whether the
+    agent runs under Corral's private CLAUDE_CONFIG_DIR or under the user's
+    own ~/.claude — which is the single thing Corral adds to a terminal that
+    already works.
+
+    Four theories have been proposed in this investigation without one being
+    measured. An A/B that either party can run in ten seconds is worth more
+    than a fifth.
+    """
+    if config_dir is None:
+        print("\n  (no private config dir was used, so there is no control "
+              "to run — the failure is not about CLAUDE_CONFIG_DIR)",
+              flush=True)
+        return
+    print("\nCONTROL — same run, WITHOUT the private config dir", flush=True)
+    ok, err, tail = _run_once(spec, cwd, None, prompt, "control")
+    if ok:
+        print("\n  ✓ IT WORKS without the private config dir.\n", flush=True)
+        print("  So: this host's credential cannot be carried into an isolated\n"
+              "  CLAUDE_CONFIG_DIR by copying the file, even though the file\n"
+              "  exists. Corral's per-pane permission posture is what that\n"
+              "  directory buys, so the fix is to give it up on this host and\n"
+              "  SAY so (postureEnforced: false, `agent-set` on the pane)\n"
+              "  rather than hand you a pane that cannot talk.\n", flush=True)
+    else:
+        _line("control also failed", err)
+        print("\n  So the private config dir is NOT the difference — the lane\n"
+              "  fails the same way under your own ~/.claude. That points at\n"
+              "  the credential itself rather than at anything Corral does.\n",
+              flush=True)
+    if tail:
+        print("  control adapter stderr:", flush=True)
+        for ln in tail[-15:]:
+            print(f"  | {ln}", flush=True)
+
+
 def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK"):
     spec = sessions.AGENTS.get(key)
     if not spec:
@@ -99,6 +198,7 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
           else "NO — not a file on this host (Keychain?)")
     _line("~/.claude.json exists",
           "yes" if (Path.home() / ".claude.json").is_file() else "no")
+    _credential_shape(cred)
 
     config_dir = None
     if spec.get("posture_via_config_dir"):
@@ -138,6 +238,7 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
     except acp.AgentError as e:
         print(f"\n  ✗ FAILED after {int(time.time() - t0)}s\n", flush=True)
         _line("error", str(e)[:400])
+        _control(spec, cwd, config_dir, prompt)
         return 1
     except Exception as e:                          # noqa: BLE001
         print(f"\n  ✗ FAILED after {int(time.time() - t0)}s\n", flush=True)
