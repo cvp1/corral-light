@@ -84,11 +84,15 @@ installed but `python3` and an Ollama to talk to.
 rather than failing later inside a request handler.
 
 ```bash
-git clone <repo> corral-light && cd corral-light
+git clone https://github.com/cvp1/corral-light.git && cd corral-light
 ./corral-light doctor       # says which lanes work here, and why the rest don't
-./corral-light serve        # http://127.0.0.1:8098
-./corral-light pair ABC-DEF # the code the page shows
+./corral-light serve        # http://127.0.0.1:8098 — leave it running
+./corral-light pair ABC-DEF # in a second shell: the code the page is showing
 ```
+
+`serve` runs in the foreground and the pairing code only exists while it is up,
+so those last two are two shells, not two steps in one. (Or run it as a service
+first — below — and pair once against that.)
 
 That is the whole install. It creates `~/.local/share/corral-light` on first
 run and needs no other setup.
