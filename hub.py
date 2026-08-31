@@ -405,9 +405,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": f"{type(e).__name__}: {e}"[:300]}, 500)
 
 
+class Server(ThreadingHTTPServer):
+    """ThreadingHTTPServer that does not print a traceback when a client
+    simply goes away.
+
+    WHY (dogma-2, 2026-08-31): the log filled with
+
+        Exception occurred during processing of request from …
+        ConnectionResetError: [Errno 54] Connection reset by peer
+
+    raised inside `handle_one_request` at `self.rfile.readline(...)` — i.e.
+    BEFORE any of this module's code runs, which is why Handler's own
+    BrokenPipe/ConnectionReset guards never caught it. socketserver's default
+    `handle_error` prints the full traceback for it.
+
+    Nothing is wrong when this happens. The peer closed the socket before
+    sending a request line, which is the normal end of a browser's speculative
+    preconnect, a reloaded tab's abandoned SSE stream, and every keep-alive
+    socket a laptop takes with it when it sleeps. A cockpit that prints a
+    stack trace for the routine case teaches its operator that stack traces
+    are routine — and the next one, which is real, gets scrolled past.
+
+    Narrow ON PURPOSE: exactly the exception types that mean "the other end
+    left", and everything else still gets the loud default. Silencing errors
+    generally would be the opposite of distrusting green (P1); this silences
+    a non-error.
+    """
+
+    daemon_threads = True
+    _QUIET = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
+              TimeoutError)
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], self._QUIET):
+            return
+        super().handle_error(request, client_address)
+
+
 def serve(bind=BIND, port=PORT):
     threading.Thread(target=_observe_loop, daemon=True).start()
-    httpd = ThreadingHTTPServer((bind, port), Handler)
+    httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     # flush=True, and it is not cosmetic. Python line-buffers stdout only when
     # it is a TTY; under systemd, launchd, or `> log 2>&1` it is block-buffered,

@@ -639,6 +639,57 @@ class DialogIsUsableOnDayOne(unittest.TestCase):
         self.assertNotIn('<select id="f-cwd"', html)
 
 
+class QuietOnlyWhereItIsNotAnError(unittest.TestCase):
+    """A client going away is not an incident; a bug still is.
+
+    dogma-2, 2026-08-31: the log filled with ConnectionResetError tracebacks
+    raised inside handle_one_request's `rfile.readline` — before any of this
+    code runs, which is why Handler's own guards never saw them. That is the
+    normal end of a browser preconnect, an abandoned SSE stream, and every
+    keep-alive socket a laptop takes with it when it sleeps.
+
+    A cockpit that prints a stack trace for the routine case teaches its
+    operator that stack traces are routine, and the next one — which is real
+    — gets scrolled past. So: silence exactly the "peer left" exceptions and
+    nothing else. This test exists to keep that list from growing.
+    """
+
+    def _handle(self, exc):
+        """Push one exception through the server's handle_error hook."""
+        import io, sys, hub
+        srv = hub.Server.__new__(hub.Server)
+        buf, real = io.StringIO(), sys.stderr
+        sys.stderr = buf
+        try:
+            try:
+                raise exc
+            except type(exc):
+                srv.handle_error(None, ("127.0.0.1", 1))
+        finally:
+            sys.stderr = real
+        return buf.getvalue()
+
+    def test_peer_left_exceptions_are_silent(self):
+        for exc in (ConnectionResetError(54, "Connection reset by peer"),
+                    BrokenPipeError(32, "Broken pipe"),
+                    ConnectionAbortedError(53, "Software caused abort"),
+                    TimeoutError("timed out")):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertEqual(self._handle(exc), "")
+
+    def test_a_real_error_is_still_loud(self):
+        out = self._handle(RuntimeError("a real bug in a handler"))
+        self.assertIn("a real bug in a handler", out)
+
+    def test_the_quiet_list_is_only_connection_errors(self):
+        """Adding, say, OSError here would swallow a full disk."""
+        import hub
+        for exc_type in hub.Server._QUIET:
+            self.assertTrue(
+                issubclass(exc_type, (ConnectionError, TimeoutError)),
+                f"{exc_type.__name__} is not a 'the peer left' exception")
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 
