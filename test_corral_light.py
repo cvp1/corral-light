@@ -67,11 +67,24 @@ class StructuralIndependence(unittest.TestCase):
                                   f"workspace: {s[:90]}")
 
     def test_no_heavy_corral_module_is_imported(self):
-        """The fleet modules are absent from the tree AND from every import."""
+        """The fleet modules are absent from the tree AND from every import.
+
+        `ssh_acp` LEFT this list on 2026-09-01, deliberately and with Craig's
+        go: the host shell lanes came back. It is the one heavy module whose
+        dependency was never the fleet — ranch generated its lane list from the
+        lightsail estate, but the adapter itself needs only ssh and a bash, so
+        it ports to a standalone host intact. Light supplies the inventory from
+        a hand-written ssh-hosts.json instead (sessions.EXTRA_SSH_HOSTS), and
+        `estate`/`fleet`/`lightsail` stay banned above — which is what keeps
+        this an added lane rather than the fork quietly reconverging.
+
+        Everything else on this list still has a fleet-shaped dependency and
+        stays out. Moving a name off this list is a decision, not a fix.
+        """
         heavy = ("fleet", "estate", "finops", "runs", "attention", "asks",
                  "push", "schedule", "library", "mail", "today", "residency",
                  "delegates", "browser_ui", "foreign", "aios_memory",
-                 "gmail_local", "ssh_acp", "local_acp", "herdr_bridge")
+                 "gmail_local", "local_acp", "herdr_bridge")
         for name in heavy:
             self.assertFalse((ROOT / f"{name}.py").exists(),
                              f"{name}.py is back in the tree")
@@ -1915,6 +1928,284 @@ class EmptyAuthJsonIsNotALogin(unittest.TestCase):
     def test_grok_main_refuses_when_unauthenticated(self):
         import grok_launcher, inspect
         self.assertIn("unavailable_reason", inspect.getsource(grok_launcher.main))
+
+
+class ModelExtrasSurviveARealSession(unittest.TestCase):
+    """`opusplan` is layered onto claude's catalog in remember_catalog, not at
+    any one probe site — because a REAL session/new response overwrites the
+    catalog wholesale (remember_catalog's own contract) and the vendor's own
+    response never lists it. If the append lived anywhere else, the option
+    would show once on a fresh box and vanish the moment a live Claude pane
+    ran. `opusplan` itself was confirmed live against the real adapter before
+    this was written (accepted, unlike a garbage value) — this test proves
+    the LOCAL bookkeeping only, not the vendor's behaviour.
+    """
+
+    def _mgr(self):
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.catalog = {}
+        real = sessions.CATALOG
+        d = Path(tempfile.mkdtemp())
+        sessions.CATALOG = d / "catalog.json"
+        self.addCleanup(lambda: setattr(sessions, "CATALOG", real))
+        return m, sessions
+
+    def test_opusplan_is_appended_to_claudes_model_options(self):
+        m, sessions = self._mgr()
+        m.remember_catalog("claude", {"model": {
+            "name": "Model", "value": "opus[1m]",
+            "options": [{"value": "opus[1m]", "name": "Opus", "description": ""}]}})
+        values = [o["value"] for o in m.catalog["claude"]["model"]["options"]]
+        self.assertIn("opusplan", values)
+
+    def test_a_repeated_write_does_not_duplicate_it(self):
+        """The vendor's own session/new response is what OVERWRITES the
+        catalog on every real session — proving this survives a second write
+        is proving it survives exactly that, not just the first seed."""
+        m, sessions = self._mgr()
+        for _ in range(3):
+            m.remember_catalog("claude", {"model": {
+                "name": "Model", "value": "opus[1m]",
+                "options": [{"value": "opus[1m]", "name": "Opus", "description": ""}]}})
+        values = [o["value"] for o in m.catalog["claude"]["model"]["options"]]
+        self.assertEqual(values.count("opusplan"), 1)
+
+    def test_other_agents_are_unaffected(self):
+        """MODEL_EXTRAS is keyed by agent — grok's model list must not grow an
+        option grok was never asked about and cannot serve."""
+        m, sessions = self._mgr()
+        m.remember_catalog("grok", {"model": {
+            "name": "Model", "value": "grok-4", "options": []}})
+        # Grok's `model` key legitimately survives with an EMPTY options list
+        # (a fixed choice, not a picker — remember_catalog's own docstring);
+        # the point here is that it stays empty, not that the key is dropped.
+        self.assertEqual(m.catalog["grok"]["model"]["options"], [])
+        m.remember_catalog("ollama", {"model": {
+            "name": "Model", "value": "llama3",
+            "options": [{"value": "llama3", "name": "llama3", "description": ""}]}})
+        values = [o["value"] for o in m.catalog["ollama"]["model"]["options"]]
+        self.assertNotIn("opusplan", values)
+
+    def test_an_agent_with_no_model_key_is_not_given_one(self):
+        """An agent whose config carries no model at all (grok reports a bare
+        value with no options, dropped by the filter above) must not have a
+        `model` key manufactured just to hang an extra off of."""
+        m, sessions = self._mgr()
+        m.remember_catalog("codex", {"effort": {
+            "name": "Effort", "value": "default",
+            "options": [{"value": "default", "name": "Default", "description": ""}]}})
+        self.assertNotIn("model", m.catalog["codex"])
+
+
+class SshShellIsBounded(unittest.TestCase):
+    """The ssh lane's guarantees, exercised against a LOCAL bash.
+
+    ssh_acp's whole reason to be testable is its connect override: the adapter
+    does not care that the far end arrived over ssh, only that it is a bash
+    reading stdin. So every bound below is proved against the real code path,
+    on this machine, with no host and no network — which is the only kind of
+    proof that survives ranch-server being down.
+    """
+
+    def _shell(self):
+        import ssh_acp
+        sh = ssh_acp.Shell(["bash", "--noprofile", "--norc"])
+        self.addCleanup(sh.kill)
+        return sh
+
+    def test_a_command_runs_and_reports_its_exit_status(self):
+        import ssh_acp
+        sh = self._shell()
+        seen = []
+        self.assertEqual(sh.run("echo hello", 10, seen.append), "0")
+        self.assertIn("hello", "".join(seen))
+        # A SUBSHELL exit, not a bare `exit` — see the test below for why that
+        # distinction is the whole difference between a status and a hangup.
+        self.assertEqual(sh.run("(exit 3)", 10, lambda t: None), "3",
+                         "a nonzero status must reach the pane, not be swallowed")
+
+    def test_typing_exit_closes_the_shell_and_the_next_command_reopens_it(self):
+        """`exit` is a command a human WILL type into a shell pane, and in a
+        persistent bash it kills the far end before the sentinel printf can
+        run. So it can never report a status — it reports a closed connection,
+        which is the truth. What must not happen is the lane staying broken."""
+        import ssh_acp
+        sh = self._shell()
+        with self.assertRaises(ssh_acp.ShellError) as cm:
+            sh.run("exit 3", 10, lambda t: None)
+        self.assertIn("shell exited", str(cm.exception))
+        seen = []
+        self.assertEqual(sh.run("echo reopened", 10, seen.append), "0",
+                         "a typed `exit` left the lane dead")
+        self.assertIn("reopened", "".join(seen))
+
+    def test_the_shell_is_persistent_across_commands(self):
+        """State set by one command is visible to the next — that is the whole
+        difference between this and `ssh host <cmd>` per prompt."""
+        sh = self._shell()
+        sh.run("CORRAL_MARKER=kept", 10, lambda t: None)
+        seen = []
+        sh.run("echo $CORRAL_MARKER", 10, seen.append)
+        self.assertIn("kept", "".join(seen))
+
+    def test_output_is_capped_and_the_shell_recovers_clean(self):
+        import ssh_acp
+        sh = self._shell()
+        real = ssh_acp.MAX_OUTPUT_BYTES
+        ssh_acp.MAX_OUTPUT_BYTES = 2048
+        self.addCleanup(lambda: setattr(ssh_acp, "MAX_OUTPUT_BYTES", real))
+        with self.assertRaises(ssh_acp.ShellError) as cm:
+            sh.run("seq 1 100000", 20, lambda t: None)
+        self.assertIn("exceeded", str(cm.exception))
+        # The recovery is the point: a killed shell must not poison the lane.
+        seen = []
+        self.assertEqual(sh.run("echo back", 10, seen.append), "0")
+        self.assertIn("back", "".join(seen))
+
+    def test_a_command_that_never_finishes_is_killed_by_the_clock(self):
+        """Deliberately UNLIKE acp.py, where no clock ends a turn. There the
+        agent is working and only Craig can judge it; here the shell is a
+        command runner and a `tail -f` that ate the sentinel will never return
+        on its own. The bound is the designed degrade, and it says so."""
+        import ssh_acp
+        sh = self._shell()
+        with self.assertRaises(ssh_acp.ShellError) as cm:
+            sh.run("sleep 30", 0.5, lambda t: None)
+        self.assertIn("no completion", str(cm.exception))
+        seen = []
+        self.assertEqual(sh.run("echo alive", 10, seen.append), "0")
+        self.assertIn("alive", "".join(seen))
+
+    def test_the_commands_own_output_cannot_forge_completion(self):
+        """The sentinel carries a per-command nonce. Without it, `echo`ing the
+        sentinel would end the command early and hand the NEXT command's reader
+        a stream that starts mid-output."""
+        import ssh_acp
+        sh = self._shell()
+        seen = []
+        status = sh.run(
+            f'echo "{ssh_acp.SENTINEL} deadbeefcafe 0"; echo after; (exit 5)',
+            10, seen.append)
+        out = "".join(seen)
+        self.assertEqual(status, "5", "the forged line ended the command early")
+        self.assertIn("after", out, "output after the forgery was lost")
+
+    def test_cancel_stops_the_command(self):
+        import ssh_acp, threading
+        sh = self._shell()
+        def cancel_soon():
+            import time
+            time.sleep(0.4)
+            sh.cancelled = True
+        threading.Thread(target=cancel_soon, daemon=True).start()
+        with self.assertRaises(ssh_acp.ShellError) as cm:
+            sh.run("sleep 30", 30, lambda t: None)
+        self.assertIn("cancelled", str(cm.exception))
+
+
+class SshLaneHasNoPermissionRail(unittest.TestCase):
+    """No rail, ON PURPOSE — and therefore it must never become agent-driven.
+
+    The consent argument is that the human typed the exact bytes that run. That
+    holds only while a human is the one typing, so the absence of a rail here
+    is load-bearing on the lane never being exposed as a tool.
+    """
+
+    def test_the_adapter_never_asks_for_permission(self):
+        src = (ROOT / "ssh_acp.py").read_text(encoding="utf-8")
+        self.assertNotIn("request_permission", src.replace(
+            "no permission rail", ""),
+            "a rail here would be a gate whose weakest path is the shell itself")
+
+    def test_the_lane_declares_no_tools(self):
+        import sessions
+        sessions.refresh_host_lanes()
+        specs = [s for k, s in sessions.AGENTS.items() if k.startswith("host:")]
+        for s in specs:
+            self.assertFalse(s.get("tools"),
+                             "a tools:true shell lane would put it in reach of "
+                             "the attach path meant for agents")
+
+    def test_the_adapter_is_documented_as_human_only(self):
+        src = (ROOT / "ssh_acp.py").read_text(encoding="utf-8")
+        self.assertIn("never be handed to an agent", src)
+
+
+class SshHostsComeFromAFileNotTheFleet(unittest.TestCase):
+    """Light has no estate. The inventory is one hand-written file, and its
+    failure modes must not take the picker with them."""
+
+    def _with_hosts(self, payload):
+        import sessions
+        d = Path(tempfile.mkdtemp())
+        f = d / "ssh-hosts.json"
+        f.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        real = sessions.EXTRA_SSH_HOSTS
+        # AGENTS is module-global and refresh_host_lanes is add/update-NEVER-
+        # delete by contract, so a test's fake hosts survive into the next test
+        # as tombstones. That is correct for the product and wrong for the
+        # suite: restore the exact key set, or every later assertion about
+        # "how many host lanes exist" counts this test's leftovers.
+        before = {k: v for k, v in sessions.AGENTS.items()
+                  if k.startswith("host:")}
+
+        def restore():
+            sessions.EXTRA_SSH_HOSTS = real
+            for k in [k for k in sessions.AGENTS if k.startswith("host:")]:
+                del sessions.AGENTS[k]
+            sessions.AGENTS.update(before)
+
+        sessions.EXTRA_SSH_HOSTS = f
+        self.addCleanup(restore)
+        return sessions
+
+    def test_a_host_becomes_a_prefixed_lane_in_the_ssh_group(self):
+        s = self._with_hosts([{"name": "testbox", "ip": "10.0.0.9"}])
+        s.refresh_host_lanes()
+        self.assertIn("host:testbox", s.AGENTS)
+        self.assertEqual(s._group_of("host:testbox"), "ssh",
+                         "the prefix seam is what consolidates hosts under one "
+                         "picker entry instead of one row per machine")
+        self.assertIn("ssh", s.agent_groups())
+
+    def test_a_removed_host_is_tombstoned_never_deleted(self):
+        """Its pane must still render the transcript. Deleting the lane key
+        would KeyError /api/state via snapshot()."""
+        s = self._with_hosts([{"name": "goingaway", "ip": "10.0.0.9"}])
+        s.refresh_host_lanes()
+        self.assertIn("host:goingaway", s.AGENTS)
+        s.EXTRA_SSH_HOSTS.write_text("[]")
+        s.refresh_host_lanes()
+        self.assertIn("host:goingaway", s.AGENTS, "the lane was deleted")
+        self.assertIn("no longer listed",
+                      s.AGENTS["host:goingaway"]["unavailable"])
+
+    def test_a_malformed_file_does_not_break_the_picker(self):
+        s = self._with_hosts("{not json at all")
+        s.refresh_host_lanes()
+        self.assertTrue(s.available_agents(),
+                        "a typo in ssh-hosts.json must not empty the agent list")
+
+    def test_the_host_list_is_bounded(self):
+        s = self._with_hosts([{"name": f"b{i}", "ip": "10.0.0.1"}
+                              for i in range(40)])
+        # Assert on what the FILE yields, not on AGENTS: the never-delete
+        # contract means AGENTS legitimately holds tombstones from earlier
+        # host lists, so counting it would measure history, not the bound.
+        self.assertLessEqual(len(s._live_ssh_hosts()), s.MAX_SSH_HOSTS)
+        s.refresh_host_lanes()
+        fresh = [k for k in s.AGENTS if k.startswith("host:b")]
+        self.assertLessEqual(len(fresh), s.MAX_SSH_HOSTS)
+
+    def test_a_connect_override_becomes_lane_env_not_argv(self):
+        """The test/local form. It must arrive as env so the command is never
+        word-split into argv by us — shlex in the adapter owns that."""
+        s = self._with_hosts([{"name": "local", "connect": "bash --norc"}])
+        s.refresh_host_lanes()
+        spec = s.AGENTS["host:local"]
+        self.assertEqual(spec["env"]["SSH_ACP_CONNECT"], "bash --norc")
+        self.assertNotIn("bash --norc", " ".join(spec["argv"]))
 
 
 if __name__ == "__main__":

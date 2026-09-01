@@ -202,12 +202,15 @@ async function pair() {
 }
 
 /* ── rendering: a pane ───────────────────────────────────────────────── */
-// The full Corral renders `host:<box>` ssh lanes as a TERMINAL rather than a
-// conversation — monospace, prompt-prefixed, no bubbles, no permission rail
-// (the typed command IS the approved artifact). Light has no shell lane, so
-// that whole rendering mode is absent rather than dormant: every pane here is
-// a conversation with an agent, and `term` styling that could never trigger
-// would be a shape waiting to be re-derived wrongly by whoever adds one back.
+// A host:<name> shell lane is a terminal, not a conversation (Craig,
+// 2026-08-24: "more of a terminal design and less of a chat design") — its
+// transcript and composer render monospace, prompt-prefixed, bubble-free.
+//
+// The fork claimed this mode was "absent rather than dormant". It was not: the
+// branches survived intact and `term` was pinned to a literal `false`, which is
+// dormant wearing absent's clothes — the comment was load-bearing and wrong.
+// Restoring the lane (2026-09-01) needed one expression, not a rendering mode.
+const isTerm = p => (p.agent || '').startsWith('host:');
 
 /* ── markdown, the mdview manner ─────────────────────────────────────────
  * Agent replies arrive as markdown and used to render as raw text — every
@@ -325,7 +328,7 @@ function renderLog(p) {
   // everything permanently. Permissions and real errors are never collapsed;
   // those are the two things he must not miss.
   const log = el('div', 'log');
-  const term = false;
+  const term = isTerm(p);
   const detailed = S.detail.has(p.id);
   let textBuf = null, thoughtBuf = null, pendingSteps = [], stepIx = new Map();
   // ⎿ rows held open live OUTSIDE this per-tick rebuild (panel 2026-08-30:
@@ -815,7 +818,8 @@ function updatePane(rec, p) {
   const hold = SEL.down === p.id || (live && live.log === rec.log);
   rec.root.className = 'pane' + (p.pending.length ? ' attn' : '') +
                        (p.state === 'dead' ? ' dead' : '') +
-                       (hold ? ' selhold' : '');
+                       (hold ? ' selhold' : '') +
+                       (isTerm(p) ? ' term' : '');
   rec.head.replaceChildren(...paneHead(p).childNodes);
 
   if (!hold) {
@@ -1108,9 +1112,76 @@ function findStep(id, delta) {
     .scrollIntoView({ block: 'center' });   // scrolling up unpins — herdr's
 }                                            // "stay put while you read history"
 
+// A shell composer, not a chat one: one line, shell history on ↑/↓, and Ctrl-C
+// on an EMPTY input (so it does not steal copy from a selection you just made
+// or from text you typed) cancels the in-flight command — ssh_acp kills the
+// shell and reconnects clean on the next command, exactly its designed degrade.
+// No slash-completer here: "/tmp" is a path, not a skill, and the completer
+// was stealing Enter/Tab from any command that started with "/".
+const TERMHIST = new Map();   // pane id -> {cmds, ix, draft}; survives rebuilds
+function termComposer(p) {
+  const c = el('div', 'composer term');
+  const h = TERMHIST.get(p.id) ||
+    { cmds: p.events.filter(e => e.kind === 'user')
+                    .map(e => (e.data || {}).text || '').filter(Boolean),
+      ix: null, draft: '' };
+  TERMHIST.set(p.id, h);
+  c.appendChild(el('span', 'pr', '❯'));
+  const inp = el('input');
+  inp.type = 'text'; inp.autocomplete = 'off'; inp.spellcheck = false;
+  inp.placeholder = `runs on ${p.agent.slice(5)} as you`;
+  let sending = false;
+  const send = async () => {
+    if (sending) return;
+    const t = inp.value.trim(); if (!t) return;
+    sending = true;
+    try {
+      // Same eager-clear hazard as the chat composer: clear only once the
+      // server accepted it, so a failure leaves the command typed for retry.
+      await api('/api/session/send', { pane: p.id, text: t });
+      if (h.cmds[h.cmds.length - 1] !== t) h.cmds.push(t);
+      h.ix = null; h.draft = '';
+      inp.value = '';
+    } catch (e) { toast(e.message, true); }
+    finally { sending = false; }
+  };
+  const recall = v => {
+    inp.value = v;
+    requestAnimationFrame(() => inp.setSelectionRange(v.length, v.length));
+  };
+  inp.onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); send(); return; }
+    if (e.key === 'ArrowUp') {
+      if (!h.cmds.length) return;
+      e.preventDefault();
+      if (h.ix === null) { h.draft = inp.value; h.ix = h.cmds.length; }
+      h.ix = Math.max(0, h.ix - 1);
+      recall(h.cmds[h.ix]);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      if (h.ix === null) return;
+      e.preventDefault();
+      h.ix += 1;
+      if (h.ix >= h.cmds.length) { h.ix = null; recall(h.draft); }
+      else recall(h.cmds[h.ix]);
+      return;
+    }
+    if (e.key === 'c' && e.ctrlKey && !inp.value &&
+        !String(window.getSelection() || '')) {
+      e.preventDefault();
+      api('/api/session/cancel', { pane: p.id })
+        .catch(err => toast(err.message, true));
+    }
+  };
+  c.appendChild(inp);
+  return c;
+}
+
 // Built once per pane. Never rebuilt while you are typing in it — a
 // composer rebuilt under an agent's event stream eats the draft mid-word.
 function composer(p, kind) {
+  if (kind === 'live' && isTerm(p)) return termComposer(p);
   const c = el('div', 'composer');
   if (kind === 'detached') {
     const note = el('div', 'sys', 'Saved. The agent is not running — send a message or resume to pick it up.');

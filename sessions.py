@@ -229,6 +229,97 @@ AGENTS = {
 }
 
 
+# --- Host shell lanes: one SSH SHELL pane per configured host ---------------
+# Craig, 2026-09-01: "add the SSH tabs back so we can manage remote hosts via
+# the complete UI". Ported from ranch's corral/sessions.py, with ONE change
+# that matters: ranch generates these from the lightsail estate inventory, and
+# Light has no estate (fleet.py, estate.py and lightsail are all banned from
+# this tree by test_no_heavy_corral_module_is_imported). So the inventory here
+# is a hand-written file and nothing else.
+#
+# ssh_acp.py holds one persistent `ssh ... bash` on the host and runs exactly
+# what Craig types — no LLM, no permission rail, because the typed command IS
+# the approved artifact (PRINCIPLES 17). This lane is a human keyboard surface
+# only; it must never be handed to an agent as a tool.
+#
+# NOT auto-enumerated from ~/.ssh/config, deliberately. That file's Host
+# entries include things that are not shell hosts at all (`github.com` is in
+# Craig's today), and a picker offering a lane that cannot open a shell is the
+# same button-that-lies available_agents() exists to prevent. Naming the hosts
+# costs one file, once.
+SSH_ADAPTER = ROOT / "ssh_acp.py"
+# [{"name": ..., "ip": ..., "user": ..., "key": ...}] — `ip` may be a plain
+# ~/.ssh/config alias, in which case user/key can be omitted and ssh's own
+# config answers. Or [{"name": ..., "connect": "<command whose stdin is a
+# bash>"}] for a local test lane.
+EXTRA_SSH_HOSTS = Path(os.environ.get(
+    "CORRAL_LIGHT_SSH_HOSTS",
+    str(Path.home() / ".config/corral-light/ssh-hosts.json")))
+MAX_SSH_HOSTS = 8
+
+
+def _live_ssh_hosts():
+    hosts = []
+    try:
+        if EXTRA_SSH_HOSTS.is_file():
+            for h in json.loads(EXTRA_SSH_HOSTS.read_text())[:MAX_SSH_HOSTS]:
+                if not h.get("name"):
+                    continue
+                entry = {"name": h["name"], "tier": h.get("tier", ""),
+                         "argv": [sys.executable, str(SSH_ADAPTER),
+                                  "--name", h["name"]],
+                         "needs": "shell over ssh — runs what you type, as you"}
+                if h.get("connect"):
+                    entry["env"] = {"SSH_ACP_CONNECT": h["connect"]}
+                else:
+                    entry["argv"] += ["--ip", h.get("ip", "")]
+                    if h.get("key"):
+                        entry["argv"] += ["--key", h["key"]]
+                    if h.get("user"):
+                        entry["argv"] += ["--user", h["user"]]
+                    entry["needs"] = (f"shell over ssh to {h.get('ip', '?')} — "
+                                      f"runs what you type, as you")
+                hosts.append(entry)
+    except Exception as e:  # noqa: BLE001 — a malformed file must not break the picker
+        print(f"corral-light: {EXTRA_SSH_HOSTS} unreadable: {e}",
+              file=sys.stderr, flush=True)
+    return hosts
+
+
+def refresh_host_lanes():
+    """(Re)build one `host:<name>` shell lane per configured host.
+
+    Add/update, NEVER delete: a host removed from the file must still render
+    its existing pane's transcript, so the lane is tombstoned with a reason
+    rather than dropped (the same contract restore() relies on at
+    sessions.py's dead-stub path).
+    """
+    current = {}
+    for h in _live_ssh_hosts():
+        key = f"host:{h['name']}"
+        tier = f" ({h['tier']})" if h.get("tier") else ""
+        spec = {"label": f"SSH — {h['name']}{tier}",
+                "argv": h["argv"],
+                "requires": (str(SSH_ADAPTER),),
+                "posture_via_config_dir": False,
+                # No tools, so no permission rail — and it says so, for the
+                # same reason the ollama lane does: a pane with an empty rail
+                # must be distinguishable from a rail that broke.
+                "tools": False,
+                "needs": h.get("needs", "")}
+        if h.get("env"):
+            spec["env"] = h["env"]
+        current[key] = spec
+    for key, spec in AGENTS.items():
+        if isinstance(key, str) and key.startswith("host:") and key not in current:
+            spec["unavailable"] = (f"no longer listed in {EXTRA_SSH_HOSTS.name} "
+                                   "— the transcript remains readable")
+    AGENTS.update(current)
+
+
+refresh_host_lanes()
+
+
 MAX_CWD_SUGGESTIONS = 24
 
 
@@ -652,15 +743,32 @@ def _skill_commands(agent):
 
 
 # --- Picker grouping --------------------------------------------------------
-# Light has exactly one family, and it is still declared rather than implied:
-# the browser tags each lane with its group and needs the definitions that name
-# the groups shipped alongside. A second family (were one ever added back) then
-# costs a dict entry, not a UI change.
+# Craig, 2026-08-31: "consolidate the SSH connections under one main SSH tab and
+# then break it out into each individual session if we choose SSH."
+#
+# Light shipped with one family and a note that a second "costs a dict entry,
+# not a UI change". 2026-09-01 collected on that: the `ssh` family below is the
+# whole picker cost of the host lanes. Two ways to belong, because the families
+# are named differently — the generated lanes carry a key PREFIX (`host:`),
+# while the agent lanes are hand-written keys with nothing in common but their
+# kind. Explicit `keys` wins over `prefix` so a future `host:`-prefixed agent
+# could be reassigned by name without renaming its lane.
+#
+# Order here is the order the picker shows, and `agents` stays first: it is the
+# overwhelmingly common case, and the dialog preselects this group's first live
+# member so opening it and pressing Start still starts Claude with no extra
+# clicks. Grouping reorganises the menu; it must not tax the default.
 AGENT_GROUPS = {
     "agents": {
         "label": "Agents",
         "keys": ("claude", "codex", "grok", "gemini", "ollama"),
         "hint": "one conversation, one process, one transcript",
+    },
+    "ssh": {
+        "label": "SSH — remote shell",
+        "prefix": "host:",
+        "hint": "one persistent shell on the host; runs exactly what you type, "
+                "with no agent and no permission rail",
     },
 }
 
@@ -696,6 +804,10 @@ def agent_groups():
 def available_agents():
     """Only offer what actually exists on this host — an agent picker listing a
     binary that isn't installed is a button that lies."""
+    # Re-read the host file on every render, not once at import: adding a host
+    # is editing a JSON file, and needing to restart the hub to see it is the
+    # kind of friction that gets a feature abandoned.
+    refresh_host_lanes()
     out = []
     # Reported on every lane rather than logged once at boot: this changes
     # which IDENTITY an agent runs as, and the place that matters is the
@@ -1903,6 +2015,35 @@ class Pane:
         }
 
 
+# --- Known aliases the live handshake does not enumerate --------------------
+# `session/new`'s configOptions lists Claude Code's model PRESETS, but the CLI
+# recognises at least one alias it does not advertise there: Craig, 2026-09-01,
+# "add Opus Plan ... it's the same as /model opusplan". Verified live before
+# adding, the same way every other claim in this file is: `set_config(model,
+# "opusplan")` is accepted (configOptions echoes back cleanly), while
+# `set_config(model, "total-garbage-xyz")` is refused with `Invalid value for
+# config option model: total-garbage-xyz`. So this is a confirmed vendor
+# alias, not Corral guessing at a model id it hopes exists.
+#
+# Layered on in remember_catalog rather than at any one probe site, because
+# that is the SINGLE place every write to the catalog passes through (a fresh
+# box's seed_catalogs probe, a live session/new, a set_config ack). Adding it
+# anywhere else would have the option vanish the moment a real Claude session
+# overwrote the catalog with the vendor's own shorter list — remember_catalog's
+# own docstring is explicit that every write "has to overwrite whatever was
+# remembered before".
+#
+# If the CLI ever drops this alias, spawn() already fails loudly on it: an
+# AgentError from set_config lands as a "could not set model=opusplan: …" note
+# in the pane, same as any other rejected value — never a silent wrong model.
+MODEL_EXTRAS = {
+    "claude": [
+        {"value": "opusplan", "name": "Opus Plan",
+         "description": "Opus in Plan Mode, Sonnet otherwise, for this "
+                        "session — same as /model opusplan"},
+    ],
+}
+
 CATALOG = STATE / "catalog.json"
 
 
@@ -2011,6 +2152,11 @@ class Manager:
                                    "value": v.get("value")}
                                for k, v in (config or {}).items()
                                if v.get("options") or v.get("value")}
+        model = self.catalog[agent].get("model")
+        if model is not None:
+            have = {o.get("value") for o in model["options"]}
+            model["options"] += [e for e in MODEL_EXTRAS.get(agent, ())
+                                 if e["value"] not in have]
         try:
             CATALOG.parent.mkdir(parents=True, exist_ok=True)
             CATALOG.write_text(json.dumps(self.catalog, indent=1), encoding="utf-8")
@@ -2056,6 +2202,9 @@ class Manager:
                 self.subscribers.remove(q)
 
     def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None):
+        if agent.startswith("host:"):
+            # The picker's list could be seconds stale; the spawn must not be.
+            refresh_host_lanes()
         if agent not in AGENTS:
             raise ValueError(f"unknown agent {agent!r}")
         spec = AGENTS[agent]
