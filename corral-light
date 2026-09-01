@@ -12,7 +12,7 @@ set -euo pipefail
 D="$(cd "$(dirname "$0")" && pwd)"
 PY="${CORRAL_LIGHT_PYTHON:-python3}"
 case "${1:-}" in
-  pair)  exec "$PY" -c "import sys;sys.path.insert(0,'$D');import auth;ok,msg=auth.approve('${2:-}');print(msg);sys.exit(0 if ok else 2)" ;;
+  pair)  exec "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); import auth; ok,msg=auth.approve(sys.argv[2] if len(sys.argv)>2 else ''); print(msg, flush=True); sys.exit(0 if ok else 2)" "$D" "${2:-}" ;;
   serve) exec "$PY" "$D/hub.py" ;;
   doctor) exec "$PY" -c "
 import sys; sys.path.insert(0,'$D')

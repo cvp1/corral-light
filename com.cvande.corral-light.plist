@@ -4,7 +4,7 @@
 
   Install:
     cp com.cvande.corral-light.plist ~/Library/LaunchAgents/
-    launchctl load  -w ~/Library/LaunchAgents/com.cvande.corral-light.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cvande.corral-light.plist
     launchctl kickstart -k gui/$(id -u)/com.cvande.corral-light   # after an edit
 
   A USER agent, not a system daemon, on purpose: every lane authenticates as
@@ -20,6 +20,10 @@
   Paths are absolute because launchd inherits almost no environment — in
   particular, PATH here is not the shell's, which is why hub.py resolves
   node itself rather than trusting one to be found.
+
+  Interpreter is Homebrew python3 (3.14), not /usr/bin/python3 (3.9 on this
+  host). The suite and the live hub have been running 3.14; 3.9 is the floor
+  hub.py names, but it is not what we tested.
 -->
 <plist version="1.0">
 <dict>
@@ -28,12 +32,12 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>/Users/cvande/Github/CC/corral-light/hub.py</string>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>/Users/craigvandeputte/corral-light/hub.py</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/cvande/Github/CC/corral-light</string>
+  <string>/Users/craigvandeputte/corral-light</string>
 
   <key>EnvironmentVariables</key>
   <dict>
@@ -63,8 +67,8 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/cvande/Library/Logs/corral-light.log</string>
+  <string>/Users/craigvandeputte/Library/Logs/corral-light.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/cvande/Library/Logs/corral-light.log</string>
+  <string>/Users/craigvandeputte/Library/Logs/corral-light.log</string>
 </dict>
 </plist>

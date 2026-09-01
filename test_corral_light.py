@@ -23,6 +23,20 @@ ROOT = Path(__file__).resolve().parent
 import ollama_acp
 
 
+def _pin_sessions_platform(test, name):
+    """Force sessions.sys.platform for the rest of this test.
+
+    Isolation via CLAUDE_CONFIG_DIR is a platform fact (darwin refuses it).
+    Tests of the copy/resync/chmod path must pin linux; tests of the
+    refusal must pin darwin. Leaving them on the host's platform is how
+    the suite went red on dogma-2 the day the Keychain finding landed.
+    """
+    import sessions
+    real = sessions.sys.platform
+    sessions.sys.platform = name
+    test.addCleanup(lambda: setattr(sessions.sys, "platform", real))
+
+
 class StructuralIndependence(unittest.TestCase):
     """Light must run from its own directory, on a host with no CC workspace."""
 
@@ -381,6 +395,27 @@ class ContentIndex(unittest.TestCase):
         self.content.refresh(force=True)
         self.assertNotIn("Leak",
                          [h["title"] for h in self.content.search("fox")["hits"]])
+
+    def test_get_refuses_a_path_that_now_escapes_the_root(self):
+        """Index-time containment is not enough: replace the file with a
+        symlink after indexing and attach would hand the agent a path that
+        now points outside the vault."""
+        hits = self.content.search("fox")["hits"]
+        self.assertTrue(hits)
+        pid = hits[0]["id"]
+        self.assertIsNotNone(self.content.get(pid))
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir(exist_ok=True)
+        secret = outside / "secret.md"
+        secret.write_text("# Secret\nleaked\n")
+        target = self.notes / "alpha.md"
+        try:
+            target.unlink()
+            target.symlink_to(secret)
+        except OSError:
+            self.skipTest("no symlink support here")
+        self.assertIsNone(self.content.get(pid),
+                          "get() served a path that now resolves outside the root")
 
     def test_deleted_files_leave_the_index(self):
         """Eviction is accretion's other half (P23) — a store that only grows
@@ -749,6 +784,7 @@ class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
         change made visible, which is what a test is for.
         """
         import sessions
+        _pin_sessions_platform(self, "linux")
         home = self._fake_home()
         (home / ".claude" / ".credentials.json").write_text(
             json.dumps({"claudeAiOauth": {"accessToken": "a" * 108,
@@ -850,6 +886,30 @@ class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
             os.environ.pop("ANTHROPIC_API_KEY", None)
             os.environ.pop("CORRAL_LIGHT_ALLOW_VENDOR_ENV", None)
 
+    def test_google_adc_and_claude_api_key_are_stripped(self):
+        """GOOGLE_API does not match GOOGLE_APPLICATION_CREDENTIALS.
+        CLAUDE_CONFIG_DIR does not match CLAUDE_API_KEY."""
+        import sessions
+        prefixes = sessions.strip_prefixes()
+        for var in ("GOOGLE_APPLICATION_CREDENTIALS", "CLAUDE_API_KEY"):
+            with self.subTest(var=var):
+                self.assertTrue(var.startswith(prefixes),
+                                f"{var} would leak into a pane")
+        saved = {k: os.environ.get(k) for k in
+                 ("GOOGLE_APPLICATION_CREDENTIALS", "CLAUDE_API_KEY")}
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/sa.json"
+        os.environ["CLAUDE_API_KEY"] = "sk-ant-test"
+        try:
+            nag = sessions.vendor_env_present()
+            self.assertIn("GOOGLE_APPLICATION_CREDENTIALS", nag)
+            self.assertIn("CLAUDE_API_KEY", nag)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
 
 class NoParentSessionLeaksIntoAPane(unittest.TestCase):
     """A pane must not inherit another Claude Code session's identity.
@@ -892,9 +952,29 @@ class NoParentSessionLeaksIntoAPane(unittest.TestCase):
         import sessions
         os.environ["CLAUDECODE"] = "1"
         try:
-            self.assertEqual(sessions.vendor_env_present(), [])
+            self.assertNotIn("CLAUDECODE", sessions.vendor_env_present())
         finally:
             os.environ.pop("CLAUDECODE", None)
+
+    def test_session_identity_vars_are_not_called_credentials(self):
+        """GROK_AGENT / GROK_SESSION_ID are this process's session, not a
+        vendor API key. Treating the GROK_ prefix as a credential made
+        `doctor` nag inside a Grok TUI session about variables nobody
+        exported as a secret."""
+        import sessions
+        saved = {k: os.environ.get(k) for k in ("GROK_AGENT", "GROK_SESSION_ID")}
+        os.environ["GROK_AGENT"] = "grok"
+        os.environ["GROK_SESSION_ID"] = "sess"
+        try:
+            got = sessions.vendor_env_present()
+            self.assertNotIn("GROK_AGENT", got)
+            self.assertNotIn("GROK_SESSION_ID", got)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 class DiagnoseIsSafeToPaste(unittest.TestCase):
@@ -1058,6 +1138,7 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
 
     def test_a_rotated_token_is_picked_up_on_the_next_seed(self):
         import sessions, time
+        _pin_sessions_platform(self, "linux")
         home, cred = self._home_with_cred("a")
         real = Path.home
         try:
@@ -1081,6 +1162,7 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
         than the source, and clobbering that with an older global file would
         actively break a working pane."""
         import sessions
+        _pin_sessions_platform(self, "linux")
         home, cred = self._home_with_cred("a")
         real = Path.home
         try:
@@ -1098,6 +1180,7 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
         already-validated copy rather than treating a bad snapshot as ground
         truth and returning None."""
         import sessions, time
+        _pin_sessions_platform(self, "linux")
         home, cred = self._home_with_cred("a")
         real = Path.home
         try:
@@ -1135,6 +1218,7 @@ class TheStaleCopyTheoryWasWrong(unittest.TestCase):
         a loosely-permissioned directory even when the file itself is
         locked down, the way ssh refuses a loose ~/.ssh."""
         import sessions
+        _pin_sessions_platform(self, "linux")
         home = Path(tempfile.mkdtemp())
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text(json.dumps(
@@ -1152,6 +1236,7 @@ class TheStaleCopyTheoryWasWrong(unittest.TestCase):
         that ignores POSIX modes (some network mounts) must not brick a
         pane over a permission bit nobody can set anyway."""
         import sessions
+        _pin_sessions_platform(self, "linux")
         home = Path(tempfile.mkdtemp())
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text(json.dumps(
@@ -1255,9 +1340,7 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
         """The fix must be scoped to the platform that actually has this
         Keychain quirk — not a blanket new restriction everywhere."""
         import sessions
-        self.assertEqual(sessions.sys.platform, "linux",
-                         "this suite runs on Linux; if that ever changes, "
-                         "this test needs a real non-darwin patch instead")
+        _pin_sessions_platform(self, "linux")
         self._fake_home_with_real_credential()
         self.assertIsNotNone(sessions.seed_config_dir(
             Path(tempfile.mkdtemp()) / "cfg", "auto"))
@@ -1378,6 +1461,106 @@ class EveryUiCallHasADefinition(unittest.TestCase):
                          f"found it")
 
 
+class PermissionDigestIsConsent(unittest.TestCase):
+    """P17: an approval proves only the bytes that were on screen.
+
+    The digest used to be a label on the card and a stamp on the audit
+    event. The POST that actually grants sent only requestId + optionId,
+    so a client that never saw the payload could still approve it.
+    """
+
+    def _pane(self, digest="deadbeef", oversize=False):
+        import sessions
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.pending = {
+            "r1": {
+                "requestId": "r1",
+                "options": [
+                    {"optionId": "allow_once", "kind": "allow_once"},
+                    {"optionId": "reject_once", "kind": "reject_once"},
+                ],
+                "_gate": {"digest": digest, "oversize": oversize, "bytes": 12},
+            }
+        }
+        p.state = "needs-you"
+        p.client = type("C", (), {
+            "answer_permission": staticmethod(lambda rid, oid: True),
+        })()
+        p.emit = lambda *a, **k: None
+        import threading
+        p._lock = threading.Lock()
+        return p
+
+    def test_a_second_answer_is_refused_not_raced(self):
+        """Pop the pending record BEFORE waking the agent. Two tabs clicking
+        allow and reject used to both pass the option check; last writer to
+        the waiter won."""
+        import threading, time
+        p = self._pane()
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow(rid, oid):
+            calls.append(oid)
+            started.set()
+            release.wait(1)
+            return True
+
+        p.client.answer_permission = slow
+        err = []
+
+        def other():
+            started.wait(1)
+            try:
+                p.answer("r1", "reject_once", digest="deadbeef")
+            except ValueError as e:
+                err.append(str(e))
+
+        t = threading.Thread(target=other)
+        t.start()
+        ok = p.answer("r1", "allow_once", digest="deadbeef")
+        release.set()
+        t.join(1)
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["allow_once"])
+        self.assertTrue(err, "the second click must be refused, not delivered")
+        self.assertNotIn("r1", p.pending)
+
+    def test_a_grant_without_the_digest_is_refused(self):
+        p = self._pane()
+        with self.assertRaises(ValueError):
+            p.answer("r1", "allow_once")
+        self.assertIn("r1", p.pending)
+
+    def test_a_wrong_digest_is_refused(self):
+        p = self._pane()
+        with self.assertRaises(ValueError):
+            p.answer("r1", "allow_once", digest="0000")
+        self.assertIn("r1", p.pending)
+
+    def test_the_matching_digest_grants(self):
+        p = self._pane()
+        self.assertTrue(p.answer("r1", "allow_once", digest="deadbeef"))
+        self.assertNotIn("r1", p.pending)
+
+    def test_oversize_still_cannot_be_granted_even_with_the_digest(self):
+        p = self._pane(oversize=True)
+        with self.assertRaises(ValueError):
+            p.answer("r1", "allow_once", digest="deadbeef")
+        self.assertIn("r1", p.pending)
+
+    def test_the_browser_posts_the_digest(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("digest: d.digest", js)
+        self.assertGreaterEqual(js.count("digest: d.digest"), 2,
+                                "card click and composer 1-9/Esc must both send it")
+
+    def test_the_hub_forwards_the_digest(self):
+        hub = (ROOT / "hub.py").read_text(encoding="utf-8")
+        self.assertIn("digest", hub.split("/api/session/permission", 1)[1][:400])
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 
@@ -1408,6 +1591,213 @@ class StaticPathContainment(unittest.TestCase):
     def test_a_real_asset_resolves(self):
         import hub
         self.assertIsNotNone(hub._safe_static_path("app.js"))
+
+
+class MacosPlistIsThisHost(unittest.TestCase):
+    """The launchd unit is the one file allowed to hardcode a home path.
+    It must be THIS account, not the ranch user it was copied from."""
+
+    def test_the_plist_does_not_point_at_the_ranch_user(self):
+        text = (ROOT / "com.cvande.corral-light.plist").read_text(encoding="utf-8")
+        self.assertNotIn("/Users/cvande/", text)
+        home = str(Path.home())
+        self.assertIn(f"{home}/corral-light", text)
+        self.assertIn(f"{home}/Library/Logs/corral-light.log", text)
+        self.assertIn("/opt/homebrew/bin/python3", text)
+
+
+class PairCodeIsNotPython(unittest.TestCase):
+    """The pair CLI is the identity proof. Interpolating the code into
+    `python -c` meant a quote in argv became arbitrary Python as Craig."""
+
+    def test_the_wrapper_does_not_interpolate_the_code_into_python(self):
+        text = (ROOT / "corral-light").read_text(encoding="utf-8")
+        self.assertNotIn("approve('${2", text)
+        self.assertNotIn('approve("${2', text)
+
+    def test_a_quote_in_the_pair_code_is_not_executed(self):
+        import subprocess
+        marker = Path(tempfile.mkdtemp()) / "pwned"
+        code = f"x'; open(r'{marker}','w').write('pwned')#"
+        r = subprocess.run(
+            [str(ROOT / "corral-light"), "pair", code],
+            capture_output=True, text=True, timeout=10)
+        self.assertFalse(marker.is_file(),
+                         "pair interpolated argv into python -c: "
+                         + (r.stdout + r.stderr)[:300])
+        self.assertNotEqual(r.returncode, 0)
+
+
+class ContentLengthAndFrames(unittest.TestCase):
+    """A cookie-authed control plane on loopback still has to bound bodies
+    and refuse to be iframed from another local port."""
+
+    def test_negative_content_length_is_refused(self):
+        import hub
+        with self.assertRaises(ValueError):
+            hub.parse_content_length("-1")
+        with self.assertRaises(ValueError):
+            hub.parse_content_length(str(hub.MAX_BODY + 1))
+        self.assertEqual(hub.parse_content_length("0"), 0)
+        self.assertEqual(hub.parse_content_length("12"), 12)
+
+    def test_every_response_refuses_framing(self):
+        hub = (ROOT / "hub.py").read_text(encoding="utf-8")
+        self.assertIn("X-Frame-Options", hub)
+        self.assertIn("frame-ancestors 'none'", hub)
+        self.assertIn("_stream", hub)
+        # SSE has its own header path; it must apply the same lock.
+        stream = hub.split("def _stream", 1)[1].split("def ", 1)[0]
+        self.assertIn("FRAME_LOCK", stream)
+
+
+class LiveCapIsNotJustCreate(unittest.TestCase):
+    """MAX_PANES was a create() check. Pause-then-resume, or reopen, started
+    as many agent processes as you liked."""
+
+    def _mgr(self):
+        import sessions, threading
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes = {}
+        m._lock = threading.Lock()
+        m.subscribers = []
+        return m
+
+    def _pane(self, mgr, state):
+        import sessions, uuid
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.id = uuid.uuid4().hex[:12]
+        p.agent = "ollama"
+        p.mgr = mgr
+        p._init_runtime()
+        p.state = state
+        p.acp_session = "sess"
+        return p
+
+    def test_resume_refuses_at_the_live_cap(self):
+        import sessions
+        m = self._mgr()
+        for _ in range(sessions.MAX_PANES):
+            p = self._pane(m, "ready")
+            m.panes[p.id] = p
+        extra = self._pane(m, "detached")
+        m.panes[extra.id] = extra
+        with self.assertRaises(ValueError) as ar:
+            extra.resume()
+        self.assertIn(str(sessions.MAX_PANES), str(ar.exception))
+        self.assertEqual(extra.state, "detached")
+
+    def test_reopen_refuses_at_the_roster_cap(self):
+        import sessions
+        m = self._mgr()
+        for _ in range(sessions.MAX_ROSTER):
+            p = self._pane(m, "detached")
+            m.panes[p.id] = p
+        with self.assertRaises(ValueError) as ar:
+            m.reopen("no-such-pane")
+        self.assertIn(str(sessions.MAX_ROSTER), str(ar.exception))
+
+    def test_restore_keeps_more_than_the_live_cap(self):
+        """Restart must not drop conversations 13–60. They come back detached;
+        MAX_PANES only applies when one of them wants a process."""
+        import sessions, json
+        state = Path(tempfile.mkdtemp())
+        n = sessions.MAX_PANES + 3
+        for i in range(n):
+            d = state / "panes" / f"p{i:02d}"
+            d.mkdir(parents=True)
+            (d / "meta.json").write_text(json.dumps({
+                "id": f"p{i:02d}", "agent": "ollama",
+                "cwd": str(state),
+                "created": f"2026-01-{i + 1:02d}T00:00:00Z",
+            }))
+            (d / "events.jsonl").write_text("")
+        real = sessions.STATE
+        sessions.STATE = state
+        m = self._mgr()
+        try:
+            m.restore()
+            self.assertEqual(len(m.panes), n,
+                             "restore used the live cap, not the roster cap")
+            self.assertEqual(getattr(m, "not_restored", 0), 0)
+        finally:
+            sessions.STATE = real
+            for p in m.panes.values():
+                log = getattr(p, "_log", None)
+                if log is not None:
+                    try:
+                        log.close()
+                    except Exception:
+                        pass
+
+
+class StrictDoesNotInheritHostAllow(unittest.TestCase):
+    """A host Bash(*) allow in ~/.claude/settings.json must not ride into a
+    pane labelled strict. Deny stays; allow starts empty."""
+
+    def test_strict_drops_host_allow_and_keeps_deny(self):
+        import sessions
+        _pin_sessions_platform(self, "linux")
+        home = Path(tempfile.mkdtemp())
+        (home / ".claude").mkdir()
+        (home / ".claude" / ".credentials.json").write_text(json.dumps(
+            {"claudeAiOauth": {"accessToken": "a" * 108}}))
+        (home / ".claude" / "settings.json").write_text(json.dumps({
+            "permissions": {"allow": ["Bash(*)"], "deny": ["Read(./.env)"]},
+            "defaultMode": "auto",
+        }))
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            d = sessions.seed_config_dir(home / "cfg", "strict")
+            perm = json.loads((Path(d) / "settings.json").read_text())["permissions"]
+            self.assertEqual(perm.get("allow"), [])
+            self.assertEqual(perm.get("deny"), ["Read(./.env)"])
+            self.assertEqual(perm.get("defaultMode"), "default")
+        finally:
+            Path.home = real
+
+
+class EmptyAuthJsonIsNotALogin(unittest.TestCase):
+    """File-exists was the Claude empty-token bug, still open on Grok and Codex."""
+
+    def test_grok_empty_auth_json_is_not_present(self):
+        import grok_launcher
+        home = Path(tempfile.mkdtemp())
+        (home / "auth.json").write_text("{}")
+        real = grok_launcher.GROK_HOME
+        grok_launcher.GROK_HOME = home
+        try:
+            self.assertFalse(grok_launcher.auth_present())
+        finally:
+            grok_launcher.GROK_HOME = real
+
+    def test_codex_empty_auth_json_is_not_present(self):
+        import codex_launcher
+        home = Path(tempfile.mkdtemp())
+        (home / "auth.json").write_text("{}")
+        real = codex_launcher.CODEX_HOME
+        codex_launcher.CODEX_HOME = home
+        try:
+            self.assertFalse(codex_launcher.auth_present())
+        finally:
+            codex_launcher.CODEX_HOME = real
+
+    def test_a_token_bearing_file_still_counts(self):
+        import grok_launcher
+        home = Path(tempfile.mkdtemp())
+        (home / "auth.json").write_text(json.dumps(
+            {"accessToken": "g" * 40}))
+        real = grok_launcher.GROK_HOME
+        grok_launcher.GROK_HOME = home
+        try:
+            self.assertTrue(grok_launcher.auth_present())
+        finally:
+            grok_launcher.GROK_HOME = real
+
+    def test_grok_main_refuses_when_unauthenticated(self):
+        import grok_launcher, inspect
+        self.assertIn("unavailable_reason", inspect.getsource(grok_launcher.main))
 
 
 if __name__ == "__main__":

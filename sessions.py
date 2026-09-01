@@ -420,13 +420,13 @@ def seed_config_dir(d, posture):
     except (OSError, ValueError):
         base = {}
     merged = {k: v for k, v in base.items() if k not in SETTINGS_DROPPED}
-    # Keep any allow/deny he has set; the pane owns defaultMode and nothing
-    # else. Overwriting the whole permissions block would silently discard
-    # a deny rule the day he writes one.
-    perm = dict(base.get("permissions") or {})
+    # Deny is his; allow is not. A host `Bash(*)` allow in ~/.claude would
+    # otherwise ride into a pane labelled strict and never hit the rail —
+    # the posture lie on every host where Corral can impose a config dir.
+    # Empty allow, keep deny, then overlay defaultMode from POSTURES.
+    host_perm = base.get("permissions") or {}
+    perm = {"allow": [], "deny": list(host_perm.get("deny") or [])}
     perm.update(POSTURES[posture])
-    perm.setdefault("allow", [])
-    perm.setdefault("deny", [])
     merged["permissions"] = perm
     (d / "settings.json").write_text(json.dumps(merged, indent=1), encoding="utf-8")
     return d
@@ -473,11 +473,9 @@ def seed_config_dir(d, posture):
 # So a pane never inherits another Claude Code session's identity. Our own
 # overrides are applied AFTER the strip, so setting CLAUDE_CONFIG_DIR
 # deliberately still works.
-STRIP_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_API",
+STRIP_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_",
                       "XAI_", "GROK_",
-                      "CLAUDECODE", "CLAUDE_CODE", "CLAUDE_CONFIG_DIR",
-                      "CLAUDE_AGENT_SDK", "CLAUDE_PID", "CLAUDE_EFFORT",
-                      "CLAUDE_AUTOCOMPACT")
+                      "CLAUDECODE", "CLAUDE_")
 
 
 def vendor_env_present():
@@ -487,8 +485,15 @@ def vendor_env_present():
     # Only CREDENTIALS are worth a note. The Claude Code session variables are
     # stripped too, but nobody exported those on purpose and saying so on
     # every lane would be noise that trains the eye to skip the line.
-    creds = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_API", "XAI_", "GROK_")
-    return sorted(k for k in os.environ if k.startswith(creds))
+    # The prefix alone is not enough: GROK_AGENT / GROK_SESSION_ID are this
+    # process's session identity (a Grok TUI session exports them), not a
+    # key. Same split already used for CLAUDE_* — strip the session vars,
+    # nag only on something that looks like a secret.
+    creds = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_", "XAI_", "GROK_",
+             "CLAUDE_")
+    hints = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
+    return sorted(k for k in os.environ
+                  if k.startswith(creds) and any(h in k.upper() for h in hints))
 
 
 def strip_prefixes():
@@ -1089,14 +1094,15 @@ class Pane:
             raise ValueError(f"pane is {self.state}, not detached")
         if not self.acp_session:
             raise ValueError("this pane has no agent session to resume")
-        if self._log is None:      # pause() closed it; reopen for this attachment
-            self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
-        spec = AGENTS[self.agent]
-        env = spawn_env(spec, self._config_dir())
-        self._expect_exit = False        # a NEW process; its exit is real news
-        with self._turn_lock:
-            self._generation += 1        # a new attachment; retire any stale drain
+        self.mgr._reserve_live(self)
         try:
+            if self._log is None:      # pause() closed it; reopen for this attachment
+                self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
+            spec = AGENTS[self.agent]
+            env = spawn_env(spec, self._config_dir())
+            self._expect_exit = False        # a NEW process; its exit is real news
+            with self._turn_lock:
+                self._generation += 1        # a new attachment; retire any stale drain
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         on_event=self._on_event,
                                         on_permission=self._on_permission,
@@ -1118,6 +1124,12 @@ class Pane:
             self._reap_failed_client()      # same leak as start(); see there
             self.state, self.error = "dead", f"could not resume: {e}"
             self.emit("dead", {"reason": self.error})
+        except Exception:
+            # Reservation marked us `starting` (counts as live). A spawn that
+            # never happened must not keep the slot.
+            if self.state == "starting":
+                self.state = "detached"
+            raise
         self.save_meta()
         return self
 
@@ -1642,7 +1654,7 @@ class Pane:
                 self.state = "needs-you" if self.pending else (
                     "busy" if self._queue else "ready")
 
-    def answer(self, request_id, option_id):
+    def answer(self, request_id, option_id, digest=None):
         req = self.pending.get(request_id)
         if not req:
             raise ValueError("no such pending permission (already answered?)")
@@ -1658,13 +1670,33 @@ class Pane:
         rec = req.get("_gate") or {}
         kind = next((str(o.get("kind", "")) for o in req.get("options") or []
                      if o.get("optionId") == option_id), "")
+        # The digest is the bind, not a label. requestId + optionId names
+        # WHICH prompt; the digest names WHAT bytes were on screen. Without
+        # this check an approval proves only that someone holding the cookie
+        # knew the id — which is not P17.
+        shown = rec.get("digest") or ""
+        if not shown or digest != shown:
+            raise ValueError(
+                "the digest on this approval does not match the bytes that "
+                "were shown — an approval proves only what you could see.")
         if rec.get("oversize") and not kind.startswith("reject"):
             raise ValueError(
                 "this request was too large to display, so it cannot be "
                 "approved here — only refused. An approval proves only what "
                 "you could see.")
-        ok = self.client.answer_permission(request_id, option_id)
-        self.pending.pop(request_id, None)
+        # Pop BEFORE waking the agent. Two concurrent POSTs used to both
+        # pass the option check; last writer to the waiter won. If the
+        # wake itself fails, put the record back so the card stays answerable.
+        with self._lock:
+            if request_id not in self.pending:
+                raise ValueError("no such pending permission (already answered?)")
+            self.pending.pop(request_id, None)
+        try:
+            ok = self.client.answer_permission(request_id, option_id)
+        except Exception:
+            with self._lock:
+                self.pending.setdefault(request_id, req)
+            raise
         if self.state != "dead":
             self.state = "needs-you" if self.pending else "busy"
         # Bind the answer to the exact bytes that were on screen. Without the
@@ -2037,7 +2069,7 @@ class Manager:
         return pane
 
     def restore(self):
-        """Bring back up to MAX_PANES panes that were not deliberately closed.
+        """Bring back up to MAX_ROSTER panes that were not deliberately closed.
 
         Craig: "I would like to be able to close the local window and open it
         again and have all my tabs there the way I left them." Closing the
@@ -2049,8 +2081,9 @@ class Manager:
         it never reads a rotated events.jsonl.1, so a conversation past
         MAX_LOG_BYTES or MAX_EVENTS has already lost its earlier turns before
         restore ever runs), with no agent process running until one is wanted.
-        Anything past MAX_PANES is skipped, not restored -- `not_restored`
-        below is how that stays visible instead of silent.
+        MAX_PANES is the live-process cap, applied on resume. The roster
+        cap is MAX_ROSTER; slicing restore at MAX_PANES dropped conversations
+        13+ on every hub bounce.
         """
         root = STATE / "panes"
         if not root.is_dir():
@@ -2072,13 +2105,29 @@ class Manager:
         # dropped on restart were exactly the pinned and earliest-ordered ones.
         # Pinning made a pane MORE likely to disappear. Positive control
         # (2026-08-01): 15 metas, 2 pinned; the old slice kept neither.
-        skipped = max(0, len(metas) - MAX_PANES)
-        for m in metas[:MAX_PANES]:
+        skipped = max(0, len(metas) - MAX_ROSTER)
+        for m in metas[:MAX_ROSTER]:
             try:
                 self.panes[m["id"]] = Pane.from_meta(m, self)
             except Exception:
                 continue                     # one bad pane must not block the rest
         self.not_restored = skipped          # said out loud, not silently dropped
+
+    def _reserve_live(self, pane):
+        """Refuse to attach a process when MAX_PANES live ones already exist.
+
+        create() already checked this; resume() and send()-on-detached did not,
+        so pause-then-type was a cap bypass. Mark the pane `starting` under
+        the lock so a concurrent resume cannot also slip through.
+        """
+        with self._lock:
+            live = [p for p in self.panes.values()
+                    if p is not pane and p.state not in ("dead", "detached")]
+            if len(live) >= MAX_PANES:
+                raise ValueError(
+                    f"{MAX_PANES} live panes is the cap — close or pause one first")
+            if pane.state == "detached":
+                pane.state = "starting"
 
     def resume(self, pane_id):
         return self.get(pane_id).resume()
@@ -2115,6 +2164,13 @@ class Manager:
 
     def reopen(self, pane_id):
         """Bring an archived conversation back, detached."""
+        if pane_id in self.panes:
+            return self.panes[pane_id]
+        with self._lock:
+            if len(self.panes) >= MAX_ROSTER:
+                raise ValueError(
+                    f"{MAX_ROSTER} panes are already on the roster, live or "
+                    f"detached — close or forget one before reopening another")
         d = STATE / "panes" / pane_id
         try:
             m = json.loads((d / "meta.json").read_text(encoding="utf-8"))
@@ -2122,11 +2178,16 @@ class Manager:
             raise ValueError(f"no archived conversation {pane_id}")
         if not m.get("closed"):
             raise ValueError("that conversation is not archived")
-        if pane_id in self.panes:
-            return self.panes[pane_id]
         pane = Pane.from_meta(m, self)
         pane.save_meta(closed=False)      # or the next restart re-archives it
-        self.panes[pane_id] = pane
+        with self._lock:
+            if pane_id in self.panes:
+                return self.panes[pane_id]
+            if len(self.panes) >= MAX_ROSTER:
+                raise ValueError(
+                    f"{MAX_ROSTER} panes are already on the roster, live or "
+                    f"detached — close or forget one before reopening another")
+            self.panes[pane_id] = pane
         pane.emit("reopened", {})
         return pane
 

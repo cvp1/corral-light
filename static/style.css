@@ -15,7 +15,7 @@
    --wash-* owns ambient canvas light; --brand-* owns the app mark. Keeping
    them separate from semantic status colours prevents a theme's danger or
    needs-you colour from accidentally becoming its decorative identity. */
-:root,[data-theme="umber"]{
+[data-theme="umber"]{
   --ground:#1d1510; --panel:#2c2019; --raise:#3b2b21; --line:#523a2b; --line2:#73513a;
   --ink:#f8f0e8; --dim:#dbc8b7; --faint:#b39b86;
   --ember:#f2a064; --sage:#b4cf83; --rust:#f18370; --dusk:#8ac4d7; --gold:#f0c66a;
@@ -43,7 +43,7 @@
   --wash-a:#4d86aa; --wash-b:#728297;
   --brand-a:#9ed1f5; --brand-b:#6c9db6; --brand-c:#f0a06d; --shadow-rgb:5 9 13;
 }
-[data-theme="ink"]{
+:root,[data-theme="ink"]{
   --ground:#090b0f; --panel:#131821; --raise:#1c2430; --line:#2b3543; --line2:#46556a;
   --ink:#f5f7fb; --dim:#c6ced9; --faint:#8f9bad;
   --ember:#a78bfa; --sage:#63e6ac; --rust:#ff7f88; --dusk:#79b8ff; --gold:#f4c76b;

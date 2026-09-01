@@ -82,6 +82,23 @@ COOKIE = "corral_light"          # its own cookie name, so a browser paired to
                                  # its session silently overwritten by this one
 SSE_PING = 20                    # keep proxies and sleeping laptops honest
 MAX_BODY = 1 << 20
+
+
+def parse_content_length(raw, cap=MAX_BODY):
+    """Refuse negative and oversize Content-Length. `read(-1)` is EOF."""
+    try:
+        n = int(raw if raw not in (None, "") else 0)
+    except (TypeError, ValueError) as e:
+        raise ValueError("bad Content-Length") from e
+    if n < 0 or n > cap:
+        raise ValueError("body too large")
+    return n
+
+
+FRAME_LOCK = (
+    ("X-Frame-Options", "DENY"),
+    ("Content-Security-Policy", "frame-ancestors 'none'"),
+)
 # How much of a note a chat-only lane gets quoted into its composer. Bounded
 # (P8) and deliberately modest: this text goes into a context window, it is
 # visible in the box before anything is sent, and a note that does not fit is
@@ -132,6 +149,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in FRAME_LOCK:
+            self.send_header(k, v)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -155,9 +174,7 @@ class Handler(BaseHTTPRequestHandler):
         return auth.verify(m.value) if m else None
 
     def _body(self):
-        n = int(self.headers.get("Content-Length", 0) or 0)
-        if n > MAX_BODY:
-            raise ValueError("body too large")
+        n = parse_content_length(self.headers.get("Content-Length", 0))
         try:
             return json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
@@ -274,6 +291,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
+        for k, v in FRAME_LOCK:
+            self.send_header(k, v)
         self.end_headers()
         try:
             self.wfile.write(b": connected\n\n")
@@ -357,7 +376,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if p == "/api/session/permission":
                 pane = MGR.get(b.get("pane", ""))
-                ok = pane.answer(b.get("requestId", ""), b.get("optionId", ""))
+                ok = pane.answer(b.get("requestId", ""), b.get("optionId", ""),
+                                 digest=(b.get("digest") or ""))
                 return self._json({"ok": True, "delivered": ok})
             if p == "/api/session/resume":
                 pane = MGR.resume(b.get("pane", ""))

@@ -325,8 +325,10 @@ verified digest.
 
 - **Linux:** `corral-light.service` — a systemd *user* unit; its header carries
   the three install commands, plus `loginctl enable-linger` for a headless box.
-- **macOS:** `com.cvande.corral-light.plist` — a launchd user agent. Edit the
-  two `/Users/cvande` paths for another account.
+- **macOS:** `com.cvande.corral-light.plist` — a launchd user agent. Paths in
+  it are this host (`/Users/craigvandeputte/corral-light`, Homebrew python3).
+  Edit ProgramArguments, WorkingDirectory, and both log paths for another
+  account.
 
 Both are USER services on purpose. Every lane authenticates as the logged-in
 user and every pane runs with that user's filesystem access, so running this as

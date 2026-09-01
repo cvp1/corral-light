@@ -63,7 +63,13 @@ def resolve_adapter(explicit: str | None = None) -> str | None:
 
 
 def auth_present() -> bool:
-    return (CODEX_HOME / "auth.json").is_file()
+    """A file that exists and carries no token is not a login.
+
+    Same class as Claude's empty `.credentials.json`: `is_file()` passed,
+    the picker said ok, the pane died on `Authentication required`.
+    """
+    from sessions import usable_credential
+    return usable_credential(CODEX_HOME / "auth.json")
 
 
 def login_command() -> str:

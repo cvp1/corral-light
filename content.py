@@ -297,7 +297,12 @@ def search(q, limit=25):
 
 
 def get(place_id):
-    """One indexed file: its path, title, and a bounded body. None if gone."""
+    """One indexed file: its path, title, and a bounded body. None if gone.
+
+    The stored path is re-resolved against the live roots. Index-time
+    containment is not enough: replace a note with a symlink after indexing
+    and attach would hand an agent a path that now points outside the vault.
+    """
     c = _connect()
     try:
         r = c.execute("SELECT id, corpus, path, title, rel, body FROM pages"
@@ -308,7 +313,23 @@ def get(place_id):
         c.close()
     if not r:
         return None
-    return {"id": r[0], "corpus": r[1], "path": r[2], "title": r[3],
+    path = Path(r[2])
+    configured, _err = roots()
+    bases = []
+    for spec in configured:
+        try:
+            bases.append(spec["root"].resolve())
+        except OSError:
+            continue
+    try:
+        resolved = path.resolve()
+        if not resolved.is_file():
+            return None
+        if not any(resolved.is_relative_to(b) for b in bases):
+            return None
+    except OSError:
+        return None
+    return {"id": r[0], "corpus": r[1], "path": str(resolved), "title": r[3],
             "rel": r[4], "body": r[5]}
 
 
