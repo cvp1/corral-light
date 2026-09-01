@@ -355,6 +355,8 @@ class Handler(BaseHTTPRequestHandler):
                 if item is None:
                     raise ValueError("that page is not in the index any more")
                 pane = MGR.get(b.get("pane", "")) if b.get("pane") else None
+                if pane and pane.agent.startswith("host:"):
+                    raise ValueError("SSH panes cannot receive note attachments")
                 has_tools = bool(pane and sessions.AGENTS.get(pane.agent, {})
                                  .get("tools"))
                 if has_tools:

@@ -566,6 +566,32 @@ class AttachSemantics(unittest.TestCase):
                          "a markdown renderer is back; if content is rendered "
                          "again, the P20 escaping argument has to come with it")
 
+    def test_ssh_panes_are_rejected_as_attachment_targets(self):
+        """A note excerpt must never become a remote shell command."""
+        hub = (ROOT / "hub.py").read_text(encoding="utf-8")
+        self.assertIn("SSH panes cannot receive note attachments", hub)
+
+    def test_attachment_targets_exclude_non_composer_panes(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        target = js[js.index("function attachTarget()"):js.index(
+            "function paletteResults", js.index("function attachTarget()"))]
+        self.assertIn("p.state !== 'detached'", target)
+        self.assertIn("!p.agent.startsWith('host:')", target)
+
+    def test_palette_invalidates_before_short_query_return(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        start = js.index("function paletteResults(query)")
+        body = js[start:js.index("function renderPalette", start)]
+        self.assertLess(body.index("++PAL.seq"), body.index(
+            "if (needle.length < 2) return"))
+
+    def test_attachment_target_is_recomputed_when_activated(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        start = js.index("async function activatePalette")
+        body = js[start:js.index("async function attachContent", start)]
+        self.assertIn("const target = newPane ? null : attachTarget()", body)
+        self.assertIn("target ? target.id : null", body)
+
 
 class PlatformHonesty(unittest.TestCase):
     """A lane must not report available on a host that cannot run it.
