@@ -110,6 +110,33 @@ POSTURES = {
 }
 DEFAULT_POSTURE = "auto"
 
+# The same three postures as ACP `mode` config-option values. Corral has two
+# ways to impose a posture and until now used only the first:
+#
+#   1. settings.json inside a private CLAUDE_CONFIG_DIR (POSTURES, above) —
+#      which on macOS moves Claude Code's Keychain service name and breaks
+#      auth outright. See darwin_keychain_blocks_isolation().
+#   2. session/set_config_option on the LIVE session — the same wire call that
+#      already sets model and effort.
+#
+# (2) needs no config dir, so the Keychain never enters into it, and it is not
+# platform-conditional. Measured on dogma-2, 2026-09-01: the Claude adapter's
+# session/new advertises
+#     mode -> currentValue "default",
+#             options [auto, default, acceptEdits, plan, dontAsk,
+#                      bypassPermissions]
+# The values below are that list's, not ours. Read the mapping in that
+# direction: `strict` is Corral's name for the agent's `default`.
+#
+# A posture with no mode here is NOT silently defaulted — _apply_posture
+# leaves the session alone and says so in the pane. Guessing a permission
+# mode is the one guess this file must never make.
+POSTURE_MODE = {
+    "strict": "default",       # prompt on dangerous operations
+    "edits":  "acceptEdits",   # auto-accept edits, prompt the rest
+    "auto":   "auto",          # a classifier decides; still escalates
+}
+
 GROK_LAUNCHER = ROOT / "grok_launcher.py"
 OLLAMA_ACP = ROOT / "ollama_acp.py"
 NATIVE_ANTIGRAVITY_LAUNCHER = ROOT / "antigravity_acp_launcher.py"
@@ -143,6 +170,11 @@ AGENTS = {
         "argv": [str(ADAPTER)],
         "requires": (str(ADAPTER),),
         "posture_via_config_dir": True,
+        # ...and, unlike the config dir, this one works on macOS. When both are
+        # available the ACP mode wins: it is the mechanism whose success is
+        # ACKED on the wire, so the pane can report the posture it actually got
+        # instead of the one it hoped a settings.json would produce.
+        "posture_via_acp_mode": True,
         "tools": True,
         # A LIVE handshake, not a guess at where a vendor keeps its secret.
         # This lane cannot be credential-file-checked portably (macOS Claude
@@ -706,6 +738,13 @@ def posture_enforceable(spec):
     Only if a private config dir can be given a working credential — which is
     a question about the credential's CONTENT, not about a path existing.
     """
+    # The ACP route asks nothing of the filesystem or the Keychain: if the lane
+    # speaks session/set_config_option, the posture is imposable here. This is
+    # still a claim about the LANE, made before any handshake; the pane itself
+    # reports what it actually got (Pane.posture_enforced), which is the value
+    # the UI trusts once a pane exists.
+    if spec.get("posture_via_acp_mode"):
+        return True
     if not spec.get("posture_via_config_dir"):
         return False
     if darwin_keychain_blocks_isolation():
@@ -988,6 +1027,12 @@ class Pane:
         self.commands = _skill_commands(getattr(self, "agent", "claude"))
         self.model = None
         self.effort = None
+        # What Corral actually IMPOSED on this pane, not what the lane can do
+        # in principle. Starts as the lane-level claim so a pane that has not
+        # handshaked yet reads the same as the dialog that opened it, and is
+        # replaced by the measured result the moment _apply_posture runs.
+        self.posture_enforced = posture_enforceable(
+            AGENTS.get(getattr(self, "agent", "claude"), {}))
         self._seq = 0             # monotonic for the life of the pane
         self._queue = []          # type-ahead; drained strictly in order
         self._turn_running = False
@@ -1242,9 +1287,19 @@ class Pane:
             finally:
                 self._replaying = False
             self._absorb_config((r or {}).get("configOptions") or [])
+            # session/load hands back a session at the AGENT's defaults, not
+            # the ones this pane was started with. Without this the posture
+            # (and the queued model/effort a detached pane accepted — the
+            # "attach path already applies" set_config promised and no code
+            # kept) silently reverted on every pause/resume: the pill kept
+            # saying `auto` because self.posture never changed, while the live
+            # session had gone back to prompting. Found 2026-09-01 chasing why
+            # auto mode did not stick.
+            self._apply_wants()
             self.state = "ready"
             self.emit("resumed", {"model": self.model, "effort": self.effort,
-                                  "config": self.config})
+                                  "config": self.config,
+                                  "postureEnforced": self.posture_enforced})
         except acp.AgentError as e:
             self._reap_failed_client()      # same leak as start(); see there
             self.state, self.error = "dead", f"could not resume: {e}"
@@ -1521,14 +1576,7 @@ class Pane:
                                             "realId": "model", "options": []}
                     self.model = model
                     self.mgr.remember_catalog(self.agent, self.config)
-            for cid, want in (("model", self.want_model), ("effort", self.want_effort)):
-                if want and want != "default":
-                    try:
-                        real_id = (self.config.get(cid) or {}).get("realId", cid)
-                        r = self.client.set_config(self.acp_session, real_id, want)
-                        self._absorb_config((r or {}).get("configOptions") or [])
-                    except acp.AgentError as e:
-                        self.emit("note", {"text": f"could not set {cid}={want}: {e}"})
+            self._apply_wants()
             self.state = "ready"
             self.emit("ready", {
                 "agent": self.agent, "cwd": self.cwd, "posture": self.posture,
@@ -1583,6 +1631,76 @@ class Pane:
         self.model = (self.config.get("model") or {}).get("value")
         self.effort = (self.config.get("effort") or {}).get("value")
         self.mgr.remember_catalog(self.agent, self.config)
+
+    def _apply_wants(self):
+        """Re-impose everything Corral chose for this pane on a FRESH session.
+
+        Called from BOTH spawn sites (start and resume) because a new agent
+        process begins at the vendor's defaults every time, and keeping the
+        two in sync by hand is how a resumed pane comes back on the wrong
+        model — or, worse, the wrong permission posture.
+        """
+        for cid, want in (("model", self.want_model), ("effort", self.want_effort)):
+            if want and want != "default":
+                try:
+                    real_id = (self.config.get(cid) or {}).get("realId", cid)
+                    r = self.client.set_config(self.acp_session, real_id, want)
+                    self._absorb_config((r or {}).get("configOptions") or [])
+                except acp.AgentError as e:
+                    self.emit("note", {"text": f"could not set {cid}={want}: {e}"})
+        self.posture_enforced = self._apply_posture()
+
+    def _apply_posture(self):
+        """Set this pane's permission posture on the live session.
+
+        Returns whether the posture is now REALLY in force — measured from the
+        agent's own echoed configOptions, never assumed from the fact that a
+        request was sent. Every exit that is not an ack returns False and
+        leaves a note in the pane, so `postureEnforced` can never be the
+        safety property this whole mechanism exists to stop Corral asserting
+        without evidence.
+        """
+        spec = AGENTS[self.agent]
+        if not spec.get("posture_via_acp_mode"):
+            # Config-dir lanes: the posture was imposed (or not) at spawn, by
+            # the presence of CLAUDE_CONFIG_DIR in spawn_env. Nothing to send.
+            return posture_enforceable(spec)
+        want = POSTURE_MODE.get(self.posture)
+        cfg = self.config.get("mode") or {}
+        allowed = {o["value"] for o in cfg.get("options") or []}
+        label = spec["label"]
+        if want is None:
+            self.emit("note", {"text": f"no permission mode is mapped for "
+                                       f"posture {self.posture!r}; left at "
+                                       f"{label}'s own default"})
+            return False
+        if not cfg:
+            self.emit("note", {"text": f"{label} did not advertise a permission "
+                                       f"mode on this session; it runs under "
+                                       f"its own default"})
+            return False
+        if allowed and want not in allowed:
+            self.emit("note", {"text": f"{label} does not offer permission mode "
+                                       f"{want!r} (it lists {sorted(allowed)}); "
+                                       f"left at its own default"})
+            return False
+        if cfg.get("value") != want:
+            try:
+                r = self.client.set_config(self.acp_session,
+                                           cfg.get("realId", "mode"), want)
+                self._absorb_config((r or {}).get("configOptions") or [])
+            except acp.AgentError as e:
+                self.emit("note", {"text": f"could not set permissions to "
+                                           f"{self.posture} ({want}): {e}"})
+                return False
+        got = (self.config.get("mode") or {}).get("value")
+        if got != want:
+            # An ack that did not take. Reporting this as enforced is exactly
+            # the lie postureEnforced exists to prevent.
+            self.emit("note", {"text": f"asked {label} for permission mode "
+                                       f"{want!r}; it reports {got!r}"})
+            return False
+        return True
 
     def set_config(self, config_id, value):
         if config_id not in ("model", "effort", "fast"):
@@ -1997,13 +2115,16 @@ class Pane:
             # pulsing dot with no evidence behind it; this is the evidence.
             "idleS": int(idle),
             "cwd": self.cwd, "posture": self.posture, "title": self.title,
-            # Whether Corral actually IMPOSED that posture. Only agents driven
-            # through a CLAUDE_CONFIG_DIR are; `oc acp` runs under its own
-            # policy. The dialog offered strict/edits/auto for every agent and
-            # the pill displayed the choice regardless, so a Grok pane could
-            # read `strict` while nothing had made it strict — a UI asserting a
-            # safety property it never established.
-            "postureEnforced": posture_enforceable(AGENTS[self.agent]),
+            # Whether Corral actually IMPOSED that posture on THIS pane —
+            # measured, once the pane has handshaked: either the agent acked
+            # the `mode` config option (see _apply_posture) or the lane was
+            # driven through a CLAUDE_CONFIG_DIR. `oc acp` runs under its own
+            # policy and reports false. The dialog once offered
+            # strict/edits/auto for every agent and the pill displayed the
+            # choice regardless, so a Grok pane could read `strict` while
+            # nothing had made it strict — a UI asserting a safety property it
+            # never established.
+            "postureEnforced": self.posture_enforced,
             # Whether this lane can read a file itself — what attaching a note
             # to it means (a reference, or a quoted excerpt).
             "tools": bool(AGENTS[self.agent].get("tools")),

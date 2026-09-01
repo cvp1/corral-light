@@ -23,6 +23,24 @@ ROOT = Path(__file__).resolve().parent
 import ollama_acp
 
 
+def _config_dir_only(spec):
+    """The claude lane as it was BEFORE the ACP `mode` route existed: posture
+    imposable only through CLAUDE_CONFIG_DIR.
+
+    The three tests below were written when that was the only mechanism, so
+    they said "the config dir is unusable here" by asserting
+    `posture_enforceable` is False. That is no longer the same sentence: the
+    lane can now impose a posture over session/set_config_option, so the
+    overall answer is legitimately True on a host where the config dir is
+    dead. Narrowing the spec keeps each test pointed at the mechanism it was
+    actually written to guard — the Keychain finding of 2026-08-31 is still
+    fully asserted — instead of quietly asserting the new route away.
+    """
+    narrowed = dict(spec)
+    narrowed.pop("posture_via_acp_mode", None)
+    return narrowed
+
+
 def _pin_sessions_platform(test, name):
     """Force sessions.sys.platform for the rest of this test.
 
@@ -782,8 +800,8 @@ class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
         real = Path.home
         try:
             Path.home = staticmethod(lambda: home)
-            self.assertFalse(
-                sessions.posture_enforceable(sessions.AGENTS["claude"]))
+            self.assertFalse(sessions.posture_enforceable(
+                _config_dir_only(sessions.AGENTS["claude"])))
         finally:
             Path.home = real
 
@@ -1119,8 +1137,8 @@ class AnEmptyTokenIsNotACredential(unittest.TestCase):
         try:
             Path.home = staticmethod(lambda: home)
             self.assertIsNone(sessions.seed_config_dir(home / "cfg", "auto"))
-            self.assertFalse(
-                sessions.posture_enforceable(sessions.AGENTS["claude"]))
+            self.assertFalse(sessions.posture_enforceable(
+                _config_dir_only(sessions.AGENTS["claude"])))
         finally:
             Path.home = real
 
@@ -1346,7 +1364,13 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
         self._fake_home_with_real_credential()
         self.assertIsNone(sessions.seed_config_dir(
             Path(tempfile.mkdtemp()) / "cfg", "auto"))
-        self.assertFalse(
+        self.assertFalse(sessions.posture_enforceable(
+            _config_dir_only(sessions.AGENTS["claude"])))
+        # ...and yet the lane as it really is DOES have a posture here, over
+        # ACP. Both halves asserted together, because the pair is the whole
+        # 2026-09-01 finding: the platform quirk is real and it was never the
+        # only road.
+        self.assertTrue(
             sessions.posture_enforceable(sessions.AGENTS["claude"]))
 
     def test_linux_is_unaffected(self):
@@ -2206,6 +2230,169 @@ class SshHostsComeFromAFileNotTheFleet(unittest.TestCase):
         spec = s.AGENTS["host:local"]
         self.assertEqual(spec["env"]["SSH_ACP_CONNECT"], "bash --norc")
         self.assertNotIn("bash --norc", " ".join(spec["argv"]))
+
+
+class PostureRidesTheAcpMode(unittest.TestCase):
+    """The 2026-09-01 finding: Corral had a second, working way to impose a
+    permission posture and never used it.
+
+    Craig's report was "Corral Light is ignoring auto mode — the picker won't
+    let me choose it". The chain: darwin_keychain_blocks_isolation() is True on
+    every Mac, so posture_enforceable() said False, so the dialog DISABLED the
+    permissions select and every Claude pane ran at whatever ambient
+    defaultMode ~/.claude carries. DEFAULT_POSTURE = "auto" was dead code for
+    the lane it mattered most on.
+
+    Measured on dogma-2 the same day, from the adapter's own session/new:
+        mode -> currentValue "default",
+                options [auto, default, acceptEdits, plan, dontAsk,
+                         bypassPermissions]
+    That is a live, settable option on the same wire call that already carried
+    model and effort. No config dir, so no Keychain.
+    """
+
+    def _pane(self, posture="auto", mode_value="default", agent="claude"):
+        import sessions, uuid
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.id = uuid.uuid4().hex[:12]
+        p.agent = agent
+        p.mgr = self._mgr()
+        p.cwd = "/tmp"
+        p.posture = posture
+        p.want_model = p.want_effort = None
+        p.acp_session = "sess"
+        p._init_runtime()
+        p.state = "ready"
+        p.config = {"mode": {
+            "value": mode_value, "name": "Permission mode", "realId": "mode",
+            "options": [{"value": v, "name": v, "description": ""} for v in
+                        ("auto", "default", "acceptEdits", "plan", "dontAsk",
+                         "bypassPermissions")]}}
+        return p
+
+    def _mgr(self):
+        import sessions, threading
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes = {}
+        m._lock = threading.Lock()
+        m.subscribers = []
+        m.remember_catalog = lambda *a, **k: None
+        return m
+
+    class _Client:
+        """Records set_config calls and echoes the new value back the way the
+        real adapter does — the ack IS the evidence _apply_posture reads."""
+        def __init__(self, echo=True, raises=None, echo_value=None):
+            self.calls, self.echo = [], echo
+            self.raises, self.echo_value = raises, echo_value
+
+        def set_config(self, session_id, config_id, value):
+            self.calls.append((config_id, value))
+            if self.raises:
+                raise self.raises
+            if not self.echo:
+                return {}
+            got = self.echo_value or value
+            return {"configOptions": [{"id": "mode", "currentValue": got,
+                                       "name": "Permission mode",
+                                       "options": []}]}
+
+    def test_the_map_only_names_modes_the_agent_actually_offers(self):
+        """Corral must never send a permission mode the adapter would reject —
+        the values are transcribed from the live handshake, not invented."""
+        import sessions
+        offered = {"auto", "default", "acceptEdits", "plan", "dontAsk",
+                   "bypassPermissions"}
+        self.assertTrue(set(sessions.POSTURE_MODE.values()) <= offered)
+        self.assertEqual(set(sessions.POSTURE_MODE), set(sessions.POSTURES))
+
+    def test_auto_is_actually_sent_and_reported_enforced(self):
+        """The bug, directly: a pane whose posture is `auto` must leave the
+        handshake with the session really in auto."""
+        p = self._pane(posture="auto")
+        p.client = self._Client()
+        self.assertTrue(p._apply_posture())
+        self.assertEqual(p.client.calls, [("mode", "auto")])
+        self.assertEqual(p.config["mode"]["value"], "auto")
+
+    def test_each_posture_maps_to_the_agents_own_name_for_it(self):
+        for posture, wire in (("auto", "auto"), ("edits", "acceptEdits"),
+                              ("strict", "default")):
+            with self.subTest(posture=posture):
+                p = self._pane(posture=posture, mode_value="plan")
+                p.client = self._Client()
+                self.assertTrue(p._apply_posture())
+                self.assertEqual(p.client.calls, [("mode", wire)])
+
+    def test_a_session_already_in_that_mode_costs_no_wire_call(self):
+        p = self._pane(posture="strict", mode_value="default")
+        p.client = self._Client()
+        self.assertTrue(p._apply_posture())
+        self.assertEqual(p.client.calls, [])
+
+    def test_a_refused_mode_is_not_reported_as_enforced(self):
+        """postureEnforced exists to stop Corral asserting a safety property
+        it never established. An AgentError must not become a green pill."""
+        import acp
+        p = self._pane(posture="auto")
+        p.client = self._Client(raises=acp.AgentError("nope"))
+        self.assertFalse(p._apply_posture())
+        self.assertTrue(any("could not set permissions" in
+                            (e.get("data") or {}).get("text", "")
+                            for e in p.events))
+
+    def test_an_ack_that_did_not_take_is_not_enforced(self):
+        """The adapter answering 200 with a DIFFERENT mode is the subtlest
+        version of the same lie — read the echoed value, not the status."""
+        p = self._pane(posture="auto")
+        p.client = self._Client(echo_value="default")
+        self.assertFalse(p._apply_posture())
+        self.assertEqual(p.config["mode"]["value"], "default")
+
+    def test_a_lane_advertising_no_mode_says_so_instead_of_guessing(self):
+        p = self._pane(posture="auto")
+        p.config = {}
+        p.client = self._Client()
+        self.assertFalse(p._apply_posture())
+        self.assertEqual(p.client.calls, [])
+        self.assertTrue(any("did not advertise a permission mode" in
+                            (e.get("data") or {}).get("text", "")
+                            for e in p.events))
+
+    def test_an_unmapped_posture_is_never_silently_defaulted(self):
+        """Guessing a permission mode is the one guess this file must not
+        make: an unknown posture leaves the agent alone and says so."""
+        p = self._pane(posture="something-new")
+        p.client = self._Client()
+        self.assertFalse(p._apply_posture())
+        self.assertEqual(p.client.calls, [])
+
+    def test_resume_reimposes_the_posture(self):
+        """session/load hands back a session at the AGENT's defaults. Without
+        re-imposing, a paused `auto` pane came back prompting while the pill
+        still read `auto` — the pill was never the thing that made it auto."""
+        p = self._pane(posture="auto")
+        p.client = self._Client()
+        p._apply_wants()
+        self.assertEqual(p.client.calls, [("mode", "auto")])
+        self.assertTrue(p.posture_enforced)
+
+    def test_the_dialog_offers_the_posture_on_macos(self):
+        """The picker's enabled/disabled state reads posture_enforceable. On
+        darwin it said False and greyed the control out — Craig's symptom."""
+        import sessions
+        _pin_sessions_platform(self, "darwin")
+        self.assertTrue(
+            sessions.posture_enforceable(sessions.AGENTS["claude"]))
+
+    def test_a_lane_that_manages_its_own_permissions_still_says_false(self):
+        """The fix must not turn every lane green: grok/codex/ollama run under
+        their own policy and must keep reporting that honestly."""
+        import sessions
+        for lane in ("grok", "ollama"):
+            with self.subTest(lane=lane):
+                self.assertFalse(
+                    sessions.posture_enforceable(sessions.AGENTS[lane]))
 
 
 if __name__ == "__main__":
