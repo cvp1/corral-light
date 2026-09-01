@@ -2000,6 +2000,7 @@ class Pane:
         """
         self.minimized = bool(flag)
         self.save_meta()
+        self.mgr.broadcast_layout(self)
         return self.minimized
 
     def cancel(self):
@@ -2557,6 +2558,8 @@ class Manager:
                 p.save_meta()
                 seen += 1
         self._resort()
+        if seen:
+            self._broadcast_layouts()
         return seen
 
     def set_pinned(self, pane_id, flag):
@@ -2564,7 +2567,27 @@ class Manager:
         p.pinned = bool(flag)
         p.save_meta()
         self._resort()
+        self._broadcast_layouts()
         return p.pinned
+
+    def broadcast_layout(self, pane):
+        """Tell every browser about a persisted layout mutation.
+
+        Layout is shared UI state rather than transcript history, so it gets a
+        lightweight event that does not consume the pane's event ring or alter
+        its per-pane sequence. The browser handles this event before normal
+        transcript sequence deduplication.
+        """
+        self.broadcast({"seq": 0, "at": _now(), "pane": pane.id,
+                        "kind": "layout", "data": {
+                            "minimized": bool(pane.minimized),
+                            "pinned": bool(pane.pinned),
+                            "order": pane.order,
+                        }})
+
+    def _broadcast_layouts(self):
+        for pane in self.panes.values():
+            self.broadcast_layout(pane)
 
     def _resort(self):
         """Rebuild the registry in display order. Pinned first, then explicit
