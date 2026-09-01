@@ -1792,6 +1792,27 @@ function connect() {
   };
   es.onmessage = m => {
     let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
+    // Layout events are shared UI state, not transcript events. They carry no
+    // pane sequence, so apply them before the normal sequence deduplication.
+    if (ev.kind === 'layout') {
+      const layoutPane = S.panes.get(ev.pane);
+      if (!layoutPane) { refresh(); return; }
+      Object.assign(layoutPane, ev.data || {});
+      const ordered = [...S.panes.values()].sort((a, b) => {
+        const ak = [a.pinned ? 0 : 1, a.order == null ? 10000 : a.order,
+                    a.created || ''];
+        const bk = [b.pinned ? 0 : 1, b.order == null ? 10000 : b.order,
+                    b.created || ''];
+        for (let i = 0; i < ak.length; i++) {
+          if (ak[i] < bk[i]) return -1;
+          if (ak[i] > bk[i]) return 1;
+        }
+        return 0;
+      });
+      S.panes = new Map(ordered.map(p => [p.id, p]));
+      render();
+      return;
+    }
     // The server emits this when it had to throw away our backlog because this
     // browser fell behind. Everything after a drop is untrustworthy — a lost
     // `permission` followed by a delivered `turn_end` reads as `ready` for a

@@ -414,6 +414,67 @@ class IntentionalPauseLifecycle(unittest.TestCase):
         self.assertFalse(any(e["kind"] == "state" for e in pane.events))
 
 
+class LayoutBroadcasts(unittest.TestCase):
+    """Shared layout mutations reach every open browser tab."""
+
+    def test_minimize_broadcasts_authoritative_layout(self):
+        import queue
+        import sessions
+
+        manager = sessions.Manager.__new__(sessions.Manager)
+        manager.subscribers = []
+        manager._lock = threading.Lock()
+        q = queue.Queue()
+        manager.subscribe(q)
+
+        pane = sessions.Pane.__new__(sessions.Pane)
+        pane.id = "layout-test"
+        pane.mgr = manager
+        pane.minimized = False
+        pane.pinned = False
+        pane.order = None
+        pane.save_meta = lambda: None
+        pane.set_minimized(True)
+
+        event = q.get_nowait()
+        self.assertEqual(event["kind"], "layout")
+        self.assertEqual(event["pane"], pane.id)
+        self.assertTrue(event["data"]["minimized"])
+
+    def test_layout_events_are_handled_before_pane_sequence_deduplication(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        start = js.index("es.onmessage = m =>")
+        body = js[start:js.index("/* ── new-conversation", start)]
+        self.assertIn("ev.kind === 'layout'", body)
+        self.assertLess(body.index("ev.kind === 'layout'"),
+                        body.index("ev.seq <= last"))
+
+    def test_pin_and_reorder_broadcast_the_updated_roster(self):
+        import queue
+        import sessions
+
+        manager = sessions.Manager.__new__(sessions.Manager)
+        manager.subscribers = []
+        manager._lock = threading.Lock()
+        manager.panes = {}
+        q = queue.Queue()
+        manager.subscribe(q)
+        for i, pane_id in enumerate(("one", "two")):
+            manager.panes[pane_id] = types.SimpleNamespace(
+                id=pane_id, minimized=False, pinned=False, order=None,
+                created=str(i), save_meta=lambda: None)
+
+        manager.set_pinned("two", True)
+        pinned_events = [q.get_nowait() for _ in range(2)]
+        self.assertTrue(any(e["pane"] == "two" and e["data"]["pinned"]
+                            for e in pinned_events))
+
+        manager.reorder(["one", "two"])
+        reorder_events = [q.get_nowait() for _ in range(2)]
+        self.assertTrue(any(e["pane"] == "one" and e["data"]["order"] == 0
+                            for e in reorder_events))
+
+
 class ContentIndex(unittest.TestCase):
     """The index behind ⌘K. Runs against a scratch tree, never the real vault."""
 
