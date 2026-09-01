@@ -2089,7 +2089,8 @@ class Pane:
                     # nothing uncertain about an exited process, and dressing a
                     # corpse as "maybe" is the flattering answer.
                     alive = False
-                    state_override = "dead"
+                    if self.state != "detached" and not self._expect_exit:
+                        state_override = "dead"
                 elif self.state == "uncertain" and idle <= STALL_S:
                     state_override = "busy"     # it started talking again
                 elif self.state == "busy" and idle > STALL_S:

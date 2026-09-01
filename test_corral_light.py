@@ -15,6 +15,9 @@ Run: python3 -m unittest test_corral_light -v   (from this directory)
 import json
 import os
 import tempfile
+import threading
+import time
+import types
 import unittest
 from pathlib import Path
 
@@ -367,6 +370,48 @@ class OllamaAdapter(unittest.TestCase):
                              "turn count alone is not a bound: one pasted file "
                              "blows the window in three messages")
         self.assertGreaterEqual(len(h), 1, "trimming must never empty history")
+
+
+class IntentionalPauseLifecycle(unittest.TestCase):
+    """A deliberate pause must survive the child process teardown window."""
+
+    def test_expected_pause_exit_stays_detached(self):
+        import sessions
+
+        pane = sessions.Pane.__new__(sessions.Pane)
+        pane.id = "pause-test"
+        pane.agent = "claude"
+        pane.cwd = "/tmp"
+        pane.title = "pause test"
+        pane.title_locked = False
+        pane.minimized = False
+        pane.order = None
+        pane.pinned = False
+        pane.model = None
+        pane.effort = None
+        pane.config = {}
+        pane.commands = []
+        pane.posture = "auto"
+        pane.posture_enforced = False
+        pane.error = None
+        pane.pending = {}
+        pane.usage = {}
+        pane.created = "now"
+        pane.mgr = types.SimpleNamespace(broadcast=lambda event: None)
+        pane.client = types.SimpleNamespace(
+            alive=True, p=types.SimpleNamespace(poll=lambda: 0))
+        pane.state = "detached"
+        pane._expect_exit = True
+        pane.last_activity = time.time()
+        pane.events = []
+        pane._seq = 0
+        pane._lock = threading.Lock()
+        pane._replaying = False
+        pane._log = None
+        pane._since_rotate_check = 0
+        result = pane.snapshot()
+        self.assertEqual(result["state"], "detached")
+        self.assertFalse(any(e["kind"] == "state" for e in pane.events))
 
 
 class ContentIndex(unittest.TestCase):
