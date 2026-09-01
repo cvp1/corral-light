@@ -1661,6 +1661,26 @@ function render() {
     n.appendChild(c); items++;
   }
   if (!items) n.appendChild(el('div', 'calm', 'Nothing. Quiet is the steady state.'));
+  const mobilePane = $('#mobile-pane');
+  if (mobilePane) {
+    const selected = S.focus;
+    mobilePane.textContent = '';
+    if (!panes.length) {
+      const option = document.createElement('option');
+      option.textContent = 'No conversations';
+      option.disabled = true;
+      option.selected = true;
+      mobilePane.appendChild(option);
+    } else {
+      for (const p of panes) {
+        const option = document.createElement('option');
+        option.value = p.id;
+        option.textContent = p.title || p.label;
+        mobilePane.appendChild(option);
+      }
+      if (panes.some(p => p.id === selected)) mobilePane.value = selected;
+    }
+  }
   railFold(items, panes.reduce((a, p) => a + p.pending.length, 0));
 }
 
@@ -2319,6 +2339,14 @@ function wirePalette() {
   });
 }
 
+function wireMobileActions() {
+  $('#mobile-new').onclick = () => $('#new').click();
+  $('#mobile-search').onclick = openPalette;
+  $('#mobile-pane').onchange = e => {
+    if (e.target.value) focusPane(e.target.value);
+  };
+}
+
 /* ── focus ───────────────────────────────────────────────────────────────
  * Light has one room, so "open this conversation" is only ever: remember it
  * as focused (the roster keeps it out of "Other" and highlights it) and
@@ -2354,6 +2382,7 @@ async function start() {
   wireRail();
   wireCopySelect();
   wirePalette();
+  wireMobileActions();
   // Stream FIRST, then snapshot. The reverse order left a window between the
   // snapshot and the EventSource opening in which every event was dropped and
   // never recoverable — the actual cause of "reload loses running work".
