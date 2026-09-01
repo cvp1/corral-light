@@ -1,456 +1,170 @@
-# Corral Light — the multi-model workspace, without the fleet
+# Corral Light
 
-One window where conversations with several agents run side by side, and
-anything needing you is visible without hunting for it. That is all it is.
+> A simple workspace for using several AI coding assistants side by side.
 
-    corral-light serve                 # http://127.0.0.1:8098
-    corral-light pair ABC-DEF          # authorize the browser showing that code
-    corral-light doctor                # which lanes can start here, and why not
-    corral-light diagnose [lane]       # run one lane end to end and show everything
+Corral Light lets you keep multiple AI conversations open in one browser window. Each conversation has its own working directory, assistant process, model settings, and saved history.
 
-## What this is
+It is designed for developers who want a lightweight local interface over the AI tools they already use.
 
-The **Live** surface of `corral/`, forked for dogma-2 on 2026-08-31 and made
-standalone. Craig: *"a version of Corral I can run on Dogma that will only do
-essentially the functions in the Live tab — a lightweight multi-model
-interface."*
+## What you get
 
-Everything ranch-server's Corral grew because it sits on the fleet is gone:
-Today, Mail, Fleet, Delegates, FinOps, the scheduler, the run registry, the
-attention queue, push notifications, tmux adoption, the AI-OS slash commands,
-ssh-shell lanes, delegate-box lanes. Not disabled — **gone**. A light build
-carrying dead branches is the heavy build with a smaller menu, and a route that
-answers "unavailable" is still a surface to maintain.
+- Multiple conversations in one window
+- Saved conversations that return after a restart
+- Reviewable approval requests for file changes and shell commands
+- Clear setup checks before an assistant is selected
+- Fast search across notes and text files
+- File attachments that work with both coding assistants and chat-only models
+- Local model support through Ollama
+- An installable web app experience
 
-The Library is the one that came back, and it came back **reimagined rather
-than ported** — as ⌘K + attach, not as a room. See below.
+## Quick start
 
-**The definition, so it stops moving:** Light is *conversations, with your
-content reachable from the composer*. That is the product. Every room upstream
-has is a candidate for "just this one more", and each would be defensible on
-its own; the line is here.
+You need Python 3.9 or newer.
 
-**A fork, deliberately, not a shared tree with a flag.** Fleet doctrine is that
-capability moves by install seed, never by synced trees (`FLEET.md`), and the
-two products have genuinely different owners: ranch-server's Corral answers to
-the fleet, this one answers to one machine. The cost is real — a fix to the
-pane renderer has to be carried across by hand — and it is bought back by
-`test_corral_light.py`, which fails the moment this build starts importing its
-way back to heavy.
+Clone the repository, then run:
 
-## What it keeps, because this is the part that matters
+~~~bash
+cd corral-light
 
-- **Panes.** One agent process per conversation, its own cwd, its own model and
-  effort, its own transcript on disk. Reload the browser, restart the server,
-  reboot the machine: the conversations come back (`detached` — attached again
-  on the first message or a click).
-- **The permission rail.** An agent asking to write a file or run a command is
-  a real process blocked on you. The card carries the **exact bytes** and a
-  sha256 of them; a payload too large to display can only be *refused*, never
-  approved, and that gate is enforced on the server, not in the browser
-  (P17 — an approval proves only what the human could see).
-- **Honest lanes.** The picker greys out what cannot start and says why, at pick
-  time rather than by handing you a pane that dies on its first prompt.
-- **Honest posture.** Only the Claude lane runs under a `CLAUDE_CONFIG_DIR`
-  Corral owns, so only that lane's permission pill is a claim Corral can back.
-  Every other pane says `agent-set` instead of displaying a safety property
-  nobody established.
-- **⌘K over everything** — see below.
-- Markdown rendering, find-in-conversation, copy-on-select, minimize, pin,
-  reorder, rename, archive/reopen, seven measured themes, PWA install.
+./corral-light doctor
+./corral-light serve
+~~~
 
-## ⌘K — your content, reachable from the composer
+Open `http://127.0.0.1:8098` in your browser. The server displays a short pairing code. In a second terminal, run:
 
-The full Corral has a **Library**: a room you navigate to, browse, and read a
-rendered page in. Light does not port it, because that shape is navigation
-scaffolding for a building with seven floors and Light has one. Inverted
-instead — content is not a place you go, it is something you *attach*:
+~~~bash
+./corral-light pair ABC-DEF
+~~~
 
-    ⌘K  →  type  →  ↵ attach to this conversation
-                    ⇧↵ open a new pane where that file lives
+Replace `ABC-DEF` with the code shown in your browser. The server runs in the foreground. It creates its data directory at `~/.local/share/corral-light` the first time it starts.
 
-One ranked list over **open panes, archived conversations, and your notes**.
-In a one-room app the palette *is* the navigation, so it searches everything;
-local matches are instant, content folds in when the index answers (~2 ms
-against 683 pages here).
+`doctor` lists the assistants that are ready to use and explains what is missing for the others.
 
-**What "attach" inserts depends on the lane, and the difference is the point:**
+## Supported assistants
 
-| lane | inserts | why |
-|---|---|---|
-| has tools (Claude, Codex, Grok, Antigravity) | the file **path** | the agent opens it *itself*, through its own permission gate — visible in the transcript, refusable in the rail. Corral does not smuggle file contents past the gate |
-| no tools (Ollama) | a bounded **quoted excerpt** | a path handed to an agent with no filesystem is a dead end that looks like a working feature |
+Corral Light connects to software installed and signed in on your computer.
 
-Either way it lands in the composer and **nothing is sent** — you read it, add
-your question, and press send. Attaching authorizes nothing (P17).
+| Assistant | What you need | Notes |
+| --- | --- | --- |
+| Claude Code | Claude Code and its Agent Client Protocol adapter | Supports model and effort selection. |
+| ChatGPT (Codex) | The Codex adapter and a Codex login | Uses a separate configuration directory. |
+| Grok | The Grok command-line tool and `grok login` | The Grok tool manages its own sign-in. |
+| Antigravity (Gemini) | Run `python3 install_antigravity_acp.py --install` | The included installer currently supports Linux x86-64. |
+| Ollama | Ollama and at least one downloaded model | Chat only; it cannot edit files or run commands. |
 
-### What it indexes
+The availability check is intentionally honest: an assistant is marked unavailable when a required program, login, or platform is missing. If an assistant passes that check but fails to answer, run:
 
-Whatever `~/.config/corral-light/content.json` names; `~/notes` by default if
-that file is absent and the directory exists:
+~~~bash
+./corral-light diagnose [assistant]
+~~~
 
-```json
-[{"key": "vault", "label": "notes", "root": "~/notes"},
- {"key": "work",  "label": "work",  "root": "~/Documents/work"}]
-```
+## Search and attach files
 
-Never a hardcoded corpus list — a config shipping five directories nobody has
-is a feature broken on arrival. `.md`/`.markdown`/`.txt`, dot-dirs and
-`node_modules` pruned, symlinks that escape a root not followed, bounded at
-20k files per root and 200 KB per file. The index (`content.db`, SQLite FTS5)
-is **derived and disposable** — delete it and it rebuilds; nothing in it is a
-system of record. No FTS5 on your sqlite? It degrades to a substring scan and
-*says so in the palette* rather than quietly getting worse.
+Press `⌘K` to search open conversations, archived conversations, notes, and other configured text files.
 
-Inspect it without the browser: `python3 content.py status | search <q> | refresh`.
+By default, Corral Light searches `~/notes` when that directory exists. Add other directories in `~/.config/corral-light/content.json`:
 
-### The security dividend
+~~~json
+[
+  {"key": "notes", "label": "Notes", "root": "~/notes"},
+  {"key": "documents", "label": "Documents", "root": "~/Documents"}
+]
+~~~
 
-Upstream needs `mdview.py` — 217 lines of escape-everything, emit-only-tags-we-
-spell-out — precisely *because* it renders vault pages, and vault notes carry
-pasted third-party content on an authed control surface (P20). Light never
-renders your content in the browser at all, so that renderer stays deleted and
-the surface it defends goes with it. The FTS snippet is the only file-derived
-string that reaches the page, and it is set as `textContent`. A test enforces
-this: if a markdown renderer ever comes back, the escaping argument has to come
-back with it.
+The search index includes Markdown and plain-text files. It skips hidden directories and `node_modules`, refuses symlinks that leave the configured directories, and applies limits to the number and size of indexed files. The SQLite index is temporary derived data and can be deleted; it will be rebuilt from your files.
 
-## Lanes
+When you attach a search result:
 
-| lane | how it starts | notes |
-|---|---|---|
-| Claude Code | `spike/node_modules/.bin/claude-agent-acp` | model + effort selectable; the one lane whose permission posture Corral imposes |
-| ChatGPT (Codex) | `codex_launcher.py` → `@agentclientprotocol/codex-acp` | owns a dedicated `CODEX_HOME` (`~/.config/corral-light/codex-home`) so it can never inherit another config's model; refuses up front when not logged in, naming the device-auth command |
-| Grok | `grok_launcher.py` → `grok agent stdio` | the vendor CLI owns auth; the credential never enters argv, env, or logs |
-| Antigravity (Gemini) | `antigravity_acp_launcher.py` | Google's own native ACP server; OAuth stays in the vendor's local state. Install/verify with `python3 install_antigravity_acp.py --install` / `--check` |
-| Local (Ollama) | `ollama_acp.py` | **the sovereign lane** — no key, no vendor, works with the WAN down. **Chat only: no tools, so no permission requests.** The label says so, because an empty rail and a broken rail look identical |
+- Coding assistants receive the file path and must open it through their normal approval flow.
+- Chat-only assistants receive a bounded quoted excerpt.
 
-Third-party providers (DeepSeek, OpenRouter) are absent for the same reason
-they are absent upstream: a pane is an agent with tools in a working tree, not
-a data-classed API call, so PRINCIPLES 11 has nothing to grade it against.
+Nothing is sent until you review the composer and press send.
 
-### Adding a lane
+Manage the index from a terminal:
 
-`sessions.AGENTS` is the one place. A lane needs `label`, `argv`,
-`posture_via_config_dir`, and — this is the part that is easy to skip —
-`requires`, naming every file it needs on disk. Four of the five lanes launch
-through an interpreter, so `argv[0]` is `python3` and exists everywhere;
-without `requires`, availability is judged by a check that cannot fail.
-`test_corral_light.py` enforces this.
+~~~bash
+python3 content.py status
+python3 content.py search "your query"
+python3 content.py refresh
+~~~
 
-## Install on a blank box
+## Security
 
-Verified 2026-08-31 by actually doing it: a fresh copy of this tree, an empty
-`HOME`, `env -i` (no inherited environment at all), `PATH=/usr/bin:/bin`. It
-came up, paired, opened a pane from the browser and answered — with nothing
-installed but `python3` and an Ollama to talk to.
+The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
 
-**The floor is `python3` 3.9+ and nothing else.** No venv, no pip, no node, no
-`_lib`, no CC workspace. `hub.py` refuses to start on 3.8 naming the reason,
-rather than failing later inside a request handler.
+~~~bash
+ssh -N -L 8098:127.0.0.1:8098 user@example.com
+~~~
 
-```bash
-git clone https://github.com/cvp1/corral-light.git && cd corral-light
-./corral-light doctor       # says which lanes work here, and why the rest don't
-./corral-light serve        # http://127.0.0.1:8098 — leave it running
-./corral-light pair ABC-DEF # in a second shell: the code the page is showing
-```
+When an assistant asks to write a file or run a command, Corral Light pauses it and shows the exact request, byte count, and SHA-256 digest. Requests too large to display cannot be approved. The browser cannot bypass this check because the server enforces it.
 
-`serve` runs in the foreground and the pairing code only exists while it is up,
-so those last two are two shells, not two steps in one. (Or run it as a service
-first — below — and pair once against that.)
+Corral Light removes common provider credential variables from assistant processes by default. This prevents a shell environment from silently changing which account an assistant uses. To intentionally allow those variables through, set:
 
-That is the whole install. It creates `~/.local/share/corral-light` on first
-run and needs no other setup.
+~~~bash
+CORRAL_LIGHT_ALLOW_VENDOR_ENV=1
+~~~
 
-### What a truly blank box gets you
-
-Lanes are the box's own software, not this repo's — so on a bare machine
-`doctor` correctly greys out all four vendor lanes and you have **no working
-lane at all** until you add one. Cheapest first:
-
-| to get | install on the box | notes |
-|---|---|---|
-| **Local (Ollama)** | `ollama`, then `ollama pull <model>` | works immediately; or set `CORRAL_OLLAMA_URL` to borrow another machine's models |
-| **Claude Code** | `node`, then `cd spike && npm install` | **`doctor` cannot verify this one's login** — see the note below. Also needs Claude Code's own login there: the pane copies `~/.claude/.credentials.json` and `~/.claude.json` into its config dir, and symlinks `~/.claude/{skills,agents,commands,plugins,prompts,CLAUDE.md}` so a pane has the same capability the terminal does |
-| **ChatGPT (Codex)** | the same `npm install` | then log in — run the exact command `doctor` prints (it creates `CODEX_HOME` and logs in, in one paste). The separate `CODEX_HOME` is deliberate: a shared one is how a pane ends up on whatever model another config pinned, so this is a separate login from any codex you already use |
-| **Grok** | the Grok CLI, then `grok login` | the CLI owns auth; nothing here touches the credential. `doctor` checks `~/.grok/auth.json` and prints the login command |
-| **Antigravity** | `python3 install_antigravity_acp.py --install` | **Linux x86-64 only** — see below |
-
-None of that is Corral-specific state to reproduce — it is each vendor's normal
-login on that machine. If the CLI works in a terminal there, the lane works.
-
-**When a pane fails, run `corral-light diagnose` first.** `doctor` answers
-"can this lane start"; that question kept saying `ok` while every conversation
-died, because the failure is one step further in — the handshake succeeds and
-the first *prompt* fails. `diagnose` sends a real prompt and prints the whole
-delta between a pane and your terminal: the resolved argv, whether a private
-config dir was used or refused, which environment variables reach the agent
-(names only — values are never printed, so it is safe to paste), and on
-failure **the adapter's own stderr**, which `acp.py` has always captured and
-until now only ever used one line of.
-
-**The confirmed cause, 2026-08-31 — read from the vendor's own source, after
-four theories that were not:**
-
-On macOS, Claude Code stores its OAuth session in the **system Keychain**,
-and the service name it looks up is generated by this function in
-`spike/node_modules/@anthropic-ai/claude-agent-sdk/cli.js`:
-
-```js
-function Kg(A=""){
-  let q=O8();
-  let Y = !process.env.CLAUDE_CONFIG_DIR ? "" :
-          `-${sha256(q).digest('hex').substring(0,8)}`;
-  return `Claude Code${D4().OAUTH_FILE_SUFFIX}${A}${Y}`
-}
-```
-
-**Simply setting `CLAUDE_CONFIG_DIR` — to any value — switches the lookup to
-a different, suffixed Keychain service name.** One that no interactive
-`claude login` has ever provisioned, because that login only ever runs with
-the variable unset. Corral's whole `.credentials.json`-copying mechanism is
-irrelevant to this: it was never a credential-*content* problem, which is
-exactly why a byte-identical, correctly-permissioned copy of the file
-changed nothing, and why the two content-focused fixes before this one
-(checking for an empty token, resyncing a stale copy) measurably did not
-help — a positive control proved the copied token was real and identical to
-the working one on both sides of the failure.
-
-**On macOS, Corral now gives up the per-pane permission posture for the
-Claude lane entirely** — the same fallback already used when no credential
-can be found at all — and the pane runs under your real `~/.claude`, where
-its actual Keychain-backed login lives. `postureEnforced: false`, the
-`agent-set` pill, and it should just work. Provisioning a matching Keychain
-entry per pane to restore per-pane isolation is possible in principle; it
-means Corral writing OAuth tokens into your OS Keychain under synthetic
-identities, which is a materially bigger decision than anything else in this
-project and one to make deliberately, not one this fix makes for you.
-
-Superseded, kept only as a record of the earlier, wrong turns:
-
-1. An empty-string token. `~/.claude/.credentials.json` can exist, parse, and
-   carry every expected key with the values `""` — complete by every
-   structural test, authenticating nothing. Fixed by checking for a non-empty
-   token rather than for the file's existence.
-2. **A stale copy.** The private config dir copies your credential once and,
-   until this fix, never again. Claude Code rotates OAuth tokens — if yours
-   rotates while a pane (or `diagnose`, which reuses one fixed directory
-   across every run) is holding an older copy, that copy's refresh token goes
-   invalid at the auth server while looking, structurally, exactly like a
-   working one: real length, a real future `expiresAt`. `seed_config_dir()`
-   now re-copies whenever the source credential is newer than the copy
-   (compared by mtime, cheap, no file contents read to decide). It will not
-   clobber a copy that is currently newer than the source — a running pane
-   may have refreshed its own copy more recently than your terminal did, and
-   overwriting that with an older file would break a working pane to fix one
-   that already recovered on its own.
-
-**The resync fix for #2 did not resolve the case it was written for.**
-Said plainly rather than left to be discovered: re-running `diagnose` after
-that fix shipped showed the same failure with the exact same `expiresAt` as
-before — proof the token had never rotated between runs, so there was
-nothing for a resync to fix. What survived: a byte-identical, valid-looking
-credential still failing only when read through the private config dir
-rather than `~/.claude` directly. That points at the directory, not the
-file's content.
-
-Two things followed from that, offered as an audit and a hardening rather
-than a fourth confident theory: `diagnose` now compares the real and private
-directories' Unix permissions (plain `mkdir` can leave a directory at `0o775`
-— group- and world-readable, which some credential-handling CLIs refuse to
-trust a token inside of), and confirms the copy is byte-identical to the
-source by hash. `seed_config_dir()` now locks the private directory to
-`0o700` on every call — cheap, cannot hurt, not yet proven to be the actual
-cause of anything.
-
-If your terminal `claude` works and panes do not, run `diagnose` and read the
-whole report, including the permission audit — that is where the next answer
-is most likely to be.
-
-Then check this:
-
-```bash
-env | grep -iE 'ANTHROPIC|OPENAI|GEMINI|XAI|GROK'
-```
-
-A vendor key exported in the shell that started the hub silently **outranks**
-the login you verified — the agent runs as a different identity than the one
-the picker described, and `/usage` shows token statistics instead of your
-subscription page because it is in API-key mode. Since 2026-08-31 panes strip
-`ANTHROPIC_*`, `OPENAI_*`, `GEMINI_*`, `GOOGLE_API*`, `XAI_*`, `GROK_*` and
-`CLAUDE_CODE_OAUTH*` from the agent's environment and `doctor` says so when it
-does. `CORRAL_LIGHT_ALLOW_VENDOR_ENV=1` keeps them if API-key auth is what you
-want.
-
-The second thing to check is the private-config-dir case: a pane runs under a
-`CLAUDE_CONFIG_DIR` Corral owns (that is what carries the per-pane permission
-posture), seeded by copying `~/.claude/.credentials.json`. On macOS that file
-need not exist — Claude Code can keep the OAuth in the Keychain — so the
-private directory got created with no credential in it. Since 2026-08-31 the
-seeding refuses in that case and the pane runs under your own `~/.claude`
-instead; it then reports `postureEnforced: false` and wears the `agent-set`
-pill, because whatever your ambient `defaultMode` is, is what you get. Losing
-the per-pane posture is a real cost and it is the smaller one — a pane that
-cannot run has no posture either.
-
-**The Claude lane is probed live, not guessed at.** Every other lane is gated
-on a credential file — which is a guess about where a vendor keeps its secret,
-and for Claude on macOS that guess is wrong (the login can live in the
-Keychain). So instead of a better guess, `doctor` and the picker run the real
-handshake: spawn the adapter, `initialize`, `session/new`, read what comes
-back, kill it. Cached 120 s, ~2 s cold.
-
-That one call answers both questions that matter, which is why it exists:
-**can this lane authenticate here**, and **what models and effort levels does
-it offer** — because a lane's model/effort lists come from nowhere else but a
-completed `session/new`. Before this, a lane that could not authenticate could
-never fill its own pickers, so a fresh box showed a disabled "Default (agent
-decides)" for both and there was no way to choose Opus or an effort level
-until some session had already succeeded. If the handshake fails, the picker
-shows **the vendor's own words** ("Authentication required"), not a paraphrase.
-
-**Antigravity is Linux x86-64 only.** Google publishes this ACP server under
-`.../releases/linux/`; the darwin and mac paths 404 (probed 2026-08-31). The
-installer refuses on any other platform rather than putting a binary on disk
-that cannot exec — because `--install` succeeding is what would then make
-`doctor` report the lane **ok**, which is worse than the honest "not
-installed" it replaced. The picker checks the platform too, so a hand-copied
-or home-synced binary cannot produce a lying lane either. If a build for your
-platform appears, pinning it is an operator decision: set `RELEASE`, `URL` and
-`ARCHIVE_SHA256` in `install_antigravity_acp.py` to the real archive and its
-verified digest.
-
-### Run it as a service
-
-- **Linux:** `corral-light.service` — a systemd *user* unit; its header carries
-  the three install commands, plus `loginctl enable-linger` for a headless box.
-- **macOS:** `com.cvande.corral-light.plist` — a launchd user agent. Paths in
-  it are this host (`/Users/craigvandeputte/corral-light`, Homebrew python3).
-  Edit ProgramArguments, WorkingDirectory, and both log paths for another
-  account.
-
-Both are USER services on purpose. Every lane authenticates as the logged-in
-user and every pane runs with that user's filesystem access, so running this as
-root would hand a browser a root shell behind a pairing gate.
+Diagnostic output includes command names, configuration details, environment variable names, connection results, and assistant error messages. It never prints credential values.
 
 ## Configuration
 
-| variable | default | |
-|---|---|---|
-| `CORRAL_LIGHT_BIND` | `127.0.0.1` | **not** `0.0.0.0`, unlike ranch's Corral (see below) |
-| `CORRAL_LIGHT_PORT` | `8098` | the full Corral uses 8099 |
-| `CORRAL_LIGHT_STATE` | `~/.local/share/corral-light` | panes, transcripts, the session key |
-| `CORRAL_OLLAMA_URL` | `http://127.0.0.1:11434` | point elsewhere to borrow another node's models |
-| `CORRAL_CLAUDE_ADAPTER` | `spike/node_modules/.bin/claude-agent-acp` | |
-| `CORRAL_CONTENT_CONFIG` | `~/.config/corral-light/content.json` | which directories ⌘K indexes |
-| `CORRAL_NODE_BIN` | `~/.hermes/node/bin` *if it exists* | ignored when absent, so a stock Mac's PATH node wins |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CORRAL_LIGHT_BIND` | `127.0.0.1` | Network address for the local server. |
+| `CORRAL_LIGHT_PORT` | `8098` | Web interface port. |
+| `CORRAL_LIGHT_STATE` | `~/.local/share/corral-light` | Saved conversations, history, and session security data. |
+| `CORRAL_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server address. |
+| `CORRAL_CLAUDE_ADAPTER` | `spike/node_modules/.bin/claude-agent-acp` | Claude adapter location. |
+| `CORRAL_CONTENT_CONFIG` | `~/.config/corral-light/content.json` | Directories searched by `⌘K`. |
+| `CORRAL_NODE_BIN` | An available Node.js installation | Optional Node.js path override. |
 
-**Why loopback by default.** Ranch's Corral binds `0.0.0.0` on the argument
-that the ranch LAN is first-class local and the boundary is the pairing gate,
-not the network. Light runs on a machine that *moves between networks*, and a
-coffee-shop LAN did not earn that ruling. Reach it from another ranch machine
-with `ssh -N -L 8098:127.0.0.1:8098 dogma-2` — which also makes it a secure
-context, so the PWA install prompt actually appears. Setting
-`CORRAL_LIGHT_BIND=0.0.0.0` is a decision to make deliberately, not a default
-to inherit.
+The default address is local-only by design. If you change `CORRAL_LIGHT_BIND` to expose the server on a network, protect access with your network controls and pairing code.
 
-## Running both on one host
+## Run in the background
 
-Yes — Light is built to sit next to the full Corral on the same machine, and
-the separation is audited by a test rather than asserted here.
+The repository includes service definitions for running Corral Light as your signed-in user:
 
-| | full Corral | Light |
-|---|---|---|
-| port | 8099 | **8098** |
-| state | `~/.local/share/corral` | `~/.local/share/corral-light` |
-| cookie | `corral` | `corral_light` |
-| MCP config | `~/.config/corral/mcp.json` | `~/.config/corral-light/mcp.json` |
-| codex home | `~/.config/corral/codex-home` | `~/.config/corral-light/codex-home` |
-| CLI | `corral` | `corral-light` |
-| unit | `corral.service` | `corral-light.service` / the plist |
+- **Linux:** `corral-light.service` for systemd user services
+- **macOS:** the included launchd plist
 
-Separate state dirs matter more than they look: they hold the **session key**,
-so a shared one would let either hub mint a cookie the other accepts, and each
-would restore the other's panes with lanes it does not have.
+Update executable paths, the working directory, and log paths for your installation. Do not run the service as root; assistants need the permissions and sign-ins of the user who starts them.
 
-**What they genuinely share, and what that costs:**
+## Troubleshooting
 
-- **Vendor logins.** Grok's CLI state and Antigravity's OAuth are the vendor's,
-  not Corral's — one login serves both, which is the good case. The Antigravity
-  *binary* is shared too (`~/.local/lib/corral/antigravity-acp`), so installing
-  it from either build is enough.
-- **Codex is the exception**: separate `CODEX_HOME`s means a separate
-  `codex login --device-auth` for each. Deliberate — a shared codex home is
-  how a pane ends up talking to whatever model the *other* config pinned.
-- **Claude credentials — the one to actually watch.** Both builds copy
-  `~/.claude/.credentials.json` into each pane's own config dir at pane
-  creation, and that copy cannot be refreshed from the original. Two hubs means
-  more independent copies of one rotating OAuth token, alongside your terminal
-  Claude Code as a third. Observed live 2026-08-31: a fresh pane died with
-  `OAuth session expired and could not be refreshed` twenty-eight seconds after
-  the host credential's own `expiresAt`. This is inherited upstream behaviour,
-  not something Light introduced, and it is not made *worse* by a second hub so
-  much as made more likely to be noticed. If a Claude pane dies this way, the
-  fix is to refresh the login on the host and start a new pane.
-- **Env var NAMES overlap** (`CORRAL_CODEX_HOME`, `CORRAL_MCP_CONFIG`,
-  `CORRAL_NODE_BIN`, `CORRAL_CLAUDE_ADAPTER`, `CORRAL_OLLAMA_URL`). The
-  *defaults* differ correctly, but exporting one in a shell that launches both
-  points both at the same thing. Set them in the unit file, not in `.bashrc`.
+Use the command that matches the problem:
 
-## Verified live, 2026-08-31
+~~~bash
+./corral-light doctor        # Check installation and sign-in requirements
+./corral-light diagnose      # Test a complete assistant conversation
+python3 content.py status    # Check search configuration and index status
+~~~
 
-Not "the tests pass" — run end to end against real agents before this shipped
-(P13):
+If an assistant works in its normal terminal tool but not in Corral Light:
 
-- **Ollama lane** — pane opened against the .21 node, catalog seeded with its 19
-  real models, prompt sent, answer streamed back and rendered as markdown in the
-  browser over SSE.
-- **Claude lane** — pane opened under `strict`, asked to write a file; the
-  permission request arrived in the rail carrying its title, digest, byte
-  count and three real options; answering `allow_once` over the API delivered
-  it and `proof.txt` appeared on disk with the right contents.
-- **Restart** — hub killed and restarted; closed panes came back as archive
-  rows, transcripts intact.
-- **Browser** — pairing screen → paired → app renders, one JS bundle, no
-  console errors beyond the expected pre-pairing 401.
-- **⌘K + attach** — indexed the real vault (683 pages, FTS5, 2 ms queries);
-  ⌘K in the browser → `ranch letter` → ↵ put the note's **path** into a Claude
-  pane's composer; the same hit into an **Ollama** pane quoted a 2,798-char
-  excerpt instead, and that chat-only lane — which cannot read a file — then
-  answered a question about the note correctly from the quoted text alone.
-  Nothing was sent in either case until the composer was submitted by hand.
-  Fixed while testing: with exactly one pane open, every hit offered "open a
-  new pane" because `S.focus` is only set by clicking a roster row — an attach
-  target that ignores the only conversation on screen.
-- **Clean room** — the tracked tree copied to an empty directory with an empty
-  `HOME` under `env -i`: hub started, browser paired, "New conversation"
-  defaulted its Directory to that box's own home, opened an Ollama pane and
-  answered. Two bugs this caught, both invisible from the build machine: the
-  new-conversation dialog hardcoded `/home/cvande/Github/CC` (a directory that
-  exists on exactly one computer), and `mcp.py` still read the FULL Corral's
-  `~/.config/corral/mcp.json`. Both are now covered by tests.
+1. Run `diagnose` and read the complete error output.
+2. Confirm that the same operating-system user starts the server and the assistant tool.
+3. Check for exported provider credentials in the server’s environment.
+4. Sign in again and create a new conversation.
 
-## Tests
+If the browser cannot connect, confirm that the server is running and that the browser uses the configured port.
 
-```bash
+## Development
+
+Run the test suite with Python’s standard library:
+
+~~~bash
 python3 -m unittest test_corral_light -v
-```
+~~~
 
-Half of them are structural, and those are the ones that earn their keep: no
-module reaches into the CC workspace, no fleet module is imported or present,
-`hub.py` serves only Live routes, and **every `/api/...` path the front end
-calls is one the server actually serves**. The front end here is a *trim* of a
-4,514-line file — a leftover `api('/api/attention')` would not be a syntax
-error, it would be a silent 404 on every render, which is exactly the class of
-bug a trim produces.
+The tests cover installation checks, assistant discovery, routing, saved conversations, approval handling, search, security boundaries, and browser/server API compatibility.
 
-## Where the reasoning lives
+Key files:
 
-The comments in `sessions.py`, `acp.py` and `static/app.js` carry the measured
-history behind decisions that look arbitrary — why a turn is never ended by a
-clock, why a permission's payload lives with the pending request instead of in
-the bounded event ring, why the composer is built once per pane. That history
-is upstream's, kept because deleting the reason is how a fix gets undone by
-someone who only sees the code. Upstream: `../corral/` (`DESIGN.md`,
-`reviews/`, and its README's lane table).
+- `hub.py` — web server and API
+- `sessions.py` — conversation storage and assistant processes
+- `acp.py` — Agent Client Protocol integration
+- `content.py` — file indexing and search
+- `static/` — browser interface
+- `test_corral_light.py` — automated tests
+
+Contributions should keep the project lightweight, local by default, and explicit about what an assistant can access or do.
