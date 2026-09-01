@@ -1,44 +1,26 @@
 # Corral Light
 
-> A simple workspace for using several AI coding assistants side by side.
+**The window for AIOS.**
 
-Corral Light lets you keep multiple AI conversations open in one browser window. Each conversation has its own working directory, assistant process, model settings, and saved history.
+A local workspace for the AI coding assistants you already run, side by side, with one permission rail. The floor underneath — schedule, vault, run log, memory — is [AI-OS Seed](https://github.com/cvp1/ai-os-seed). Two repos, one folder.
 
-It is designed for developers who want a lightweight local interface over the AI tools they already use.
+## Install
 
-## What you get
+You already have Claude Code. Python 3.9+.
 
-- Multiple conversations in one window
-- Saved conversations that return after a restart
-- Reviewable approval requests for file changes and shell commands
-- Clear setup checks before an assistant is selected
-- Fast search across notes and text files
-- File attachments that work with both coding assistants and chat-only models
-- Local model support through Ollama
-- An installable web app experience
+One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is a second brain.
 
-## Quick start
+1. Install Seed into `~/aios` (or `--into` a workspace you already have — that folder then *is* `~/aios` for this purpose). See the Seed README. Do not install Seed into this repo.
+2. Clone this repo, then:
+   ```
+   ./corral-light doctor
+   ./corral-light serve
+   ```
+   Open http://127.0.0.1:8098, then in another terminal `./corral-light pair <code>` with the code on screen.
+3. New Claude conversation. Working directory = `~/aios`.
+4. Done when `/status` answers.
 
-You need Python 3.9 or newer.
-
-Clone the repository, then run:
-
-~~~bash
-cd corral-light
-
-./corral-light doctor
-./corral-light serve
-~~~
-
-Open `http://127.0.0.1:8098` in your browser. The server displays a short pairing code. In a second terminal, run:
-
-~~~bash
-./corral-light pair ABC-DEF
-~~~
-
-Replace `ABC-DEF` with the code shown in your browser. The server runs in the foreground. It creates its data directory at `~/.local/share/corral-light` the first time it starts.
-
-`doctor` lists the assistants that are ready to use and explains what is missing for the others.
+The server runs in the foreground. Data lives at `~/.local/share/corral-light` — not in `~/aios`, and not in this clone. `doctor` lists the assistants that are ready and explains what is missing for the others.
 
 ## Supported assistants
 
@@ -54,9 +36,9 @@ Corral Light connects to software installed and signed in on your computer.
 
 The availability check is intentionally honest: an assistant is marked unavailable when a required program, login, or platform is missing. If an assistant passes that check but fails to answer, run:
 
-~~~bash
+```
 ./corral-light diagnose [assistant]
-~~~
+```
 
 ## Search and attach files
 
@@ -64,12 +46,12 @@ Press `⌘K` to search open conversations, archived conversations, notes, and ot
 
 By default, Corral Light searches `~/notes` when that directory exists. Add other directories in `~/.config/corral-light/content.json`:
 
-~~~json
+```json
 [
   {"key": "notes", "label": "Notes", "root": "~/notes"},
   {"key": "documents", "label": "Documents", "root": "~/Documents"}
 ]
-~~~
+```
 
 The search index includes Markdown and plain-text files. It skips hidden directories and `node_modules`, refuses symlinks that leave the configured directories, and applies limits to the number and size of indexed files. The SQLite index is temporary derived data and can be deleted; it will be rebuilt from your files.
 
@@ -82,27 +64,27 @@ Nothing is sent until you review the composer and press send.
 
 Manage the index from a terminal:
 
-~~~bash
+```
 python3 content.py status
 python3 content.py search "your query"
 python3 content.py refresh
-~~~
+```
 
 ## Security
 
 The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
 
-~~~bash
+```
 ssh -N -L 8098:127.0.0.1:8098 user@example.com
-~~~
+```
 
 When an assistant asks to write a file or run a command, Corral Light pauses it and shows the exact request, byte count, and SHA-256 digest. Requests too large to display cannot be approved. The browser cannot bypass this check because the server enforces it.
 
 Corral Light removes common provider credential variables from assistant processes by default. This prevents a shell environment from silently changing which account an assistant uses. To intentionally allow those variables through, set:
 
-~~~bash
+```
 CORRAL_LIGHT_ALLOW_VENDOR_ENV=1
-~~~
+```
 
 Diagnostic output includes command names, configuration details, environment variable names, connection results, and assistant error messages. It never prints credential values.
 
@@ -133,11 +115,11 @@ Update executable paths, the working directory, and log paths for your installat
 
 Use the command that matches the problem:
 
-~~~bash
+```
 ./corral-light doctor        # Check installation and sign-in requirements
 ./corral-light diagnose      # Test a complete assistant conversation
 python3 content.py status    # Check search configuration and index status
-~~~
+```
 
 If an assistant works in its normal terminal tool but not in Corral Light:
 
@@ -152,9 +134,9 @@ If the browser cannot connect, confirm that the server is running and that the b
 
 Run the test suite with Python’s standard library:
 
-~~~bash
+```
 python3 -m unittest test_corral_light -v
-~~~
+```
 
 The tests cover installation checks, assistant discovery, routing, saved conversations, approval handling, search, security boundaries, and browser/server API compatibility.
 
@@ -167,4 +149,4 @@ Key files:
 - `static/` — browser interface
 - `test_corral_light.py` — automated tests
 
-Contributions should keep the project lightweight, local by default, and explicit about what an assistant can access or do.
+This repo is the window. It does not import Seed’s `_lib`, fleet, scheduler, or vault, and it does not add hub routes for `/status`. Contributions should keep the project lightweight, local by default, and explicit about what an assistant can access or do.
