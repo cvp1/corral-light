@@ -475,6 +475,21 @@ class LayoutBroadcasts(unittest.TestCase):
                             for e in reorder_events))
 
 
+class MobileSurface(unittest.TestCase):
+    """The narrow viewport still exposes the core live-tab actions."""
+
+    def test_mobile_keeps_new_search_and_navigation_controls(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        for control in ("mobile-actions", "mobile-new", "mobile-search",
+                        "mobile-pane"):
+            self.assertIn(control, html)
+        self.assertIn(".mobile-actions", css)
+        self.assertIn("@media(max-width:820px)", css)
+        self.assertIn("wireMobileActions", js)
+
+
 class ContentIndex(unittest.TestCase):
     """The index behind ⌘K. Runs against a scratch tree, never the real vault."""
 
@@ -509,6 +524,15 @@ class ContentIndex(unittest.TestCase):
         hits = self.content.search("fox")["hits"]
         self.assertEqual([h["title"] for h in hits], ["Alpha Note"])
         self.assertIn("fox", hits[0]["snippet"].lower())
+
+    def test_index_reads_only_the_configured_file_bound(self):
+        large = "x" * (self.content.MAX_FILE + 1000)
+        (self.notes / "large.txt").write_text(large)
+        self.content.refresh(force=True)
+        row = self.content.get("notes:large.txt")
+        self.assertLessEqual(len(row["body"]), self.content.MAX_FILE)
+        source = (ROOT / "content.py").read_text(encoding="utf-8")
+        self.assertIn("fh.read(MAX_FILE)", source)
 
     def test_dotdirs_are_not_indexed(self):
         """A `.hidden/secret.md` matching the query must not surface.
@@ -2183,6 +2207,19 @@ class SshShellIsBounded(unittest.TestCase):
         sh = ssh_acp.Shell(["bash", "--noprofile", "--norc"])
         self.addCleanup(sh.kill)
         return sh
+
+    def test_reader_treats_closed_pipe_as_normal_eof(self):
+        import queue
+        import ssh_acp
+
+        class ClosedStdout:
+            def readline(self, _limit):
+                raise ValueError("I/O operation on closed file")
+
+        output = queue.Queue()
+        ssh_acp.Shell._reader(
+            types.SimpleNamespace(stdout=ClosedStdout()), output)
+        self.assertIsNone(output.get_nowait())
 
     def test_a_command_runs_and_reports_its_exit_status(self):
         import ssh_acp

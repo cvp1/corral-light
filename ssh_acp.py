@@ -108,12 +108,17 @@ class Shell:
 
     @staticmethod
     def _reader(proc, out_queue):
-        while True:
-            line = proc.stdout.readline(MAX_LINE)
-            if not line:
-                break
-            out_queue.put(line)
-        out_queue.put(None)          # EOF marker
+        try:
+            while True:
+                try:
+                    line = proc.stdout.readline(MAX_LINE)
+                except (OSError, ValueError):
+                    break            # intentional pipe closure during kill()
+                if not line:
+                    break
+                out_queue.put(line)
+        finally:
+            out_queue.put(None)      # EOF marker
 
     def kill(self):
         # Close the pipes and REAP, not just signal. The ported version set
