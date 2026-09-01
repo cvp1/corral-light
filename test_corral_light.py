@@ -1561,6 +1561,123 @@ class PermissionDigestIsConsent(unittest.TestCase):
         self.assertIn("digest", hub.split("/api/session/permission", 1)[1][:400])
 
 
+class RefusalIsNeverGatedOnTheDigest(unittest.TestCase):
+    """The digest guards GRANTING. Gating refusal too is a deadlock.
+
+    Measured 2026-08-31, on the very pane that was committing the digest
+    change: Craig's browser still held the app.js from before it shipped, so
+    it posted no digest at all. Every button on the card failed -- including
+    "reject" -- and the agent sat blocked on a permission that could no
+    longer be answered in either direction. He had to kill the pane.
+
+    Refusal is the fail-closed default. Nothing is protected by making it
+    hard to say no, and an agent stuck waiting is the harm. The oversize
+    rule beside it always got this right (`and not kind.startswith("reject")`);
+    the digest check shipped without the same clause.
+    """
+
+    def _pane(self, oversize=False):
+        return PermissionDigestIsConsent._pane(
+            PermissionDigestIsConsent(), oversize=oversize)
+
+    def test_a_refusal_with_no_digest_at_all_still_delivers(self):
+        p = self._pane()
+        self.assertTrue(p.answer("r1", "reject_once"))
+        self.assertNotIn("r1", p.pending)
+
+    def test_a_refusal_with_a_stale_digest_still_delivers(self):
+        """The exact stale-tab case: the browser holds a digest from an
+        earlier request that reused this same requestId."""
+        p = self._pane()
+        self.assertTrue(p.answer("r1", "reject_once", digest="0000"))
+        self.assertNotIn("r1", p.pending)
+
+    def test_an_oversize_request_can_still_be_refused_with_no_digest(self):
+        p = self._pane(oversize=True)
+        self.assertTrue(p.answer("r1", "reject_once"))
+        self.assertNotIn("r1", p.pending)
+
+    def test_the_refusal_message_tells_you_what_to_do(self):
+        """A refused GRANT must say the way out, or the card reads as broken."""
+        p = self._pane()
+        with self.assertRaises(ValueError) as cm:
+            p.answer("r1", "allow_once", digest="0000")
+        self.assertIn("Reload", str(cm.exception))
+
+
+class ARequestIdIsNotUniqueInATranscript(unittest.TestCase):
+    """A requestId is the agent's own JSON-RPC id.
+
+    JSON-RPC only requires an id to be unique among a peer's IN-FLIGHT
+    requests. Grok numbers every permission it asks `0`: measured on pane
+    495d803d, 2026-08-31 -- two permission cards 18,000 events apart, both
+    requestId "0", in one transcript.
+
+    So "is this requestId pending?" is true of every stale card sharing the
+    id, and each of those carries the digest of ITS OWN bytes. The browser
+    re-armed an hour-old card; clicking it posted the hour-old digest and the
+    server refused it -- correctly, and (before the fix above) unanswerably.
+    """
+
+    def test_the_card_is_told_whether_it_is_live_not_left_to_guess(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("function permCard(p, d, outcome, live)", js)
+        self.assertIn("const answered = !live;", js)
+        self.assertNotIn("const answered = !p.pending.includes(d.requestId);", js,
+                         "deriving liveness from the id alone is the bug")
+
+    def test_outcomes_are_paired_by_position_not_by_id(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("permOutcomes.set(open, e)", js)
+        self.assertNotIn("permOutcomes.set((e.data || {}).requestId, e)", js)
+        self.assertIn("permOutcomes.get(e.seq)", js)
+
+    def test_a_reused_id_releases_the_old_waiter(self):
+        """Assigning over a live slot stranded the old thread on an Event
+        nothing would ever set -- PERMISSION_TIMEOUT is None, so it waited
+        forever and the agent's earlier request was never replied to."""
+        import acp, threading
+        c = acp.AcpClient.__new__(acp.AcpClient)
+        c._perm_answers = {}
+        c._last_activity = 0.0
+        c.alive = True
+        c._closed = False
+        events, perms, written = [], [], []
+        c.on_event = lambda k, d: events.append((k, d))
+        c.on_permission = perms.append
+        c._write = written.append
+        first = threading.Event()
+        c._perm_answers["0"] = {"ev": first, "option": None}
+
+        c._on_request({"method": "session/request_permission", "id": 0,
+                       "params": {"toolCall": {"title": "second"}}})
+
+        self.assertTrue(first.is_set(), "the stranded waiter must be released")
+        self.assertIn(("permission_expired",
+                       {"requestId": "0",
+                        "reason": "the agent reused this request id"}), events)
+        self.assertEqual(len(perms), 1)
+        # And the NEW slot is the one now under the key, not the old one.
+        self.assertIsNot(c._perm_answers["0"]["ev"], first)
+
+    def test_the_old_waiter_does_not_pop_the_new_slot(self):
+        """A plain pop(key) on wake removed whatever was under the id -- after
+        a reuse that is the NEXT request's slot, so answering the new card
+        found nothing to wake and hung the same way the reuse used to."""
+        import acp, threading
+        c = acp.AcpClient.__new__(acp.AcpClient)
+        c._perm_answers = {}
+        c.alive = True
+        c._write = lambda msg: None
+        old_ev = threading.Event()
+        new_ev = threading.Event()
+        c._perm_answers["0"] = {"ev": new_ev, "option": None}   # the survivor
+        old_ev.set()                                            # old one released
+        c._await_permission("0", 0, {}, old_ev)
+        self.assertIn("0", c._perm_answers, "the new slot must survive")
+        self.assertIs(c._perm_answers["0"]["ev"], new_ev)
+
+
 class StaticPathContainment(unittest.TestCase):
     """A string prefix check is not a containment check."""
 

@@ -1674,12 +1674,31 @@ class Pane:
         # WHICH prompt; the digest names WHAT bytes were on screen. Without
         # this check an approval proves only that someone holding the cookie
         # knew the id — which is not P17.
+        #
+        # It gates GRANTING only. Refusal is the fail-closed default and can
+        # never be the harmful direction, so nothing is protected by making it
+        # hard — and a great deal is broken. Craig, 2026-08-31, on the pane
+        # that was committing this very change: "It says the digest on this
+        # approval does not match the bytes on the command." His browser was
+        # holding an app.js from before the digest shipped, so it posted no
+        # digest at all; with refusal gated too, EVERY button on the card
+        # failed and the agent sat blocked until he killed the pane. A gate
+        # that can withhold approval but cannot deliver a refusal is not a
+        # consent gate, it is a deadlock with a security story attached. Same
+        # shape as the oversize rule below, which already got this right.
+        #
+        # Which option refuses is decided HERE, from the agent's own declared
+        # `kind`, never from anything the client asserts — a stale client is
+        # exactly the case this clause exists for, so it gets no say in it.
         shown = rec.get("digest") or ""
-        if not shown or digest != shown:
+        granting = not kind.startswith("reject")
+        if granting and (not shown or digest != shown):
             raise ValueError(
                 "the digest on this approval does not match the bytes that "
-                "were shown — an approval proves only what you could see.")
-        if rec.get("oversize") and not kind.startswith("reject"):
+                "were shown — an approval proves only what you could see. "
+                "Reload the page and answer the card again; refusing works "
+                "either way.")
+        if rec.get("oversize") and granting:
             raise ValueError(
                 "this request was too large to display, so it cannot be "
                 "approved here — only refused. An approval proves only what "

@@ -329,6 +329,23 @@ class AcpClient:
                     "reason": f"more than {MAX_PENDING_PERMISSIONS} "
                               f"permission requests pending"})
                 return
+            stale = self._perm_answers.pop(key, None)
+            if stale is not None:
+                # The agent reused an id whose previous request we are STILL
+                # holding. A JSON-RPC id only has to be unique among a peer's
+                # in-flight requests, and Grok numbers every permission it asks
+                # `0` (measured 2026-08-31), so this is a live case, not a
+                # theoretical one. Assigning over the slot stranded the old
+                # waiter on an Event nothing would ever set — PERMISSION_TIMEOUT
+                # is None, so that thread waits forever and the agent's earlier
+                # request is never replied to. Release it first, with no option
+                # selected: _await_permission then writes nothing (fail-closed)
+                # and the owner is told it expired instead of the card simply
+                # vanishing.
+                stale["ev"].set()
+                self.on_event("permission_expired", {
+                    "requestId": key,
+                    "reason": "the agent reused this request id"})
             ev = threading.Event()
             self._perm_answers[key] = {"ev": ev, "option": None}
             self.on_permission({"requestId": key, **params})
@@ -351,8 +368,15 @@ class AcpClient:
         never synthesize an answer at all, in either direction.
         """
         ev.wait(PERMISSION_TIMEOUT)
-        slot = self._perm_answers.pop(key, {})
-        option = slot.get("option")
+        # Pop only OUR OWN slot. A plain pop(key) would remove whatever is
+        # under that key, and after an id reuse (above) that is the NEXT
+        # request's slot — answering the new card would then find nothing to
+        # wake, and it would hang exactly the way the reuse itself used to.
+        cur = self._perm_answers.get(key)
+        slot = cur if cur is not None and cur.get("ev") is ev else None
+        if slot is not None:
+            self._perm_answers.pop(key, None)
+        option = (slot or {}).get("option")
         if not self.alive or not option:
             # Either the process is gone (the reader's exit path already told
             # the owner "agent exited"), or we were woken without a selection.

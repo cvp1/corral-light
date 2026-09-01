@@ -528,10 +528,29 @@ function renderLog(p) {
   // word "answered". Resolve from the transcript itself, over the full
   // visible ring (not just the capped slice below), so history replay gets
   // the same answer live SSE handling already computes for `p.pending`.
-  const permOutcomes = new Map();
+  //
+  // Paired by POSITION, not by requestId alone. A requestId is the agent's own
+  // JSON-RPC id, unique only among the requests it has IN FLIGHT — it is free
+  // to reuse one the moment the previous is answered, and Grok reuses `0` for
+  // every permission it ever asks (measured on pane 495d803d, 2026-08-31: two
+  // cards 18,000 events apart, both requestId "0"). So one transcript holds
+  // many cards under one id. Keyed by id alone, every old card inherited the
+  // newest outcome — and, far worse, the LIVENESS test below (`is this id
+  // pending?`) said yes to all of them, so a card from an hour ago re-armed
+  // its buttons carrying an hour-old digest. Clicking it posted that stale
+  // digest and the server refused it, correctly and unanswerably. That is the
+  // freeze Craig hit. Walk forward instead and bind each permission to the
+  // first outcome that follows IT; whatever is still open at the end is the
+  // one — and the only one — the agent is actually blocked on.
+  const permOutcomes = new Map();   // permission event seq -> its outcome event
+  const permOpen = new Map();       // requestId -> seq of its unanswered card
   for (const e of visible) {
-    if (e.kind === 'permission_answered' || e.kind === 'permission_expired') {
-      permOutcomes.set((e.data || {}).requestId, e);
+    const rid = (e.data || {}).requestId;
+    if (e.kind === 'permission') {
+      permOpen.set(rid, e.seq);
+    } else if (e.kind === 'permission_answered' || e.kind === 'permission_expired') {
+      const open = permOpen.get(rid);
+      if (open !== undefined) { permOutcomes.set(open, e); permOpen.delete(rid); }
     }
   }
 
@@ -573,7 +592,13 @@ function renderLog(p) {
                    title: `plan · ${(d.entries || []).length} steps`, status: '' });
         break;
       // Never collapsed — the two things that must not be missed.
-      case 'permission': flush(); log.appendChild(permCard(p, d, permOutcomes.get(d.requestId))); break;
+      case 'permission': flush();
+        // Live only if this is the still-open card for that id AND the id
+        // is actionable right now. Both halves are load-bearing; see above.
+        log.appendChild(permCard(p, d, permOutcomes.get(e.seq),
+                                 permOpen.get(d.requestId) === e.seq &&
+                                 p.pending.includes(d.requestId)));
+        break;
       case 'dead': flush();
         log.appendChild(el('div', 'sys err', `agent stopped — ${d.reason || 'unknown'}`)); break;
       // Quiet unless you asked for detail.
@@ -612,8 +637,14 @@ function renderLog(p) {
 // The permission card. This is the load-bearing surface: it must show the
 // EXACT thing being approved, because an approval proves only what the human
 // could see (PRINCIPLES 17). ACP gives us rawInput and a structured diff.
-function permCard(p, d, outcome) {
-  const answered = !p.pending.includes(d.requestId);
+// `live` says whether THIS card is the one the agent is blocked on. It is
+// passed in, never derived from `p.pending` here: requestId is reused across a
+// pane's transcript (see renderLog), so "is that id pending?" is true of every
+// stale card sharing the id, and each of them carries a digest the server will
+// refuse. The rail passes true because it renders only the open card by
+// construction.
+function permCard(p, d, outcome, live) {
+  const answered = !live;
   const c = el('div', 'perm');
   c.appendChild(el('div', 'h', `Wants to: ${d.title || d.kind || 'act'}`));
 
@@ -1506,7 +1537,7 @@ function render() {
       c.appendChild(el('div', 'm', `${p.label} · ${p.cwd.split('/').pop()}` +
                                    (p.minimized ? ' · minimized' : '')));
       if (ev) {
-        c.appendChild(permCard(p, ev.data));
+        c.appendChild(permCard(p, ev.data, null, true));
       } else {
         // The payload aged out of the bounded ring. Never offer buttons for a
         // request whose contents can no longer be shown — an approval proves
