@@ -1916,6 +1916,132 @@ class MacosPlistIsThisHost(unittest.TestCase):
         self.assertIn("/opt/homebrew/bin/python3", text)
 
 
+class TheServiceRunsThisTree(unittest.TestCase):
+    """The 2026-09-01 bug bash, as a test.
+
+    The installed LaunchAgent got repointed at a superpowers worktree.
+    `spike/node_modules/` is gitignored, so that checkout had every tracked
+    file and NEITHER vendor adapter; the Claude and ChatGPT lanes both
+    reported "not installed" while grok/gemini/ollama stayed green, and the
+    shape of that — two frontier vendors, together, and nothing else — reads
+    as an auth outage rather than a wrong folder.
+
+    MacosPlistIsThisHost already guards the plist IN THE REPO. Nothing guarded
+    the INSTALLED copy, which is a file that leaves the repo and then drifts
+    from it silently and forever. That is the gap these tests close.
+    """
+
+    def _plist(self, program=None, workdir=None):
+        import plistlib
+        d = {}
+        if program:
+            d["ProgramArguments"] = ["/opt/homebrew/bin/python3", str(program)]
+        if workdir:
+            d["WorkingDirectory"] = str(workdir)
+        path = Path(tempfile.mkdtemp()) / "com.cvande.corral-light.plist"
+        with open(path, "wb") as fh:
+            plistlib.dump(d, fh)
+        return path
+
+    def test_the_matching_tree_is_silent(self):
+        """A correct host says nothing. This is the control that proves the
+        failing assertions below are detecting the tree and not just the
+        presence of a plist."""
+        import diagnose
+        tree = Path(tempfile.mkdtemp()).resolve()
+        plist = self._plist(tree / "hub.py", tree)
+        self.assertIsNone(diagnose.service_tree_problem(
+            root=tree, path=plist, label="nope.not.loaded"))
+
+    def test_a_worktree_in_program_arguments_is_caught(self):
+        import diagnose
+        root = Path(tempfile.mkdtemp()).resolve()
+        other = Path(tempfile.mkdtemp()).resolve()
+        plist = self._plist(other / "hub.py", other)
+        problem = diagnose.service_tree_problem(
+            root=root, path=plist, label="nope.not.loaded")
+        self.assertIsNotNone(problem)
+        self.assertIn(str(other), problem)
+        self.assertIn(str(root), problem)
+
+    def test_the_reason_names_the_gitignored_adapters(self):
+        """"Wrong path" alone does not explain why two SPECIFIC lanes vanished.
+        Without the node_modules sentence the operator has a discrepancy and no
+        mechanism, which is where the afternoon went."""
+        import diagnose
+        root = Path(tempfile.mkdtemp()).resolve()
+        plist = self._plist(Path(tempfile.mkdtemp()).resolve() / "hub.py")
+        problem = diagnose.service_tree_problem(
+            root=root, path=plist, label="nope.not.loaded")
+        self.assertIn("spike/node_modules/", problem)
+        self.assertIn("kickstart", problem)
+
+    def test_no_installed_agent_is_not_a_fault(self):
+        """Running hub.py by hand from a checkout is the SUPPORTED way to
+        preview a branch. Telling that developer their host is misconfigured
+        would train them to ignore this check."""
+        import diagnose
+        root = Path(tempfile.mkdtemp()).resolve()
+        self.assertEqual(diagnose.installed_service_trees(root / "absent.plist"), [])
+        self.assertIsNone(diagnose.service_tree_problem(
+            root=root, path=root / "absent.plist", label="nope.not.loaded"))
+
+    def test_the_interpreter_is_not_mistaken_for_the_tree(self):
+        """argv[0] is /opt/homebrew/bin/python3. Reading the tree off it would
+        report /opt/homebrew/bin on every correctly configured host."""
+        import diagnose
+        tree = Path(tempfile.mkdtemp()).resolve()
+        trees = diagnose.installed_service_trees(self._plist(tree / "hub.py"))
+        self.assertEqual(trees, [tree])
+
+    def test_the_repo_plist_passes_its_own_check(self):
+        """The file we ship must be the file that satisfies this. Otherwise
+        the documented fix (`cp` it into LaunchAgents) reinstalls a fault."""
+        import diagnose
+        self.assertIsNone(diagnose.service_tree_problem(
+            root=ROOT, path=ROOT / "com.cvande.corral-light.plist",
+            label="nope.not.loaded"))
+
+
+class UnavailableReasonsNameWhatWasChecked(unittest.TestCase):
+    """A lane's refusal is read by a human who will act on it. Naming a
+    location that was not probed sends them to a folder where everything is
+    fine — which is how the bug bash concluded the adapters were installed."""
+
+    def test_codex_names_the_path_it_probed(self):
+        import codex_launcher
+        real_adapter, real_here = codex_launcher.DEFAULT_ADAPTER, codex_launcher.HERE
+        stray = Path(tempfile.mkdtemp()).resolve()
+        codex_launcher.DEFAULT_ADAPTER = stray / "spike/node_modules/.bin/codex-acp"
+        codex_launcher.HERE = stray
+        self.addCleanup(setattr, codex_launcher, "DEFAULT_ADAPTER", real_adapter)
+        self.addCleanup(setattr, codex_launcher, "HERE", real_here)
+        os.environ.pop("CORRAL_CODEX_ACP", None)
+        reason = codex_launcher.unavailable_reason()
+        self.assertIn(str(stray), reason)
+        # The old text. It names a tree this process may not be running from.
+        self.assertNotIn("npm install in corral-light/spike", reason)
+
+
+class TheGeminiLaneAnswersPlatformFirst(unittest.TestCase):
+    """dogma-2 is a Mac; the pinned Antigravity server is a Linux x86-64
+    binary. "not installed: …/agy_acp_server.par" is true and misleading — it
+    invites an install that install_antigravity_acp itself refuses to perform.
+    The files are missing BECAUSE the platform cannot run them, so the
+    platform is the answer."""
+
+    def test_a_mac_is_told_the_platform_not_the_missing_file(self):
+        import sessions
+        from install_antigravity_acp import platform_problem
+        if platform_problem() is None:
+            self.skipTest("this host can actually run the pinned release")
+        gemini = [a for a in sessions.available_agents() if a["key"] == "gemini"]
+        self.assertEqual(len(gemini), 1)
+        self.assertFalse(gemini[0]["available"])
+        self.assertNotIn("not installed:", gemini[0]["why"])
+        self.assertIn("pinned Antigravity ACP release", gemini[0]["why"])
+
+
 class PairCodeIsNotPython(unittest.TestCase):
     """The pair CLI is the identity proof. Interpolating the code into
     `python -c` meant a quote in argv became arbitrary Python as Craig."""

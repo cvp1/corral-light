@@ -32,6 +32,8 @@ SECRETS
 import argparse
 import json
 import os
+import plistlib
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -41,6 +43,124 @@ import sessions
 
 
 SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
+
+# --- WHICH TREE IS ACTUALLY RUNNING ------------------------------------------
+# Craig, 2026-09-01: "we just finished a bug bash on corral light and now claude
+# and GPT don't show as available."
+#
+# Neither lane was broken. The installed LaunchAgent had been repointed at a
+# superpowers worktree, and `spike/node_modules/` is gitignored — so the
+# worktree had every tracked file and NEITHER vendor adapter. Both lanes
+# refused, correctly, with the path they had looked at. The other three lanes
+# resolve their binaries outside the tree, so the failure presented as "the two
+# frontier vendors stopped authenticating", which is a much scarier and
+# completely wrong hypothesis.
+#
+# The suite already asserts the REPO's plist is sane (MacosPlistIsThisHost).
+# Nothing asserted the INSTALLED one, and that is the gap the incident lived
+# in: an artifact copied out of the repo drifts from it silently and forever.
+# So this asks the two questions the bug bash could not answer in one line —
+# what will launchd run, and what is it running right now.
+LAUNCHD_LABEL = "com.cvande.corral-light"
+INSTALLED_PLIST = (Path.home() / "Library" / "LaunchAgents"
+                   / f"{LAUNCHD_LABEL}.plist")
+
+
+def installed_service_trees(path=INSTALLED_PLIST):
+    """Every tree the INSTALLED LaunchAgent would run out of, resolved.
+
+    `[]` when no agent is installed, which is NOT a fault: running hub.py by
+    hand from a checkout is the supported way to preview a branch, and a
+    developer doing that must not be told their host is misconfigured.
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = plistlib.load(fh)
+    except Exception:                               # noqa: BLE001 — absent, or not a plist
+        return []
+    trees = set()
+    for arg in data.get("ProgramArguments") or []:
+        # The interpreter is argv[0]; the tree is wherever the script lives.
+        if isinstance(arg, str) and arg.endswith(".py"):
+            trees.add(Path(arg).resolve().parent)
+    wd = data.get("WorkingDirectory")
+    if isinstance(wd, str) and wd:
+        trees.add(Path(wd).resolve())
+    return sorted(trees)
+
+
+def running_service_tree(label=LAUNCHD_LABEL):
+    """The tree the LIVE hub is running from, or None if it isn't running.
+
+    The plist says what launchd WILL run. This says what it IS running, and
+    they disagree for exactly as long as it takes someone to restart the
+    service — which is the window every "fixed it" claim lands in. Reporting
+    only the plist would have let this incident be declared closed while the
+    old process still held the port.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        printed = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True, text=True, timeout=10).stdout
+        pid = next(ln.split("=", 1)[1].strip() for ln in printed.splitlines()
+                   if ln.strip().startswith("pid ="))
+        args = subprocess.run(["ps", "-p", pid, "-o", "args="],
+                              capture_output=True, text=True, timeout=10).stdout
+    except Exception:                               # noqa: BLE001 — never a blocker
+        return None
+    for token in args.split():
+        if token.endswith(".py"):
+            return Path(token).resolve().parent
+    return None
+
+
+def service_tree_problem(root=None, path=INSTALLED_PLIST, label=LAUNCHD_LABEL):
+    """Why the service is not running THIS tree, or None if it is (or if no
+    service is installed here).
+
+    Names both trees and the consequence, because "wrong path" alone does not
+    tell you why two specific lanes vanished — the gitignored adapters do.
+    """
+    root = Path(root or sessions.ROOT).resolve()
+    stray = [t for t in installed_service_trees(path) if t != root]
+    live = running_service_tree(label)
+    problems = []
+    if stray:
+        problems.append(
+            f"the installed LaunchAgent runs {stray[0]}, not {root}")
+    if live is not None and live != root:
+        problems.append(f"the live process is running {live}, not {root}")
+    if not problems:
+        return None
+    return ("; ".join(problems) + ".\n"
+            "  spike/node_modules/ is gitignored, so a worktree or a stale "
+            "copy has NEITHER vendor adapter and the Claude and ChatGPT lanes "
+            "both report 'not installed' while grok/gemini/ollama look fine.\n"
+            f"  Fix: cp {root}/{LAUNCHD_LABEL}.plist ~/Library/LaunchAgents/ "
+            f"&& launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}\n"
+            "  To preview a branch instead, run it on another port from that "
+            "checkout (CORRAL_LIGHT_PORT=8099 python3 hub.py) and leave the "
+            "service alone.")
+
+
+def _service_report():
+    """Printed on every diagnose run, before any lane is touched: if this is
+    wrong, nothing below it is evidence about the tree you are editing."""
+    root = Path(sessions.ROOT).resolve()
+    _line("this tree", root)
+    installed = installed_service_trees()
+    _line("launchd will run",
+          ", ".join(str(t) for t in installed) if installed
+          else "(no LaunchAgent installed — running from source)")
+    live = running_service_tree()
+    _line("launchd is running", live if live is not None else "(not running)")
+    problem = service_tree_problem(root)
+    if problem:
+        print(f"\n  ✗ WRONG TREE — {problem}\n", flush=True)
+    return problem
+
 
 
 def _line(k, v):
@@ -235,6 +355,12 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
     _line("platform", f"{sys.platform} / {os.uname().machine}")
     _line("python", sys.version.split()[0])
     _line("cwd for this run", cwd)
+
+    # BEFORE the lane, deliberately. A lane report gathered from a tree the
+    # service is not running is a measurement of the wrong thing, and it looks
+    # exactly like a measurement of the right one.
+    print("\nSERVICE", flush=True)
+    _service_report()
 
     print("\nLANE", flush=True)
     _line("argv[0]", spec["argv"][0])

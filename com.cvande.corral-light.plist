@@ -13,6 +13,21 @@
   that user's filesystem access. Running this as root would give a browser on
   the LAN a root shell behind a pairing gate.
 
+  NEVER REPOINT THIS AT A WORKTREE (2026-09-01). To try a branch, run it in
+  the foreground from that checkout on another port —
+
+    cd <worktree> && CORRAL_LIGHT_PORT=8099 /opt/homebrew/bin/python3 hub.py
+
+  — and leave the service alone. Editing the installed copy of this file to
+  point at a worktree cost a bug bash an afternoon: `spike/node_modules/` is
+  gitignored, so a worktree has the Python but NEITHER vendor ACP adapter, and
+  the Claude and ChatGPT lanes both went dark while grok/gemini/ollama stayed
+  green — which reads as a vendor auth outage, not a wrong-folder mistake. A
+  foreground process on another port dies with the terminal that wanted it;
+  an edited plist outlives the session, and the next person to look has no
+  reason to suspect it. `python3 diagnose.py` now names the running tree in
+  its SERVICE section as its first output.
+
   RunAtLoad + KeepAlive, but NOT a launchd-managed restart on config change:
   a pane's transcript survives a restart (it is on disk) and the pane comes
   back detached, so a crash-loop is loud rather than destructive.

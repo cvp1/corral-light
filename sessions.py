@@ -907,7 +907,15 @@ def available_agents():
         # then dies at exec. The installer refuses to put it there, but a hand
         # copy or a synced home directory can, so the picker asks the platform
         # too rather than trusting the filesystem alone.
-        if key == "gemini" and not missing:
+        # PLATFORM BEFORE FILES, and the order is the whole point. This read
+        # `and not missing`, so on a Mac — where the files are missing and
+        # always will be — the generic branch below won instead and reported
+        # "not installed: …/agy_acp_server.par". That is a true sentence that
+        # tells a lie: it invites an install of a pinned Linux x86-64 binary
+        # onto a machine that cannot execute it, and installing it is exactly
+        # what install_antigravity_acp refuses to do. On dogma-2 the honest
+        # answer is not "missing", it is "this host cannot run it".
+        if key == "gemini":
             from install_antigravity_acp import platform_problem
             problem = platform_problem()
             if problem:

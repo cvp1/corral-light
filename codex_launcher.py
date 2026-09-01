@@ -115,8 +115,16 @@ def build_env() -> dict[str, str]:
 def unavailable_reason() -> str | None:
     """Why this lane cannot open right now, or None if it can."""
     if not resolve_adapter():
-        return ("codex-acp adapter not installed — npm install in corral-light/spike "
-                "(or set CORRAL_CODEX_ACP)")
+        # Name the path actually probed, not a relative folder name. The old
+        # text said "npm install in corral-light/spike", which is a sentence
+        # about a tree this process may not be running out of: during the
+        # 2026-09-01 bug bash the service ran from a worktree with no
+        # node_modules, and that message sent the operator to ~/corral-light
+        # — where the adapter was present and nothing looked wrong. A message
+        # that names a folder it did not check is worse than no message.
+        return (f"codex-acp adapter not installed at {DEFAULT_ADAPTER} — "
+                f"run `npm install` in {HERE / 'spike'} (or set "
+                f"CORRAL_CODEX_ACP)")
     if not auth_present():
         return f"not logged in — run: {login_command()}"
     return None
