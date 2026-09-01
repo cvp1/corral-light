@@ -1648,6 +1648,17 @@ class Pane:
                     self._absorb_config((r or {}).get("configOptions") or [])
                 except acp.AgentError as e:
                     self.emit("note", {"text": f"could not set {cid}={want}: {e}"})
+                    continue
+                # An ACK IS NOT ADOPTION. This adapter accepts a model name
+                # with any suffix after a separator and silently resolves it to
+                # the base model ("opusplan" -> "opus[1m]"), so a pane could
+                # run for an hour on a model nobody chose while the pill agreed
+                # with the request. Read what came back; say so when it differs.
+                got = (self.config.get(cid) or {}).get("value")
+                if got != want:
+                    self.emit("note", {"text": f"asked for {cid}={want}; "
+                                               f"{AGENTS[self.agent]['label']} "
+                                               f"is running {got!r}"})
         self.posture_enforced = self._apply_posture()
 
     def _apply_posture(self):
@@ -2157,13 +2168,40 @@ class Pane:
 # If the CLI ever drops this alias, spawn() already fails loudly on it: an
 # AgentError from set_config lands as a "could not set model=opusplan: …" note
 # in the pane, same as any other rejected value — never a silent wrong model.
-MODEL_EXTRAS = {
-    "claude": [
-        {"value": "opusplan", "name": "Opus Plan",
-         "description": "Opus in Plan Mode, Sonnet otherwise, for this "
-                        "session — same as /model opusplan"},
-    ],
-}
+# WITHDRAWN 2026-09-01: "opusplan" was here, and it was never real.
+#
+# Craig: "we are still missing opus plan ... when started in that mode we
+# default to opus5". Measured against the live adapter, which is what the
+# entry above should have been:
+#
+#     set_config(model, "opusplan")              -> accepted, echoes "opus[1m]"
+#     set_config(model, "opus-plan")             -> accepted, echoes "opus[1m]"
+#     set_config(model, "opus-total-garbage-xyz")-> accepted, echoes "opus[1m]"
+#     set_config(model, "opus!!!")               -> accepted, echoes "opus[1m]"
+#     set_config(model, "sonnet-garbage")        -> accepted, echoes "sonnet"
+#     set_config(model, "opusXYZ")               -> REFUSED
+#     set_config(model, "plan")                  -> REFUSED
+#
+# The adapter matches a model name up to a separator and drops the rest, so
+# "opusplan" resolves to plain Opus and Plan Mode never happens. The original
+# check reasoned "garbage is refused, opusplan is accepted, therefore it is a
+# vendor alias" — but its garbage (`total-garbage-xyz`) began with no model
+# name, so it could only ever prove the refusal path existed. `opus!!!` is the
+# control that had to be run: acceptance here proves nothing about
+# recognition.
+#
+# The pane header made this visible and got blamed for it. The dialog offers
+# catalog + these extras; the header cycles p.config, straight from the live
+# agent. So the invented option appeared in one control and not the other,
+# which is the mechanism working correctly: the agent never advertised it.
+#
+# What Corral CAN offer instead is the `plan` value of the `mode` config
+# option — real Plan Mode, advertised by the agent. It is not the same thing
+# (opusplan also swaps the model per phase, which nothing here exposes), so it
+# is Craig's call, not a silent substitution.
+#
+# Anything added here must survive the `opus!!!` control first.
+MODEL_EXTRAS = {}
 
 CATALOG = STATE / "catalog.json"
 

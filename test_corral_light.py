@@ -1955,15 +1955,23 @@ class EmptyAuthJsonIsNotALogin(unittest.TestCase):
 
 
 class ModelExtrasSurviveARealSession(unittest.TestCase):
-    """`opusplan` is layered onto claude's catalog in remember_catalog, not at
-    any one probe site — because a REAL session/new response overwrites the
-    catalog wholesale (remember_catalog's own contract) and the vendor's own
-    response never lists it. If the append lived anywhere else, the option
-    would show once on a fresh box and vanish the moment a live Claude pane
-    ran. `opusplan` itself was confirmed live against the real adapter before
-    this was written (accepted, unlike a garbage value) — this test proves
-    the LOCAL bookkeeping only, not the vendor's behaviour.
+    """An extra model option is layered on in remember_catalog, not at any one
+    probe site — because a REAL session/new response overwrites the catalog
+    wholesale (remember_catalog's own contract). If the append lived anywhere
+    else, the option would show once on a fresh box and vanish the moment a
+    live pane ran.
+
+    The mechanism is exercised here with a SYNTHETIC entry. It used to be
+    exercised with `opusplan`, the only real one, and that entry has been
+    withdrawn — see OpusPlanWasNeverARealAlias below for the measurement.
+    This class proves the LOCAL bookkeeping, which was never the part that
+    was wrong.
     """
+
+    def _with_extra(self, sessions, entry):
+        real = sessions.MODEL_EXTRAS
+        sessions.MODEL_EXTRAS = {"claude": [entry]}
+        self.addCleanup(lambda: setattr(sessions, "MODEL_EXTRAS", real))
 
     def _mgr(self):
         import sessions
@@ -1975,30 +1983,36 @@ class ModelExtrasSurviveARealSession(unittest.TestCase):
         self.addCleanup(lambda: setattr(sessions, "CATALOG", real))
         return m, sessions
 
-    def test_opusplan_is_appended_to_claudes_model_options(self):
+    def test_an_extra_is_appended_to_claudes_model_options(self):
         m, sessions = self._mgr()
+        self._with_extra(sessions, {"value": "made-up", "name": "Made Up",
+                                    "description": ""})
         m.remember_catalog("claude", {"model": {
             "name": "Model", "value": "opus[1m]",
             "options": [{"value": "opus[1m]", "name": "Opus", "description": ""}]}})
         values = [o["value"] for o in m.catalog["claude"]["model"]["options"]]
-        self.assertIn("opusplan", values)
+        self.assertIn("made-up", values)
 
     def test_a_repeated_write_does_not_duplicate_it(self):
         """The vendor's own session/new response is what OVERWRITES the
         catalog on every real session — proving this survives a second write
         is proving it survives exactly that, not just the first seed."""
         m, sessions = self._mgr()
+        self._with_extra(sessions, {"value": "made-up", "name": "Made Up",
+                                    "description": ""})
         for _ in range(3):
             m.remember_catalog("claude", {"model": {
                 "name": "Model", "value": "opus[1m]",
                 "options": [{"value": "opus[1m]", "name": "Opus", "description": ""}]}})
         values = [o["value"] for o in m.catalog["claude"]["model"]["options"]]
-        self.assertEqual(values.count("opusplan"), 1)
+        self.assertEqual(values.count("made-up"), 1)
 
     def test_other_agents_are_unaffected(self):
         """MODEL_EXTRAS is keyed by agent — grok's model list must not grow an
         option grok was never asked about and cannot serve."""
         m, sessions = self._mgr()
+        self._with_extra(sessions, {"value": "made-up", "name": "Made Up",
+                                    "description": ""})
         m.remember_catalog("grok", {"model": {
             "name": "Model", "value": "grok-4", "options": []}})
         # Grok's `model` key legitimately survives with an EMPTY options list
@@ -2009,7 +2023,7 @@ class ModelExtrasSurviveARealSession(unittest.TestCase):
             "name": "Model", "value": "llama3",
             "options": [{"value": "llama3", "name": "llama3", "description": ""}]}})
         values = [o["value"] for o in m.catalog["ollama"]["model"]["options"]]
-        self.assertNotIn("opusplan", values)
+        self.assertNotIn("made-up", values)
 
     def test_an_agent_with_no_model_key_is_not_given_one(self):
         """An agent whose config carries no model at all (grok reports a bare
@@ -2393,6 +2407,104 @@ class PostureRidesTheAcpMode(unittest.TestCase):
             with self.subTest(lane=lane):
                 self.assertFalse(
                     sessions.posture_enforceable(sessions.AGENTS[lane]))
+
+
+class OpusPlanWasNeverARealAlias(unittest.TestCase):
+    """Craig, 2026-09-01: "we are still missing opus plan ... when started in
+    that mode we default to opus5".
+
+    He was right, and the pane header was the honest control all along: the
+    dialog offered catalog + MODEL_EXTRAS, the header cycled p.config straight
+    from the live agent, and the option appeared in one and not the other
+    because the agent had never advertised it.
+
+    Measured against the real adapter (dogma-2, 2026-09-01):
+
+        opusplan               -> accepted, echoes "opus[1m]"
+        opus-plan              -> accepted, echoes "opus[1m]"
+        opus-total-garbage-xyz -> accepted, echoes "opus[1m]"
+        opus!!!                -> accepted, echoes "opus[1m]"
+        sonnet-garbage         -> accepted, echoes "sonnet"
+        opusXYZ                -> REFUSED
+        plan                   -> REFUSED
+
+    The adapter matches a model name up to a separator and drops the rest.
+    The original entry was justified by "garbage is refused, opusplan is
+    accepted, therefore it is a vendor alias" — but that garbage began with no
+    model name, so it only ever proved the refusal path existed. `opus!!!` is
+    the control that decides it, and it says acceptance proves nothing.
+    """
+
+    def test_no_invented_model_is_offered_for_claude(self):
+        import sessions
+        self.assertEqual(sessions.MODEL_EXTRAS.get("claude", []), [])
+
+    def test_the_withdrawal_and_its_control_are_recorded(self):
+        """A future reader will be tempted to re-add this; the measurement
+        that killed it has to survive in the source, not just in a commit."""
+        import inspect, sessions
+        src = inspect.getsource(sessions)
+        self.assertIn("opus!!!", src)
+        self.assertIn("opusXYZ", src)
+
+
+class AnAckIsNotAdoption(unittest.TestCase):
+    """The systemic half of the opusplan bug: Corral believed a set_config
+    that came back 200 without reading what came back IN it.
+
+    A pane could run for an hour on a model nobody chose while the header pill
+    agreed with the request — the same class of lie as claiming a permission
+    posture nothing imposed, and it deserves the same treatment: read the
+    agent's echoed value, and say so when it differs.
+    """
+
+    def _pane(self, want_model):
+        import sessions, uuid, threading
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes = {}; m._lock = threading.Lock(); m.subscribers = []
+        m.remember_catalog = lambda *a, **k: None
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.id = uuid.uuid4().hex[:12]
+        p.agent = "claude"; p.mgr = m; p.cwd = "/tmp"; p.posture = "auto"
+        p.want_model, p.want_effort = want_model, None
+        p.acp_session = "sess"
+        p._init_runtime()
+        p.state = "ready"
+        p.config = {"mode": {"value": "auto", "realId": "mode", "name": "m",
+                             "options": [{"value": "auto", "name": "auto",
+                                          "description": ""}]}}
+        return p
+
+    class _CoercingClient:
+        """The real adapter's behaviour: accept the suffixed name, resolve it
+        to the base model, and echo the base model back."""
+        def __init__(self, resolves_to):
+            self.resolves_to = resolves_to
+        def set_config(self, session_id, config_id, value):
+            if config_id == "mode":
+                return {"configOptions": [{"id": "mode", "currentValue": value,
+                                           "name": "m", "options": []}]}
+            return {"configOptions": [{"id": "model",
+                                       "currentValue": self.resolves_to,
+                                       "name": "Model", "options": []}]}
+
+    def test_a_coerced_model_is_reported_not_hidden(self):
+        p = self._pane("opusplan")
+        p.client = self._CoercingClient("opus[1m]")
+        p._apply_wants()
+        self.assertEqual(p.model, "opus[1m]")
+        self.assertTrue(any("asked for model=opusplan" in
+                            (e.get("data") or {}).get("text", "")
+                            for e in p.events),
+                        "a silently substituted model must leave a note")
+
+    def test_an_honoured_model_says_nothing(self):
+        """Edge-triggered: the note is news, so an exact match is silent."""
+        p = self._pane("sonnet")
+        p.client = self._CoercingClient("sonnet")
+        p._apply_wants()
+        self.assertEqual(p.model, "sonnet")
+        self.assertFalse([e for e in p.events if e["kind"] == "note"])
 
 
 if __name__ == "__main__":
