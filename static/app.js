@@ -2100,18 +2100,23 @@ function openPalette() {
  * right there. An attach target that ignores the only pane on screen is a
  * feature explaining itself to a user who can see the answer.
  *
- * A minimized or dead pane is never the target: attaching into a composer
- * that is not on screen is a message you cannot see and did not send.
+ * A minimized, detached, dead, or SSH pane is never the target: attaching
+ * into a composer that is not on screen, or into a shell command line, is a
+ * message you cannot see or a command you did not mean to type.
  */
 function attachTarget() {
   const focused = S.panes.get(S.focus);
-  if (focused && !focused.minimized && focused.state !== 'dead') return focused;
+  const usable = p => !p.minimized && p.state !== 'dead' &&
+    p.state !== 'detached' && !p.agent.startsWith('host:');
+  if (focused && usable(focused)) return focused;
   const shown = [...S.panes.values()]
-    .filter(p => !p.minimized && p.state !== 'dead');
+    .filter(usable);
   return shown.length === 1 ? shown[0] : null;
 }
 
 function paletteResults(query) {
+  const seq = ++PAL.seq;
+  clearTimeout(PAL.t);
   const needle = query.trim().toLowerCase();
   const rows = [];
   const focused = attachTarget();
@@ -2139,8 +2144,6 @@ function paletteResults(query) {
   // Debounced, and guarded by a sequence number: keystrokes outrun the
   // network, and an older response landing after a newer one would repaint
   // the list with results for a query that is no longer in the box.
-  const seq = ++PAL.seq;
-  clearTimeout(PAL.t);
   PAL.t = setTimeout(async () => {
     let d;
     try { d = await api('/api/search?q=' + encodeURIComponent(needle)); }
@@ -2212,7 +2215,8 @@ async function activatePalette(row, newPane) {
     return;
   }
   if (row.kind !== 'content') return;
-  await attachContent(row.id, newPane || !row.pane ? null : row.pane.id);
+  const target = newPane ? null : attachTarget();
+  await attachContent(row.id, target ? target.id : null);
 }
 
 /* Attach a note to a pane's composer — or to a new pane opened where it
