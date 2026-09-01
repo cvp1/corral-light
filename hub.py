@@ -326,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             if p == "/api/session/new":
                 pane = MGR.create(b.get("agent", ""),
-                                  b.get("cwd") or str(Path.home()),
+                                  b.get("cwd") or str(sessions.default_cwd()),
                                   b.get("posture") or sessions.DEFAULT_POSTURE,
                                   (b.get("model") or "").strip() or None,
                                   (b.get("effort") or "").strip() or None)

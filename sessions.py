@@ -232,6 +232,18 @@ AGENTS = {
 MAX_CWD_SUGGESTIONS = 24
 
 
+def default_cwd():
+    """Where a new conversation starts when nothing else is remembered.
+
+    If Seed is installed, that folder is ~/aios — the one workspace this
+    window looks at. Home always exists, so it remains the fallback when
+    Seed has not been installed yet. Existence-checked: a missing ~/aios
+    must not become the default, or the first pane would refuse to start.
+    """
+    aios = Path.home() / "aios"
+    return aios if aios.is_dir() else Path.home()
+
+
 def cwd_suggestions(recent=()):
     """Real directories worth opening a conversation in, best first.
 
@@ -257,6 +269,7 @@ def cwd_suggestions(recent=()):
     for c in recent:                       # panes already open here
         add(c)
     home = Path.home()
+    add(home / "aios")                     # AIOS workspace, if Seed is installed
     add(home)
     containers = []
     for name in ("Github", "github", "Projects", "projects", "src", "code",
@@ -2298,13 +2311,15 @@ class Manager:
                 "agentGroups": agent_groups(),
                 "postures": sorted(POSTURES),
                 # Where a new conversation starts, when nothing else is
-                # remembered. The BROWSER used to carry this as a literal
+                # remembered. Prefer ~/aios when Seed is installed (that
+                # folder is the workspace); otherwise home, which always
+                # exists. The BROWSER used to carry this as a literal
                 # ('/home/cvande/Github/CC'), inherited from the full Corral —
                 # which on any other machine is a directory that does not
                 # exist, so the first thing a new install did was refuse to
                 # start a pane. The host knows its own home; the client should
                 # not be guessing at it.
-                "defaultCwd": str(Path.home()),
+                "defaultCwd": str(default_cwd()),
                 # Somewhere to START from. The field was free text with one
                 # default, so choosing a directory meant knowing and typing an
                 # absolute path — on a new machine, the one thing you do not
