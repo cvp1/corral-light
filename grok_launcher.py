@@ -52,7 +52,13 @@ GROK_HOME = Path(os.environ.get("CORRAL_GROK_HOME", Path.home() / ".grok"))
 
 
 def auth_present() -> bool:
-    return (GROK_HOME / "auth.json").is_file()
+    """A file that exists and carries no token is not a login.
+
+    Same class as Claude's empty `.credentials.json`: `is_file()` passed,
+    the picker said ok, the pane died on `Authentication required`.
+    """
+    from sessions import usable_credential
+    return usable_credential(GROK_HOME / "auth.json")
 
 
 def login_command(grok: str | None = None) -> str:
@@ -156,6 +162,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Launch Grok's ACP stdio agent")
     parser.add_argument("--print-argv", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    reason = unavailable_reason()
+    if reason:
+        print(f"Grok unavailable: {reason}", file=sys.stderr, flush=True)
+        return 127
     grok = resolve_grok()
     if not grok:
         print(unavailable_message(), file=sys.stderr, flush=True)

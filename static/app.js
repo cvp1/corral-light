@@ -9,8 +9,16 @@ const $ = s => document.querySelector(s);
 const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c;
                           if (x !== undefined) n.textContent = x; return n; };
 
+function loadDetail() {
+  try {
+    const v = JSON.parse(localStorage.getItem('corral.detail') || '[]');
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
 const S = { panes: new Map(), agents: [], focus: null, es: null, railShut: null,
-            detail: new Set(JSON.parse(localStorage.getItem('corral.detail') || '[]')) };
+            detail: new Set(loadDetail()) };
 const saveDetail = () =>
   localStorage.setItem('corral.detail', JSON.stringify([...S.detail]));
 
@@ -703,7 +711,8 @@ function permCard(p, d, outcome) {
     b.onclick = async () => {
       try {
         await api('/api/session/permission',
-                  { pane: p.id, requestId: d.requestId, optionId: o.optionId });
+                  { pane: p.id, requestId: d.requestId, optionId: o.optionId,
+                    digest: d.digest });
       } catch (e) { toast(e.message, true); }
     };
     opts.appendChild(b);
@@ -864,7 +873,7 @@ function paneHead(p) {
     pill.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
     h.appendChild(pill);
   }
-  h.appendChild(el('span', 'meta', `${p.label} · ` + p.cwd.replace(/^\/home\/[^/]+/, '~')));
+  h.appendChild(el('span', 'meta', `${p.label} · ` + p.cwd.replace(/^\/(home|Users)\/[^/]+/, '~')));
   // The on-state used to be a colour change on a 12px glyph, and it persists
   // in localStorage per pane forever. So a pane could sit in full-detail mode
   // indefinitely and read as a rendering bug — it did, 2026-08-01, on a Grok
@@ -1172,7 +1181,8 @@ function composer(p, kind) {
       const d = (cur.pending || []).length === 1 ? pendingPerm(cur) : null;
       const answer = o => {
         api('/api/session/permission',
-            { pane: p.id, requestId: d.requestId, optionId: o.optionId })
+            { pane: p.id, requestId: d.requestId, optionId: o.optionId,
+              digest: d.digest })
           .catch(err => toast(err.message, true));
       };
       if (d && /^[1-9]$/.test(e.key)) {
@@ -2116,8 +2126,12 @@ async function attachContent(id, paneId) {
     // lives — the directory is the context an agent with tools actually
     // needs, and it is the same create a click on New makes.
     try {
+      const from = attachTarget();
+      const agent = (from && from.agent)
+        || (S.agents.find(a => a.available) || {}).key
+        || 'claude';
       const r = await api('/api/session/new',
-                          { agent: 'claude', cwd: d.dir,
+                          { agent, cwd: d.dir,
                             posture: localStorage.getItem('corral.posture') || 'auto' });
       S.panes.set(r.pane.id, r.pane);
       paneId = r.pane.id;
