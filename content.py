@@ -193,7 +193,8 @@ def refresh(force=False):
                             and prev[1] == st.st_size):
                         continue
                     try:
-                        text = p.read_text(errors="replace")[:MAX_FILE]
+                        with p.open("rb") as fh:
+                            text = fh.read(MAX_FILE).decode(errors="replace")
                     except OSError:
                         continue
                     title = _title_of(p, text)
