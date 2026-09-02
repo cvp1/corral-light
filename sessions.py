@@ -2602,8 +2602,9 @@ class Manager:
             raise ValueError(f"{src.title} has not answered yet")
         clipped = len(body) > QUOTE_CHARS
         label = AGENTS.get(src.agent, {}).get("label") or src.agent
-        text = (f"From {label} \u2014 {src.title}:\n\n\"\"\"\n{body[:QUOTE_CHARS]}"
-                f"{chr(10) + '[\u2026truncated]' if clipped else ''}\n\"\"\"\n\n")
+        tail = "\n[\u2026truncated]" if clipped else ""      # no backslash inside an
+        text = (f"From {label} \u2014 {src.title}:\n\n\"\"\"\n"   # f-string expr: 3.9
+                f"{body[:QUOTE_CHARS]}{tail}\n\"\"\"\n\n")
         return {"text": text, "complete": complete, "title": src.title,
                 "label": label, "clipped": clipped}
 
