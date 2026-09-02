@@ -1123,7 +1123,11 @@ function termComposer(p) {
   const c = el('div', 'composer term');
   const h = TERMHIST.get(p.id) ||
     { cmds: p.events.filter(e => e.kind === 'user')
-                    .map(e => (e.data || {}).text || '').filter(Boolean),
+                    .map(e => (e.data || {}).text || '')
+                    // A single-line <input> flattens a recalled multi-line
+                    // command into one line (see onpaste below) -- keep those
+                    // out of ↑/↓ rather than replay them mangled.
+                    .filter(t => t && !t.includes('\n')),
       ix: null, draft: '' };
   TERMHIST.set(p.id, h);
   c.appendChild(el('span', 'pr', '❯'));
@@ -1131,19 +1135,47 @@ function termComposer(p) {
   inp.type = 'text'; inp.autocomplete = 'off'; inp.spellcheck = false;
   inp.placeholder = `runs on ${p.agent.slice(5)} as you`;
   let sending = false;
+  // A multi-line paste waiting for Enter. The browser strips newlines from
+  // anything pasted into <input type=text> and joins the lines with spaces,
+  // so three pasted commands ran as ONE line -- `git push origin HEAD --tags
+  // cd ~/x && git push ...` -> "fatal: invalid refspec" (seen live 2026-09-02).
+  // Held here instead of in the input's value, so the lines survive intact;
+  // Enter runs them as one command (the shell reads it line by line, exactly
+  // as if typed one after another), Esc discards. Not run on paste: pasting
+  // into a prompt line has never meant "execute", and the operator gets to
+  // see the line count before anything runs.
+  let block = null;
+  const holdBlock = (text) => {
+    block = text;
+    const lines = text.split('\n');
+    inp.value = `${lines[0]}   … +${lines.length - 1} more pasted lines — Enter runs all, Esc discards`;
+    inp.readOnly = true;
+  };
+  const dropBlock = () => { block = null; inp.readOnly = false; inp.value = ''; };
   const send = async () => {
     if (sending) return;
-    const t = inp.value.trim(); if (!t) return;
+    const t = block !== null ? block : inp.value.trim(); if (!t) return;
     sending = true;
     try {
       // Same eager-clear hazard as the chat composer: clear only once the
       // server accepted it, so a failure leaves the command typed for retry.
       await api('/api/session/send', { pane: p.id, text: t });
-      if (h.cmds[h.cmds.length - 1] !== t) h.cmds.push(t);
+      if (!t.includes('\n') && h.cmds[h.cmds.length - 1] !== t) h.cmds.push(t);
       h.ix = null; h.draft = '';
-      inp.value = '';
+      if (block !== null) dropBlock(); else inp.value = '';
     } catch (e) { toast(e.message, true); }
     finally { sending = false; }
+  };
+  inp.onpaste = e => {
+    const raw = String((e.clipboardData || window.clipboardData).getData('text') || '');
+    const text = raw.replace(/\r\n?/g, '\n').trim();
+    if (!text.includes('\n')) return;            // one line: the default paste is right
+    e.preventDefault();
+    if (inp.value.trim() && block === null) {
+      toast('clear the prompt line before pasting a multi-line command', true);
+      return;
+    }
+    holdBlock(text);
   };
   const recall = v => {
     inp.value = v;
@@ -1151,6 +1183,12 @@ function termComposer(p) {
   };
   inp.onkeydown = e => {
     if (e.key === 'Enter') { e.preventDefault(); send(); return; }
+    if (block !== null) {
+      // The held block is all-or-nothing: Enter above, Esc here, nothing else.
+      if (e.key === 'Escape') dropBlock();
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'ArrowUp') {
       if (!h.cmds.length) return;
       e.preventDefault();
