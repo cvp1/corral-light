@@ -2908,6 +2908,28 @@ class PanesFeedPanes(unittest.TestCase):
         self.assertIn("B", str(cm.exception))
         self.assertEqual(done.sent, [])          # nobody was sent a partial round
 
+    def test_crossfeed_names_a_never_asked_pane_as_such(self):
+        # A fresh pane on the wall was refused as "has not finished
+        # answering" -- Craig went looking for a hung agent (2026-09-02).
+        done = self._pane("claude", "A", [("user", {"text": "q"}),
+                                          ("text", {"text": "done"}), ("turn_end", {})])
+        fresh = self._pane("grok", "B", [("ready", {})])
+        with self.assertRaises(ValueError) as cm:
+            self._mgr(done, fresh).crossfeed(["A", "B"], "go")
+        self.assertIn("has not been asked anything yet", str(cm.exception))
+        self.assertNotIn("finished", str(cm.exception))
+        self.assertEqual(done.sent, [])
+
+    def test_crossfeed_names_an_empty_finished_answer_as_such(self):
+        done = self._pane("claude", "A", [("user", {"text": "q"}),
+                                          ("text", {"text": "done"}), ("turn_end", {})])
+        silent = self._pane("grok", "B", [("user", {"text": "q"}),
+                                          ("tool", {"title": "Read"}), ("turn_end", {})])
+        with self.assertRaises(ValueError) as cm:
+            self._mgr(done, silent).crossfeed(["A", "B"], "go")
+        self.assertIn("no text to quote", str(cm.exception))
+        self.assertEqual(done.sent, [])
+
     def test_crossfeed_needs_two_and_no_ssh(self):
         a = self._pane("claude", "A", [("user", {"text": "q"}),
                                        ("text", {"text": "x"}), ("turn_end", {})])

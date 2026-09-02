@@ -2639,9 +2639,19 @@ class Manager:
             if p.agent.startswith("host:"):
                 raise ValueError(f"{p.title} is an SSH pane and cannot take part")
             body, complete = p.last_answer()
-            if not body or not complete:
-                raise ValueError(f"{p.title} has not finished answering "
+            if not any(ev["kind"] == "user" for ev in p.events):
+                # A fresh pane on the wall is not an arm: it was never asked.
+                # Saying it "has not finished answering" here was a lie that
+                # sent Craig looking for a hung agent (2026-09-02).
+                raise ValueError(f"{p.title} has not been asked anything yet "
+                                 f"\u2014 send it the question first, or leave "
+                                 f"it out of the cross-feed")
+            if not complete:
+                raise ValueError(f"{p.title} is still answering "
                                  f"\u2014 cross-feed waits for every arm")
+            if not body:
+                raise ValueError(f"{p.title} finished with no text to quote "
+                                 f"(tool calls only) \u2014 ask it to answer in words first")
             quotes[p.id] = self.quote(p.id)["text"]
         preamble = (preamble or "").strip()
         results, sent = {}, 0
