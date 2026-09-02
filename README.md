@@ -70,6 +70,14 @@ python3 content.py search "your query"
 python3 content.py refresh
 ```
 
+## Passing work between assistants
+
+Five ways to move work across panes, and when each one fits: attach a note,
+quote one pane's answer into another, fan one prompt out to every pane (⌘↵),
+cross-feed the answers so they argue (⇄), or ask an assistant to consult
+another one itself. The guide, with the panel recipe and the rules that hold
+in every case: [`docs/PASSING-WORK.md`](docs/PASSING-WORK.md).
+
 ## Security
 
 The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
