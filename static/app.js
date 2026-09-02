@@ -2417,10 +2417,22 @@ const CROSSFEED_DEFAULT = 'Round two. Below are the other arms\' answers to the 
  * sent, and the composed prompt lands in every pane as its own user turn, so
  * the transcript shows exactly what each arm was given. */
 async function crossfeed() {
-  const panes = composablePanes();
-  if (panes.length < 2) return toast('cross-feed needs two or more live panes', true);
+  // An arm is a pane that has been ASKED something. A fresh pane on the
+  // wall is not one, and feeding it would only earn the server's refusal;
+  // it is left out here and named in the confirmation so nothing is
+  // dropped silently.
+  const all = composablePanes();
+  const asked = (p) => (p.events || []).some(e => e.kind === 'user');
+  const panes = all.filter(asked);
+  const idle = all.filter(p => !asked(p)).map(p => p.title || p.label);
+  if (panes.length < 2) {
+    return toast('cross-feed needs two or more panes that have been asked something'
+      + (idle.length ? ` — never asked: ${idle.join(', ')}` : ''), true);
+  }
   const text = window.prompt(
-    `Cross-feed ${panes.length} panes: ${panes.map(p => p.title || p.label).join(', ')}.\nPreamble each arm gets above the others' answers:`,
+    `Cross-feed ${panes.length} panes: ${panes.map(p => p.title || p.label).join(', ')}.`
+    + (idle.length ? `\nLeaving out, never asked: ${idle.join(', ')}.` : '')
+    + `\nPreamble each arm gets above the others' answers:`,
     CROSSFEED_DEFAULT);
   if (text === null) return;
   try {
