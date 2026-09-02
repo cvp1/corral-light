@@ -374,8 +374,20 @@ class Handler(BaseHTTPRequestHandler):
                                    "title": item["title"], "path": item["path"],
                                    "dir": str(Path(item["path"]).parent)})
             if p == "/api/session/send":
+                if b.get("panes"):
+                    # Same prompt, several panes: the first half of a panel.
+                    r = MGR.fanout(list(b.get("panes") or []), b.get("text", ""))
+                    return self._json({"ok": r["sent"] > 0, **r})
                 MGR.get(b.get("pane", "")).send(b.get("text", ""))
                 return self._json({"ok": True})
+            if p == "/api/session/quote":
+                # Composer text only, like content attach: nothing is sent
+                # until the operator presses send in the target pane.
+                r = MGR.quote(b.get("from", ""), b.get("pane") or None)
+                return self._json({"ok": True, "mode": "quote", **r})
+            if p == "/api/session/crossfeed":
+                r = MGR.crossfeed(list(b.get("panes") or []), b.get("text", ""))
+                return self._json({"ok": r["sent"] > 0, **r})
             if p == "/api/session/permission":
                 pane = MGR.get(b.get("pane", ""))
                 ok = pane.answer(b.get("requestId", ""), b.get("optionId", ""),
