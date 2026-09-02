@@ -16,6 +16,7 @@ import json
 import os
 import tempfile
 import threading
+import sys
 import time
 import types
 import unittest
@@ -2804,3 +2805,147 @@ class AnAckIsNotAdoption(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class PanesFeedPanes(unittest.TestCase):
+    """Composition verbs: quote, fan-out, cross-feed (2026-09-01).
+
+    Built on fake panes whose send() records what it was given, so the tests
+    assert the prompt each arm RECEIVES -- input fidelity, not just the
+    return shape.
+    """
+
+    def _pane(self, agent, title, turns, state="ready"):
+        import sessions
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.id, p.agent, p.title, p.state = title, agent, title, state
+        p.events, p._seq, p._lock = [], 0, threading.Lock()
+        p._replaying, p._log, p._since_rotate_check = False, None, 0
+        p.mgr = types.SimpleNamespace(broadcast=lambda e: None)
+        p.last_activity = time.time()
+        p.sent = []
+        p.send = lambda text: p.sent.append(text)
+        for kind, data in turns:
+            p.emit(kind, data)
+        return p
+
+    def _mgr(self, *panes):
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes = {p.id: p for p in panes}
+        return m
+
+    def test_last_answer_is_only_the_text_since_the_last_user_turn(self):
+        p = self._pane("claude", "A", [
+            ("user", {"text": "first"}), ("text", {"text": "old"}), ("turn_end", {}),
+            ("user", {"text": "second"}), ("text", {"text": "new "}),
+            ("tool", {"title": "Read"}), ("thought", {"text": "hm"}),
+            ("text", {"text": "answer"}), ("turn_end", {})])
+        self.assertEqual(p.last_answer(), ("new answer", True))
+
+    def test_last_answer_reports_an_unfinished_turn(self):
+        p = self._pane("claude", "A", [("user", {"text": "q"}),
+                                       ("text", {"text": "half"})])
+        self.assertEqual(p.last_answer(), ("half", False))
+
+    def test_quote_is_attributed_fenced_and_bounded(self):
+        import sessions
+        long = "x" * (sessions.QUOTE_CHARS + 50)
+        p = self._pane("grok", "A", [("user", {"text": "q"}),
+                                     ("text", {"text": long}), ("turn_end", {})])
+        r = self._mgr(p).quote("A")
+        self.assertTrue(r["clipped"])
+        self.assertTrue(r["text"].startswith("From Grok — A:"))
+        self.assertIn("[…truncated]", r["text"])
+        self.assertLess(len(r["text"]), sessions.QUOTE_CHARS + 200)
+
+    def test_quote_refuses_ssh_panes_self_and_silence(self):
+        a = self._pane("claude", "A", [("user", {"text": "q"}),
+                                       ("text", {"text": "ans"}), ("turn_end", {})])
+        quiet = self._pane("claude", "Q", [])
+        ssh = self._pane("host:box", "S", [("text", {"text": "$ ls"})])
+        m = self._mgr(a, quiet, ssh)
+        with self.assertRaises(ValueError): m.quote("S")
+        with self.assertRaises(ValueError): m.quote("A", "S")
+        with self.assertRaises(ValueError): m.quote("A", "A")
+        with self.assertRaises(ValueError): m.quote("Q")
+
+    def test_fanout_delivers_the_same_text_and_reports_each_refusal(self):
+        a = self._pane("claude", "A", [])
+        b = self._pane("grok", "B", [])
+        c = self._pane("gemini", "C", [])
+        def refuse(text): raise ValueError("4 messages already waiting")
+        c.send = refuse
+        r = self._mgr(a, b, c).fanout(["A", "B", "C", "A", "missing"], "hello")
+        self.assertEqual(a.sent, ["hello"])
+        self.assertEqual(b.sent, ["hello"])
+        self.assertEqual(r["sent"], 2)
+        self.assertIn("waiting", r["results"]["C"])
+        self.assertIn("no pane", r["results"]["missing"])
+
+    def test_crossfeed_gives_each_arm_only_the_others_answers(self):
+        panes = [self._pane(ag, t, [("user", {"text": "q"}),
+                                    ("text", {"text": f"{t} says"}), ("turn_end", {})])
+                 for ag, t in (("claude", "A"), ("grok", "B"), ("gemini", "C"))]
+        r = self._mgr(*panes).crossfeed(["A", "B", "C"], "Round two.")
+        self.assertEqual(r["sent"], 3)
+        for p in panes:
+            self.assertEqual(len(p.sent), 1)
+            got = p.sent[0]
+            self.assertTrue(got.startswith("Round two."))
+            self.assertNotIn(f"{p.title} says", got)
+            for o in panes:
+                if o is not p:
+                    self.assertIn(f"{o.title} says", got)
+
+    def test_crossfeed_refuses_entirely_while_any_arm_is_unfinished(self):
+        done = self._pane("claude", "A", [("user", {"text": "q"}),
+                                          ("text", {"text": "done"}), ("turn_end", {})])
+        busy = self._pane("grok", "B", [("user", {"text": "q"}),
+                                        ("text", {"text": "half"})], state="busy")
+        with self.assertRaises(ValueError) as cm:
+            self._mgr(done, busy).crossfeed(["A", "B"], "go")
+        self.assertIn("B", str(cm.exception))
+        self.assertEqual(done.sent, [])          # nobody was sent a partial round
+
+    def test_crossfeed_needs_two_and_no_ssh(self):
+        a = self._pane("claude", "A", [("user", {"text": "q"}),
+                                       ("text", {"text": "x"}), ("turn_end", {})])
+        s = self._pane("host:box", "S", [("user", {"text": "ls"}),
+                                         ("text", {"text": "x"}), ("turn_end", {})])
+        m = self._mgr(a, s)
+        with self.assertRaises(ValueError): m.crossfeed(["A"], "go")
+        with self.assertRaises(ValueError): m.crossfeed(["A", "S"], "go")
+        self.assertEqual(a.sent, [])
+
+
+class AgentsSurviveTheirSpawningThread(unittest.TestCase):
+    """A Linux agent that asks for a parent-death signal must not die when
+    the HTTP thread that created its pane returns (Grok, 2026-09-01)."""
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "PDEATHSIG is Linux")
+    def test_child_with_pdeathsig_outlives_the_thread_that_made_it(self):
+        import acp
+        # The child does what Grok Build does: prctl(PR_SET_PDEATHSIG=1, SIGTERM=15).
+        # AcpClient's own reader owns the child's stdout, so readiness is a
+        # marker file, not a line: the child writes it AFTER prctl has run.
+        mark = Path(tempfile.mkdtemp()) / "armed"
+        argv = [sys.executable, "-c",
+                "import ctypes, time, sys, pathlib; ctypes.CDLL(None).prctl(1, 15); "
+                f"pathlib.Path({str(mark)!r}).write_text('1'); time.sleep(20)"]
+        box = {}
+        def make():
+            c = acp.AcpClient(argv, "/tmp")
+            for _ in range(100):
+                if mark.exists(): break
+                time.sleep(0.05)
+            box["c"] = c
+        th = threading.Thread(target=make); th.start(); th.join(10)
+        self.assertTrue(mark.exists(), "child never armed its parent-death signal")
+        self.assertIn("c", box)
+        time.sleep(1.0)                    # a doomed child is dead well within this
+        c = box["c"]
+        try:
+            self.assertIsNone(c.p.poll(), "child was killed when its spawning thread exited")
+        finally:
+            c.p.kill(); c.p.wait(5)

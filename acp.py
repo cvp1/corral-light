@@ -27,6 +27,7 @@ TWO THINGS THIS OWNS THAT THE UI MUST NOT
 Stdlib only. Bounded: every buffer capped, every wait released by the process
 dying — never by a deadline that outranks the operator.
 """
+import concurrent.futures
 import json
 import os
 import queue
@@ -95,6 +96,18 @@ class AgentError(Exception):
     pass
 
 
+# One thread, alive for the life of the process, that does every fork. See
+# AcpClient.__init__ for why the forking thread's lifetime is load-bearing.
+_SPAWNER = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="acp-spawn")
+
+
+def _spawn(fn):
+    """Run `fn` (a Popen) on the long-lived spawner thread and return its
+    result, re-raising its exception unchanged."""
+    return _SPAWNER.submit(fn).result()
+
+
 class AcpClient:
     """One agent subprocess. Thread-safe for one writer per method."""
 
@@ -125,11 +138,20 @@ class AcpClient:
         full_env = {k: v for k, v in os.environ.items()
                     if not (strip_env and k.startswith(tuple(strip_env)))}
         full_env.update(env or {})
+        # Fork from a thread that OUTLIVES the caller. On Linux an agent may
+        # ask the kernel for a parent-death signal (Grok Build does:
+        # prctl(PR_SET_PDEATHSIG, SIGTERM), measured 2026-09-01), and that
+        # signal fires when the parent THREAD that forked it exits -- not the
+        # process. The hub creates panes on per-request HTTP threads, so every
+        # Grok pane came up `ready` and was SIGTERMed the moment its request
+        # returned: dead within the same second, "rc=143", no stderr, and the
+        # hub's own trace showed itself as the sender with no kill() of its
+        # own. One long-lived spawner thread is the parent of every agent.
         try:
-            self.p = subprocess.Popen(
+            self.p = _spawn(lambda: subprocess.Popen(
                 self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, bufsize=1,
-                env=full_env, cwd=self.cwd, start_new_session=True)
+                env=full_env, cwd=self.cwd, start_new_session=True))
         except OSError as e:
             raise AgentError(f"could not start {self.argv[0]}: {e}")
         # Remember the group id NOW. `start_new_session=True` makes the adapter

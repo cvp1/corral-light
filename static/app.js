@@ -1303,6 +1303,29 @@ function composer(p, kind) {
         }
       }
     }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      // One prompt, every pane that can take one: the blind half of a panel.
+      // Explicit chord, never the plain Enter -- broadcasting by accident is
+      // N mistakes at once.
+      e.preventDefault();
+      const t = ta.value.trim(); if (!t || sending) return;
+      const ids = composablePanes().map(x => x.id);
+      if (!ids.includes(p.id)) ids.unshift(p.id);
+      if (ids.length < 2) return toast('only this pane can take a prompt right now — open another lane to fan out', true);
+      sending = true;
+      api('/api/session/send', { panes: ids, text: t })
+        .then(r => {
+          const bad = Object.entries(r.results || {}).filter(([, err]) => err);
+          if (r.sent) { ta.value = ''; ta.style.height = 'auto'; }
+          toast(bad.length
+            ? `sent to ${r.sent} of ${ids.length} — ` + bad.map(([id, err]) =>
+                `${(S.panes.get(id) || {}).title || id}: ${err}`).join('; ')
+            : `sent to ${r.sent} panes`, !!bad.length);
+        })
+        .catch(err => toast(err.message, true))
+        .finally(() => { sending = false; });
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   };
   ta.onblur = hide;
@@ -2166,7 +2189,7 @@ function paletteResults(query) {
     const label = p.title || p.label;
     if (!needle || label.toLowerCase().includes(needle)
         || (p.cwd || '').toLowerCase().includes(needle)) {
-      rows.push({ kind: 'pane', label, paneId: id,
+      rows.push({ kind: 'pane', label, paneId: id, ssh: p.agent.startsWith('host:'),
                   sub: p.state + ' · ' + ((p.cwd || '').split('/').pop() || '') });
     }
   }
@@ -2236,6 +2259,15 @@ function renderPalette(rows, needle, contentError) {
     if (r.kind === 'content') {
       row.appendChild(el('span', 'palhint',
         r.pane ? '↵ attach · ⇧↵ new pane' : '↵ new pane here'));
+    } else if (r.kind === 'pane') {
+      // Quote is offered only when there is somewhere for the words to go
+      // that is not the row's own pane; a hint for an action that would
+      // refuse is a lie in small type.
+      const t = attachTarget();
+      row.appendChild(el('span', 'palhint',
+        t && t.id !== r.paneId && !r.ssh
+          ? '↵ focus · ⇧↵ quote its answer into ' + (t.title || t.label)
+          : '↵ focus'));
     }
     row.onmousedown = e => e.preventDefault();      // keep focus in the input
     row.onclick = e => activatePalette(r, e.shiftKey);
@@ -2246,7 +2278,11 @@ function renderPalette(rows, needle, contentError) {
 async function activatePalette(row, newPane) {
   $('#palette').close();
   if (row.kind === 'action') return $('#new').click();
-  if (row.kind === 'pane') return focusPane(row.paneId);
+  if (row.kind === 'pane') {
+    const target = newPane ? attachTarget() : null;   // ⇧↵ = quote, ↵ = focus
+    if (target && target.id !== row.paneId) return quoteInto(row.paneId, target.id);
+    return focusPane(row.paneId);
+  }
   if (row.kind === 'archived') {
     try {
       await api('/api/session/reopen', { pane: row.paneId });
@@ -2289,22 +2325,74 @@ async function attachContent(id, paneId) {
       d = await api('/api/content/attach', { id, pane: paneId });
     } catch (e) { return toast(e.message, true); }
   }
+  insertIntoComposer(paneId, d.text, d.mode === 'excerpt'
+      ? `quoted "${d.title}" — this lane has no tools, so the text came along`
+      : `referenced "${d.title}" — the agent will read it through its own gate`);
+}
+
+/* Put text at the head of a pane's composer and leave the cursor after it.
+ * Shared by note attach and pane quote: both are composer conveniences that
+ * send nothing by themselves. */
+function insertIntoComposer(paneId, text, msg) {
   focusPane(paneId);
   requestAnimationFrame(() => {
     const box = document.querySelector(`[data-pane="${paneId}"] .composer textarea`)
              || document.querySelector(`[data-pane="${paneId}"] .composer input`);
     if (!box) return toast('attached, but that pane has no composer', true);
-    box.value = d.text + (box.value || '');
+    box.value = text + (box.value || '');
     box.focus();
     // Cursor AFTER the inserted text: you are about to type the question, and
     // landing at position 0 means typing in front of your own attachment.
-    const at = d.text.length;
+    const at = text.length;
     box.setSelectionRange(at, at);
     box.dispatchEvent(new Event('input', { bubbles: true }));
-    toast(d.mode === 'excerpt'
-      ? `quoted "${d.title}" — this lane has no tools, so the text came along`
-      : `referenced "${d.title}" — the agent will read it through its own gate`);
+    toast(msg);
   });
+}
+
+/* Quote one pane's last answer into another's composer. The server decides
+ * the bytes (bounded, fenced, attributed); nothing is sent until the operator
+ * presses send in the target. */
+async function quoteInto(fromId, toId) {
+  let d;
+  try { d = await api('/api/session/quote', { from: fromId, pane: toId }); }
+  catch (e) { return toast(e.message, true); }
+  insertIntoComposer(toId, d.text,
+    `quoted ${d.label}'s answer` + (d.complete ? '' : ' — still being written')
+      + (d.clipped ? ' (truncated)' : ''));
+}
+
+/* Panes that can take a composed prompt right now: live, on screen, with a
+ * chat composer. The same test attachTarget applies to one pane, over all. */
+function composablePanes() {
+  return [...S.panes.values()].filter(p => !p.minimized && p.state !== 'dead'
+    && p.state !== 'detached' && !p.agent.startsWith('host:'));
+}
+
+const CROSSFEED_DEFAULT = 'Round two. Below are the other arms\' answers to the '
+  + 'same question. Attack them: where are they wrong, what did they miss, and '
+  + 'does your own answer change? Say what you now reject and end with your '
+  + 'revised answer.';
+
+/* Round two of a panel: each composable pane gets every other's last answer
+ * under one preamble. The preamble is shown for editing before anything is
+ * sent, and the composed prompt lands in every pane as its own user turn, so
+ * the transcript shows exactly what each arm was given. */
+async function crossfeed() {
+  const panes = composablePanes();
+  if (panes.length < 2) return toast('cross-feed needs two or more live panes', true);
+  const text = window.prompt(
+    `Cross-feed ${panes.length} panes: ${panes.map(p => p.title || p.label).join(', ')}.\nPreamble each arm gets above the others' answers:`,
+    CROSSFEED_DEFAULT);
+  if (text === null) return;
+  try {
+    const r = await api('/api/session/crossfeed', { panes: panes.map(p => p.id), text });
+    const bad = Object.entries(r.results || {}).filter(([, err]) => err);
+    toast(bad.length
+      ? `cross-fed ${r.sent} of ${panes.length} — ` + bad.map(([id, err]) =>
+          `${(S.panes.get(id) || {}).title || id}: ${err}`).join('; ')
+      : `cross-fed ${r.sent} panes`, !!bad.length);
+  } catch (e) { toast(e.message, true); }
 }
 
 function movePaletteSel(delta) {
@@ -2319,6 +2407,7 @@ function movePaletteSel(delta) {
 function wirePalette() {
   const q = $('#pal-q');
   $('#search-trigger').onclick = openPalette;
+  $('#crossfeed').onclick = crossfeed;
   q.oninput = () => paletteResults(q.value);
   q.onkeydown = e => {
     if (e.key === 'ArrowDown') { e.preventDefault(); movePaletteSel(1); }

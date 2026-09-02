@@ -80,6 +80,7 @@ MAX_PERM_BYTES = 262_144       # a consent payload past this is REFUSED, not cli
 MAX_PENDING_PERMS = 20         # a wedged/hostile adapter cannot grow the needs-you
                                # backlog without bound; past this, auto-refuse
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
+QUOTE_CHARS = 12_000           # of one pane's last answer carried into another
 MAX_LOG_BYTES = 64 * 1024 * 1024   # per-pane transcript on disk, then rotate
 STALL_S = 300                  # busy with nothing emitted for this long = suspect
 
@@ -2080,6 +2081,30 @@ class Pane:
         except Exception:
             pass
 
+    def last_answer(self):
+        """The agent's most recent answer, as (text, complete).
+
+        Read off the bounded ring, newest first, back to the `user` event
+        that asked for it: every `text` chunk in between IS the answer (tool
+        rows, thoughts and notes are not). `complete` is whether a
+        `turn_end` has landed since that user event -- a cross-feed that
+        quotes a half-written answer would hand the other arms a sentence
+        the model had not finished, so callers that compose must check it.
+        Empty text with complete=True is a real state (the turn produced only
+        tool calls) and is reported as such, never padded.
+        """
+        chunks, complete = [], False
+        for ev in reversed(self.events):
+            k = ev["kind"]
+            if k == "user":
+                break
+            if k == "turn_end":
+                complete = True
+            elif k == "text":
+                chunks.append((ev.get("data") or {}).get("text") or "")
+        chunks.reverse()
+        return "".join(chunks).strip(), complete
+
     def snapshot(self, since=0):
         # Ask the OS, not our own bookkeeping. `client.alive` only flips when
         # stdout closes or a write fails, so an adapter that wedged with its
@@ -2546,6 +2571,89 @@ class Manager:
         if not p:
             raise ValueError(f"no pane {pane_id}")
         return p
+
+    # --- Composition: panes feeding panes ------------------------------------
+    # Until 2026-09-01 the only router between panes was the human. Five
+    # lanes side by side were five chat windows; the pattern that actually
+    # earned its keep this month (49 rival panels in 9 days) ran headless,
+    # outside the window. These three verbs put it inside, on the same rail:
+    # nothing here bypasses a pane's own permission gate, and every prompt a
+    # verb composes is emitted as that pane's `user` event, so what was sent
+    # is exactly what the transcript shows (PRINCIPLES 17, 18).
+    def quote(self, from_id, to_id=None):
+        """Text for a composer: one pane's last answer, fenced and attributed.
+
+        Returns text only -- nothing is sent (the same P17 stance as
+        content attach). An SSH pane is never a source or a target: its
+        transcript is shell output, and a quoted answer pasted onto a
+        command line is a command you did not mean to type.
+        """
+        src = self.get(from_id)
+        if src.agent.startswith("host:"):
+            raise ValueError("an SSH pane has no answer to quote")
+        if to_id:
+            dst = self.get(to_id)
+            if dst.agent.startswith("host:"):
+                raise ValueError("SSH panes cannot receive quoted answers")
+            if dst.id == src.id:
+                raise ValueError("a pane cannot quote itself")
+        body, complete = src.last_answer()
+        if not body:
+            raise ValueError(f"{src.title} has not answered yet")
+        clipped = len(body) > QUOTE_CHARS
+        label = AGENTS.get(src.agent, {}).get("label") or src.agent
+        text = (f"From {label} \u2014 {src.title}:\n\n\"\"\"\n{body[:QUOTE_CHARS]}"
+                f"{chr(10) + '[\u2026truncated]' if clipped else ''}\n\"\"\"\n\n")
+        return {"text": text, "complete": complete, "title": src.title,
+                "label": label, "clipped": clipped}
+
+    def fanout(self, ids, text):
+        """One prompt to many panes. Per-pane bounds and queues still apply;
+        one pane refusing does not stop the others, and the refusal is
+        returned by pane id, never swallowed."""
+        ids = list(dict.fromkeys(i for i in ids if i))[:MAX_PANES]
+        if not ids:
+            raise ValueError("no panes to send to")
+        results, sent = {}, 0
+        for pid in ids:
+            try:
+                self.get(pid).send(text)
+                results[pid] = None
+                sent += 1
+            except Exception as e:      # noqa: BLE001 - reported, per pane
+                results[pid] = str(e)
+        return {"sent": sent, "results": results}
+
+    def crossfeed(self, ids, preamble):
+        """Round two: every pane receives every OTHER pane's last answer,
+        under one preamble. Refuses -- for all, not some -- if any arm has
+        not finished: a round two over a partial round one is a panel with
+        a missing arm that nobody was told about."""
+        ids = list(dict.fromkeys(i for i in ids if i))[:MAX_PANES]
+        if len(ids) < 2:
+            raise ValueError("cross-feed needs at least two panes")
+        panes = [self.get(i) for i in ids]
+        quotes = {}
+        for p in panes:
+            if p.agent.startswith("host:"):
+                raise ValueError(f"{p.title} is an SSH pane and cannot take part")
+            body, complete = p.last_answer()
+            if not body or not complete:
+                raise ValueError(f"{p.title} has not finished answering "
+                                 f"\u2014 cross-feed waits for every arm")
+            quotes[p.id] = self.quote(p.id)["text"]
+        preamble = (preamble or "").strip()
+        results, sent = {}, 0
+        for p in panes:
+            others = "".join(quotes[o.id] for o in panes if o.id != p.id)
+            prompt = (preamble + "\n\n" + others).strip()
+            try:
+                p.send(prompt)
+                results[p.id] = None
+                sent += 1
+            except Exception as e:      # noqa: BLE001
+                results[p.id] = str(e)
+        return {"sent": sent, "results": results}
 
     def reorder(self, ids):
         """Set an explicit order from a list of pane ids.
