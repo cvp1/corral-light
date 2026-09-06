@@ -4,6 +4,9 @@
 #   corral-light serve          run the hub in the foreground
 #   corral-light doctor         say which lanes can start here, and why not
 #   corral-light diagnose       run one lane end to end and report everything
+#   corral-light consult ...    ask a lane from a script — the assistant's way to
+#                               get a second opinion on your subscriptions, not
+#                               an API key (consult.py --help for the verbs)
 #
 # /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (dogma-2), which
 # has no /usr/bin/bash. The same shebang mistake shipped once in the full
@@ -24,5 +27,6 @@ note = (lanes[0].get('envNote') if lanes else None)
 if note: print('\n  !   ' + note)
 " ;;
   diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]}"; exit 2 ;;
+  consult) shift; exec "$PY" "$D/consult.py" "$@" ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]|consult <verb> ...}"; exit 2 ;;
 esac

@@ -78,6 +78,16 @@ cross-feed the answers so they argue (⇄), or ask an assistant to consult
 another one itself. The guide, with the panel recipe and the rules that hold
 in every case: [`docs/PASSING-WORK.md`](docs/PASSING-WORK.md).
 
+An assistant (or any script) can do the last one through the wall instead of
+through a vendor API: `corral-light consult ask --lane grok --prompt "…"`
+opens a pane on that lane, waits for the answer, and prints it as JSON —
+on the subscription the lane is already signed in with, in a pane you can
+watch and answer. `consult lanes` lists what is live; `fanout` and
+`crossfeed` are the ⌘↵ and ⇄ buttons from a script. Point your assistant at
+it once in its instructions file ("to ask another model, use `corral-light
+consult`, never an API key by default") and second opinions stop costing a
+second bill.
+
 ## Security
 
 The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
@@ -107,6 +117,8 @@ Diagnostic output includes command names, configuration details, environment var
 | `CORRAL_CLAUDE_ADAPTER` | `spike/node_modules/.bin/claude-agent-acp` | Claude adapter location. |
 | `CORRAL_CONTENT_CONFIG` | `~/.config/corral-light/content.json` | Directories searched by `⌘K`. |
 | `CORRAL_NODE_BIN` | An available Node.js installation | Optional Node.js path override. |
+| `CORRAL_LIGHT_URL` | `http://127.0.0.1:8098` | Where `corral-light consult` finds the hub. |
+| `CORRAL_LIGHT_CONSULT_CFG` | `~/.config/corral-light/consult-session.json` | The paired session `consult` keeps (0600). |
 
 The default address is local-only by design. If you change `CORRAL_LIGHT_BIND` to expose the server on a network, protect access with your network controls and pairing code.
 
@@ -154,6 +166,8 @@ Key files:
 - `sessions.py` — conversation storage and assistant processes
 - `acp.py` — Agent Client Protocol integration
 - `content.py` — file indexing and search
+- `consult.py` — scripted client of the hub (`corral-light consult`): ask a lane, fan out, cross-feed, from a shell or an assistant
+- `test_consult.py` — its offline tests (`python3 test_consult.py`)
 - `static/` — browser interface
 - `test_corral_light.py` — automated tests
 
