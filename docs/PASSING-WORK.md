@@ -116,6 +116,28 @@ other tool must be installed and signed in on the box. This is the pattern the
 three verbs above grew out of; use it when the assistant, not you, is the one
 who should be deciding to ask.
 
+**The better way to do it: through the wall.** `corral-light consult` is the
+same hand-off, but the consulted model answers in a pane you can see. The
+assistant runs, say:
+
+```
+corral-light consult ask --lane grok --cwd . --prompt "Review this plan: …"
+```
+
+and gets one JSON document back with the answer, whether the turn really
+ended, and how long it took. `fanout --lane grok --lane codex --lane gemini`
+opens one pane per lane in parallel; `crossfeed --pane … --pane …` is the ⇄
+button from a script. The panes it opens are ordinary panes: a lane that
+wants to run a tool asks you in the rail, not the script, and you can keep
+talking to the pane afterwards. Pairing is automatic when the script runs as
+you on the hub host; anywhere else it prints a code for `corral-light pair`.
+
+Tell your assistant this once, in its instructions file, and it stops
+reaching for an API key: *"To ask another model for an opinion, use
+`corral-light consult` — never a vendor API by default."* Every consult rides
+the subscription the lane is signed in with; the hub, not the assistant,
+holds the login.
+
 ---
 
 ## The panel recipe
