@@ -1115,12 +1115,80 @@ class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
         finally:
             os.environ.pop("ANTHROPIC_API_KEY", None)
 
-    def test_both_spawn_sites_strip(self):
+    def test_both_doors_strip_for_every_lane(self):
         """start() and resume() are two doors into the same room; a guard on
-        one of them is a guard on neither."""
-        sess = (ROOT / "sessions.py").read_text(encoding="utf-8")
-        self.assertEqual(sess.count("strip_env=strip_prefixes()"), 2,
-                         "start() and resume() must both strip")
+        one of them is a guard on neither.
+
+        Measured at the process boundary through the REAL start() and
+        resume(), for every lane in the roster. The first version of this test
+        (2026-08-31) counted the string `strip_env=strip_prefixes()` in
+        sessions.py — a source grep that goes vacuous under any refactor and
+        cannot tell a stripped child from an unstripped one (completion review
+        2026-09-09, Grok). Removing the strip from either door now fails this
+        test for every lane on that door; proven by doing exactly that.
+        """
+        import sessions, tempfile, sys as _sys, time, json as _json
+        work = Path(tempfile.mkdtemp())
+        spy = work / "spy.py"
+        spy.write_text(
+            "import json,os,sys\n"
+            "seen=sorted(k for k in os.environ if k.startswith(%r))\n"
+            "open(sys.argv[1],'w').write(json.dumps("
+            "{'seen':seen,'cfg':os.environ.get('CLAUDE_CONFIG_DIR')}))\n"
+            % (sessions.STRIP_ENV_PREFIXES,))
+        canaries = {"ANTHROPIC_API_KEY": "sk-ant-test", "OPENAI_API_KEY": "sk-x",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "/parent/sa.json",
+                    "XAI_API_KEY": "x", "CLAUDECODE": "1",
+                    "CLAUDE_CONFIG_DIR": "/parent/config"}
+        saved = {k: os.environ.get(k) for k in canaries}
+        roster = dict(sessions.AGENTS)
+        os.environ.update(canaries)
+        panes = []
+
+        class _Mgr:
+            def broadcast(self, ev): pass
+            def remember_catalog(self, agent, config): pass
+            def _reserve_live(self, pane): pass      # the live-cap gate; not under test here
+
+        def _report(path):
+            for _ in range(200):
+                if path.is_file() and path.stat().st_size:
+                    return _json.loads(path.read_text())
+                time.sleep(0.05)
+            self.fail(f"spy never wrote {path}")
+        try:
+            for key, spec in roster.items():
+                for door in ("start", "resume"):
+                    with self.subTest(lane=key, door=door):
+                        out = work / f"{key}.{door}.json"
+                        sessions.AGENTS[key] = dict(
+                            spec, argv=[_sys.executable, str(spy), str(out)])
+                        p = sessions.Pane(key, str(work), "auto", _Mgr())
+                        p._config_dir = lambda: "/ours/config"
+                        panes.append(p)
+                        if door == "start":
+                            p.start()
+                        else:
+                            p.state, p.acp_session = "detached", "s-1"
+                            p.resume()
+                        r = _report(out)
+                        leaked = [k for k in r["seen"] if k != "CLAUDE_CONFIG_DIR"]
+                        self.assertEqual(leaked, [], f"{key}.{door}() leaked {leaked}")
+                        if spec.get("posture_via_config_dir"):
+                            self.assertEqual(r["cfg"], "/ours/config",
+                                             "our config dir must win, not the parent's")
+                        else:
+                            self.assertIsNone(r["cfg"], "parent CLAUDE_CONFIG_DIR leaked")
+        finally:
+            sessions.AGENTS.clear(); sessions.AGENTS.update(roster)
+            for k, v in saved.items():
+                if v is None: os.environ.pop(k, None)
+                else: os.environ[k] = v
+            for p in panes:
+                try:
+                    if p.client: p.client.close()
+                except Exception: pass
+                if getattr(p, "_log", None): p._log.close()
 
     def test_the_probe_strips_too(self):
         lp = (ROOT / "lane_probe.py").read_text(encoding="utf-8")

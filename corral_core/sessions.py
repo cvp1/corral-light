@@ -63,20 +63,91 @@ STATE = None             # Path: where panes and transcripts live
 CATALOG = None           # derived from STATE, not a constant — see configure()
 
 
-def configure(*, AGENTS, AGENT_GROUPS, STATE):     # noqa: N803
-    """Bind the globals that legitimately differ between products."""
+def configure(*, AGENTS, AGENT_GROUPS, STATE,                    # noqa: N803
+              ALLOW_VENDOR_ENV_VAR="CORRAL_ALLOW_VENDOR_ENV"):      # noqa: N803
+    """Bind the globals that legitimately differ between products.
+
+    `ALLOW_VENDOR_ENV_VAR` names the escape hatch that lets ambient vendor
+    keys through to a pane (see `strip_prefixes`). It is a product name, not
+    a shared one: Light shipped and documented `CORRAL_LIGHT_ALLOW_VENDOR_ENV`
+    on 2026-08-31, full Corral has no reason to spell its own with LIGHT in
+    it, and renaming Light's would break a documented operator knob.
+    """
     g = globals()
     if AGENTS is None or AGENT_GROUPS is None or STATE is None:
         raise ValueError("corral_core.sessions.configure needs all three of "
                          "AGENTS, AGENT_GROUPS and STATE")
     g["AGENTS"], g["AGENT_GROUPS"] = AGENTS, AGENT_GROUPS
     g["STATE"] = Path(STATE)
+    g["ALLOW_VENDOR_ENV_VAR"] = str(ALLOW_VENDOR_ENV_VAR)
     # `CATALOG = STATE / "catalog.json"` is spelled identically in both
     # products and is therefore easy to mistake for a shared constant. It is
     # not: it is derived from the one path that differs, so it has to be
     # recomputed here rather than evaluated at import against a STATE that is
     # still None.
     g["CATALOG"] = g["STATE"] / "catalog.json"
+
+
+# ── ambient credentials never reach a pane ────────────────────────────────
+# A vendor credential exported in the shell that started the hub silently
+# OUTRANKS the login the operator verified — the agent runs as a different
+# identity than the one the picker described, and the failure arrives later
+# and elsewhere (the operator, 2026-08-31: logged in, verified it, /usage
+# showed token STATISTICS instead of the subscription page, next prompt failed
+# `Authentication required` — API-key mode, the login never used). Light
+# shipped the strip that day (caf616e); full Corral did not get it until the
+# 2026-09-09 completion review found the reason it was parked did not hold.
+#
+# Also stripped, MEASURED the same day: the eleven CLAUDE_* variables a Claude
+# Code session exports into its children, CLAUDE_CONFIG_DIR among them. That
+# one is the sharp edge — a hub started from inside a Claude Code session would
+# otherwise hand every pane the parent session's config directory in exactly
+# the fallback case where the product deliberately does not set its own.
+# Product overrides are applied AFTER the strip, so setting CLAUDE_CONFIG_DIR
+# on purpose still works.
+#
+# Fail safe: strip by default and SAY SO in the picker (each product's
+# `available_agents` attaches `vendor_env_present()` as an envNote), because
+# someone deliberately using an API key deserves to learn we removed it, not
+# to debug why. The opt-in hatch is the env var named by `configure()`.
+STRIP_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_",
+                      "XAI_", "GROK_",
+                      "CLAUDECODE", "CLAUDE_")
+ALLOW_VENDOR_ENV_VAR = "CORRAL_ALLOW_VENDOR_ENV"   # configure() may rename
+
+
+def vendor_env_present():
+    """Vendor credential vars in this process's environment, if any."""
+    if os.environ.get(ALLOW_VENDOR_ENV_VAR) == "1":
+        return []
+    # Only CREDENTIALS are worth a note. The Claude Code session variables are
+    # stripped too, but nobody exported those on purpose and saying so on
+    # every lane would be noise that trains the eye to skip the line.
+    # The prefix alone is not enough: GROK_AGENT / GROK_SESSION_ID are this
+    # process's session identity (a Grok TUI session exports them), not a
+    # key. Same split already used for CLAUDE_* — strip the session vars,
+    # nag only on something that looks like a secret.
+    creds = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_", "XAI_", "GROK_",
+             "CLAUDE_")
+    hints = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
+    return sorted(k for k in os.environ
+                  if k.startswith(creds) and any(h in k.upper() for h in hints))
+
+
+def strip_prefixes():
+    """() when the operator has explicitly opted into ambient vendor auth."""
+    if os.environ.get(ALLOW_VENDOR_ENV_VAR) == "1":
+        return ()
+    return STRIP_ENV_PREFIXES
+
+
+def vendor_env_note(stripped):
+    """The picker line both products show when something was stripped."""
+    if not stripped:
+        return ""
+    return (f"ignoring {', '.join(stripped)} from this environment — panes "
+            f"use the login on this host, not an ambient key. Unset it, or "
+            f"set {ALLOW_VENDOR_ENV_VAR}=1 to use it.")
 
 
 # ── bounds, identical in both products ────────────────────────────────────
