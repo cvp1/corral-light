@@ -580,75 +580,16 @@ def seed_config_dir(d, posture):
     return d
 
 
-# A vendor credential exported in the shell that started the hub silently
-# OUTRANKS the login the operator verified — the agent runs as a different
-# identity than the one the picker described, and the failure arrives later
-# and elsewhere.
-#
-# Craig, dogma-2, 2026-08-31, in the order he found them: logged in; verified
-# he was logged in; ran /usage and got token STATISTICS instead of the
-# subscription usage page; the next prompt failed `Authentication required`.
-# A statistics page rather than a subscription page is what API-key mode
-# looks like — i.e. the agent was never using the login he had just checked.
-#
-# codex_launcher has stripped exactly these prefixes since 2026-08-23, with a
-# comment naming the case ("a dev shell with a key exported for something
-# unrelated"). The Claude lane, which is the one everybody actually uses,
-# never got the same guard.
-#
-# Fail safe: strip by default, and SAY SO in the picker rather than silently
-# — someone deliberately using an API key deserves to learn that we removed
-# it, not to debug why. CORRAL_LIGHT_ALLOW_VENDOR_ENV=1 keeps them.
-# Vendor credentials, plus — MEASURED 2026-08-31, and the first thing in this
-# whole investigation that was measured rather than proposed — the variables a
-# Claude Code session exports into its own children. Running
-# `corral-light diagnose` from inside a Claude Code session showed ELEVEN of
-# them reaching the spawned agent:
-#
-#   CLAUDECODE, CLAUDE_CODE_SESSION_ID, CLAUDE_CODE_CHILD_SESSION,
-#   CLAUDE_CODE_ENTRYPOINT, CLAUDE_CODE_EXECPATH, CLAUDE_AGENT_SDK_VERSION,
-#   CLAUDE_PID, CLAUDE_EFFORT, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, … and
-#   CLAUDE_CONFIG_DIR.
-#
-# That last one is the sharp edge. Corral sets CLAUDE_CONFIG_DIR when it can
-# impose a posture, and deliberately does NOT set it when it cannot (the
-# credential-not-in-a-file fallback). In exactly that fallback case, an
-# INHERITED CLAUDE_CONFIG_DIR wins — so a hub started from inside a Claude
-# Code session would hand every pane the parent session's config directory,
-# which is the one thing the whole mechanism exists to prevent. "Do not set
-# it" only means "use the default" if nothing else is setting it.
-#
-# So a pane never inherits another Claude Code session's identity. Our own
-# overrides are applied AFTER the strip, so setting CLAUDE_CONFIG_DIR
-# deliberately still works.
-STRIP_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_",
-                      "XAI_", "GROK_",
-                      "CLAUDECODE", "CLAUDE_")
-
-
-def vendor_env_present():
-    """Vendor credential vars in this process's environment, if any."""
-    if os.environ.get("CORRAL_LIGHT_ALLOW_VENDOR_ENV") == "1":
-        return []
-    # Only CREDENTIALS are worth a note. The Claude Code session variables are
-    # stripped too, but nobody exported those on purpose and saying so on
-    # every lane would be noise that trains the eye to skip the line.
-    # The prefix alone is not enough: GROK_AGENT / GROK_SESSION_ID are this
-    # process's session identity (a Grok TUI session exports them), not a
-    # key. Same split already used for CLAUDE_* — strip the session vars,
-    # nag only on something that looks like a secret.
-    creds = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_", "XAI_", "GROK_",
-             "CLAUDE_")
-    hints = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
-    return sorted(k for k in os.environ
-                  if k.startswith(creds) and any(h in k.upper() for h in hints))
-
-
-def strip_prefixes():
-    """() when the operator has explicitly opted into ambient vendor auth."""
-    if os.environ.get("CORRAL_LIGHT_ALLOW_VENDOR_ENV") == "1":
-        return ()
-    return STRIP_ENV_PREFIXES
+# Ambient vendor credentials and parent-session variables never reach a pane.
+# The strip list, the picker note and the opt-in hatch live in the core
+# (`corral_core/sessions.py`, "ambient credentials never reach a pane") since
+# 2026-09-09 so full Corral cannot fork them again; the history — Craig on
+# dogma-2, 2026-08-31, verified login, /usage showing token statistics, then
+# `Authentication required` — is told there. This product's hatch keeps the
+# name it shipped and documented with: CORRAL_LIGHT_ALLOW_VENDOR_ENV=1.
+STRIP_ENV_PREFIXES = _core.STRIP_ENV_PREFIXES
+vendor_env_present = _core.vendor_env_present
+strip_prefixes = _core.strip_prefixes
 
 
 def spawn_env(spec, config_dir=None):
@@ -826,7 +767,8 @@ AGENT_GROUPS = {
 # AGENT_GROUPS and STATE from the core's namespace, which is the one place the
 # two products legitimately differ. Doing it at import, loudly, is the point —
 # a missing roster must not surface as a confusing AttributeError on a click.
-_core.configure(AGENTS=AGENTS, AGENT_GROUPS=AGENT_GROUPS, STATE=STATE)
+_core.configure(AGENTS=AGENTS, AGENT_GROUPS=AGENT_GROUPS, STATE=STATE,
+                ALLOW_VENDOR_ENV_VAR="CORRAL_LIGHT_ALLOW_VENDOR_ENV")
 
 # Derived from STATE, so it is only correct after configure().
 CATALOG = _core.CATALOG
@@ -955,9 +897,7 @@ def available_agents():
                     "postureEnforced": posture_enforceable(spec),
                     "tools": bool(spec.get("tools"))})
     if stripped:
-        note = (f"ignoring {', '.join(stripped)} from this environment — panes "
-                f"use the login on this host, not an ambient key. Unset it, or "
-                f"set CORRAL_LIGHT_ALLOW_VENDOR_ENV=1 to use it.")
+        note = _core.vendor_env_note(stripped)
         for item in out:
             item["envNote"] = note
     # One pass over every append site above, so a lane added later cannot miss
