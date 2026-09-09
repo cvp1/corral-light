@@ -75,6 +75,22 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
                     f"{f.name} imports {mod!r} from full Corral — the public "
                     f"product must stand alone")
 
+    def test_the_core_names_no_host(self):
+        """This repository is PUBLIC. The core is code that arrived from a
+        private sibling, so it is the one place a machine name, a LAN address
+        or an account can cross over by accident — comments carry incident
+        history and incident history is full of hostnames. The rest of the
+        tree was scrubbed by hand when it was forked; this keeps the core
+        scrubbed by machine."""
+        import re
+        bad = re.compile(r"ranch-server|dogma-2|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
+        for f in sorted((ROOT / "corral_core").glob("*.py")):
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                m = bad.search(line)
+                self.assertIsNone(
+                    m, f"{f.name}:{i} names a host or account in a public "
+                       f"repository: {line.strip()[:90]}")
+
     def test_the_core_imports_with_nothing_but_this_tree_on_the_path(self):
         """Not just a text check: actually import it in a clean interpreter
         whose path contains only this directory."""

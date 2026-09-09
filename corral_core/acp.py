@@ -213,14 +213,13 @@ class AcpClient:
         full_env.update(env or {})
         # Fork from a thread that OUTLIVES the caller. On Linux an agent may
         # ask the kernel for a parent-death signal (Grok Build does:
-        # prctl(PR_SET_PDEATHSIG, SIGTERM), measured on ranch-server
-        # 2026-09-01), and that signal fires when the parent THREAD that
-        # forked it exits -- not the process. The hub creates panes on
-        # per-request HTTP threads, so every Grok pane came up `ready` and was
-        # SIGTERMed the moment its request returned: dead within the same
-        # second, "rc=143", no stderr, and strace showed the hub itself as the
-        # sender with no kill() of its own. One long-lived spawner thread is
-        # the parent of every agent.
+        # prctl(PR_SET_PDEATHSIG, SIGTERM), measured 2026-09-01), and that
+        # signal fires when the parent THREAD that forked it exits -- not the
+        # process. The hub creates panes on per-request HTTP threads, so every
+        # Grok pane came up `ready` and was SIGTERMed the moment its request
+        # returned: dead within the same second, "rc=143", no stderr, and the
+        # hub's own trace showed itself as the sender with no kill() of its
+        # own. One long-lived spawner thread is the parent of every agent.
         try:
             self.p = _spawn(lambda: subprocess.Popen(
                 self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
