@@ -24,7 +24,71 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+
+def acp_unanswered():
+    """The core's "no human selection yet" sentinel.
+
+    Distinct from a falsy option id on purpose: a vendor is entitled to an
+    optionId of "" or 0, and reading that as "no selection" made the human's
+    click vanish (2026-08-31 panel, grok finding 8).
+    """
+    import acp
+    return acp._UNANSWERED
+
 import ollama_acp
+
+# The shared rail contract, collected into THIS suite so `python3 -m unittest
+# test_corral_light` proves the permission rail too. It lives in corral_core
+# because full Corral runs the same file: a contract that lives in one product
+# proves one product, which is exactly how the 2026-08-31 rail fixes shipped to
+# Corral and not to the product other people run.
+from corral_core.test_acp_rail import *          # noqa: F401,F403
+
+
+class TheCoreNeverImportsFullCorral(unittest.TestCase):
+    """Corral Light is the public, MIT, standalone product.
+
+    The core lives in THIS tree so the dependency can only point one way:
+    `corral/` reaches sideways for `corral_core`, never the reverse. If the
+    core ever imported from `corral/`, Light would stop working on a host
+    that has no full Corral checkout — which is every host but ranch-server —
+    and the fork would be re-opened from the other end.
+    """
+
+    def test_no_module_in_the_core_reaches_into_corral(self):
+        """Statements, not prose. The core's docstrings talk about `corral/`
+        at length — explaining the rule is not breaking it — so this reads
+        the parsed imports rather than grepping the text."""
+        import ast
+        core = ROOT / "corral_core"
+        for f in sorted(core.glob("*.py")):
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            names = []
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Import):
+                    names += [a.name for a in n.names]
+                elif isinstance(n, ast.ImportFrom) and n.module:
+                    names.append(n.module)
+            for mod in names:
+                self.assertNotEqual(
+                    mod.split(".")[0], "corral",
+                    f"{f.name} imports {mod!r} from full Corral — the public "
+                    f"product must stand alone")
+
+    def test_the_core_imports_with_nothing_but_this_tree_on_the_path(self):
+        """Not just a text check: actually import it in a clean interpreter
+        whose path contains only this directory."""
+        import subprocess
+        # Keep the stdlib, drop every workspace entry: the question is whether
+        # the core needs a SIBLING product, not whether it needs `json`.
+        prog = ("import sys; "
+                "sys.path[:] = [%r] + [p for p in sys.path "
+                "                      if 'Github/CC' not in p and p]; "
+                "from corral_core import acp; print(acp.MAX_STDOUT_LINE)" % str(ROOT))
+        r = subprocess.run([sys.executable, "-c", prog],
+                           capture_output=True, text=True, timeout=60, cwd="/")
+        self.assertEqual(r.returncode, 0,
+                         f"the core cannot import standalone: {r.stderr[-500:]}")
 
 
 def _config_dir_only(spec):
@@ -1826,46 +1890,80 @@ class ARequestIdIsNotUniqueInATranscript(unittest.TestCase):
         self.assertNotIn("permOutcomes.set((e.data || {}).requestId, e)", js)
         self.assertIn("permOutcomes.get(e.seq)", js)
 
-    def test_a_reused_id_releases_the_old_waiter(self):
-        """Assigning over a live slot stranded the old thread on an Event
-        nothing would ever set -- PERMISSION_TIMEOUT is None, so it waited
-        forever and the agent's earlier request was never replied to."""
-        import acp, threading
+    def _stub(self):
+        """A client with real state and no child process.
+
+        `_init_state()`, never a hand-copied echo of the fields — that is the
+        module's own rule and these tests used to break it. When the shared
+        core arrived carrying `_permlock`, the hand-copied stub below raised
+        AttributeError instead of proving anything (2026-09-09).
+        """
+        import acp
         c = acp.AcpClient.__new__(acp.AcpClient)
-        c._perm_answers = {}
-        c._last_activity = 0.0
+        c._init_state()
         c.alive = True
-        c._closed = False
-        events, perms, written = [], [], []
-        c.on_event = lambda k, d: events.append((k, d))
-        c.on_permission = perms.append
-        c._write = written.append
+        c.events, c.perms, c.written = [], [], []
+        c.on_event = lambda k, d=None: c.events.append((k, d))
+        c.on_permission = c.perms.append
+        c._write = c.written.append
+        return c
+
+    def test_a_reused_id_is_refused_and_the_live_card_survives(self):
+        """The CONTRACT CHANGED on 2026-09-09, deliberately — record of why.
+
+        Light used to release the stranded waiter and let the new request take
+        the id. That fixed the hang (the old thread waited forever on an Event
+        nothing would set; PERMISSION_TIMEOUT is None) but paid for it by
+        destroying a card the human might be looking at right now: the agent's
+        choice of id silently invalidated a decision in flight.
+
+        Full Corral's answer to the same defect — from the 2026-08-31 panel,
+        gemini finding 3 / gpt finding 4, and running live since — refuses the
+        DUPLICATE instead. The card already on the rail stays answerable, and
+        the second request is told loudly that its id is taken. That is the
+        fail-closed direction and the one principle 17 wants: nothing the agent
+        does can take away the bytes the human was shown.
+
+        It only bites while the first card is genuinely pending; answering it
+        pops the slot and the id is free again. The panel also measured the
+        harder half: a duplicate key OVERWROTE its predecessor without growing
+        the dict, so `len()` — which is how the pending bound is enforced —
+        stayed put while waiter threads piled up (61 live against a bound of
+        32, every overwritten Event unreachable).
+        """
+        import threading
+        c = self._stub()
         first = threading.Event()
-        c._perm_answers["0"] = {"ev": first, "option": None}
+        c._perm_answers["0"] = {"ev": first, "option": acp_unanswered()}
 
         c._on_request({"method": "session/request_permission", "id": 0,
                        "params": {"toolCall": {"title": "second"}}})
 
-        self.assertTrue(first.is_set(), "the stranded waiter must be released")
-        self.assertIn(("permission_expired",
-                       {"requestId": "0",
-                        "reason": "the agent reused this request id"}), events)
-        self.assertEqual(len(perms), 1)
-        # And the NEW slot is the one now under the key, not the old one.
-        self.assertIsNot(c._perm_answers["0"]["ev"], first)
+        self.assertIs(c._perm_answers["0"]["ev"], first,
+                      "the live card was replaced by the duplicate")
+        self.assertFalse(first.is_set(),
+                         "the human's pending card was cancelled out from "
+                         "under them by the agent reusing an id")
+        reasons = [d.get("reason") for k, d in c.events if k == "permission_expired"]
+        self.assertTrue(any("already pending" in (r or "") for r in reasons),
+                        f"the duplicate was not refused loudly: {c.events}")
+        self.assertEqual(c.perms, [],
+                         "a second card was drawn for a refused duplicate")
 
     def test_the_old_waiter_does_not_pop_the_new_slot(self):
         """A plain pop(key) on wake removed whatever was under the id -- after
         a reuse that is the NEXT request's slot, so answering the new card
-        found nothing to wake and hung the same way the reuse used to."""
-        import acp, threading
-        c = acp.AcpClient.__new__(acp.AcpClient)
-        c._perm_answers = {}
-        c.alive = True
-        c._write = lambda msg: None
+        found nothing to wake and hung the same way the reuse used to.
+
+        Still true under the refuse-the-duplicate contract: the id frees up
+        when the first card is answered, so a LATE waiter for the old request
+        must still not take the new one's slot with it.
+        """
+        import threading
+        c = self._stub()
         old_ev = threading.Event()
         new_ev = threading.Event()
-        c._perm_answers["0"] = {"ev": new_ev, "option": None}   # the survivor
+        c._perm_answers["0"] = {"ev": new_ev, "option": acp_unanswered()}
         old_ev.set()                                            # old one released
         c._await_permission("0", 0, {}, old_ev)
         self.assertIn("0", c._perm_answers, "the new slot must survive")
