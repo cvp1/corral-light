@@ -477,6 +477,16 @@ class Server(ThreadingHTTPServer):
 
 
 def serve(bind=BIND, port=PORT):
+    # The hub runs as a systemd unit, and every pane it spawns inherits its
+    # environment -- so until 2026-09-09 every interactive agent under it
+    # carried systemd's INVOCATION_ID and passed the "scheduled estate" gate
+    # in _lib/mail.py and ontology/_sender (measured live: grok, codex and
+    # claude children of the hub all had it). An agent in a pane is the
+    # interactive case those gates exist to refuse. Drop the unit identity
+    # here, once, before the first spawn; the gates additionally require
+    # CC_SCHEDULED_JOB, which only observability/log_run.py sets.
+    for _k in ("INVOCATION_ID", "JOURNAL_STREAM", "CC_SCHEDULED_JOB"):
+        os.environ.pop(_k, None)
     threading.Thread(target=_observe_loop, daemon=True).start()
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
