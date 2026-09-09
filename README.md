@@ -164,7 +164,11 @@ Key files:
 
 - `hub.py` — web server and API
 - `sessions.py` — conversation storage and assistant processes
-- `acp.py` — Agent Client Protocol integration
+- `corral_core/` — the code this project and its larger sibling must not fork
+  (see below). `corral_core/acp.py` is the Agent Client Protocol client and
+  the permission rail; `corral_core/test_acp_rail.py` is their contract, run
+  by this suite and by the sibling's
+- `acp.py` — an alias for `corral_core.acp`, so `import acp` keeps working
 - `content.py` — file indexing and search
 - `consult.py` — scripted client of the hub (`corral-light consult`): ask a lane, fan out, cross-feed, from a shell or an assistant
 - `test_consult.py` — its offline tests (`python3 test_consult.py`)
@@ -172,3 +176,27 @@ Key files:
 - `test_corral_light.py` — automated tests
 
 This repo is the window. It does not import Seed’s `_lib`, fleet, scheduler, or vault, and it does not add hub routes for `/status`. Contributions should keep the project lightweight, local by default, and explicit about what an assistant can access or do.
+
+### `corral_core` — one copy of the parts that must not drift
+
+Corral Light shares a code core with a larger, private sibling built on the
+same rail. The dependency points **one way only**: the sibling imports
+`corral_core` from this tree, and nothing in `corral_core` may import from it.
+That keeps this project standalone on a machine where the sibling does not
+exist, and two tests enforce it (`TheCoreNeverImportsFullCorral`) — one reads
+the parsed imports, the other actually imports the core in a clean interpreter
+with only this directory on the path.
+
+The rule exists because the alternative was tried. The two projects each kept
+their own copy of the ACP client, and on one day in August each copy received
+a safety fix the other never saw: the sibling got a three-model review's
+fifteen permission-rail fixes, this one got the fix that stops an ambient
+`ANTHROPIC_API_KEY` from silently outranking the login you just verified. Nine
+days later, five of the ten rail-contract tests still failed here — including
+one where the assistant could rename the request you were being asked to
+approve, so your click could be recorded against a different action than the
+one on your screen. Nobody was careless. There was simply no seam that made
+"we fixed it" mean "the version people run is fixed".
+
+So: anything both projects need to agree on — the permission rail above all —
+lives in `corral_core`, and its tests run in both suites.
