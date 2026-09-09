@@ -1908,6 +1908,9 @@ class MacosPlistIsThisHost(unittest.TestCase):
     """The launchd unit is the one file allowed to hardcode a home path.
     It must be THIS account, not the ranch user it was copied from."""
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "launchd plist is a macOS artifact; Path.home() is the "
+                         "mac account only on the host that runs the agent")
     def test_the_plist_does_not_point_at_the_ranch_user(self):
         text = (ROOT / "com.cvande.corral-light.plist").read_text(encoding="utf-8")
         self.assertNotIn("/Users/cvande/", text)
@@ -1995,6 +1998,9 @@ class TheServiceRunsThisTree(unittest.TestCase):
         trees = diagnose.installed_service_trees(self._plist(tree / "hub.py"))
         self.assertEqual(trees, [tree])
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "launchd plist is a macOS artifact; the shipped absolute "
+                         "paths are the mac tree, not this checkout")
     def test_the_repo_plist_passes_its_own_check(self):
         """The file we ship must be the file that satisfies this. Otherwise
         the documented fix (`cp` it into LaunchAgents) reinstalls a fault."""
