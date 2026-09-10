@@ -45,6 +45,7 @@ import json
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import uuid
@@ -906,6 +907,14 @@ class ManagerBase:
         artifact." A close you asked for is finished business; only a pane that
         died on its own is news, and that one still stays for `forget`."""
         p = self.get(pane_id)
+        # SAY SO. A close writes `closed: true` on disk and restore() then
+        # skips the pane forever; until 2026-09-10 it left no trace anywhere
+        # but that flag. Six panes were found closed inside one 37-second
+        # window with nothing in the journal, the run registry or the
+        # transcripts to name what did it -- an unauditable disappearance of
+        # the operator's work (P18). One line makes the next one answerable.
+        print(f"corral: close pane {p.id} ({p.agent}) {p.title!r}",
+              file=sys.stderr, flush=True)
         p.stop()
         self.panes.pop(pane_id, None)
         return p
@@ -923,6 +932,8 @@ class ManagerBase:
         if p.state != "dead" or (p.client and p.client.alive):
             raise ValueError("close it first — a live conversation cannot be "
                              "dismissed by accident")
+        print(f"corral: forget pane {p.id} ({p.agent}) {p.title!r}",
+              file=sys.stderr, flush=True)
         p.save_meta(closed=True)     # same hole as stop(): dismissed, then back
         self.panes.pop(pane_id, None)
         return pane_id
