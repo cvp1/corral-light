@@ -221,9 +221,18 @@ class PaneBase:
     `set_config`, `_config_dir`, `from_meta` — by defining it in its subclass.
     """
 
+    # `role`, `role_sha` and `role_delivery` are ANNOTATIONS, not controls
+    # (full Corral's roles.py; Light does not ship roles and simply leaves them
+    # None). They record which named preset started this conversation, the
+    # digest of the preset's bytes AT THAT MOMENT, and how its instructions
+    # were delivered -- today "preamble", i.e. user turn 0 under the vendor's
+    # own system prompt, never a native --agent-profile. Nothing reads them to
+    # decide anything after spawn; the day delivery changes, the record says so
+    # rather than the change being invisible.
     META_KEYS = ("id", "agent", "cwd", "posture", "title", "title_locked",
                  "minimized", "acp_session", "created", "want_model",
-                 "want_effort", "order", "pinned")
+                 "want_effort", "order", "pinned",
+                 "role", "role_sha", "role_delivery")
 
     # Corral's own vocabulary is `model`/`effort`; adapters don't all use it.
     # Codex's ACP session (confirmed live, 2026-08-23, codex-acp 1.6.2) reports
@@ -245,6 +254,9 @@ class PaneBase:
         self.mgr = mgr
         self.want_model = model
         self.want_effort = effort
+        self.role = None            # set by the caller that resolved it, if any
+        self.role_sha = None
+        self.role_delivery = None
         self._replaying = False
         self.title = self._default_title(agent, cwd)
         self.title_locked = False      # True once Craig renames it by hand
