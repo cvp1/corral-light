@@ -900,7 +900,7 @@ class ManagerBase:
                     p.created or "")
         self.panes = {p.id: p for p in sorted(self.panes.values(), key=key)}
 
-    def close(self, pane_id):
+    def close(self, pane_id, by=None):
         """Close AND remove. Closing used to leave a dead row in the roster and
         an "agent stopped" card in the needs-you rail until dismissed again --
         Craig: "when I close a pane it shows agent stopped and leaves an
@@ -912,8 +912,15 @@ class ManagerBase:
         # but that flag. Six panes were found closed inside one 37-second
         # window with nothing in the journal, the run registry or the
         # transcripts to name what did it -- an unauditable disappearance of
-        # the operator's work (P18). One line makes the next one answerable.
-        print(f"corral: close pane {p.id} ({p.agent}) {p.title!r}",
+        # the operator's work (P18).
+        #
+        # `by` was added 2026-09-11 because the line WITHOUT it did not make the
+        # next one answerable: two panes closed two seconds apart that morning
+        # and the journal could name the panes but not the actor, so a human had
+        # to be asked who did it. That is the same question the log exists to
+        # answer. A local/CLI close has no session and reads `local`.
+        print(f"corral: close pane {p.id} ({p.agent}) by {by or 'local'} "
+              f"{p.title!r}",
               file=sys.stderr, flush=True)
         p.stop()
         self.panes.pop(pane_id, None)

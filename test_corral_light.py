@@ -22,6 +22,18 @@ import types
 import unittest
 from pathlib import Path
 
+# sessions.STATE binds at IMPORT time from CORRAL_LIGHT_STATE, so a suite run
+# without one writes into the LIVE store. Measured 2026-09-11: a plain
+# `python3 test_corral_light.py` created TEN pane directories under
+# ~/.local/share/corral-light/panes, mixed in with real ones. A test suite must
+# never be able to touch the running product's state, and "remember the env
+# var" is not a mechanism -- so default it here, before anything imports
+# sessions. A caller that sets its own (line ~595 does) is unaffected.
+# corral/test_roles.py carries the same guard for CORRAL_STATE, for the same
+# reason and after the same accident.
+os.environ.setdefault("CORRAL_LIGHT_STATE",
+                      tempfile.mkdtemp(prefix="corral-light-test-"))
+
 ROOT = Path(__file__).resolve().parent
 
 
