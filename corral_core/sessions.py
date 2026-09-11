@@ -111,8 +111,15 @@ def configure(*, AGENTS, AGENT_GROUPS, STATE,                    # noqa: N803
 # `available_agents` attaches `vendor_env_present()` as an envNote), because
 # someone deliberately using an API key deserves to learn we removed it, not
 # to debug why. The opt-in hatch is the env var named by `configure()`.
+# FIREWORKS_/DEEPSEEK_ added 2026-09-11: the two THIRD-PARTY lanes were the
+# two missing from this list, which is exactly backwards. An ambient
+# FIREWORKS_API_KEY in the shell that started the hub both rode into every pane
+# and made the lane report itself available while the vault was LOCKED -- so the
+# "locked vault fails loud" guarantee was satisfied by an env var instead
+# (invariant 7, P4). The spawn-strip canary test omitted both names, so the
+# suite stayed green with the hole.
 STRIP_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "GEMINI_", "GOOGLE_",
-                      "XAI_", "GROK_",
+                      "XAI_", "GROK_", "FIREWORKS_", "DEEPSEEK_",
                       "CLAUDECODE", "CLAUDE_")
 ALLOW_VENDOR_ENV_VAR = "CORRAL_ALLOW_VENDOR_ENV"   # configure() may rename
 
