@@ -240,7 +240,16 @@ class PaneBase:
     META_KEYS = ("id", "agent", "cwd", "posture", "title", "title_locked",
                  "minimized", "acp_session", "created", "want_model",
                  "want_effort", "order", "pinned",
-                 "role", "role_sha", "role_delivery")
+                 "role", "role_sha", "role_delivery",
+                 # `ported_from` is an ANNOTATION too (full Corral's port.py;
+                 # Light does not ship porting and simply leaves it None). It
+                 # records that this conversation's TRANSCRIPT was carried
+                 # here from another lane or another host -- never that the
+                 # model remembers it, which is exactly the thing an
+                 # `acp_session` id would falsely imply across adapters.
+                 # Optional, `None` when absent: no migration, both skins read
+                 # it with `.get`.
+                 "ported_from")
 
     # Corral's own vocabulary is `model`/`effort`; adapters don't all use it.
     # Codex's ACP session (confirmed live, 2026-08-23, codex-acp 1.6.2) reports
