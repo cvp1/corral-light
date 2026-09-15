@@ -1009,6 +1009,14 @@ class Pane(_core.PaneBase):
         p.acp_session = meta.get("acp_session")
         p.want_model = meta.get("want_model")
         p.want_effort = meta.get("want_effort")
+        # Light does not ship porting, but it must not ERASE the annotation
+        # either: `ported_from` is in the core's META_KEYS, so save_meta()
+        # writes whatever the attribute holds -- and with nothing restoring it
+        # that is None. A pane carried Full -> Light -> Full came back with
+        # its provenance silently blanked (bug bash 2026-09-14, Astra; the
+        # cross-tree test exempts this key from its equality assertion, which
+        # is why nothing caught it).
+        p.ported_from = meta.get("ported_from")
         p._init_runtime()
         p.state = "detached"
         p.dir = STATE / "panes" / p.id
