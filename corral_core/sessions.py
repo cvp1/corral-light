@@ -62,10 +62,15 @@ AGENTS = None            # {lane: spec} — the roster this product offers
 AGENT_GROUPS = None      # ordered grouping of that roster for the picker
 STATE = None             # Path: where panes and transcripts live
 CATALOG = None           # derived from STATE, not a constant — see configure()
+# (src_pane, dst_pane) -> refusal string, or None to allow. See
+# `_refuse_transfer` below for why the composition verbs ask this and why the
+# default of None is not a hole.
+TRANSFER_GATE = None
 
 
 def configure(*, AGENTS, AGENT_GROUPS, STATE,                    # noqa: N803
-              ALLOW_VENDOR_ENV_VAR="CORRAL_ALLOW_VENDOR_ENV"):      # noqa: N803
+              ALLOW_VENDOR_ENV_VAR="CORRAL_ALLOW_VENDOR_ENV",       # noqa: N803
+              TRANSFER_GATE=None):                                  # noqa: N803
     """Bind the globals that legitimately differ between products.
 
     `ALLOW_VENDOR_ENV_VAR` names the escape hatch that lets ambient vendor
@@ -81,6 +86,7 @@ def configure(*, AGENTS, AGENT_GROUPS, STATE,                    # noqa: N803
     g["AGENTS"], g["AGENT_GROUPS"] = AGENTS, AGENT_GROUPS
     g["STATE"] = Path(STATE)
     g["ALLOW_VENDOR_ENV_VAR"] = str(ALLOW_VENDOR_ENV_VAR)
+    g["TRANSFER_GATE"] = TRANSFER_GATE
     # `CATALOG = STATE / "catalog.json"` is spelled identically in both
     # products and is therefore easy to mistake for a shared constant. It is
     # not: it is derived from the one path that differs, so it has to be
@@ -820,6 +826,32 @@ class ManagerBase:
     # nothing here bypasses a pane's own permission gate, and every prompt a
     # verb composes is emitted as that pane's `user` event, so what was sent
     # is exactly what the transcript shows (PRINCIPLES 17, 18).
+    #
+    # ONE AUTHORITY DECIDES WHERE A TRANSCRIPT MAY GO (2026-09-14 bug bash,
+    # both arms, finding 1). `port` grew a data-class gate on 2026-09-11 --
+    # a Claude answer may not be carried into a lane merit_policy does not
+    # clear for sensitive data -- and these verbs carry exactly the same bytes
+    # into exactly the same lanes without asking anyone. The gate cannot live
+    # here (the core must not import full Corral, and Light ships neither
+    # merit_policy nor those lanes), so the product INJECTS it through
+    # `configure(TRANSFER_GATE=...)` and every verb that moves one pane's
+    # words into another pane asks it first.
+    #
+    # A product that injects nothing keeps the old behaviour on purpose:
+    # Corral Light is standalone and has no data-class registry to consult,
+    # so there is no policy for it to fail open ON. What is NOT allowed is a
+    # gate that errors and is treated as a pass -- that direction fails
+    # closed below (P4).
+    def _refuse_transfer(self, src, dst):
+        gate = TRANSFER_GATE
+        if gate is None or src is None or dst is None:
+            return None
+        try:
+            return gate(src, dst)
+        except Exception as e:                  # noqa: BLE001
+            return (f"cannot check whether this answer may be carried to "
+                    f"{getattr(dst, 'title', '?')}: {e}")
+
     def quote(self, from_id, to_id=None):
         """Text for a composer: one pane's last answer, fenced and attributed.
 
@@ -837,6 +869,9 @@ class ManagerBase:
                 raise ValueError("SSH panes cannot receive quoted answers")
             if dst.id == src.id:
                 raise ValueError("a pane cannot quote itself")
+            why = self._refuse_transfer(src, dst)
+            if why:
+                raise ValueError(why)
         body, complete = src.last_answer()
         if not body:
             raise ValueError(f"{src.title} has not answered yet")
@@ -893,6 +928,17 @@ class ManagerBase:
                 raise ValueError(f"{p.title} finished with no text to quote "
                                  f"(tool calls only) \u2014 ask it to answer in words first")
             quotes[p.id] = self.quote(p.id)["text"]
+        # Refuse for ALL, not some -- the same stance the unfinished-arm check
+        # above takes. A round two missing one arm's input, with nobody told,
+        # is the failure this verb already refuses to ship; a round two that
+        # silently drops the arm the gate refused is the same shape.
+        for dst in panes:
+            for src in panes:
+                if src.id == dst.id:
+                    continue
+                why = self._refuse_transfer(src, dst)
+                if why:
+                    raise ValueError(why)
         preamble = (preamble or "").strip()
         results, sent = {}, 0
         for p in panes:
