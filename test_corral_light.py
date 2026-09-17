@@ -672,7 +672,7 @@ class ContentIndex(unittest.TestCase):
                           "get() served a path that now resolves outside the root")
 
     def test_deleted_files_leave_the_index(self):
-        """Eviction is accretion's other half (P23) — a store that only grows
+        """Accretion needs a removal path (P23) — a store that only grows
         keeps answering with files that are gone."""
         self.assertTrue(self.content.search("hydroponics")["hits"])
         (self.notes / "sub" / "beta.md").unlink()
