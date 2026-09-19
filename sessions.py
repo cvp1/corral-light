@@ -267,6 +267,14 @@ AGENTS = {
         # `python3 install_antigravity_acp.py --install` / `--check`.
         "label": "Antigravity (Gemini)",
         "argv": [sys.executable, str(NATIVE_ANTIGRAVITY_LAUNCHER)],
+        # The lane's own approval mode, applied at session/new the way Codex's
+        # launcher sets INITIAL_AGENT_MODE and Claude's posture sets
+        # defaultMode. The vendor advertises default/auto_edit/yolo and starts
+        # in `default`, so every tool call raised a card. auto_edit is the
+        # auto-mode ANALOGUE: the VENDOR still enforces it and still escalates
+        # what it considers dangerous -- this is deliberately not Corral
+        # auto-answering cards.
+        "default_config": {"mode": "auto_edit"},
         "requires": (str(NATIVE_ANTIGRAVITY_LAUNCHER),
                      str(NATIVE_ANTIGRAVITY_BIN),
                      str(NATIVE_ANTIGRAVITY_HELPER)),
@@ -1459,6 +1467,7 @@ class Pane(_core.PaneBase):
         two in sync by hand is how a resumed pane comes back on the wrong
         model — or, worse, the wrong permission posture.
         """
+        self._apply_lane_defaults()
         for cid, want in (("model", self.want_model), ("effort", self.want_effort)):
             if want and want != "default":
                 try:
@@ -1532,8 +1541,52 @@ class Pane(_core.PaneBase):
             return False
         return True
 
+    # Values no lane default may ever carry, whatever a spec says. yolo is the
+    # vendor's skip-everything mode; auto-mode parity does not mean that, and a
+    # default is exactly where it would go unnoticed.
+    FORBIDDEN_DEFAULTS = {"mode": {"yolo"}}
+
+    def _apply_lane_defaults(self):
+        """Apply this lane's default approval mode, if the agent offers it.
+
+        Validated against what the agent ADVERTISED in session/new, so a lane
+        that does not offer it is left alone rather than sent a setting it
+        will reject. Never silent: applied or refused, it says so on the pane.
+        """
+        for cid, value in (AGENTS[self.agent].get("default_config") or {}).items():
+            if value in self.FORBIDDEN_DEFAULTS.get(cid, set()):
+                self.emit("note", {"text": f"refusing lane default {cid}={value} "
+                                           f"— not allowed as a default"})
+                continue
+            cfg = self.config.get(cid) or {}
+            allowed = {o["value"] for o in cfg.get("options", [])}
+            if not allowed or value not in allowed:
+                self.emit("note", {"text": f"lane default {cid}={value} not offered "
+                                           f"by {AGENTS[self.agent]['label']} "
+                                           f"(offers {sorted(allowed) or 'nothing'}) "
+                                           f"— left at {cfg.get('value')!r}"})
+                continue
+            if cfg.get("value") == value:
+                continue
+            try:
+                r = self.client.set_config(self.acp_session,
+                                           cfg.get("realId", cid), value)
+                self._absorb_config((r or {}).get("configOptions") or [])
+                self.emit("note", {"text": f"{cid} = {value} (lane default)"})
+            except acp.AgentError as e:
+                self.emit("note", {"text": f"could not set lane default "
+                                           f"{cid}={value}: {e}"})
+
     def set_config(self, config_id, value):
-        if config_id not in ("model", "effort", "fast"):
+        # `mode` joined 2026-09-19 (the operator: "fix anti-gravity so that it
+        # follows the auto mode that Claude and Codex both follow. I'm tired
+        # of all the permission prompts"). It is the lane's OWN approval-mode
+        # option -- Antigravity's default / auto_edit / yolo -- validated
+        # below against exactly what the agent advertised, so a lane that
+        # offers no such option still refuses. Ported from the CC corral,
+        # where it landed 2026-09-03; this repo never had it, so on this host
+        # there was no way to turn the prompts off at all.
+        if config_id not in ("model", "effort", "fast", "mode"):
             raise ValueError(f"{config_id!r} is not settable from here")
         # No advertised options at all -- e.g. Grok's ACP session reports
         # configOptions: null -- is a REFUSAL, not an unfiltered value to
