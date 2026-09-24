@@ -1870,7 +1870,16 @@ function connect() {
   };
   es.onerror = () => {
     $('#conn').textContent = 'reconnecting…'; $('#conn').className = 'conn off';
+    // A 401 on reconnect is TERMINAL for EventSource (WHATWG): it stops
+    // retrying and stays CLOSED. Ask the hub once whether we are still paired
+    // rather than sitting on "reconnecting…" forever (2026-09-24 review).
+    if (es.readyState === EventSource.CLOSED) {
+      api('/api/state').catch(e => { if (e.status === 401) relock(); });
+    }
   };
+  // The hub re-verifies the cookie behind an open stream and says so when it
+  // expires. Named SSE events never reach onmessage — listen for it by name.
+  es.addEventListener('expired', () => relock());
   es.onmessage = m => {
     let ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
     // Layout events are shared UI state, not transcript events. They carry no
