@@ -255,7 +255,15 @@ class PaneBase:
                  # `acp_session` id would falsely imply across adapters.
                  # Optional, `None` when absent: no migration, both skins read
                  # it with `.get`.
-                 "ported_from")
+                 "ported_from",
+                 # `ephemeral` marks a seat a SCRIPT opened for one answer
+                 # (full Corral's consult.py) rather than a conversation;
+                 # Corral's hub closes one left idle (reap_ephemeral). Light
+                 # has no consult and no reaper, so it only carries the flag
+                 # -- a pane written by either skin round-trips through the
+                 # other (test_cross_tree_resume). Absent = False.
+                 "ephemeral")
+    ephemeral = False
 
     # Corral's own vocabulary is `model`/`effort`; adapters don't all use it.
     # Codex's ACP session (confirmed live, 2026-08-23, codex-acp 1.6.2) reports

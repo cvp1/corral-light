@@ -1017,6 +1017,9 @@ class Pane(_core.PaneBase):
         # cross-tree test exempts this key from its equality assertion, which
         # is why nothing caught it).
         p.ported_from = meta.get("ported_from")
+        # Same hole for `ephemeral`: Light never sets it, but a Corral seat
+        # resumed here and saved again must still be one Corral will reap.
+        p.ephemeral = bool(meta.get("ephemeral"))
         p._init_runtime()
         p.state = "detached"
         p.dir = STATE / "panes" / p.id
