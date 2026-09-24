@@ -48,6 +48,7 @@ if sys.version_info < (3, 9):
 
 import auth
 import sessions
+from corral_core import edge
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -81,6 +82,10 @@ COOKIE = "corral_light"          # its own cookie name, so a browser paired to
                                  # a full Corral on the same host cannot have
                                  # its session silently overwritten by this one
 SSE_PING = 20                    # keep proxies and sleeping laptops honest
+STREAM_RECHECK = 30              # re-verify the cookie behind an open SSE stream
+# Bind the pairing cookie to ONE tailnet identity when Tailscale Serve fronts
+# the hub (corral_core/edge.py). Unset = LAN behaviour, unchanged.
+BOUND_LOGIN = (os.environ.get("CORRAL_TAILSCALE_LOGIN") or "").strip() or None
 MAX_BODY = 1 << 20
 
 
@@ -162,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200, extra=None):
         self._send(code, json.dumps(obj), "application/json", extra)
 
-    def _user(self):
+    def _token(self):
         raw = self.headers.get("Cookie")
         if not raw:
             return None
@@ -171,7 +176,20 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return None
         m = c.get(COOKIE)
-        return auth.verify(m.value) if m else None
+        return m.value if m else None
+
+    def _user(self):
+        tok = self._token()
+        return auth.verify(tok) if tok else None
+
+    def _edge_refused(self):
+        """Identity binding for a hub fronted by Tailscale Serve (corral_core/
+        edge.py). Unbound (no CORRAL_TAILSCALE_LOGIN) => never refuses."""
+        ok, why = edge.identity_ok(self.headers, BOUND_LOGIN)
+        if ok:
+            return False
+        self._json({"error": "tailnet identity refused: " + why}, 403)
+        return True
 
     def _body(self):
         n = parse_content_length(self.headers.get("Content-Length", 0))
@@ -206,6 +224,9 @@ class Handler(BaseHTTPRequestHandler):
                                "tick_age_s": age, "panes_live": live,
                                "permissions_waiting": blocked})
 
+        if self._edge_refused():
+            return
+
         if p == "/api/pair/new":
             try:
                 code, ttl = auth.new_code()
@@ -218,8 +239,9 @@ class Handler(BaseHTTPRequestHandler):
             if not tok:
                 return self._json({"status": status}, 200)
             return self._json({"status": "ok"}, 200, {
-                "Set-Cookie": f"{COOKIE}={tok}; HttpOnly; SameSite=Strict; "
-                              f"Path=/; Max-Age={auth.SESSION_TTL}"})
+                "Set-Cookie": edge.cookie_header(
+                    COOKIE, tok, auth.SESSION_TTL,
+                    secure=edge.via_serve(self.headers))})
 
         if p in ("/", "/index.html"):
             return self._static("index.html")
@@ -298,7 +320,17 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b": connected\n\n")
             self.wfile.flush()
             last = time.time()
+            tok, checked = self._token(), time.time()
             while True:
+                # The cookie was verified when this stream OPENED and never
+                # again, so a stolen cookie's transcript feed outlived its
+                # 12h TTL (Astra finding 3, 2026-09-24). Re-verify on a clock.
+                if time.time() - checked > STREAM_RECHECK:
+                    checked = time.time()
+                    if not (tok and auth.verify(tok)):
+                        self.wfile.write(b"event: expired\ndata: {}\n\n")
+                        self.wfile.flush()
+                        break
                 try:
                     ev = q.get(timeout=2)
                     self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
@@ -313,10 +345,16 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             MGR.unsubscribe(q)
+            # HTTP/1.1 keep-alive would otherwise hold the socket open after an
+            # expired stream returns (measured 2026-09-24: curl sat 30s past
+            # `event: expired`). A finished stream ends its connection.
+            self.close_connection = True
 
     # ── POST ─────────────────────────────────────────────────────────────
     def do_POST(self):
         p = urlparse(self.path).path
+        if self._edge_refused():
+            return
         user = self._user()
         if not user:
             return self._json({"error": "not paired"}, 401)

@@ -55,6 +55,7 @@ import ollama_acp
 # proves one product, which is exactly how the 2026-08-31 rail fixes shipped to
 # Corral and not to the product other people run.
 from corral_core.test_acp_rail import *          # noqa: F401,F403
+from corral_core.test_edge import *              # noqa: F401,F403
 
 
 class TheCoreNeverImportsFullCorral(unittest.TestCase):
@@ -3171,3 +3172,38 @@ class AgentsSurviveTheirSpawningThread(unittest.TestCase):
             self.assertIsNone(c.p.poll(), "child was killed when its spawning thread exited")
         finally:
             c.p.kill(); c.p.wait(5)
+
+
+class TheEdgeGuardsAreWiredIntoThisSkin(unittest.TestCase):
+    """corral_core/edge.py is only a guard if the hub CALLS it, in both verbs.
+    A guard present in one skin and absent from the other is the drift these
+    structural tests exist to catch (2026-09-11 bug bash, thrice)."""
+
+    def setUp(self):
+        self.src = (ROOT / "hub.py").read_text()
+
+    def test_identity_gate_sits_in_front_of_both_verbs(self):
+        get = self.src.split("def do_GET", 1)[1].split("def _static", 1)[0]
+        post = self.src.split("def do_POST", 1)[1]
+        self.assertIn("self._edge_refused()", get)
+        self.assertIn("self._edge_refused()", post)
+        self.assertLess(get.index("self._edge_refused()"), get.index("/api/pair/new"),
+                        "pairing is reachable before the identity gate")
+        self.assertLess(post.index("self._edge_refused()"), post.index("self._user()"),
+                        "a POST reads the cookie before the identity gate")
+
+    def test_cookie_is_minted_through_edge(self):
+        self.assertIn("edge.cookie_header(", self.src)
+        self.assertNotIn('HttpOnly; SameSite=Strict; "', self.src,
+                         "a hand-built Set-Cookie survives beside edge.cookie_header")
+
+    def test_stream_reverifies_its_cookie(self):
+        stream = self.src.split("def _stream", 1)[1].split("def do_POST", 1)[0]
+        self.assertIn("STREAM_RECHECK", stream)
+        self.assertIn("auth.verify(tok)", stream)
+        self.assertIn("event: expired", stream)
+
+    def test_unbound_by_default(self):
+        import hub
+        self.assertIsNone(hub.BOUND_LOGIN if not os.environ.get("CORRAL_TAILSCALE_LOGIN") else None)
+

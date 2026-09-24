@@ -96,6 +96,15 @@ The server listens only on your computer by default (`127.0.0.1`). To use it fro
 ssh -N -L 8098:127.0.0.1:8098 user@example.com
 ```
 
+Or, from your phone on a [Tailscale](https://tailscale.com) tailnet, put Tailscale Serve in front of it — real HTTPS, tailnet-only, no open port:
+
+```
+tailscale serve --bg 8098                       # https://<machine>.<tailnet>.ts.net → 127.0.0.1:8098
+CORRAL_TAILSCALE_LOGIN=you@example.com ./corral-light serve
+```
+
+With `CORRAL_TAILSCALE_LOGIN` set, a request that arrives through Serve must carry that tailnet identity (Serve stamps it and strips any forged copy); proxied traffic with no identity — Funnel, a tagged device — is refused; requests on the machine itself are unchanged. The session cookie is marked `Secure` when it is minted through Serve, and an open event stream re-checks its cookie every 30 seconds and closes itself when the cookie expires. Pairing still needs a shell on the machine — that is the point. What this does not do: separate the approval authority from the assistant's own UNIX user; anything running as you can still pair itself. (`corral_core/edge.py`, contract in `corral_core/test_edge.py`.)
+
 When an assistant asks to write a file or run a command, Corral Light pauses it and shows the exact request, byte count, and SHA-256 digest. Requests too large to display cannot be approved. The browser cannot bypass this check because the server enforces it.
 
 Corral Light removes common provider credential variables from assistant processes by default. This prevents a shell environment from silently changing which account an assistant uses. To intentionally allow those variables through, set:
