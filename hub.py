@@ -147,12 +147,20 @@ class Handler(BaseHTTPRequestHandler):
         pass                     # silent in steady state (P7)
 
     # ── plumbing ─────────────────────────────────────────────────────────
+    def _carries_body(self):
+        te = self.headers.get("Transfer-Encoding")
+        cl = (self.headers.get("Content-Length") or "").strip()
+        return bool(te) or cl not in ("", "0")
+
     def _send(self, code, body, ctype="application/json", extra=None):
-        if self.command == "POST" and not getattr(self, "_body_read", True):
-            # Answering a POST without reading its body leaves those bytes on
-            # a keep-alive socket, where they parse as the NEXT request — with
-            # no Serve headers, so past the identity gate (Astra 1, 2026-09-24,
-            # reproduced). Any early answer to a POST ends the connection.
+        if self._carries_body() and not getattr(self, "_body_read", False):
+            # Answering a request without reading its body leaves those bytes
+            # on a keep-alive socket, where they parse as the NEXT request —
+            # with no Serve headers, so past the identity gate (Astra 1,
+            # 2026-09-24, reproduced). Grok, same day: the flag used to be set
+            # BEFORE the read, so a bad/oversized Content-Length 400 stayed
+            # keep-alive, and a GET with a body was never covered. Any answer
+            # to a request whose body we did not consume ends the connection.
             self.close_connection = True
         data = body if isinstance(body, bytes) else str(body).encode()
         self.send_response(code)
@@ -203,10 +211,11 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _body(self):
-        self._body_read = True
         n = parse_content_length(self.headers.get("Content-Length", 0))
         try:
-            return json.loads(self.rfile.read(n) or b"{}")
+            raw = self.rfile.read(n)
+            self._body_read = True   # only now are the bytes off the socket
+            return json.loads(raw or b"{}")
         except ValueError:
             raise ValueError("malformed JSON body")
 
@@ -222,6 +231,7 @@ class Handler(BaseHTTPRequestHandler):
     # ── GET ──────────────────────────────────────────────────────────────
     def do_GET(self):
         p = urlparse(self.path).path
+        self._body_read = False
         q = parse_qs(urlparse(self.path).query)
 
         if p == "/health":

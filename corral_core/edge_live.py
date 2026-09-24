@@ -106,6 +106,23 @@ def run(hub, auth):
         st, _, _ = _get(port, "/api/state", {"Cookie": f"{hub.COOKIE}={lan_tok}"})
         check(st == 200, f"a LAN cookie stopped working locally (got {st})")
 
+        # 5b. Grok (2026-09-24): a PAIRED POST whose Content-Length is bad or
+        #     over the cap is refused with its body still on the socket; a GET
+        #     that carries a body likewise. Neither may answer the body.
+        ck_lan = f"Cookie: {hub.COOKIE}={lan_tok}\r\n".encode()
+        for label, cl in (("oversized", b"99999999"), ("malformed", b"abc")):
+            req = (b"POST /api/session/close HTTP/1.1\r\nHost: x\r\n" + ck_lan +
+                   b"Content-Length: " + cl + b"\r\n\r\n" + inner)
+            out, closed = _raw(port, req)
+            check(out.count(b"HTTP/1.1 ") == 1 and closed,
+                  f"a {label}-Content-Length POST's body was answered as a second "
+                  f"request ({out.count(b'HTTP/1.1 ')} responses, closed={closed})")
+        req = (b"GET /api/state HTTP/1.1\r\nHost: x\r\n" + ck_lan +
+               b"Content-Length: " + str(len(inner)).encode() + b"\r\n\r\n" + inner)
+        out, closed = _raw(port, req)
+        check(out.count(b"HTTP/1.1 ") == 1 and closed,
+              "a GET's body was answered as a second request")
+
         # 6. Secure only when claimed through Serve (via pairing)
         for via, want in ((True, True), (False, False)):
             h = {edge.TS_LOGIN: ME} if via else {}
