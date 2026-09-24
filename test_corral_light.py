@@ -2284,8 +2284,9 @@ class ContentLengthAndFrames(unittest.TestCase):
         self.assertIn("X-Frame-Options", hub)
         self.assertIn("frame-ancestors 'none'", hub)
         self.assertIn("_stream", hub)
-        # SSE has its own header path; it must apply the same lock.
-        stream = hub.split("def _stream", 1)[1].split("def ", 1)[0]
+        # SSE has its own header path; it must apply the same lock. Since the
+        # 2026-09-24 leak fix the headers live in _stream_body.
+        stream = hub.split("def _stream_body", 1)[1].split("def ", 1)[0]
         self.assertIn("FRAME_LOCK", stream)
 
 
@@ -3174,36 +3175,13 @@ class AgentsSurviveTheirSpawningThread(unittest.TestCase):
             c.p.kill(); c.p.wait(5)
 
 
-class TheEdgeGuardsAreWiredIntoThisSkin(unittest.TestCase):
-    """corral_core/edge.py is only a guard if the hub CALLS it, in both verbs.
-    A guard present in one skin and absent from the other is the drift these
-    structural tests exist to catch (2026-09-11 bug bash, thrice)."""
+class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
+    """corral_core/edge_live.py drives THIS skin's Handler over TCP. The first
+    cut string-matched hub.py and survived the guards being disabled (review
+    2026-09-24); these checks were mutation-tested to fail on each."""
 
-    def setUp(self):
-        self.src = (ROOT / "hub.py").read_text()
-
-    def test_identity_gate_sits_in_front_of_both_verbs(self):
-        get = self.src.split("def do_GET", 1)[1].split("def _static", 1)[0]
-        post = self.src.split("def do_POST", 1)[1]
-        self.assertIn("self._edge_refused()", get)
-        self.assertIn("self._edge_refused()", post)
-        self.assertLess(get.index("self._edge_refused()"), get.index("/api/pair/new"),
-                        "pairing is reachable before the identity gate")
-        self.assertLess(post.index("self._edge_refused()"), post.index("self._user()"),
-                        "a POST reads the cookie before the identity gate")
-
-    def test_cookie_is_minted_through_edge(self):
-        self.assertIn("edge.cookie_header(", self.src)
-        self.assertNotIn('HttpOnly; SameSite=Strict; "', self.src,
-                         "a hand-built Set-Cookie survives beside edge.cookie_header")
-
-    def test_stream_reverifies_its_cookie(self):
-        stream = self.src.split("def _stream", 1)[1].split("def do_POST", 1)[0]
-        self.assertIn("STREAM_RECHECK", stream)
-        self.assertIn("auth.verify(tok)", stream)
-        self.assertIn("event: expired", stream)
-
-    def test_unbound_by_default(self):
+    def test_edge_live(self):
         import hub
-        self.assertIsNone(hub.BOUND_LOGIN if not os.environ.get("CORRAL_TAILSCALE_LOGIN") else None)
-
+        import auth
+        from corral_core import edge_live
+        self.assertEqual(edge_live.run(hub, auth), [])

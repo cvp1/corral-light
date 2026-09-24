@@ -67,5 +67,37 @@ class IdentityOk(unittest.TestCase):
         self.assertTrue(forged[0] and plain[0])
 
 
+class PeerRules(unittest.TestCase):
+    ME = "craig@example.com"
+
+    def test_direct_tailnet_connection_refused_when_bound(self):
+        ok, why = edge.identity_ok({}, self.ME, peer="100.100.1.2")
+        self.assertFalse(ok)
+        self.assertIn("skips Serve", why)
+        self.assertFalse(edge.identity_ok({}, self.ME, peer="fd7a:115c:a1e0::5")[0])
+
+    def test_lan_and_loopback_stay_local(self):
+        for peer in ("198.51.100.7", "127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            self.assertEqual(edge.identity_ok({}, self.ME, peer=peer), (True, "local"))
+
+    def test_identity_header_only_counts_from_loopback(self):
+        h = {"Tailscale-User-Login": self.ME}
+        self.assertTrue(edge.identity_ok(h, self.ME, peer="127.0.0.1")[0])
+        ok, why = edge.identity_ok(h, self.ME, peer="198.51.100.7")
+        self.assertFalse(ok)
+        self.assertIn("not the Serve proxy", why)
+        self.assertTrue(edge.via_serve(h, "127.0.0.1"))
+        self.assertFalse(edge.via_serve(h, "198.51.100.7"))
+        self.assertFalse(edge.via_serve(h, "100.100.1.2"))
+
+    def test_serve_audience(self):
+        h = {"Tailscale-User-Login": self.ME}
+        self.assertTrue(edge.audience_ok(edge.SERVE_USER, h, "127.0.0.1"))
+        self.assertFalse(edge.audience_ok(edge.SERVE_USER, {}, "127.0.0.1"))
+        self.assertFalse(edge.audience_ok(edge.SERVE_USER, h, "198.51.100.7"))
+        self.assertTrue(edge.audience_ok("craig", {}, "198.51.100.7"))
+        self.assertFalse(edge.audience_ok(None, h, "127.0.0.1"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

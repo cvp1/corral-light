@@ -148,6 +148,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── plumbing ─────────────────────────────────────────────────────────
     def _send(self, code, body, ctype="application/json", extra=None):
+        if self.command == "POST" and not getattr(self, "_body_read", True):
+            # Answering a POST without reading its body leaves those bytes on
+            # a keep-alive socket, where they parse as the NEXT request — with
+            # no Serve headers, so past the identity gate (Astra 1, 2026-09-24,
+            # reproduced). Any early answer to a POST ends the connection.
+            self.close_connection = True
         data = body if isinstance(body, bytes) else str(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -178,20 +184,26 @@ class Handler(BaseHTTPRequestHandler):
         m = c.get(COOKIE)
         return m.value if m else None
 
+    def _peer(self):
+        return self.client_address[0] if self.client_address else None
+
     def _user(self):
         tok = self._token()
-        return auth.verify(tok) if tok else None
+        user = auth.verify(tok) if tok else None
+        return user if user and edge.audience_ok(user, self.headers, self._peer()) else None
 
     def _edge_refused(self):
         """Identity binding for a hub fronted by Tailscale Serve (corral_core/
         edge.py). Unbound (no CORRAL_TAILSCALE_LOGIN) => never refuses."""
-        ok, why = edge.identity_ok(self.headers, BOUND_LOGIN)
+        ok, why = edge.identity_ok(self.headers, BOUND_LOGIN, self._peer())
         if ok:
             return False
+        self.close_connection = True   # never parse an unread body as a request
         self._json({"error": "tailnet identity refused: " + why}, 403)
         return True
 
     def _body(self):
+        self._body_read = True
         n = parse_content_length(self.headers.get("Content-Length", 0))
         try:
             return json.loads(self.rfile.read(n) or b"{}")
@@ -238,10 +250,12 @@ class Handler(BaseHTTPRequestHandler):
             tok, status = auth.claim((q.get("code") or [""])[0])
             if not tok:
                 return self._json({"status": status}, 200)
+            serve = edge.via_serve(self.headers, self._peer())
+            if serve:
+                tok = auth.mint(user=edge.SERVE_USER)   # good only via Serve
             return self._json({"status": "ok"}, 200, {
                 "Set-Cookie": edge.cookie_header(
-                    COOKIE, tok, auth.SESSION_TTL,
-                    secure=edge.via_serve(self.headers))})
+                    COOKIE, tok, auth.SESSION_TTL, secure=serve)})
 
         if p in ("/", "/index.html"):
             return self._static("index.html")
@@ -307,7 +321,22 @@ class Handler(BaseHTTPRequestHandler):
     def _stream(self):
         """One SSE connection carries every pane's events."""
         q = queue.Queue(maxsize=1000)
-        MGR.subscribe(q)
+        try:
+            # Subscribe INSIDE the try: a reset while the headers are being
+            # written used to skip the finally and leak the queue (Astra 5,
+            # Gemini 5, 2026-09-24).
+            MGR.subscribe(q)
+            self._stream_body(q)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            MGR.unsubscribe(q)
+            # HTTP/1.1 keep-alive would otherwise hold the socket open after an
+            # expired stream returns (measured 2026-09-24). A finished stream
+            # ends its connection.
+            self.close_connection = True
+
+    def _stream_body(self, q):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -316,43 +345,35 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in FRAME_LOCK:
             self.send_header(k, v)
         self.end_headers()
-        try:
-            self.wfile.write(b": connected\n\n")
-            self.wfile.flush()
-            last = time.time()
-            tok, checked = self._token(), time.time()
-            while True:
-                # The cookie was verified when this stream OPENED and never
-                # again, so a stolen cookie's transcript feed outlived its
-                # 12h TTL (Astra finding 3, 2026-09-24). Re-verify on a clock.
-                if time.time() - checked > STREAM_RECHECK:
-                    checked = time.time()
-                    if not (tok and auth.verify(tok)):
-                        self.wfile.write(b"event: expired\ndata: {}\n\n")
-                        self.wfile.flush()
-                        break
-                try:
-                    ev = q.get(timeout=2)
-                    self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+        self.wfile.write(b": connected\n\n")
+        self.wfile.flush()
+        last = time.time()
+        checked = time.time()
+        while True:
+            # The cookie was verified when this stream OPENED and never
+            # again, so a stolen cookie's transcript feed outlived its
+            # 12h TTL (Astra finding 3, 2026-09-24). Re-verify on a clock.
+            if time.time() - checked > STREAM_RECHECK:
+                checked = time.time()
+                if not self._user():
+                    self.wfile.write(b"event: expired\ndata: {}\n\n")
                     self.wfile.flush()
-                    last = time.time()   # a real event is as good as a ping
-                except queue.Empty:
-                    if time.time() - last > SSE_PING:
-                        self.wfile.write(b": ping\n\n")
-                        self.wfile.flush()
-                        last = time.time()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            MGR.unsubscribe(q)
-            # HTTP/1.1 keep-alive would otherwise hold the socket open after an
-            # expired stream returns (measured 2026-09-24: curl sat 30s past
-            # `event: expired`). A finished stream ends its connection.
-            self.close_connection = True
+                    break
+            try:
+                ev = q.get(timeout=2)
+                self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                self.wfile.flush()
+                last = time.time()   # a real event is as good as a ping
+            except queue.Empty:
+                if time.time() - last > SSE_PING:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    last = time.time()
 
     # ── POST ─────────────────────────────────────────────────────────────
     def do_POST(self):
         p = urlparse(self.path).path
+        self._body_read = False
         if self._edge_refused():
             return
         user = self._user()
