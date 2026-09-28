@@ -7,6 +7,7 @@ in a working tree.
 """
 import argparse
 import hashlib
+import json
 import os
 import platform
 from pathlib import Path
@@ -38,6 +39,16 @@ ARCHIVE_SHA256 = "ce3f09628575b25497cf5a3c19d073b49acb80f1dab1ff8592919e9c9b8799
 FILES = ("agy_acp_server.par", "localharness_external")
 RUNTIME = Path.home() / ".local/lib/corral/antigravity-acp"
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+
+# The server refuses session/new — "Authentication required … No
+# authentication method selected" — until settings.json names one. Installed
+# files and a clean initialize handshake do not reveal that, so the lane read
+# available and died on first use (Omarchy, 2026-09-27). The installer picks
+# oauth-personal: the operator's own Google login, the subscription path.
+# NEVER gemini-api-key — a vendor key silently changes who pays and who sees
+# the data, and that is the operator's call, not an installer default.
+SETTINGS = Path.home() / ".gemini/antigravity-acp/settings.json"
+AUTH_TYPE = "oauth-personal"
 
 
 def sha256(path):
@@ -85,18 +96,72 @@ def platform_problem():
             f"file to the real archive and its verified digest.")
 
 
-def install(destination=RUNTIME):
-    """Download, verify and install if absent. Existing runtime is untouched."""
+def auth_type(settings=None):
+    """The auth.type the server will use, or None when none is selected."""
+    try:
+        data = json.loads(Path(settings or SETTINGS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    auth = data.get("auth") if isinstance(data, dict) else None
+    value = auth.get("type") if isinstance(auth, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def auth_problem(settings=None):
+    """Why a session would be refused for want of an auth method, or None."""
+    settings = settings or SETTINGS
+    if auth_type(settings):
+        return None
+    return (f"no sign-in method selected in {settings} — run "
+            f"`python3 install_antigravity_acp.py --install` to select "
+            f"{AUTH_TYPE} (your Google login)")
+
+
+def select_auth(settings=None):
+    """Select AUTH_TYPE where nothing is selected. A choice already made —
+    including an API key — is the operator's and is left alone, as is a
+    file that is not a JSON object (it is not ours to rewrite)."""
+    settings = Path(settings or SETTINGS)
+    current = auth_type(settings)
+    if current:
+        return f"sign-in method already selected: {current}"
+    data = {}
+    if settings.exists():
+        try:
+            data = json.loads(settings.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{settings} is not a JSON object; set auth.type "
+                               f"to {AUTH_TYPE} in it by hand")
+    auth = data.get("auth")
+    data["auth"] = dict(auth, type=AUTH_TYPE) if isinstance(auth, dict) else {"type": AUTH_TYPE}
+    settings.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = settings.with_name(settings.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, settings)
+    return f"selected sign-in method {AUTH_TYPE}: {settings}"
+
+
+def install(destination=RUNTIME, settings=None):
+    """Download, verify and install if absent, then make sure a sign-in
+    method is selected. Existing runtime is untouched."""
     destination = Path(destination)
     if installed_ok(destination):
-        return f"already installed: {destination}"
+        return f"already installed: {destination}\n{select_auth(settings)}"
     problem = platform_problem()
     if problem:
         raise RuntimeError(problem)
     if destination.exists():
         raise RuntimeError(f"refusing to replace incomplete runtime: {destination}")
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="corral-antigravity-acp-", dir="/tmp") as td:
+    # BESIDE the destination, never /tmp. The last step is os.replace, which
+    # is atomic only within one filesystem; this pinned "/tmp" and on a Linux
+    # box whose /tmp is tmpfs (Omarchy, 2026-09-27) it failed EXDEV — "Invalid
+    # cross-device link" — after the download and the SHA check had both
+    # passed. Same directory also keeps a 1.5 GB archive out of RAM.
+    with tempfile.TemporaryDirectory(prefix=".corral-antigravity-acp-",
+                                     dir=destination.parent) as td:
         archive = Path(td) / "release.zip"
         download(URL, archive)
         got = sha256(archive)
@@ -116,7 +181,7 @@ def install(destination=RUNTIME):
                 target.chmod(0o555)
         extract.chmod(0o700)
         os.replace(extract, destination)
-    return f"installed {RELEASE}: {destination}"
+    return f"installed {RELEASE}: {destination}\n{select_auth(settings)}"
 
 
 def main(argv=None):
@@ -135,6 +200,9 @@ def main(argv=None):
             # `installed_ok` is true and the lane reads available — say the
             # thing that actually matters instead of the reassuring half.
             print(f"installed, but UNRUNNABLE here — {problem}", flush=True)
+            return 1
+        if ok and auth_problem():
+            print(f"installed, but NOT SIGNED IN — {auth_problem()}", flush=True)
             return 1
         print("installed" if ok else f"missing ({problem})" if problem
               else "missing", flush=True)
