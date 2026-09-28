@@ -820,6 +820,107 @@ class PlatformHonesty(unittest.TestCase):
         self.assertIn("platform_problem", sess)
 
 
+class AntigravityInstallsBesideItsDestination(unittest.TestCase):
+    """Omarchy, 2026-09-27: /tmp is tmpfs, the installer pinned its work dir
+    to /tmp, and the final os.replace into ~/.local/lib failed EXDEV after the
+    download and the SHA check had both passed. The rename is only atomic
+    within one filesystem, so the work dir must sit beside the destination."""
+
+    def test_the_final_rename_stays_in_the_destination_directory(self):
+        import hashlib
+        import zipfile
+        import install_antigravity_acp as m
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            payload = root / "release.src.zip"
+            with zipfile.ZipFile(payload, "w") as zf:
+                for name in m.FILES:
+                    zf.writestr(name, b"#!/bin/sh\n")
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            destination = root / "lib" / "antigravity-acp"
+            renames = []
+            real = (m.download, m.ARCHIVE_SHA256, m.platform_problem, m.os.replace)
+            try:
+                m.download = lambda url, out: Path(out).write_bytes(payload.read_bytes())
+                m.ARCHIVE_SHA256 = digest
+                m.platform_problem = lambda: None
+
+                def replace(src, dst):
+                    renames.append((Path(src), Path(dst)))
+                    return real[3](src, dst)
+                m.os.replace = replace
+                m.install(destination, settings=root / "settings.json")
+            finally:
+                m.download, m.ARCHIVE_SHA256, m.platform_problem, m.os.replace = real
+            self.assertTrue(m.installed_ok(destination))
+            src, dst = next(r for r in renames if r[1] == destination)
+            self.assertEqual(src.parent.parent, destination.parent)
+            self.assertEqual([p.name for p in destination.parent.iterdir()],
+                             [destination.name])
+
+    def test_no_work_dir_is_pinned_to_tmp(self):
+        src = (ROOT / "install_antigravity_acp.py").read_text(encoding="utf-8")
+        self.assertNotIn('dir="/tmp"', src)
+
+
+class AntigravitySignInIsSelected(unittest.TestCase):
+    """Omarchy, 2026-09-27: installed, handshake ok, lane read available —
+    and session/new said "Authentication required … No authentication method
+    selected". The installer selects the operator's Google login; it never
+    selects an API key and never overrides a choice already made."""
+
+    def test_install_selects_the_google_login_where_nothing_is_set(self):
+        import install_antigravity_acp as m
+        with tempfile.TemporaryDirectory() as root:
+            settings = Path(root) / "antigravity-acp" / "settings.json"
+            self.assertIsNotNone(m.auth_problem(settings))
+            m.select_auth(settings)
+            self.assertEqual(m.auth_type(settings), "oauth-personal")
+            self.assertIsNone(m.auth_problem(settings))
+
+    def test_a_choice_already_made_is_left_alone(self):
+        import install_antigravity_acp as m
+        with tempfile.TemporaryDirectory() as root:
+            settings = Path(root) / "settings.json"
+            body = '{"auth": {"type": "gemini-api-key"}, "other": 1}\n'
+            settings.write_text(body, encoding="utf-8")
+            m.select_auth(settings)
+            self.assertEqual(settings.read_text(encoding="utf-8"), body)
+
+    def test_other_settings_survive_the_selection(self):
+        import install_antigravity_acp as m
+        with tempfile.TemporaryDirectory() as root:
+            settings = Path(root) / "settings.json"
+            settings.write_text('{"theme": "dark", "auth": {"x": 1}}', encoding="utf-8")
+            m.select_auth(settings)
+            data = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(data, {"theme": "dark", "auth": {"x": 1, "type": "oauth-personal"}})
+
+    def test_a_file_that_is_not_ours_to_rewrite_is_refused(self):
+        import install_antigravity_acp as m
+        with tempfile.TemporaryDirectory() as root:
+            settings = Path(root) / "settings.json"
+            settings.write_text("[1, 2]", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                m.select_auth(settings)
+            self.assertEqual(settings.read_text(encoding="utf-8"), "[1, 2]")
+
+    def test_the_picker_reports_no_sign_in_rather_than_ok(self):
+        import sessions
+        import install_antigravity_acp as m
+        if m.platform_problem() or not m.installed_ok():
+            self.skipTest("the pinned release is not installed on this host")
+        real = m.SETTINGS
+        with tempfile.TemporaryDirectory() as root:
+            try:
+                m.SETTINGS = Path(root) / "settings.json"
+                gemini = [a for a in sessions.available_agents() if a["key"] == "gemini"]
+            finally:
+                m.SETTINGS = real
+        self.assertFalse(gemini[0]["available"])
+        self.assertIn("no sign-in method selected", gemini[0]["why"])
+
+
 class PrintedCommandsWork(unittest.TestCase):
     """A command shown to a human is a promise that running it does the thing.
 

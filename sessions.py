@@ -855,9 +855,12 @@ def available_agents():
         # onto a machine that cannot execute it, and installing it is exactly
         # what install_antigravity_acp refuses to do. On mac-host the honest
         # answer is not "missing", it is "this host cannot run it".
+        # Then, with the files present, the sign-in method: the server
+        # handshakes fine without one and refuses session/new, so a lane
+        # judged on files alone reads ok and dies on its first prompt.
         if key == "gemini":
-            from install_antigravity_acp import platform_problem
-            problem = platform_problem()
+            from install_antigravity_acp import auth_problem, platform_problem
+            problem = platform_problem() or (None if missing else auth_problem())
             if problem:
                 out.append({"key": key, "label": spec["label"],
                             "available": False,
