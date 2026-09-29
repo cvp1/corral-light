@@ -539,6 +539,37 @@ def v_quote(c, a):
     return 0
 
 
+def v_later(c, a):
+    """Scheduled prompts (later.py): list, add, rm."""
+    if a.later_cmd == "list":
+        jobs = c.get("/api/session/schedule")["jobs"]
+        if not jobs:
+            c.say("nothing scheduled")
+        for j in jobs:
+            c.say(f"{j['id']}  {j['at']}  {(j.get('repeat') or 'once'):<6} "
+                  f"{j['action']:<6} {j.get('agent') or '':<8} "
+                  f"{'FAILED: ' + str(j.get('last_error')) if j.get('failed') else j.get('title')}")
+        return 0
+    if a.later_cmd == "rm":
+        c.say("removed " + c.post("/api/session/schedule/remove", {"id": a.id})["removed"])
+        return 0
+    body = {"when": a.at, "repeat": a.repeat or "", "prompt": a.prompt or "",
+            "action": a.action}
+    if a.pane:
+        body["pane"] = c.pane(a.pane)["id"]
+    else:
+        body.update({"agent": consult.lane_key(a.lane or ""),
+                     "cwd": str(Path(a.cwd).expanduser().resolve())})
+    for k in ("posture", "role", "title"):
+        if getattr(a, k):
+            body[k] = getattr(a, k)
+    j = c.post("/api/session/schedule/add", body)["job"]
+    for n in j.get("role_notes") or []:
+        print(f"corral-light: {n}", file=sys.stderr, flush=True)
+    c.say(f"{j['id']} at {j['at']} ({j.get('repeat') or 'once'})")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="corral-light",
                                  description="Corral Light from a terminal.")
@@ -619,6 +650,24 @@ def main(argv=None):
     s.add_argument("src")
     s.add_argument("dst", nargs="?")
     s.set_defaults(fn=v_quote)
+
+    s = sub.add_parser("later", help="scheduled prompts: list | add | rm")
+    lsub = s.add_subparsers(dest="later_cmd", required=True)
+    lsub.add_parser("list")
+    x = lsub.add_parser("rm")
+    x.add_argument("id")
+    x = lsub.add_parser("add")
+    x.add_argument("--at", required=True, help="local YYYY-MM-DDTHH:MM, or …Z for UTC")
+    x.add_argument("--repeat", choices=("daily", "weekly"))
+    x.add_argument("--lane")
+    x.add_argument("--cwd", default=str(Path.cwd()))
+    x.add_argument("--pane", help="land on this existing pane (with --action nudge|resume)")
+    x.add_argument("--action", default="start", choices=("start", "nudge", "resume"))
+    x.add_argument("--prompt")
+    x.add_argument("--posture", choices=("strict", "edits", "auto"))
+    x.add_argument("--role")
+    x.add_argument("--title")
+    s.set_defaults(fn=v_later)
 
     a = ap.parse_args(argv)
     c = Cli(a.url, interactive=True if (a.interactive or getattr(

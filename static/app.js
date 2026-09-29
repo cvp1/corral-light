@@ -1578,9 +1578,30 @@ function render() {
     }
   }
 
-  // Light's roster stops here. The full Corral also lists scheduled jobs,
-  // adopted tmux sessions, and pinned/recent Library places below this
-  // point — three sources that do not exist on this build.
+  // Scheduled (later.py): what will start on its own, and any one-shot that
+  // failed or was missed — a record until dismissed, never silently gone.
+  const jobs = S.schedule || [];
+  if (jobs.length) {
+    r.appendChild(el('div', 'lab', `Scheduled · ${jobs.length}`));
+    for (const j of jobs) {
+      const it = el('div', 'rit arc' + (j.failed ? ' dead' : ''));
+      it.appendChild(el('span', 'dot'));
+      const t = el('div', 'txt');
+      t.appendChild(el('div', 't', j.title || j.prompt.slice(0, 60)));
+      const when = new Date(j.at).toLocaleString();
+      t.appendChild(el('div', 's', j.failed ? `failed: ${j.last_error}` :
+        `${j.action} · ${when}${j.repeat ? ' · ' + j.repeat : ''} · ${j.agent}`));
+      it.appendChild(t);
+      const x = el('button', 'a', '✕'); x.title = j.failed ? 'dismiss' : 'unschedule';
+      x.onclick = async e => {
+        e.stopPropagation();
+        try { await api('/api/session/schedule/remove', { id: j.id }); await refresh(); }
+        catch (err) { toast(err.message, true); }
+      };
+      const acts = el('div', 'acts'); acts.appendChild(x); it.appendChild(acts);
+      r.appendChild(it);
+    }
+  }
   }
 
   // grid
@@ -1891,6 +1912,7 @@ async function refresh() {
   S.cwdSuggestions = d.cwdSuggestions || S.cwdSuggestions || [];
   S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
+  S.schedule = d.schedule || [];
   const next = new Map();
   for (const np of (d.panes || [])) {
     const prev = S.panes.get(np.id);
@@ -2218,11 +2240,9 @@ function wireDialog() {
     dlg.showModal();
   };
   $('#f-posture').onchange = e => { $('#posturehint').textContent = HINTS[e.target.value]; };
-  // The full Corral's dialog has a third mode here: "At a time…", which posts
-  // the same form to /api/schedule/add and starts the conversation later.
-  // Light has no scheduler process, so the control is absent rather than
-  // present-and-broken — a Start button that silently means Now is the worst
-  // of the three options.
+  // "Later…" (later.py, 2026-09-29): with a time set, Start ARMS the
+  // conversation instead of opening it — the same form posted to
+  // /api/session/schedule/add. Without a time it is Start, now, as before.
   dlg.addEventListener('close', async () => {
     if (dlg.returnValue !== 'ok') return;
     const cwd = $('#f-cwd').value.trim();
@@ -2232,6 +2252,20 @@ function wireDialog() {
                      posture: $('#f-posture').value,
                      model: $('#f-model').value, effort: $('#f-effort').value,
                      role: $('#f-role').value };
+    const when = $('#f-when').value;
+    if (when) {
+      // Later: arm it, open nothing now. The prompt is stored as typed (a
+      // role's instructions are inlined server-side when it is armed).
+      try {
+        const r = await api('/api/session/schedule/add', { ...common, when,
+          repeat: $('#f-repeat').value, prompt: $('#f-prompt').value });
+        toast(`scheduled for ${new Date(r.job.at).toLocaleString()}`);
+        for (const n of (r.job.role_notes || [])) toast(n);
+        $('#f-when').value = ''; $('#f-prompt').value = '';
+        await refresh();
+      } catch (e) { toast(e.message, true); }
+      return;
+    }
     try {
       const d = await api('/api/session/new', common);
       S.panes.set(d.pane.id, d.pane);

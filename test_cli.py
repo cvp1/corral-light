@@ -173,6 +173,22 @@ class RolesOverTheCli(HubCase):
             self.cli("close", line.split()[0])
 
 
+class LaterOverTheCli(HubCase):
+    def test_add_list_rm(self):
+        rc, out, err = self.cli("later", "add", "--at", "2099-01-01T06:00", "--lane", "fake",
+                                "--cwd", str(self.tmp / "agent"), "--prompt", "summarise",
+                                "--repeat", "daily")
+        self.assertEqual(rc, 0, err)
+        jid = out.split()[0]
+        rc, out, _ = self.cli("later", "list")
+        self.assertIn(jid, out)
+        self.assertIn("daily", out)
+        rc, out, _ = self.cli("later", "rm", jid)
+        self.assertIn("removed", out)
+        rc, out, _ = self.cli("later", "list")
+        self.assertIn("nothing scheduled", out)
+
+
 class TheLaneMatrix(HubCase):
     def test_the_fake_lane_remembers_and_refuses(self):
         r = subprocess.run([sys.executable, str(ROOT / "lane_matrix.py"), "--json", "--lane", "fake",
