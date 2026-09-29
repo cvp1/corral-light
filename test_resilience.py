@@ -433,5 +433,111 @@ class ALostContextIsSaid(FakeLaneCase):
         self.assertTrue(r["_meta"]["corral/contextLost"])
 
 
+class TheTurnLedger(FakeLaneCase):
+    """P0-ledger (Astra 2026-09-28): accepted is durable before the ack."""
+
+    def setUp(self):
+        super().setUp()
+        from corral_core import sessions as core
+        self.core = core
+        self.state = Path(tempfile.mkdtemp(prefix="corral-light-ledger-"))
+        for mod in (self.sessions, core):
+            real = mod.STATE
+            mod.STATE = self.state
+            self.addCleanup(setattr, mod, "STATE", real)
+
+    def ledger(self, p):
+        import ledger
+        return ledger.TurnLedger(p.dir / "turns.jsonl").turns()
+
+    def test_accepted_is_on_disk_when_send_returns_then_completed(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        tid = p.send("hello ledger")
+        self.assertTrue(tid)
+        lines = (p.dir / "turns.jsonl").read_text().splitlines()
+        first = json.loads(lines[0])
+        self.assertEqual((first["turn"], first["state"]), (tid, "accepted"))
+        self.assertEqual(first["text"], "hello ledger")
+        self.assertTrue(wait_for(lambda: self.ledger(p)[tid]["state"] == "completed"))
+        states = [json.loads(l)["state"] for l in
+                  (p.dir / "turns.jsonl").read_text().splitlines()]
+        self.assertEqual(states, ["accepted", "dispatched", "completed"])
+
+    def test_a_turn_that_cannot_be_recorded_is_refused_not_acked(self):
+        p = self.mgr.create("fake", self.agent_dir)
+
+        def boom(text):
+            raise OSError("disk full")
+        p._turns().accept = boom
+        with self.assertRaises(ValueError) as ar:
+            p.send("never recorded")
+        self.assertIn("durably", str(ar.exception))
+        self.assertEqual(p._queue, [])
+        self.assertNotIn("user", self.kinds(p))
+
+    def test_a_dead_hubs_dispatched_turn_is_interrupted_and_noted_never_resent(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        tid = p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: self.ledger(p)[tid]["state"] == "dispatched"))
+        queued = p.send("typed ahead")
+        # The first hub is DEAD in the case under test, so none of its threads
+        # may react to what happens next. Retiring its attachment generation
+        # silences them exactly as a process exit would.
+        with p._turn_lock:
+            p._generation += 1
+        # A second hub boots on the same state dir without the first one
+        # having exited cleanly — the SIGKILL/OOM case.
+        import sessions
+        m2 = sessions.Manager.__new__(sessions.Manager)
+        m2.panes, m2.subscribers, m2.not_restored = {}, [], 0
+        m2._lock = threading.Lock()
+        m2.catalog, m2.mcp = {}, None
+        m2.restore()
+        self.addCleanup(lambda: [q._log and q._log.close() for q in m2.panes.values()])
+        q = m2.panes[p.id]
+        led = self.ledger(q)
+        self.assertEqual(led[tid]["state"], "interrupted")
+        self.assertEqual(led[tid]["was"], "dispatched")
+        self.assertEqual(led[queued]["state"], "interrupted")
+        note = [e["data"] for e in q.events if e["kind"] == "note"
+                and "interrupted when the hub stopped" in e["data"]["text"]]
+        self.assertEqual(len(note), 1)
+        self.assertIn("sleep 30", note[0]["text"])
+        self.assertEqual(q._queue, [], "a recovered turn was queued for re-sending")
+        # A second boot finds nothing open: the note is said once (the one
+        # from the first boot is read back from disk; no second is written).
+        for x in m2.panes.values():
+            x._log and x._log.close()
+        m2.restore()
+        self.assertEqual(sum(1 for e in m2.panes[p.id].events if e["kind"] == "note"
+                             and "interrupted when the hub stopped" in e["data"]["text"]), 1)
+
+    def test_pause_closes_the_in_flight_turn(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        tid = p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: self.ledger(p)[tid]["state"] == "dispatched"))
+        p.pause()
+        r = self.ledger(p)[tid]
+        self.assertEqual((r["state"], r["why"]), ("interrupted", "paused"))
+
+    def test_the_ledger_is_bounded(self):
+        import ledger
+        lg = ledger.TurnLedger(self.state / "bound" / "turns.jsonl")
+        ids = []
+        for i in range(ledger.LEDGER_TURNS + 150):
+            t = lg.accept(f"t{i}")
+            lg.mark(t, "dispatched")
+            lg.mark(t, "completed")
+            ids.append(t)
+        with (self.state / "bound" / "turns.jsonl").open() as fh:
+            n = sum(1 for _ in fh)
+        self.assertLessEqual(n, ledger.LEDGER_MAX_LINES)
+        turns = lg.turns()
+        self.assertLessEqual(len(turns), ledger.LEDGER_MAX_LINES)
+        self.assertIn(ids[-1], turns)
+        self.assertEqual(turns[ids[-1]]["state"], "completed")
+        self.assertNotIn(ids[0], turns)
+
+
 if __name__ == "__main__":
     unittest.main()

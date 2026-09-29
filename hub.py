@@ -472,8 +472,10 @@ class Handler(BaseHTTPRequestHandler):
                     # Same prompt, several panes: the first half of a panel.
                     r = MGR.fanout(list(b.get("panes") or []), b.get("text", ""))
                     return self._json({"ok": r["sent"] > 0, **r})
-                MGR.get(b.get("pane", "")).send(b.get("text", ""))
-                return self._json({"ok": True})
+                # `turn` is the ledger id, durable before this ack
+                # (P0-ledger): a client can ask later what became of it.
+                tid = MGR.get(b.get("pane", "")).send(b.get("text", ""))
+                return self._json({"ok": True, "turn": tid})
             if p == "/api/session/quote":
                 # Composer text only, like content attach: nothing is sent
                 # until the operator presses send in the target pane.
