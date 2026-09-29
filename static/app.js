@@ -937,6 +937,18 @@ function paneHead(p) {
   fnd.title = 'find in this conversation';
   fnd.onclick = () => toggleFind(p);
   h.appendChild(fnd);
+  if (p.portedFrom) {
+    const pf = p.portedFrom;
+    const tag = el('span', 'pill unknown', `⇄ from ${pf.agent}`);
+    tag.title = `transcript carried from pane ${pf.pane} on ${pf.host} — the model ` +
+                `read it, it does not remember it` + (pf.delivered === false ? ' (NOT delivered)' : '');
+    h.appendChild(tag);
+  }
+  if (!isTerm(p)) {
+    const pt = el('button', 'x', '⇄'); pt.title = 'carry this conversation to another lane';
+    pt.onclick = () => openPort(p);
+    h.appendChild(pt);
+  }
   const min = el('button', 'x', '–'); min.title = 'minimize (keeps running)';
   min.onclick = () => setMin(p, true);
   h.appendChild(min);
@@ -2279,6 +2291,41 @@ function wireDialog() {
       for (const n of (d.notes || [])) toast(n);
     } catch (e) { toast(e.message, true); }
   });
+}
+
+/* ── port: carry a conversation to another lane (port.py) ────────────────
+ * The preview is the EXACT pack; Send posts its sha and the hub recomposes
+ * and refuses if the transcript has grown since (P17). */
+async function openPort(src) {
+  const dlg = $('#portdlg'), sel = $('#p-agent'), go = $('#p-go');
+  sel.replaceChildren();
+  for (const a of S.agents.filter(a => a.available && !a.key.startsWith('host:'))) {
+    const o = el('option', null, a.label); o.value = a.key; sel.appendChild(o);
+  }
+  let pack = null;
+  const load = async () => {
+    go.disabled = true; pack = null;
+    $('#p-text').textContent = 'composing…';
+    try {
+      pack = await api('/api/session/port/preview', { pane: src.id, agent: sel.value });
+      $('#p-hint').textContent = `${pack.chars} chars · ${pack.turns_carried} of ` +
+        `${pack.turns_total} turns · goes to ${pack.vendor} · sha ${pack.sha.slice(0, 12)}`;
+      $('#p-text').textContent = pack.text;
+      go.disabled = false;
+    } catch (e) { $('#p-hint').textContent = e.message; $('#p-text').textContent = ''; }
+  };
+  sel.onchange = load;
+  dlg.onclose = async () => {
+    if (dlg.returnValue !== 'ok' || !pack) return;
+    try {
+      const r = await api('/api/session/port', { pane: src.id, agent: sel.value, sha: pack.sha });
+      S.panes.set(r.pane.id, r.pane); S.focus = r.pane.id; render();
+      toast(r.delivered ? 'carried — the new pane read the transcript'
+                        : 'the pane opened but the transcript was NOT delivered: ' + r.error, !r.delivered);
+    } catch (e) { toast(e.message, true); }
+  };
+  dlg.showModal();
+  await load();
 }
 
 /* ── ⌘K — the one way to get anywhere ──────────────────────────────────────

@@ -1932,6 +1932,9 @@ class Pane(_core.PaneBase):
             # to load. A pane that died before session/new has none.
             "resumable": bool(getattr(self, "acp_session", None)),
             "role": getattr(self, "role", None),
+            # A transcript carried here from another lane (port.py) — the
+            # header says so, so nobody mistakes it for the model's memory.
+            "portedFrom": getattr(self, "ported_from", None),
             "usage": self.usage, "alive": alive,
             "events": [e for e in self.events if e["seq"] > since],
             "seq": self.events[-1]["seq"] if self.events else 0,
@@ -2046,6 +2049,53 @@ class Manager(_core.ManagerBase):
         # the same catalog the dialog reads, so a seeded list appears on the
         # next state() poll rather than blocking the UI on boot.
         threading.Thread(target=self.seed_catalogs, daemon=True).start()
+
+    def port_preview(self, from_id, to_agent):
+        """The exact pack a port would send, its sha, and who receives it.
+        Refusals are the same function Manager.port() applies (P17)."""
+        import port as port_mod
+        src = self.get(from_id)
+        why = port_mod.refuse_target(to_agent, AGENTS.get(to_agent),
+                                     source_agent=src.agent, src_pane=src)
+        if why:
+            raise ValueError(why)
+        pack = port_mod.compose(src, to_agent)
+        pack["vendor"] = port_mod.vendor_of(to_agent)
+        pack["label"] = (AGENTS.get(to_agent) or {}).get("label") or to_agent
+        return pack
+
+    def port(self, from_id, to_agent, *, sha, cwd=None, posture=None):
+        """Carry a conversation to another lane (full Corral's DESIGN-4 F3).
+
+        NOT a resume: an acp_session belongs to one adapter's store, so what
+        moves is the TRANSCRIPT, and the new pane's `ported_from` says so.
+        `sha` must match the pack recomposed here — a transcript that grew
+        since the preview refuses rather than sending unread bytes (P17).
+        Delivery is its own fact: a pane can exist and the pack not arrive.
+        """
+        import socket
+        import port as port_mod
+        pack = self.port_preview(from_id, to_agent)
+        if not sha or pack["sha"] != sha:
+            raise ValueError("the preview is out of date — reopen and check it")
+        src = self.get(from_id)
+        pane = self.create(to_agent, cwd or src.cwd, posture or src.posture)
+        pane.ported_from = {"pane": src.id, "agent": src.agent,
+                            "host": socket.gethostname()[:64], "at": _now(),
+                            "turns": pack["turns_carried"],
+                            "omitted": pack["omitted"]}
+        pane.title, pane.title_locked = src.title, True   # not "# Handoff —…"
+        pane.save_meta()
+        try:
+            pane.send(pack["text"])
+        except (acp.AgentError, ValueError) as e:
+            pane.emit("note", {"text": f"the handoff pack was not delivered: {e}"})
+            pane.ported_from.update(turns=0, delivered=False, error=str(e)[:300])
+            pane.save_meta()
+            return {"pane": pane, "delivered": False, "error": str(e)[:300]}
+        pane.ported_from["delivered"] = True
+        pane.save_meta()
+        return {"pane": pane, "delivered": True, "error": None}
 
     def shutdown_notes(self, why):
         """Write a shutdown note on every pane that has work in flight.

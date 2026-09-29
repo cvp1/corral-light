@@ -684,6 +684,15 @@ class Handler(BaseHTTPRequestHandler):
                 m = MGR.get(b.get("pane", "")).set_minimized(
                     b.get("minimized", True))
                 return self._json({"ok": True, "minimized": m})
+            if p == "/api/session/port/preview":
+                # The exact bytes a port would send, and their sha (port.py).
+                pack = MGR.port_preview(b.get("pane", ""), b.get("agent", ""))
+                return self._json({"ok": True, **pack})
+            if p == "/api/session/port":
+                r = MGR.port(b.get("pane", ""), b.get("agent", ""),
+                             sha=b.get("sha") or "", cwd=b.get("cwd") or None)
+                return self._json({"ok": r["delivered"], "delivered": r["delivered"],
+                                   "error": r["error"], "pane": r["pane"].snapshot()})
             if p == "/api/session/schedule/add":
                 # later.py: the SAME create+send a click takes, at a time.
                 job = MGR.schedule.add(

@@ -272,5 +272,83 @@ class TranscriptSearch(unittest.TestCase):
         self.assertNotIn("import close", src)
 
 
+class PortAConversation(unittest.TestCase):
+    """port.py — carry a transcript to another lane; bound to the previewed sha."""
+
+    def setUp(self):
+        from test_resilience import FakeLaneCase, wait_for
+        self.wait_for = wait_for
+        self.case = FakeLaneCase("run")
+        self.case.setUp()
+        self.addCleanup(self.case.doCleanups)
+        self.mgr, self.dir = self.case.mgr, self.case.agent_dir
+        import port
+        self.port = port
+
+    def _src(self):
+        p = self.mgr.create("fake", self.dir)
+        p.send("remember walnut")
+        self.assertTrue(self.wait_for(lambda: self.case.turn_ends(p) == 1))
+        p._on_permission({"requestId": "r9", "toolCall": {"rawInput": {"cmd": "PERMSECRET"}},
+                          "options": []})
+        p.pending.clear()
+        return p
+
+    def test_preview_then_port_delivers_the_exact_pack(self):
+        src = self._src()
+        pack = self.mgr.port_preview(src.id, "fake")
+        self.assertIn("## The original ask\nremember walnut", pack["text"])
+        self.assertNotIn("PERMSECRET", pack["text"], "a consent payload was carried")
+        self.assertEqual(pack["text"], pack["text"].strip())
+        r = self.mgr.port(src.id, "fake", sha=pack["sha"])
+        self.assertTrue(r["delivered"], r["error"])
+        dst = r["pane"]
+        self.assertEqual(dst.ported_from["pane"], src.id)
+        self.assertTrue(dst.ported_from["delivered"])
+        self.assertEqual(dst.title, src.title)
+        users = [e["data"]["text"] for e in dst.events if e["kind"] == "user"]
+        self.assertEqual(users, [pack["text"]], "what was sent is not what was previewed")
+        self.assertTrue(self.wait_for(lambda: self.case.turn_ends(dst) == 1))
+        self.assertEqual(dst.snapshot()["portedFrom"]["agent"], "fake")
+
+    def test_a_stale_or_missing_sha_refuses(self):
+        src = self._src()
+        pack = self.mgr.port_preview(src.id, "fake")
+        with self.assertRaises(ValueError):
+            self.mgr.port(src.id, "fake", sha="")
+        src.send("one more turn")
+        self.assertTrue(self.wait_for(lambda: self.case.turn_ends(src) == 2))
+        with self.assertRaises(ValueError) as ar:
+            self.mgr.port(src.id, "fake", sha=pack["sha"])
+        self.assertIn("out of date", str(ar.exception))
+
+    def test_structural_refusals_and_the_injected_gate(self):
+        self.assertIn("shell", self.port.refuse_target("fake", {"label": "F"},
+                                                       source_agent="host:box"))
+        self.assertIn("SSH", self.port.refuse_target("host:box", {}))
+        self.assertIn("no such lane", self.port.refuse_target("nope", None))
+        from corral_core import sessions as core
+        real = core.TRANSFER_GATE
+        core.TRANSFER_GATE = lambda s, d: "policy says no"
+        try:
+            self.assertEqual(self.port.refuse_target("fake", {"label": "F"},
+                                                     src_pane=object()), "policy says no")
+        finally:
+            core.TRANSFER_GATE = real
+
+    def test_export_then_import_lands_an_archived_pane(self):
+        src = self._src()
+        b = self.port.export(src.id, state_dir=src.dir.parent.parent)
+        self.assertNotIn("acp_session", b["meta"])
+        state = Path(tempfile.mkdtemp())
+        new_id = self.port.import_bundle(json.loads(json.dumps(b)), state_dir=state)
+        meta = json.loads((state / "panes" / new_id / "meta.json").read_text())
+        self.assertTrue(meta["closed"])
+        self.assertTrue(meta["ported_from"]["imported"])
+        with self.assertRaises(ValueError):
+            self.port.import_bundle(dict(b, events=[{"seq": 1, "kind": "user",
+                                                     "data": ["bad"]}]), state_dir=state)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1031,3 +1031,7 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
   font-size:11.5px;color:var(--gold);padding:6px 8px;margin-bottom:4px;
   border-left:2px solid var(--gold);background:var(--raise);border-radius:0 6px 6px 0;
 }
+
+/* port.py preview: the exact pack that will be sent, readable and bounded */
+.porttext{max-height:45vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
+  font-size:12px;background:var(--bg2, rgba(127,127,127,.08));padding:8px;border-radius:6px}

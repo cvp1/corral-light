@@ -559,6 +559,34 @@ def v_digest(c, a):
     return 0
 
 
+def v_port(c, a):
+    """Carry a pane's transcript to another lane: print the EXACT pack and its
+    sha, then confirm on the terminal or by --sha (P17), then send."""
+    p = c.pane(a.pane)
+    lane = consult.lane_key(a.lane)
+    pack = c.post("/api/session/port/preview", {"pane": p["id"], "agent": lane})
+    c.say(pack["text"])
+    c.say(f"\n── {pack['chars']} chars · {pack['turns_carried']}/{pack['turns_total']} "
+          f"turns · to {pack['label']} ({pack['vendor']}) · sha {pack['sha']}")
+    if a.sha:
+        if len(a.sha) < DIGEST_MIN or not pack["sha"].startswith(a.sha.lower()):
+            raise ConsultError("--sha does not match the pack printed above")
+    elif c.interactive:
+        c.out.write("  send exactly this? [y/N] > ")
+        c.out.flush()
+        if c.inp.readline().strip().lower() not in ("y", "yes"):
+            c.say("  not sent")
+            return 1
+    else:
+        raise ConsultError(f"no terminal to confirm on: re-run with --sha "
+                           f"{pack['sha'][:DIGEST_MIN]}")
+    r = c.post("/api/session/port", {"pane": p["id"], "agent": lane, "sha": pack["sha"]},
+               timeout=consult.HANDSHAKE_S)
+    c.say(f"{r['pane']['id']} " + ("delivered" if r["delivered"] else
+                                   f"NOT delivered: {r['error']}"))
+    return 0 if r["delivered"] else 1
+
+
 def v_later(c, a):
     """Scheduled prompts (later.py): list, add, rm."""
     if a.later_cmd == "list":
@@ -670,6 +698,13 @@ def main(argv=None):
     s.add_argument("src")
     s.add_argument("dst", nargs="?")
     s.set_defaults(fn=v_quote)
+
+    s = sub.add_parser("port", help="carry a pane's transcript to another lane")
+    s.add_argument("pane")
+    s.add_argument("--lane", required=True)
+    s.add_argument("--sha", help=f"≥{DIGEST_MIN} hex chars of the printed sha "
+                                 f"(required without a terminal)")
+    s.set_defaults(fn=v_port)
 
     s = sub.add_parser("search", help="full-text search of what was said in any pane")
     s.add_argument("query", nargs="+")
