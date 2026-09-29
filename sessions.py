@@ -1026,6 +1026,10 @@ class Pane(_core.PaneBase):
         # Same hole for `ephemeral`: Light never sets it, but a Corral seat
         # resumed here and saved again must still be one Corral will reap.
         p.ephemeral = bool(meta.get("ephemeral"))
+        # The previous hub's adapter, if restore() found it still running it
+        # has already been reaped by now (Manager.restore); either way this
+        # pane has no process of its own yet, so nothing is recorded.
+        p.pid = p.pgid = p.pid_start = None
         p._init_runtime()
         p.state = "detached"
         p.dir = STATE / "panes" / p.id
@@ -1117,6 +1121,7 @@ class Pane(_core.PaneBase):
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         strip_env=strip_prefixes(),
                                         **self._bind(gen))
+            self._record_pid()
             self.client.initialize()
             # The agent replays the whole transcript on load. We already have
             # it; emitting it again would double the conversation on screen.
@@ -1157,6 +1162,19 @@ class Pane(_core.PaneBase):
 
 
 
+
+    def _record_pid(self):
+        """Persist the adapter's pid/pgid/start time the moment it exists.
+
+        BEFORE the handshake, not after: initialize + session/load can take
+        up to HANDSHAKE_TIMEOUT, and a hub that dies in that window leaves
+        exactly the orphan this record exists to find (Grok 2026-09-28).
+        """
+        c = self.client
+        self.pid = getattr(getattr(c, "p", None), "pid", None)
+        self.pgid = getattr(c, "pgid", None)
+        self.pid_start = getattr(c, "start_token", None)
+        self.save_meta()
 
     def _bind(self, gen):
         """The callbacks for ONE attachment, fenced by its generation.
@@ -1275,6 +1293,7 @@ class Pane(_core.PaneBase):
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         strip_env=strip_prefixes(),
                                         **self._bind(self._generation))
+            self._record_pid()
             info = self.client.initialize()
             new = self.client.new_session_full(self.cwd, self._mcp_servers())
             self.acp_session = new.get("sessionId")
@@ -1832,6 +1851,26 @@ MODEL_EXTRAS = {}
 
 
 
+def _clear_pid_record(pane_dir):
+    """Null the pid fields in a meta.json, touching NOTHING else in it.
+
+    Not save_meta(): that rewrites every META key from the pane's attributes,
+    and Light does not restore the role annotations a full-Corral pane may
+    carry — a boot-time save would blank them (the same class of loss as the
+    2026-09-14 `ported_from` bug). Atomic, like save_meta.
+    """
+    f = Path(pane_dir) / "meta.json"
+    try:
+        m = json.loads(f.read_text(encoding="utf-8"))
+        for k in ("pid", "pgid", "pid_start"):
+            m[k] = None
+        tmp = f.with_name("meta.json.tmp")
+        tmp.write_text(json.dumps(m, indent=1), encoding="utf-8")
+        os.replace(tmp, f)
+    except (OSError, ValueError):
+        pass
+
+
 class Manager(_core.ManagerBase):
     """Panes, plus the agent's own config CATALOG.
 
@@ -1850,6 +1889,7 @@ class Manager(_core.ManagerBase):
         self.panes = {}
         self.subscribers = []
         self.not_restored = 0
+        self.orphans = {}          # pane id -> what restore() did to its old adapter
         self._lock = threading.Lock()
         self.mcp = mcp.Registry()
         self.catalog = self._load_catalog()
@@ -2013,15 +2053,51 @@ class Manager(_core.ManagerBase):
         root = STATE / "panes"
         if not root.is_dir():
             return
-        metas = []
-        for d in root.iterdir():
+        metas, unreadable, orphans = [], 0, []
+        try:
+            dirs = list(root.iterdir())
+        except OSError as e:
+            # Loud, and left for the outside watcher to page on: a hub that
+            # cannot list its own panes must not come up looking empty
+            # (Astra/Grok 2026-09-28, K8). The raise still stops the boot.
+            print(f"corral-light: cannot read {root}: {e}", file=sys.stderr,
+                  flush=True)
             try:
-                m = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                (STATE / "DEAD").write_text(f"restore failed: cannot read "
+                                            f"{root}: {e}\n", encoding="utf-8")
+            except OSError:
+                pass
+            raise
+        for d in dirs:
+            mf = d / "meta.json"
+            if not mf.exists():
                 continue                     # no meta = pre-persistence pane
+            try:
+                m = json.loads(mf.read_text(encoding="utf-8"))
+                if not isinstance(m, dict):
+                    raise ValueError("not an object")
+            except (OSError, ValueError) as e:
+                # Counted and said, never silently skipped (Astra 2026-09-28,
+                # K8: "restore() is not loud"). It lands in notRestored, which
+                # the roster already renders.
+                unreadable += 1
+                print(f"corral-light: pane {d.name} not restored — "
+                      f"meta.json unreadable: {e}", file=sys.stderr, flush=True)
+                continue
+            if m.get("pgid") and m.get("agent") in AGENTS:
+                orphans.append((m.get("id") or d.name, m.get("pid"), m.get("pgid"),
+                                m.get("pid_start"), AGENTS[m["agent"]]["argv"][:2]))
             if m.get("closed") or not m.get("id"):
                 continue
             metas.append(m)
+        # Reap BEFORE any pane object exists, and therefore before anything
+        # can run session/load against a conversation an orphaned adapter
+        # from the previous hub still holds (Grok 2026-09-28, missed kill).
+        reaped = acp.reap_orphans(orphans) if orphans else {}
+        self.orphans = {k: v for k, v in reaped.items()}
+        for key, outcome in reaped.items():
+            print(f"corral-light: previous hub's adapter for pane {key}: "
+                  f"{outcome}", file=sys.stderr, flush=True)
         metas.sort(key=lambda m: (0 if m.get("pinned") else 1,
                                   m.get("order") if m.get("order") is not None else 10_000,
                                   m.get("created") or ""))
@@ -2033,10 +2109,23 @@ class Manager(_core.ManagerBase):
         skipped = max(0, len(metas) - MAX_ROSTER)
         for m in metas[:MAX_ROSTER]:
             try:
-                self.panes[m["id"]] = Pane.from_meta(m, self)
-            except Exception:
-                continue                     # one bad pane must not block the rest
-        self.not_restored = skipped          # said out loud, not silently dropped
+                p = Pane.from_meta(m, self)
+            except Exception as e:           # noqa: BLE001
+                unreadable += 1              # one bad pane must not block the rest
+                print(f"corral-light: pane {m.get('id')} not restored: "
+                      f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                continue
+            self.panes[m["id"]] = p
+            outcome = self.orphans.get(m["id"])
+            if outcome in ("reaped", "killed"):
+                p.emit("note", {"text": "the agent process from before the hub "
+                                        "restarted was still running; it was "
+                                        f"stopped ({outcome}) so resuming this "
+                                        "conversation cannot attach a second "
+                                        "agent to it"})
+            if m.get("pgid") or m.get("pid"):
+                _clear_pid_record(p.dir)     # the previous hub's process is handled
+        self.not_restored = skipped + unreadable   # said out loud, not dropped
 
     def _reserve_live(self, pane):
         """Refuse to attach a process when MAX_PANES live ones already exist.

@@ -138,5 +138,113 @@ class ResumeFromDead(FakeLaneCase):
         self.assertIn("p.state === 'dead') return p.resumable ? 'live' : 'none'", js)
 
 
+class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
+    """P0-pid (Grok 2026-09-28): the pid is on disk, and restore() uses it."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+        self.subprocess = subprocess
+        self.state = Path(tempfile.mkdtemp(prefix="corral-light-restore-"))
+        self._real_state = self.sessions.STATE
+        self.sessions.STATE = self.state
+        self.addCleanup(setattr, self.sessions, "STATE", self._real_state)
+        self.procs = []
+        self.addCleanup(self._kill_procs)
+
+    def _kill_procs(self):
+        for pr in self.procs:
+            try:
+                os.killpg(pr.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                pr.wait(5)
+            except Exception:                     # noqa: BLE001
+                pass
+            for s in (pr.stdin, pr.stdout, pr.stderr):
+                if s:
+                    s.close()
+
+    def _spawn(self, argv):
+        pr = self.subprocess.Popen(argv, stdin=self.subprocess.PIPE,
+                                   stdout=self.subprocess.DEVNULL,
+                                   stderr=self.subprocess.DEVNULL,
+                                   start_new_session=True,
+                                   env={**os.environ, "FAKE_ACP_DIR": self.agent_dir})
+        self.procs.append(pr)
+        # A real orphan is reparented to init, which reaps it the moment it
+        # dies. This one is OUR child, so without a waiter it lingers as a
+        # zombie that still "exists" to killpg(0). Stand in for init.
+        threading.Thread(target=pr.wait, daemon=True).start()
+        return pr
+
+    def _meta(self, pid, pr, start, agent="fake"):
+        d = self.state / "panes" / pid
+        d.mkdir(parents=True)
+        (d / "meta.json").write_text(json.dumps({
+            "id": pid, "agent": agent, "cwd": self.agent_dir,
+            "created": "2026-09-28T00:00:00Z", "acp_session": "s1",
+            "role": "reviewer",
+            "pid": pr.pid, "pgid": pr.pid, "pid_start": start}))
+        return d
+
+    def test_spawn_writes_pid_pgid_and_start_and_pause_clears_them(self):
+        self.sessions.STATE = self._real_state      # create() uses the core dir
+        p = self.mgr.create("fake", self.agent_dir)
+        m = json.loads((p.dir / "meta.json").read_text())
+        self.assertEqual(m["pid"], p.client.p.pid)
+        self.assertEqual(m["pgid"], p.client.pgid)
+        self.assertTrue(m["pid_start"])
+        p.pause()
+        m = json.loads((p.dir / "meta.json").read_text())
+        self.assertIsNone(m["pid"])
+        self.assertIsNone(m["pgid"])
+
+    def test_a_surviving_adapter_is_stopped_before_restore_returns(self):
+        import acp
+        pr = self._spawn([sys.executable, str(FAKE)])
+        self.assertTrue(wait_for(lambda: acp.process_start_token(pr.pid)))
+        d = self._meta("orph1", pr, acp.process_start_token(pr.pid))
+        self.mgr.restore()
+        self.assertIsNotNone(pr.poll(), "the orphaned adapter is still running")
+        self.assertIn(self.mgr.orphans.get("orph1"), ("reaped", "killed"))
+        p = self.mgr.panes["orph1"]
+        self.assertTrue(any(e["kind"] == "note" and "still running" in
+                            e["data"]["text"] for e in p.events))
+        m = json.loads((d / "meta.json").read_text())
+        self.assertIsNone(m["pid"])
+        self.assertEqual(m["role"], "reviewer", "clearing the pid blanked other keys")
+
+    def test_a_reused_pid_is_never_signalled(self):
+        pr = self._spawn(["sleep", "30"])
+        self._meta("stranger", pr, "proc:0-not-this-process")
+        self.mgr.restore()
+        self.assertIsNone(pr.poll(), "a process that is not our adapter was signalled")
+        self.assertTrue(self.mgr.orphans["stranger"].startswith("left alone"))
+
+    def test_with_no_start_time_an_argv_mismatch_is_never_signalled(self):
+        pr = self._spawn(["sleep", "30"])
+        self._meta("nostart", pr, None)
+        self.mgr.restore()
+        self.assertIsNone(pr.poll())
+        self.assertIn("not this lane", self.mgr.orphans["nostart"])
+
+    def test_with_no_start_time_a_matching_argv_is_reaped(self):
+        pr = self._spawn([sys.executable, str(FAKE)])
+        self.assertTrue(wait_for(lambda: (Path(self.agent_dir) / f"pid-{pr.pid}").exists()))
+        self._meta("oldmeta", pr, None)
+        self.mgr.restore()
+        self.assertIsNotNone(pr.poll())
+
+    def test_unreadable_metas_are_counted_not_skipped(self):
+        d = self.state / "panes" / "broken"
+        d.mkdir(parents=True)
+        (d / "meta.json").write_text("{not json")
+        (self.state / "panes" / "nometa").mkdir()
+        self.mgr.restore()
+        self.assertEqual(self.mgr.not_restored, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
