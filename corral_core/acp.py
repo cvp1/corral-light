@@ -867,7 +867,7 @@ def _argv_piece_present(piece, args):
 
     A script path is matched literally. An INTERPRETER is matched by its
     basename family, because macOS's framework Python re-execs itself as
-    `.../Python.app/Contents/MacOS/Python` (measured on dogma-2,
+    `.../Python.app/Contents/MacOS/Python` (measured on a macOS host,
     2026-09-29): the spec says `/usr/bin/python3`, `ps` shows `.../Python`,
     and a literal compare left every orphan alone on the one host whose
     launchd does not reap them -- the weak check was blind exactly where it
