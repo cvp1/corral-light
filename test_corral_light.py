@@ -3421,6 +3421,228 @@ class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
                            "the posture pill and the New dialog")
 
 
+class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
+    """DESIGN-5 S3b. The repo shipped two service TEMPLATES: the Linux one
+    needs a `sed s|%HERE%|$PWD|` the reader has to notice and type in the
+    right directory, and the macOS one carries absolute paths from the
+    machine it was written on -- so copying it points launchd at a home
+    that does not exist, and launchd's complaint is a log line nobody is
+    watching on their first day.
+
+    Two properties: every path is RESOLVED from the running checkout, and
+    nothing is enabled or started. Writing a file is `rm`-reversible and
+    inert; starting a daemon that holds a port and spawns agents with the
+    user's filesystem access is the operator's call, so the enable command
+    is printed instead of run.
+    """
+
+    def _plan(self, platform, home):
+        import install_service
+        return install_service.plan(platform=platform, root=ROOT,
+                                    python="/usr/bin/python3", home=home)
+
+    def test_the_linux_unit_resolves_the_checkout_and_the_interpreter(self):
+        with tempfile.TemporaryDirectory() as home:
+            p = self._plan("linux", home)
+            self.assertIn(f"ExecStart=/usr/bin/python3 {ROOT}/hub.py", p["text"])
+            self.assertIn(f"WorkingDirectory={ROOT}", p["text"])
+            self.assertTrue(Path(f"{ROOT}/hub.py").is_file(),
+                            "ExecStart names a file that does not exist")
+            self.assertTrue((ROOT).is_dir())
+            self.assertNotIn("%HERE%", p["text"],
+                             "the template placeholder survived — the reader "
+                             "is back to running sed by hand")
+            self.assertEqual(p["path"],
+                             Path(home) / ".config/systemd/user/corral-light.service")
+
+    def test_the_macos_plist_resolves_the_same_way_from_a_linux_host(self):
+        """Rendered for darwin ON THIS HOST. The generator takes the platform
+        rather than reading it, so the Mac answer is testable without a Mac —
+        which is the only way the macOS path gets tested at all here."""
+        with tempfile.TemporaryDirectory() as home:
+            p = self._plan("darwin", home)
+            self.assertIn(f"<string>{ROOT}/hub.py</string>", p["text"])
+            self.assertIn(f"<string>{ROOT}</string>", p["text"])
+            self.assertIn("/usr/bin/python3", p["text"])
+            self.assertIn(str(Path(home) / "Library/Logs/corral-light.log"),
+                          p["text"])
+            self.assertEqual(
+                p["path"],
+                Path(home) / "Library/LaunchAgents/com.cvande.corral-light.plist")
+
+    def test_an_unknown_platform_refuses_and_names_itself(self):
+        """P4. A systemd unit written hopefully into a directory that means
+        nothing on that OS is worse than a refusal."""
+        with tempfile.TemporaryDirectory() as home:
+            with self.assertRaises(SystemExit) as e:
+                self._plan("sunos5", home)
+            self.assertIn("sunos5", str(e.exception))
+
+    def test_print_writes_nothing(self):
+        import contextlib
+        import io
+        import install_service
+        with tempfile.TemporaryDirectory() as home:
+            target = install_service.plan(platform=sys.platform, root=ROOT,
+                                          home=home)["path"]
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = install_service.main(["--print"])
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+            self.assertEqual(rc, 0)
+            self.assertFalse(target.exists(),
+                             "--print wrote the file it promised only to show")
+            self.assertFalse(target.parent.exists(),
+                             "--print created the directory")
+            self.assertIn("hub.py", buf.getvalue())
+
+    def test_writing_it_enables_nothing_and_says_what_to_run(self):
+        import contextlib
+        import io
+        import install_service
+        with tempfile.TemporaryDirectory() as home:
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = install_service.main([])
+                out = buf.getvalue()
+                target = install_service.plan(platform=sys.platform, root=ROOT,
+                                              home=home)["path"]
+                self.assertEqual(rc, 0)
+                self.assertTrue(target.exists())
+                self.assertIn(str(target), out, "it does not say what it wrote")
+                self.assertIn("NOT enabled", out)
+                self.assertIn("enable" if sys.platform.startswith("linux")
+                              else "bootstrap", out,
+                              "the enable command is not printed, so the "
+                              "operator has to go and find it")
+                # A re-run must not clobber an installed file someone edited.
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc2 = install_service.main([])
+                self.assertEqual(rc2, 1)
+                self.assertIn("already exists", err.getvalue())
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+
+    def test_the_generated_files_name_no_host_or_account(self):
+        """T3.5. This repository is PUBLIC. The TEMPLATES must carry no home
+        path — the paths arrive at render time from whatever checkout is
+        running, which is the whole point of generating them."""
+        import re
+        import install_service
+        bad = re.compile(r"ranch-server|dogma-2|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
+        src = Path(install_service.__file__).read_text(encoding="utf-8")
+        for i, line in enumerate(src.splitlines(), 1):
+            m = bad.search(line)
+            self.assertIsNone(m, f"install_service.py:{i} names a host or "
+                                 f"account in a public repository: "
+                                 f"{line.strip()[:90]}")
+
+
+class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
+    """DESIGN-5 S3a. `spike/node_modules` is gitignored, so NO clone arrives
+    with the Claude and ChatGPT adapters. Both lanes then refuse with the
+    path they looked at -- a true sentence that reads like a broken install
+    rather than the one setup step the README never had. On someone's first
+    ten minutes, that is the difference between a product and a dead end.
+    """
+
+    LANES = [{"key": "claude", "label": "Claude Code", "available": False,
+              "why": "not installed: …/spike/node_modules/.bin/claude-agent-acp"}]
+
+    def test_doctor_names_the_npm_step_when_the_adapters_are_absent(self):
+        import doctor
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "spike").mkdir()
+            (Path(tmp) / "spike" / "package.json").write_text("{}", encoding="utf-8")
+            lines = doctor.report(root=tmp, agents=self.LANES)
+        blob = "\n".join(lines)
+        self.assertIn("npm install", blob,
+                      "doctor does not name the command that fixes it")
+        self.assertIn(str(Path(tmp) / "spike"), blob,
+                      "doctor does not say WHERE to run it")
+        self.assertIn("Claude Code", blob, "the lane list is gone")
+
+    def test_doctor_is_quiet_about_npm_once_it_is_installed(self):
+        """Edge-trigger (P7): a note that appears on every healthy run is a
+        note nobody reads on the run that matters."""
+        import doctor
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "spike" / "node_modules").mkdir(parents=True)
+            (Path(tmp) / "spike" / "package.json").write_text("{}", encoding="utf-8")
+            lines = doctor.report(root=tmp, agents=self.LANES)
+        self.assertNotIn("npm install", "\n".join(lines))
+
+    def test_an_incomplete_checkout_is_a_different_sentence(self):
+        """No package.json at all is not a missing npm install — telling
+        someone to run it there would send them down a dead end."""
+        import doctor
+        with tempfile.TemporaryDirectory() as tmp:
+            problem = doctor.npm_problem(root=tmp)
+        self.assertIn("no package.json", problem)
+        self.assertNotIn("npm install", problem)
+
+    def test_the_real_checkout_answers_too(self):
+        """Against THIS tree, whatever state it is in — the function must not
+        depend on a fixture to run at all."""
+        import doctor
+        self.assertIn(doctor.npm_problem(root=ROOT), (None,))
+
+    def test_the_gemini_lane_names_the_platform_it_cannot_run_on(self):
+        """S3e. Already true before this story (the installer's
+        platform_problem names both the pinned platform and this host);
+        asserted here so it stays true, since `doctor` is now the surface
+        that carries it."""
+        from install_antigravity_acp import platform_problem
+        import platform as _p
+        problem = platform_problem()
+        if problem is None:
+            self.assertEqual((_p.system(), "x86_64"),
+                             ("Linux", "x86_64"),
+                             "no platform problem reported on a host that is "
+                             "not the pinned platform")
+            raise unittest.SkipTest(
+                "this host IS Linux x86-64, so the refusal cannot be observed "
+                "here; the message's shape is asserted on a fake below")
+        self.assertIn(_p.system(), problem)
+        self.assertIn(_p.machine(), problem)
+
+    def test_the_platform_refusal_says_both_platforms(self):
+        """Driven with a fake platform so it is checked on every host, not
+        only on the Macs where it fires."""
+        import install_antigravity_acp as ia
+        real = ia.platform.system, ia.platform.machine
+        try:
+            ia.platform.system = lambda: "Darwin"
+            ia.platform.machine = lambda: "arm64"
+            problem = ia.platform_problem()
+        finally:
+            ia.platform.system, ia.platform.machine = real
+        self.assertIsNotNone(problem)
+        for needle in ("Linux", "x86_64", "Darwin", "arm64"):
+            self.assertIn(needle, problem,
+                          f"the refusal does not name {needle} — 'unavailable' "
+                          f"without the platform invites an install that "
+                          f"cannot work")
+
+    def test_the_empty_state_and_the_shortcut_overlay(self):
+        _run_node_selftest(self, "selftest_onboarding.mjs",
+                           "the empty state and the ? overlay")
+
+
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.

@@ -39,7 +39,10 @@
     </button>
     <div class="lab">Conversations</div>
     <div id="roster" class="roster"></div>
-    <div class="foot"><span id="conn" class="conn">connecting…</span><div class="themes" id="themes"></div></div>
+    <div class="foot"><span id="conn" class="conn">connecting…</span>
+      <button class="keysbtn" id="keysbtn" type="button" title="Keyboard shortcuts (?)"
+              aria-label="Keyboard shortcuts">?</button>
+      <div class="themes" id="themes"></div></div>
   </aside>
 
   <!-- No room nav. Light is one room; a tab bar with a single tab is chrome
@@ -130,6 +133,18 @@
       <button value="cancel" class="btn">Cancel</button>
       <button value="ok" class="btn go" id="p-go" disabled>Send</button>
     </menu>
+  </form>
+</dialog>
+
+<!-- Built by toggleKeys() from the KEYS table in app.js — the same table the
+     global key handler dispatches from, so this list cannot advertise a
+     shortcut that does nothing. Empty here on purpose; a hand-written copy is
+     exactly the drift it exists to prevent. -->
+<dialog id="keysdlg">
+  <form method="dialog" class="dlg">
+    <h2>Keyboard</h2>
+    <div id="keys-body" class="keysbody"></div>
+    <menu><button value="cancel" class="btn">Close</button></menu>
   </form>
 </dialog>
 
