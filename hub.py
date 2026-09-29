@@ -694,7 +694,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": r["delivered"], "delivered": r["delivered"],
                                    "error": r["error"], "pane": r["pane"].snapshot()})
             if p == "/api/session/schedule/add":
-                # later.py: the SAME create+send a click takes, at a time.
+                # schedule.py: the SAME create+send a click takes, at a time.
                 job = MGR.schedule.add(
                     b.get("agent", ""), b.get("cwd") or str(sessions.default_cwd()),
                     b.get("prompt", ""), b.get("when", ""),
@@ -830,7 +830,7 @@ def serve(bind=BIND, port=PORT):
         os.environ.pop(_k, None)
     threading.Thread(target=_observe_loop, daemon=True).start()
     threading.Thread(target=_notify_loop, daemon=True).start()
-    MGR.schedule.start()                    # later.py: scheduled prompts
+    MGR.schedule.start()                    # schedule.py: scheduled prompts
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     install_shutdown_handler()

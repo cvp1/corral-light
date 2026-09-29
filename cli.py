@@ -588,7 +588,7 @@ def v_port(c, a):
 
 
 def v_later(c, a):
-    """Scheduled prompts (later.py): list, add, rm."""
+    """Scheduled prompts (schedule.py): list, add, rm."""
     if a.later_cmd == "list":
         jobs = c.get("/api/session/schedule")["jobs"]
         if not jobs:

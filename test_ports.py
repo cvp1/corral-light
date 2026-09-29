@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Tests for the features ported from full Corral (resilience review §3):
-roles, scheduled prompts (later.py), transcript search, port.
+roles, scheduled prompts (schedule.py), transcript search, port.
 Collected by test_corral_light.py."""
 import json
 import os
@@ -121,19 +121,19 @@ class Roles(unittest.TestCase):
 
 
 class Later(unittest.TestCase):
-    """later.py — scheduled prompts, ported from full Corral's schedule.py."""
+    """schedule.py — scheduled prompts, ported from full Corral's schedule.py."""
 
     def setUp(self):
         from test_resilience import FakeLaneCase
-        import later
-        self.later = later
+        import schedule
+        self.later = schedule
         # Borrow the fake-lane Manager the resilience tests use.
         self.case = FakeLaneCase("run")
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
         self.mgr = self.case.mgr
         self.dir = self.case.agent_dir
-        self.s = later.Scheduler(self.mgr, Path(tempfile.mkdtemp()) / "schedule.json")
+        self.s = schedule.Scheduler(self.mgr, Path(tempfile.mkdtemp()) / "schedule.json")
 
     def iso(self, **delta):
         from datetime import datetime, timedelta, timezone
