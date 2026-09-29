@@ -13,7 +13,9 @@ Prompt verbs (the text of the prompt):
                          across a process restart: the file is the "memory")
     sleep <s>         -> streams a chunk, then sleeps; session/cancel ends it
     die               -> exits the process mid-turn (rc 3)
-    perm              -> asks session/request_permission and reports the answer
+    perm, or any text with "touch " in it
+                      -> asks session/request_permission and reports the
+                         answer (it never runs anything, whatever the answer)
     anything else     -> "echo: <text>"
 
 State lives in $FAKE_ACP_DIR (a test's temp dir): one JSON file per session,
@@ -64,8 +66,11 @@ def prompt(rid, params):
     text = "".join(p.get("text", "") for p in params.get("prompt") or [])
     m = mem(sid)
     words = text.split()
-    if words[:1] == ["remember"] and len(words) > 1:
-        m["word"] = words[-1].strip(".")
+    low = text.lower()
+    if "remember" in low and not low.startswith("what word") and len(words) > 1:
+        # "remember <word>" or "...remember this word...: <word>. Reply..."
+        after = text.split(":", 1)[1].split() if ":" in text else words[-1:]
+        m["word"] = after[0].strip(".") if after else words[-1].strip(".")
         save(sid, m)
         chunk(sid, "ok")
     elif text.lower().startswith("what word"):
@@ -80,7 +85,7 @@ def prompt(rid, params):
     elif text == "die":
         chunk(sid, "dying")
         os._exit(3)
-    elif text == "perm":
+    elif text == "perm" or "touch " in text:     # never touches anything
         _next[0] += 1
         pid = _next[0]
         ev = threading.Event()

@@ -11,6 +11,12 @@
 #                               a desktop notification) when it is down or its
 #                               observer stalled. Never restarts it. Run by the
 #                               corral-light-watch timer (README).
+#   corral-light watch <pane>   ...with a pane id: follow that pane live (cli.py)
+#   corral-light panes | open | say | pending | ok | no | cancel | pause |
+#                resume | close | forget | reopen | rename | config |
+#                attach | quote     the whole pane surface from a terminal
+#                               (cli.py --help; `say` answers permissions in
+#                               the same terminal and never cancels on a timer)
 #
 # /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (mac-host), which
 # has no /usr/bin/bash. The same shebang mistake shipped once in the full
@@ -32,6 +38,13 @@ if note: print('\n  !   ' + note)
 " ;;
   diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;
   consult) shift; exec "$PY" "$D/consult.py" "$@" ;;
-  watch) shift; exec "$PY" "$D/watch.py" "$@" ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]|consult <verb> ...|watch}"; exit 2 ;;
+  watch)
+    # Two meanings, one word: with a pane id it follows that pane (cli.py);
+    # bare, or with --flags, it is the outside hub watcher (watch.py).
+    if [ $# -ge 2 ] && [[ "$2" != -* ]]; then exec "$PY" "$D/cli.py" "$@"; fi
+    shift; exec "$PY" "$D/watch.py" "$@" ;;
+  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote)
+    exec "$PY" "$D/cli.py" "$@" ;;
+  cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote}"; exit 2 ;;
 esac
