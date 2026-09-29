@@ -208,5 +208,69 @@ class Later(unittest.TestCase):
         self.assertNotIn("EDITED", self.s.list()[0]["prompt"])
 
 
+class TranscriptSearch(unittest.TestCase):
+    """transcripts.py — search and a mechanical digest over events.jsonl."""
+
+    def setUp(self):
+        import transcripts
+        from datetime import datetime, timezone
+        self.t = transcripts
+        self.state = Path(tempfile.mkdtemp(prefix="corral-light-fts-"))
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def pane(pid, events, meta=True, closed=False):
+            d = self.state / "panes" / pid
+            d.mkdir(parents=True)
+            if meta:
+                (d / "meta.json").write_text(json.dumps({
+                    "id": pid, "title": f"title {pid}", "agent": "grok",
+                    "cwd": "/w", "closed": closed}))
+            with (d / "events.jsonl").open("w") as fh:
+                for i, (k, data) in enumerate(events, 1):
+                    fh.write(json.dumps({"seq": i, "at": now, "pane": pid,
+                                         "kind": k, "data": data}) + "\n")
+        pane("live1", [("user", {"text": "look at the cookie"}),
+                       ("text", {"text": "the route "}), ("text", {"text": "refused it"}),
+                       ("tool", {"id": "t1", "title": "Edit hub.py", "kind": "edit",
+                                 "status": "completed", "locations": [{"path": "/w/hub.py"}]}),
+                       ("permission", {"requestId": "r1", "rawInput": {"command": "SECRETPAYLOAD"}}),
+                       ("permission_answered", {"requestId": "r1"}),
+                       ("turn_end", {})])
+        pane("arch1", [("user", {"text": "archived zebra words"})], closed=True)
+        pane("nometa", [("user", {"text": "orphan quokka"})], meta=False)
+        self.t.refresh(force=True, state_dir=self.state)
+
+    def test_a_phrase_across_chunks_is_found(self):
+        hits = self.t.search("route refused", state_dir=self.state)["hits"]
+        self.assertEqual([h["pane"] for h in hits], ["live1"])
+        self.assertIn("‹", hits[0]["snippet"])
+
+    def test_archived_and_metaless_panes_are_searchable(self):
+        h = self.t.search("zebra", state_dir=self.state)["hits"]
+        self.assertTrue(h and h[0]["closed"])
+        h = self.t.search("quokka", state_dir=self.state)["hits"]
+        self.assertTrue(h and h[0]["metaless"])
+
+    def test_a_consent_payload_is_not_search_material(self):
+        self.assertEqual(self.t.search("SECRETPAYLOAD", state_dir=self.state)["hits"], [])
+
+    def test_user_text_is_never_fts_syntax(self):
+        out = self.t.search('cookie" OR "*', state_dir=self.state)
+        self.assertNotIn("error", out)
+
+    def test_the_digest_counts_from_events(self):
+        text = self.t.digest(24, state_dir=self.state, live={"live1"})
+        self.assertIn("## title live1 — grok · /w · live", text)
+        self.assertIn("- turns: 1", text)
+        self.assertIn("- tools: 1 calls", text)
+        self.assertIn("permissions: 1 asked · 1 answered · 0 expired", text)
+        self.assertNotIn("Docket", text)
+
+    def test_it_reads_lights_state_not_the_full_corrals(self):
+        src = (ROOT / "transcripts.py").read_text(encoding="utf-8")
+        self.assertIn('"CORRAL_LIGHT_STATE"', src)
+        self.assertNotIn("import close", src)
+
+
 if __name__ == "__main__":
     unittest.main()

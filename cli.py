@@ -539,6 +539,26 @@ def v_quote(c, a):
     return 0
 
 
+def v_search(c, a):
+    q = urllib.parse.urlencode({"q": " ".join(a.query), "n": a.limit})
+    out = c.get("/api/session/search?" + q)
+    for h in out.get("hits") or []:
+        c.say(f"{h['at']}  {h['pane']}  {h['title']}{' [archived]' if h['closed'] else ''}"
+              f" · {h['agent']} #{h['seq']} ({h['kind']})\n    {h['snippet']}")
+    if out.get("partial"):
+        c.say(f"(index partial for {', '.join(out['partial'])} — older turns not indexed)")
+    if out.get("error"):
+        c.say(f"(search error: {out['error']})")
+    if not out.get("hits"):
+        c.say("(nothing)")
+    return 0
+
+
+def v_digest(c, a):
+    c.say(c.get(f"/api/session/digest?hours={a.hours}")["text"], end="")
+    return 0
+
+
 def v_later(c, a):
     """Scheduled prompts (later.py): list, add, rm."""
     if a.later_cmd == "list":
@@ -650,6 +670,15 @@ def main(argv=None):
     s.add_argument("src")
     s.add_argument("dst", nargs="?")
     s.set_defaults(fn=v_quote)
+
+    s = sub.add_parser("search", help="full-text search of what was said in any pane")
+    s.add_argument("query", nargs="+")
+    s.add_argument("--limit", type=int, default=30)
+    s.set_defaults(fn=v_search)
+
+    s = sub.add_parser("digest", help="mechanical what-the-agents-did (no model)")
+    s.add_argument("--hours", type=float, default=24)
+    s.set_defaults(fn=v_digest)
 
     s = sub.add_parser("later", help="scheduled prompts: list | add | rm")
     lsub = s.add_subparsers(dest="later_cmd", required=True)

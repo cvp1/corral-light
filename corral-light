@@ -43,7 +43,7 @@ if note: print('\n  !   ' + note)
     # bare, or with --flags, it is the outside hub watcher (watch.py).
     if [ $# -ge 2 ] && [[ "$2" != -* ]]; then exec "$PY" "$D/cli.py" "$@"; fi
     shift; exec "$PY" "$D/watch.py" "$@" ;;
-  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|later)
+  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|later|search|digest)
     exec "$PY" "$D/cli.py" "$@" ;;
   cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
   *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote}"; exit 2 ;;
