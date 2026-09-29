@@ -7,6 +7,10 @@
 #   corral-light consult ...    ask a lane from a script — the assistant's way to
 #                               get a second opinion on your subscriptions, not
 #                               an API key (consult.py --help for the verbs)
+#   corral-light watch          probe the hub from OUTSIDE it; page (STATE/DEAD +
+#                               a desktop notification) when it is down or its
+#                               observer stalled. Never restarts it. Run by the
+#                               corral-light-watch timer (README).
 #
 # /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (dogma-2), which
 # has no /usr/bin/bash. The same shebang mistake shipped once in the full
@@ -28,5 +32,6 @@ if note: print('\n  !   ' + note)
 " ;;
   diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;
   consult) shift; exec "$PY" "$D/consult.py" "$@" ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]|consult <verb> ...}"; exit 2 ;;
+  watch) shift; exec "$PY" "$D/watch.py" "$@" ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]|consult <verb> ...|watch}"; exit 2 ;;
 esac

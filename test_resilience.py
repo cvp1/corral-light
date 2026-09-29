@@ -539,5 +539,192 @@ class TheTurnLedger(FakeLaneCase):
         self.assertNotIn(ids[0], turns)
 
 
+def free_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+BARE_HUB = r"""
+import os, sys
+sys.path.insert(0, os.environ["LIGHT_ROOT"])
+import sessions
+sessions.Manager.seed_catalogs = lambda self: None     # no live vendor probes
+import hub
+hub.serve("127.0.0.1", int(os.environ["PORT"]))
+"""
+
+
+def start_hub(state, extra_env=None, script=BARE_HUB):
+    """A real hub on a private port and state dir. Returns (proc, url)."""
+    import subprocess
+    port = free_port()
+    env = {**os.environ, "CORRAL_LIGHT_STATE": str(state), "PORT": str(port),
+           "LIGHT_ROOT": str(ROOT), **(extra_env or {})}
+    pr = subprocess.Popen([sys.executable, "-c", script], env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    for line in pr.stdout:
+        if line.startswith("corral-light: http://"):
+            break
+    return pr, f"http://127.0.0.1:{port}"
+
+
+def stop_hub(pr):
+    if pr.poll() is None:
+        pr.kill()
+    pr.wait(10)
+    pr.stdout.close()
+
+
+class TheWatcherPagesAndNeverRestarts(unittest.TestCase):
+    """P0-d' (Astra/Grok 2026-09-28)."""
+
+    def setUp(self):
+        import watch
+        self.watch = watch
+        self.state = Path(tempfile.mkdtemp(prefix="corral-light-watch-"))
+        real = watch.STATE
+        watch.STATE = self.state
+        self.addCleanup(setattr, watch, "STATE", real)
+        self.shown = []
+        real_desktop = watch.notify.desktop
+        watch.notify.desktop = lambda t, b, **k: (self.shown.append((t, b)) or (True, "shown"))
+        self.addCleanup(setattr, watch.notify, "desktop", real_desktop)
+
+    def test_the_rules(self):
+        j = self.watch.judge
+        alive, dead = (True, 1, "running"), (False, 1, "hub process 1 is gone")
+        self.assertEqual(j({"service": "corral-light", "tick_age_s": 3}, None, alive),
+                         (True, "healthy"))
+        ok, why = j(None, "refused", dead)
+        self.assertFalse(ok)
+        self.assertIn("down", why)
+        ok, why = j(None, "timed out", alive)
+        self.assertIn("running but /health does not answer", why)
+        ok, why = j({"service": "corral-light", "tick_age_s": 999}, None, alive)
+        self.assertIn("observer has not ticked", why)
+        ok, why = j({"service": "corral", "tick_age_s": 1}, None, alive)
+        self.assertIn("something else", why)
+
+    def test_paging_is_edge_triggered_and_clears(self):
+        self.watch.page("the hub is down")
+        self.watch.page("the hub is down")
+        self.assertEqual(len(self.shown), 1, "the same page was repeated")
+        self.assertIn("the hub is down", (self.state / "DEAD").read_text())
+        self.assertIn("never restarts", (self.state / "DEAD").read_text())
+        self.watch.page("observer stalled")
+        self.assertEqual(len(self.shown), 2)
+        self.watch.clear()
+        self.assertFalse((self.state / "DEAD").exists())
+
+    def test_against_a_real_hub_healthy_then_killed(self):
+        pr, url = start_hub(self.state)
+        try:
+            self.assertEqual(self.watch.main(["--url", url]), 0)
+            self.assertTrue((self.state / "hub.pid").exists(), "serve() wrote no pidfile")
+            self.assertTrue(self.watch.hub_process()[0])
+            pr.kill()
+            pr.wait(10)
+            self.assertEqual(self.watch.main(["--url", url]), 2)
+            dead = (self.state / "DEAD").read_text()
+            self.assertIn("down", dead)
+            self.assertEqual(len(self.shown), 1)
+        finally:
+            stop_hub(pr)
+
+    def test_the_watcher_cannot_restart_anything(self):
+        src = (ROOT / "watch.py").read_text(encoding="utf-8")
+        for verb in ("systemctl", "launchctl", "kickstart", "subprocess"):
+            self.assertNotIn(verb + " ", src.split('"""', 2)[2].replace("(", " "),
+                             f"watch.py reaches for {verb}")
+        self.assertIn("watch) shift; exec", (ROOT / "corral-light").read_text())
+
+
+class QuietHoursAndNoNotifier(unittest.TestCase):
+    def test_quiet_hours(self):
+        import notify
+        from datetime import datetime
+        d = lambda h, m=0: datetime(2026, 9, 28, h, m)
+        self.assertTrue(notify.quiet_now(d(21)))
+        self.assertTrue(notify.quiet_now(d(2)))
+        self.assertTrue(notify.quiet_now(d(4, 59)))
+        self.assertFalse(notify.quiet_now(d(5)))
+        self.assertFalse(notify.quiet_now(d(20, 59)))
+        self.assertEqual(notify.desktop("t", "b", now=d(23)),
+                         (False, "quiet hours (21:00–05:00)"))
+
+    def test_no_notifier_is_said_not_raised(self):
+        import notify
+        real = notify.shutil.which
+        notify.shutil.which = lambda name: None
+        try:
+            shown, why = notify.desktop("t", "b", force=True)
+        finally:
+            notify.shutil.which = real
+        self.assertFalse(shown)
+        self.assertIn("no notifier", why)
+
+
+class UnseenNeedsYouNotifies(unittest.TestCase):
+    """P0-e' (Astra/Grok 2026-09-28): notify when nobody SAW it."""
+
+    def setUp(self):
+        import hub
+        import types
+        self.hub = hub
+        self.calls = []
+        real_d, real_g = hub.notify.desktop, hub.NOTIFY_GRACE_S
+        hub.notify.desktop = lambda t, b, **k: (self.calls.append((t, b)) or (True, "shown"))
+        hub.NOTIFY_GRACE_S = 0.05
+        self.addCleanup(setattr, hub.notify, "desktop", real_d)
+        self.addCleanup(setattr, hub, "NOTIFY_GRACE_S", real_g)
+        self.pane = types.SimpleNamespace(id="np1", title="Refactor", state="needs-you",
+                                          pending={"r1": {}})
+        real_panes = hub.MGR.panes
+        hub.MGR.panes = {"np1": self.pane}
+        self.addCleanup(setattr, hub.MGR, "panes", real_panes)
+        hub.SEEN.pop("np1", None)
+        self.addCleanup(hub.SEEN.pop, "np1", None)
+
+    def ev(self, seq, kind="permission", **data):
+        return {"seq": seq, "pane": "np1", "kind": kind,
+                "data": {"requestId": "r1", "title": "rm -rf build", **data}}
+
+    def test_an_unseen_permission_notifies_once(self):
+        self.hub._notify_event(self.ev(5))
+        self.hub._notify_event(self.ev(6))            # coalesced into one check
+        self.assertTrue(wait_for(lambda: self.calls, timeout=3))
+        time.sleep(0.2)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("Refactor needs you", self.calls[0][0])
+        self.assertIn("rm -rf build", self.calls[0][1])
+
+    def test_a_seen_permission_does_not(self):
+        self.hub.mark_seen("np1", 5)
+        self.hub._notify_event(self.ev(5))
+        time.sleep(0.3)
+        self.assertEqual(self.calls, [])
+
+    def test_an_answered_permission_does_not(self):
+        self.pane.pending = {}
+        self.hub._notify_event(self.ev(5))
+        time.sleep(0.3)
+        self.assertEqual(self.calls, [])
+
+    def test_a_dead_pane_notifies_unless_already_resumed(self):
+        self.pane.state = "dead"
+        self.hub._notify_event(self.ev(9, kind="dead", reason="rc=137"))
+        self.assertTrue(wait_for(lambda: self.calls, timeout=3))
+        self.assertIn("stopped", self.calls[0][0])
+
+    def test_the_browser_reports_seen_only_while_looking(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("document.visibilityState === 'visible' && document.hasFocus()", js)
+        self.assertIn("api('/api/session/seen'", js)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,13 @@
+# Every ten minutes, and once shortly after login. Ten, because the thing it
+# catches (a hub that died or whose observer stopped) is not fixed faster by
+# noticing it sooner than a person can act on the page.
+[Unit]
+Description=Corral Light — outside watcher every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

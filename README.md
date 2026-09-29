@@ -140,6 +140,41 @@ The repository includes service definitions for running Corral Light as your sig
 
 Update executable paths, the working directory, and log paths for your installation. Do not run the service as root; assistants need the permissions and sign-ins of the user who starts them.
 
+The systemd unit uses `KillMode=mixed`: on a stop or restart the hub is signalled first and writes one note in every pane that had a turn running, naming the interrupted message and anything queued behind it. Nothing is re-sent automatically. If an agent process outlives the hub anyway (launchd), the next start stops it before any conversation is resumed.
+
+## Watching the hub
+
+`corral-light watch` checks the hub from outside it: it reads `/health`, judges how long ago the hub last checked its panes, and checks that the hub process is alive. When something is wrong it **pages** — it writes the reason to `~/.local/share/corral-light/DEAD` and shows a desktop notification (`notify-send` on Linux, `osascript` on macOS; never between 21:00 and 05:00, never over the network). It **never restarts** the hub, because a restart ends every running conversation; that decision stays with you. It notifies once per new problem and removes `DEAD` when the hub is healthy again. Exit status: 0 healthy, 2 paged.
+
+Linux, every ten minutes:
+
+```
+sed "s|%HERE%|$PWD|" corral-light-watch.service > ~/.config/systemd/user/corral-light-watch.service
+cp corral-light-watch.timer ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now corral-light-watch.timer
+```
+
+macOS: save as `~/Library/LaunchAgents/com.cvande.corral-light-watch.plist` (fix the two paths), then `launchctl load` it:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cvande.corral-light-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>/path/to/corral-light/watch.py</string>
+  </array>
+  <key>StartInterval</key><integer>600</integer>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+```
+
+The hub itself also notifies you — on a permission request or an agent that stopped — when no open, focused browser tab has shown that pane's event within 20 seconds. Same quiet hours, same no-network rule.
+
 ## Troubleshooting
 
 Use the command that matches the problem:

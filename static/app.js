@@ -1396,6 +1396,7 @@ function fmtAge(s) {
 /* ── rendering: shell ────────────────────────────────────────────────── */
 function render() {
   const panes = [...S.panes.values()];
+  markSeen();                  // whatever this render shows, a human can see
 
   // roster
   const r = $('#roster');
@@ -1839,6 +1840,31 @@ function wireRail() {
 // whatever this form does.
 /* ── data ────────────────────────────────────────────────────────────── */
 let refreshSeq = 0;
+/* ── seen: what a human actually had in front of them (P0-e') ─────────────
+ * The hub turns an unseen `permission` / `dead` into a desktop notification
+ * after a short grace. An open stream is not a pair of eyes — a background
+ * tab keeps one — so this reports only while the page is VISIBLE and
+ * FOCUSED, and only seqs this tab has rendered. Throttled: one batch per
+ * SEEN_MS at most, one POST per pane whose seq moved. */
+const SEEN = new Map();
+const SEEN_MS = 1000;
+let seenTimer = null;
+function looking() { return document.visibilityState === 'visible' && document.hasFocus(); }
+function markSeen() {
+  if (!looking() || seenTimer) return;
+  seenTimer = setTimeout(() => {
+    seenTimer = null;
+    if (!looking()) return;
+    for (const p of S.panes.values()) {
+      const seq = p.seq || 0;
+      if (seq > (SEEN.get(p.id) || 0)) {
+        SEEN.set(p.id, seq);
+        api('/api/session/seen', { pane: p.id, seq }).catch(() => {});
+      }
+    }
+  }, SEEN_MS);
+}
+
 async function refresh() {
   // Ask only for events past what we already hold. Replacing the map wholesale
   // was the other half of the reload bug: a snapshot taken while a turn was
@@ -2567,7 +2593,9 @@ async function start() {
   // yet, so re-sync on the way in rather than trusting the stream survived.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') refresh().catch(() => {});
+    markSeen();
   });
+  window.addEventListener('focus', markSeen);
 }
 
 (async function boot() {
