@@ -394,16 +394,30 @@ def v_panes(c, a):
 def v_open(c, a):
     body = {"agent": consult.lane_key(a.lane),
             "cwd": str(Path(a.cwd).expanduser().resolve())}
-    for k in ("model", "effort", "posture"):
-        if getattr(a, k):
+    for k in ("model", "effort", "posture", "role"):
+        if getattr(a, k, None):
             body[k] = getattr(a, k)
-    p = c.post("/api/session/new", body, timeout=consult.HANDSHAKE_S)["pane"]
+    r = c.post("/api/session/new", body, timeout=consult.HANDSHAKE_S)
+    p = r["pane"]
     if p.get("state") == "dead":
         c.say(f"{p['id']} dead: {p.get('error')}")
         return 1
     if a.title:
         c.post("/api/session/rename", {"pane": p["id"], "title": a.title[:60]})
+    for n in r.get("notes") or []:
+        print(f"corral-light: {n}", file=sys.stderr, flush=True)
     c.say(p["id"] if not a.json else json.dumps(p, indent=2))
+    if r.get("preamble"):
+        # The role's instructions are turn 0. With --ask they go with it,
+        # composed exactly as roles.compose does; without, they are shown and
+        # NOT sent — a script must see what it is about to send (P17).
+        if a.ask:
+            import roles
+            text = roles.compose(r["preamble"], a.ask)
+            sr = c.post("/api/session/send", {"pane": p["id"], "text": text})
+            return c.follow(p["id"], turn=sr.get("turn"), seq0=int(p.get("seq") or 0))
+        print(f"corral-light: role instructions NOT sent (pass --ask to send them "
+              f"with your first message):\n{r['preamble']}", file=sys.stderr, flush=True)
     return 0
 
 
@@ -545,6 +559,9 @@ def main(argv=None):
     s.add_argument("--effort")
     s.add_argument("--posture", choices=("strict", "edits", "auto"))
     s.add_argument("--title")
+    s.add_argument("--role", help="a role preset (roles.py list)")
+    s.add_argument("--ask", help="with --role: send the role's instructions plus "
+                                 "this ask as the first turn, and follow it")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=v_open)
 

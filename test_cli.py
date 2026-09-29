@@ -40,6 +40,7 @@ class HubCase(unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp(prefix="corral-light-cli-"))
         (cls.tmp / "agent").mkdir()
         cls.env = {**os.environ, "CORRAL_LIGHT_STATE": str(cls.tmp / "state"),
+                   "CORRAL_LIGHT_ROLES_DIR": str(cls.tmp / "roles"),
                    "CORRAL_LIGHT_CONSULT_CFG": str(cls.tmp / "cfg" / "s.json"),
                    "FAKE": str(FAKE), "FAKE_ACP_DIR": str(cls.tmp / "agent")}
         cls.hub, cls.url = start_hub(cls.tmp / "state", extra_env=cls.env,
@@ -147,6 +148,29 @@ class TheCli(HubCase):
         follow = src[src.index("    def follow("):src.index("# ── verbs")]
         self.assertNotIn("/api/session/cancel", follow)
         self.assertNotIn("wait_turn(", src)     # consult's cancel-on-budget wait
+
+
+class RolesOverTheCli(HubCase):
+    def test_open_with_a_role_sends_its_instructions_only_with_an_ask(self):
+        import roles
+        roles.create({"id": "echoer", "description": "repeats what it is told",
+                      "personality": "terse", "does": "echo", "expects": "the echo",
+                      "data_class": "public"}, rdir=self.tmp / "roles")
+        rc, out, err = self.cli("open", "--role", "echoer", "--cwd", str(self.tmp / "agent"),
+                                "--lane", "fake")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("NOT sent", err)
+        self.assertIn("You are working as `echoer`", err)
+        pid = out.strip()
+        rc, out, _ = self.cli("panes", "--json")
+        self.assertIn('"id": "' + pid, out)
+        rc, out, err = self.cli("open", "--role", "echoer", "--cwd", str(self.tmp / "agent"),
+                                "--lane", "fake", "--ask", "hello role")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("echo: You are working as `echoer`", out)
+        self.assertIn("hello role", out)
+        for line in self.cli("panes")[1].splitlines():
+            self.cli("close", line.split()[0])
 
 
 class TheLaneMatrix(HubCase):

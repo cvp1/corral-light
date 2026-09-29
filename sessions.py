@@ -1045,6 +1045,12 @@ class Pane(_core.PaneBase):
         # Same hole for `ephemeral`: Light never sets it, but a Corral seat
         # resumed here and saved again must still be one Corral will reap.
         p.ephemeral = bool(meta.get("ephemeral"))
+        # Roles are Light's since 2026-09-29 (roles.py). Restored for the same
+        # reason as `ported_from`: META_KEYS persists them, so a restore that
+        # dropped them blanked them on the next save.
+        p.role = meta.get("role")
+        p.role_sha = meta.get("role_sha")
+        p.role_delivery = meta.get("role_delivery")
         # The previous hub's adapter, if restore() found it still running it
         # has already been reaped by now (Manager.restore); either way this
         # pane has no process of its own yet, so nothing is recorded.
@@ -1925,6 +1931,7 @@ class Pane(_core.PaneBase):
             # Whether ↻ / typing can bring this pane back: a conversation id
             # to load. A pane that died before session/new has none.
             "resumable": bool(getattr(self, "acp_session", None)),
+            "role": getattr(self, "role", None),
             "usage": self.usage, "alive": alive,
             "events": [e for e in self.events if e["seq"] > since],
             "seq": self.events[-1]["seq"] if self.events else 0,
@@ -2148,7 +2155,8 @@ class Manager(_core.ManagerBase):
 
 
 
-    def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None):
+    def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None,
+               role=None, role_sha=None):
         if agent.startswith("host:"):
             # The picker's list could be seconds stale; the spawn must not be.
             refresh_host_lanes()
@@ -2188,6 +2196,11 @@ class Manager(_core.ManagerBase):
                     f"{MAX_ROSTER} panes are already on the roster, live or "
                     f"detached — close or forget one before starting another")
             pane = Pane(agent, cwd, posture, self, model, effort)
+            # A role is an ANNOTATION (roles.py): which preset started this
+            # conversation and the digest of its bytes at that moment. Set
+            # before start() so the first save_meta carries it.
+            if role:
+                pane.role, pane.role_sha, pane.role_delivery = role, role_sha, "preamble"
             self.panes[pane.id] = pane
         try:
             pane.start()
