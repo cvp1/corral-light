@@ -184,6 +184,17 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .rit.needs-you .dot{background:var(--gold);animation:pulse .9s infinite}
 .rit.dead .dot{background:var(--rust)}
 .rit.detached .dot{background:var(--line2)}
+/* The display projection (DESIGN-5 S1): five words, one colour each, and they
+   come AFTER the raw-state rules above so they win where the two differ --
+   `ready` and `d-idle` are the same pane, and idle is the one the eye should
+   skip. The raw classes stay because a dozen other rules key on them. */
+.rit.d-your-turn .dot{background:var(--sage);animation:none}
+.rit.d-working .dot{background:var(--dusk);animation:pulse 1.4s infinite}
+.rit.d-needs-you .dot{background:var(--gold);animation:pulse .9s infinite}
+.rit.d-dead .dot{background:var(--rust);animation:none}
+.rit.d-idle .dot{background:var(--line2);animation:none}
+.rit.d-idle{opacity:.72}
+.rit.d-idle .s{color:var(--faint)}
 .pane.detached{opacity:.9}
 .minchip.detached .d{background:var(--line2)}
 .rit .txt{min-width:0;flex:1}
@@ -247,6 +258,14 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip.busy .d{background:var(--dusk);animation:pulse 1.4s infinite}
 .minchip.ready .d{background:var(--sage)}
 .minchip.dead .d{background:var(--rust)}
+/* Same five, on a minimized chip. After the raw rules, for the same reason. */
+.minchip.d-needs-you{border-color:var(--gold);color:var(--ink)}
+.minchip.d-needs-you .d{background:var(--gold);animation:pulse .9s infinite}
+.minchip.d-working .d{background:var(--dusk);animation:pulse 1.4s infinite}
+.minchip.d-your-turn .d{background:var(--sage);animation:none}
+.minchip.d-dead .d{background:var(--rust);animation:none}
+.minchip.d-idle .d{background:var(--line2);animation:none}
+.minchip.d-idle{opacity:.78}
 .empty{grid-column:1/-1;display:grid;place-items:center;height:70vh;text-align:center;color:var(--dim)}
 .empty h2{font-family:var(--serif);font-size:24px;color:var(--ink);margin:0 0 8px;font-weight:400}
 
@@ -269,6 +288,18 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 /* An honest "we do not know": deliberately drab, so it never reads as a
    safety assurance the way a coloured posture pill does. */
 .ph .pill.unknown{color:var(--faint);border-color:var(--line);border-style:dashed}
+/* The pane's own state pill — the same five words as the roster and the tab
+   title. Quiet by default; only needs-you is allowed to shout, because a pill
+   that always shouts is wallpaper. */
+.ph .pill.st{color:var(--dim)}
+.ph .pill.st.d-needs-you{color:var(--gold);
+  border-color:color-mix(in srgb, var(--gold) 55%, var(--line2))}
+.ph .pill.st.d-your-turn{color:var(--sage);
+  border-color:color-mix(in srgb, var(--sage) 55%, var(--line2))}
+.ph .pill.st.d-working{color:var(--dusk)}
+.ph .pill.st.d-dead{color:var(--rust);
+  border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
+.ph .pill.st.d-idle{color:var(--faint);border-style:dashed}
 .ph .pill.ctx{color:var(--dim)}
 .ph .pill.ctx.warn{color:var(--rust);border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
 .ph .x{color:var(--faint);font-size:15px;padding:0 3px}

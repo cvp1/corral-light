@@ -84,6 +84,9 @@ ADAPTER = Path(os.environ.get("CORRAL_CLAUDE_ADAPTER",
 from corral_core import sessions as _core                        # noqa: E402
 
 DEFAULT_POSTURE = _core.DEFAULT_POSTURE
+DISPLAY_STATES = _core.DISPLAY_STATES
+IDLE_DISPLAY_S = _core.IDLE_DISPLAY_S
+display_state = _core.display_state
 MAX_EVENTS = _core.MAX_EVENTS
 MAX_LOG_BYTES = _core.MAX_LOG_BYTES
 MAX_PANES = _core.MAX_PANES
@@ -1985,6 +1988,12 @@ class Pane(_core.PaneBase):
             # to it means (a reference, or a quoted excerpt).
             "tools": bool(AGENTS[self.agent].get("tools")),
             "state": state, "error": self.error, "created": self.created,
+            # The triage projection over `state` — one opinion, computed in the
+            # core and rendered (never re-derived) by the roster, the chips,
+            # the pane header and the tab title. `state` above stays the
+            # record and stays on the tooltip. `unread` is False here because
+            # the hub cannot know what a particular human has already read.
+            "display": _core.display_state(self, state=state)["state"],
             "pending": list(self.pending.keys()),
             # Whether ↻ / typing can bring this pane back: a conversation id
             # to load. A pane that died before session/new has none.
