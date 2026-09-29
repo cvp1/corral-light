@@ -876,6 +876,43 @@ function updatePane(rec, p) {
   return rec.root;
 }
 
+/* What the pill says on a lane whose posture Corral cannot set.
+ *
+ * `agent-set` was one word for three different promises, and the differences
+ * are the ones that matter: the vendor's own policy applies (Grok, Codex),
+ * OUR adapter asks before every write and fails closed (any lane the `rail`
+ * flag is set on), or the lane has no tools at all so there is nothing to ask
+ * about. Flattening those into one label meant the safest lane and the least
+ * constrained lane wore the same badge.
+ *
+ * The vendor name is the label's first word: "Claude Code" -> Claude,
+ * "Antigravity (Gemini)" -> Antigravity. Derived, never a second list to keep
+ * in step with AGENTS.
+ */
+function posturePill(p) {
+  const vendor = String(p.label || p.agent || 'the agent')
+    .split(/[\s(—-]/)[0] || p.label;
+  let text, why;
+  if (p.rail) {
+    text = 'harness rail';
+    why = `Corral cannot set a permission MODE on ${p.label}, but this lane `
+        + `runs Corral's own adapter: it asks before every write or command, `
+        + `with the exact bytes, and fails closed if nobody answers.`;
+  } else if (p.tools === false) {
+    text = 'chat only';
+    why = `${p.label} has no tools, so it raises no permission requests. `
+        + `An empty rail here is the lane's nature, not a rail that stopped `
+        + `working.`;
+  } else {
+    text = `${vendor} policy`;
+    why = `Corral cannot set the permission policy for ${p.label}. `
+        + `Whatever that agent does by default is what you get.`;
+  }
+  const q = el('span', 'pill unknown', text);
+  q.title = why;
+  return q;
+}
+
 function paneHead(p) {
   const h = el('div', 'ph');
   h.appendChild(el('span', 'nm', p.title || p.label));
@@ -891,9 +928,7 @@ function paneHead(p) {
   // policy, so a Grok pane wearing a `strict` pill was the UI asserting a
   // safety property nothing had established.
   if (p.postureEnforced === false) {
-    const q = el('span', 'pill unknown', 'agent-set');
-    q.title = `Corral cannot set the permission policy for ${p.label}. ` +
-              `Whatever that agent does by default is what you get.`;
+    const q = posturePill(p);
     h.appendChild(q);
   } else {
     h.appendChild(el('span', 'pill ' + p.posture, p.posture));
@@ -2303,6 +2338,13 @@ function wireDialog() {
       const sel = $('#f-posture'), hint = $('#posturehint');
       if (a.postureEnforced === false) {
         sel.disabled = true;
+        // Blank it, do not merely grey it. The close handler reads `.value`,
+        // so a leftover `strict` from the previously selected lane was posted
+        // for an agent nothing can make strict — the same imaginary result
+        // this control was disabled for, arriving through a different door.
+        // Empty means "the lane's own default", which is the truth; the close
+        // handler then omits the key entirely.
+        sel.value = '';
         hint.textContent = `${a.label} manages its own permissions — Corral ` +
                            `cannot set this, and will not pretend it did.`;
       } else {
@@ -2332,11 +2374,20 @@ function wireDialog() {
     if (dlg.returnValue !== 'ok') return;
     const cwd = $('#f-cwd').value.trim();
     S.lastCwd = cwd;
-    localStorage.setItem('corral.posture', $('#f-posture').value);
+    // Remember the posture only when it was a CHOICE. On a lane that cannot
+    // enforce one the control is blanked, and storing that emptiness would
+    // quietly forget a `strict` the operator had set on a lane where it means
+    // something.
+    const posture = $('#f-posture').disabled ? '' : $('#f-posture').value;
+    if (posture) localStorage.setItem('corral.posture', posture);
     const common = { agent: dlg._chosenAgent(), cwd,
-                     posture: $('#f-posture').value,
                      model: $('#f-model').value, effort: $('#f-effort').value,
                      role: $('#f-role').value };
+    // ABSENT, not empty. The hub reads `b.get("posture") or DEFAULT_POSTURE`
+    // either way, but a key that is not there cannot be misread later as "the
+    // operator chose nothing on purpose" — and the stored meta is the thing
+    // 244 of 446 panes were wrong about.
+    if (posture) common.posture = posture;
     const when = $('#f-when').value;
     if (when) {
       // Later: arm it, open nothing now. The prompt is stored as typed (a

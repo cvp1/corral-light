@@ -293,8 +293,17 @@ def read_prompt(args):
     return sys.stdin.read()
 
 
-def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture="strict",
+def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
               config=None):
+    """Open a pane on `lane`.
+
+    `posture=None` means "whatever this hub's default is" and posts NO posture
+    key. It used to default to "strict", which was a claim rather than a
+    setting: on every lane that reports postureEnforced:false, nothing made
+    the pane strict, and the value was still written into its meta.json. 244
+    of 446 panes on this fleet carry that annotation. Facts stay facts -- no
+    historic meta is rewritten -- but no new pane gets one for free.
+    """
     key = lane_key(lane)
     live = {a["key"]: a for a in lanes(hub)}
     a = live.get(key)
@@ -304,7 +313,9 @@ def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture="stri
         raise ConsultError(f"lane {key!r} ({a.get('label')}) is unavailable: "
                            f"{a.get('why') or a.get('needs') or 'no reason given'}")
     # Resolved HERE: the hub checks is_dir() in its own working directory.
-    body = {"agent": key, "cwd": str(Path(cwd).expanduser().resolve()), "posture": posture}
+    body = {"agent": key, "cwd": str(Path(cwd).expanduser().resolve())}
+    if posture:
+        body["posture"] = posture
     if model:
         body["model"] = model
     if effort:
@@ -698,7 +709,12 @@ def _prompt_args(p):
                    help=f"wall budget per arm, seconds (default {DEFAULT_TIMEOUT_S})")
 
 
-def main(argv=None):
+def build_parser():
+    """The CLI, built separately from main() so a test can ask what a
+    flag DEFAULTS to. The `--posture strict` default lived here as well
+    as in open_pane's signature, and fixing only the signature would
+    have left every command-line caller posting `strict` exactly as
+    before -- the kind of half-fix this split makes visible."""
     ap = argparse.ArgumentParser(prog="corral-light consult",
                                  description=__doc__.split("\n")[0])
     ap.add_argument("--url", default=DEFAULT_URL)
@@ -715,7 +731,11 @@ def main(argv=None):
     p.add_argument("--title")
     p.add_argument("--model")
     p.add_argument("--effort")
-    p.add_argument("--posture", default="strict")
+    # No default: an unset posture posts no key and the hub applies its own
+    # DEFAULT_POSTURE. `strict` here was the single largest source of the
+    # unenforced "strict" annotation on stored panes -- every scripted arm,
+    # including every panel run, carried it onto lanes nothing can make strict.
+    p.add_argument("--posture", default=None)
     p.add_argument("--config", action="append", metavar="ID=VALUE",
                    help="extra lane config, e.g. mode=read-only (repeatable)")
     p.add_argument("--close", action="store_true", help="close the pane afterwards")
@@ -732,7 +752,11 @@ def main(argv=None):
     p.add_argument("--pane", action="append")
     p.add_argument("--cwd", default=str(Path.home()))
     p.add_argument("--title")
-    p.add_argument("--posture", default="strict")
+    # No default: an unset posture posts no key and the hub applies its own
+    # DEFAULT_POSTURE. `strict` here was the single largest source of the
+    # unenforced "strict" annotation on stored panes -- every scripted arm,
+    # including every panel run, carried it onto lanes nothing can make strict.
+    p.add_argument("--posture", default=None)
     _prompt_args(p)
     p.set_defaults(fn=cmd_fanout)
 
@@ -745,7 +769,11 @@ def main(argv=None):
     p.add_argument("--pane", action="append", required=True)
     p.set_defaults(fn=cmd_close)
 
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
     except ConsultError as e:
