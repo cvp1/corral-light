@@ -640,7 +640,7 @@ class TheWatcherPagesAndNeverRestarts(unittest.TestCase):
         for verb in ("systemctl", "launchctl", "kickstart", "subprocess"):
             self.assertNotIn(verb + " ", src.split('"""', 2)[2].replace("(", " "),
                              f"watch.py reaches for {verb}")
-        self.assertIn("watch) shift; exec", (ROOT / "corral-light").read_text())
+        self.assertIn('shift; exec "$PY" "$D/watch.py"', (ROOT / "corral-light").read_text())
 
 
 class QuietHoursAndNoNotifier(unittest.TestCase):

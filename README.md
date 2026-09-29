@@ -175,6 +175,36 @@ macOS: save as `~/Library/LaunchAgents/com.cvande.corral-light-watch.plist` (fix
 
 The hub itself also notifies you — on a permission request or an agent that stopped — when no open, focused browser tab has shown that pane's event within 20 seconds. Same quiet hours, same no-network rule.
 
+## From the command line
+
+Everything the browser does with a pane, a terminal can do too, on every lane — the commands talk to the running server exactly as the browser does, so a pane opened here appears on the wall and keeps its permission rail:
+
+```
+./corral-light panes                               # list panes: state, lane, model, waiting cards
+./corral-light open --lane grok --cwd ~/src/app    # prints the new pane's id
+./corral-light say <pane> "review the diff"        # sends, streams the reply
+./corral-light watch <pane>                        # follow a pane live
+./corral-light pending <pane>                      # every waiting card, in full, with its digest
+./corral-light ok <pane> [n] | no <pane> [n]       # answer a card
+./corral-light cancel|pause|resume|close|forget|reopen <pane>
+./corral-light rename <pane> <title> · config <pane> <id> <value>
+./corral-light attach <pane> <note-id> · quote <from> [<to>]
+```
+
+`say` waits for as long as the turn takes. When the pane needs you it prints the whole request — the same bytes the approval's digest covers — and takes `ok`, `no` or `cancel` in the same terminal. It never cancels a turn on a timer; Ctrl-C detaches and the turn keeps running. From a script without a terminal, `ok` requires `--digest <first 12 characters>` of the digest it prints; `no` never does. A pane id can be shortened to any unique prefix.
+
+### Does every lane keep its memory? (evidence)
+
+`python3 lane_matrix.py` opens a pane on every available lane, asks it to remember a random word, pauses and resumes it (a new agent process on the same conversation), asks for the word back, then asks for one shell command under the strict posture and refuses the permission card. Measured 2026-09-29 on a Linux host against a private hub (scratch state dir):
+
+| lane | opens | model | first turn | pause → resume | remembers after resume | permission round-trip | notes |
+|---|---|---|---|---|---|---|---|
+| claude | yes | opus | yes | yes | yes | asked, refused | |
+| grok | yes | grok-4.6 | yes | yes | yes | **no card — ran the command without asking** | posture shows `agent-set` (not enforceable on this lane); the probe file was created in the scratch dir and removed |
+| gemini | yes | gemini-3.7-flash-high | yes | yes | yes | asked, refused | |
+
+Not measured: **codex** (the host had no ChatGPT device login, which needs a person), **ollama** (no local Ollama on that host; by design it keeps no context across a restart and now says so in the pane), SSH lanes (a shell has nothing to remember). Re-run the matrix after any adapter upgrade.
+
 ## Troubleshooting
 
 Use the command that matches the problem:

@@ -3290,6 +3290,7 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.
 from test_resilience import *                    # noqa: F401,F403,E402
+from test_cli import *                           # noqa: F401,F403,E402
 
 
 if __name__ == "__main__":

@@ -174,6 +174,28 @@ _NOTIFY_PENDING = {}        # pane id -> newest unseen notifiable event
 _NOTIFY_LOCK = threading.Lock()
 
 
+def pending_payloads(pane):
+    """What a human must see to answer each pending card, oldest first.
+
+    Built from the record answer() enforces (`_gate`), never from the event
+    ring. An oversize payload is withheld exactly as the browser withholds
+    it: only refusal is possible for bytes nobody can be shown.
+    """
+    out = []
+    for rid, req in list(pane.pending.items()):
+        gate = req.get("_gate") or {}
+        tc = req.get("toolCall") or {}
+        over = bool(gate.get("oversize"))
+        out.append({"requestId": rid, "title": tc.get("title"),
+                    "kind": tc.get("kind"), "digest": gate.get("digest"),
+                    "bytes": gate.get("bytes"), "oversize": over,
+                    "rawInput": None if over else tc.get("rawInput"),
+                    "content": [] if over else (tc.get("content") or []),
+                    "locations": [] if over else (tc.get("locations") or []),
+                    "options": req.get("options") or []})
+    return out
+
+
 def mark_seen(pane_id, seq):
     MGR.get(pane_id)                     # ValueError for a pane that is not here
     seq = int(seq)
@@ -397,6 +419,19 @@ class Handler(BaseHTTPRequestHandler):
             # pointed this at anything yet".
             import content
             return self._json(content.status())
+        if p == "/api/session/pending":
+            # The AUTHORITATIVE pending permission payloads, with the digest
+            # an approval must carry (Astra/Grok 2026-09-28, CLI). The event
+            # ring is a bounded presentation cache — a permission older than
+            # MAX_EVENTS has left it while still blocking the agent — so a
+            # terminal answering a card reads it from pane.pending, the same
+            # record answer() checks the digest against.
+            try:
+                pane = MGR.get((q.get("pane") or [""])[0])
+                return self._json({"pane": pane.id, "state": pane.state,
+                                   "pending": pending_payloads(pane)})
+            except ValueError as e:
+                return self._json({"error": str(e)[:200]}, 400)
         if p == "/api/session/history":
             # Transcript paging: events OLDER than `before` from the on-disk
             # log — the ring in /api/state holds only the tail.
