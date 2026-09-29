@@ -366,6 +366,8 @@ class AcpClient:
             # stop reading this pipe, keep the pane. (stdout is the opposite:
             # there, losing framing means losing the protocol.)
             pass
+        finally:
+            _close_quietly(getattr(self.p, "stderr", None))    # this thread owns the pipe
 
     @staticmethod
     def _read_bounded_line(stream, limit=None):
@@ -457,6 +459,12 @@ class AcpClient:
                 slot["ev"].set()
                 self.on_event("permission_expired",
                               {"requestId": key, "reason": "agent exited"})
+            # The pipe's owner is this thread; once it has stopped reading,
+            # nothing ever will. Left open, every exited adapter leaked a file
+            # descriptor for the life of the hub (a ResourceWarning per pane
+            # in the 2026-09-28 resilience tests, which were the first to
+            # drive real processes through kill and resume).
+            _close_quietly(getattr(self.p, "stdout", None))
             self.on_event("agent_exit", {"reason": self.exit_reason,
                                          "closed": self._closed, "rc": rc})
 
@@ -716,6 +724,15 @@ class AcpClient:
             self.p.wait(timeout=2)              # reap, so it is not a zombie
         except Exception:
             pass
+        _close_quietly(getattr(self.p, "stdin", None))           # the writer end is ours
+
+
+def _close_quietly(stream):
+    try:
+        if stream is not None:
+            stream.close()
+    except Exception:                           # noqa: BLE001
+        pass
 
 
 def _group_alive(pgid):
