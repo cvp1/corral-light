@@ -197,3 +197,50 @@ matrix, closing K4.
 3. Roles, scheduled prompts, transcript search, port (three days).
 4. Floor strip + freeze/brief (a day).
 5. Read a week of restart notes; decide on the pane host.
+
+---
+
+## 6. After rival review — v2 (2026-09-28, Astra gpt-6-astra high + Grok 4.7, blind, independent)
+
+Full arms: `reviews/2026-09-28-resilience-astra.md`,
+`reviews/2026-09-28-resilience-grok.md`. Every claim below was re-checked in
+the code before being accepted.
+
+### Where both arms converged (independently)
+
+| Finding | Verified | Consequence |
+|---|---|---|
+| A hub exit does not guarantee the adapters exit. `start_new_session=True` (corral_core/acp.py:227) puts each adapter in its own session; the plist has no `AbandonProcessGroup`, so on dogma-2 launchd's group kill misses them. **`meta.json` stores no pid**, so `restore()` cannot reap the orphan and the next `session/load` runs a second adapter on the same `acp_session`. | yes | **New P0: write `pid`+`pgid` into meta at spawn; `restore()` SIGTERMs a still-running group before any load.** Both P0-c and the pane host double-attach until this exists. |
+| `pause()` is the wrong shutdown primitive: it clears the queue (corral_core/sessions.py:659) and the in-flight prompt is already popped (sessions.py:1455), so "persist the queue then pause" loses the one message that matters and duplicates `user` events already on disk. | yes | P0-b becomes: on SIGTERM write ONE `note` per busy pane naming the interrupted prompt and the still-queued ones, from the main thread; no pause. `KillMode=mixed` so the handler runs before the children are signalled. |
+| K4 must measure remembered context, not the `loadSession` flag. And Light's own replay suppression (`_replaying=True` around load, sessions.py:1063) swallows Ollama's "context lost" chunk (ollama_acp.py:148), so the pane looks continuous while the model forgot everything. | yes | Bug: emit the Ollama notice as a `note` after replay ends, or have ollama_acp send it as a separate notification the hub does not suppress. Lane matrix asserts continuity with a "what did I say first?" turn. |
+| `_spawn()` waits on `Future.result()` with no timeout (acp.py:158). | yes | A bounded wait plus a loud error; not a note. |
+| `restore()` is not loud: unreadable metas are skipped silently (sessions.py:1946); an unreadable `panes/` dir loops the unit. | yes | Count and surface skipped metas as `notRestored` too; a `DEAD`-style marker file when the dir is unreadable. |
+| P0-d as written is another K1: `_TICK` updates only after the whole loop (hub.py:137), so one pane's `snapshot()` exception freezes `tick_age_s` and a restart-on-stale watchdog would kill twelve healthy panes. | yes | Watchdog **pages, never restarts**; move the tick update inside the loop; restart only when the main process is gone. |
+| P0-e: `MGR.subscribers` proves a stream is open, not that a human is looking; a backgrounded tab keeps one. | yes | Notify on `permission` and `dead` when that pane's stream has not been read (client acks a `seen` seq); quiet hours as written. |
+| CLI: `cancel` is missing from the verb table (route exists, hub.py:496); `consult.wait_turn` cancels the turn on timeout (consult.py:457) and only writes `needs-you` to stderr, so a foreground `say` built on it kills the turn a human was about to approve. Pending permission payloads are authoritative only in `pane.pending`, not the event ring. | yes | `say` must print the pending payload and take ok/no/cancel in the same terminal before any timer; add `cancel`, `config`, `reopen`; add `GET /api/session/pending` returning the authoritative payload + digest. |
+| Pane host: two writers on one `acp_session` (hub replay/boot load vs. the host's in-flight prompt) produce duplicate `permission`/`turn_end` or gaps; send-before-ack on reconnect can duplicate a prompt or misapply an approval. Grok adds: a host outliving the hub keeps an approved shell editing with nobody attached, and a same-uid pane could open its own socket and answer its own permission. | design | The host needs command ids + dedup, fenced single ownership, seq assigned in the host, and a peer check on the socket. **This is why it stays P2 and behind the pid fix.** |
+
+### Where they disagreed, and the ruling
+
+- **P0-c (re-attach on boot).** Astra: reshape. Grok: drop (double-attach, 24 s not 10 s, rate-limit stampede — which is K2 again). Ruling: **hold**, not ship, until the pid-in-meta reap exists; then opt-in only, and never for Ollama.
+- **Seq 4 (floor strip, freeze/brief).** Grok: drop from this roadmap; it keeps no pane alive. Astra: separate product work. Ruling: **moved out of the resilience roadmap** into the feature backlog; it remains the cross-model continuity story but it is not a kill fix.
+
+### Dropped after review
+
+- Context-usage pill and find-in-pane ports: both already exist in Light (static/app.js:903, :925). My inventory was wrong.
+
+### Two additions, one from each arm, both accepted
+
+- **Grok: pid/pgid in meta + orphan reap before load** (above). Smaller than the host; closes the kill path the inventory missed.
+- **Astra: a durable turn ledger.** `/api/session/send` returns ok after a volatile queue insert (hub.py:450). Persist `accepted → dispatched → completed | interrupted | uncertain` keyed by turn id before acking; never auto-replay an uncertain turn. This is the loss window neither a SIGTERM handler nor a socket closes, and it is what makes an interrupted-turn note truthful.
+
+### v2 order
+
+1. **P0-a′** resume from `dead`: close the old client, park (do not drain) the stale queue, then load. Plus the P0-a UI button.
+2. **P0-pid** pid/pgid in meta; reap before load; count skipped metas.
+3. **P0-b′** SIGTERM note-only handler; `KillMode=mixed`; tick update inside the loop; bounded `_spawn`; atomic catalog write; Ollama resume notice made visible.
+4. **P0-ledger** turn ledger (accepted/dispatched/completed/interrupted).
+5. **P0-d′** watchdog that pages (file + desktop notification), never restarts; **P0-e′** unseen-seq notification.
+6. `cli.py` with `cancel`, `pending`, foreground `say` that takes ok/no/cancel; `lane_matrix.py` with a continuity assertion per lane.
+7. Roles, schedule, transcript search, port (off the kill path).
+8. Decide the pane host with orphan-pid and interrupted-turn counts from plain restarts.
