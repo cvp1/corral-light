@@ -242,9 +242,16 @@ class Handler(BaseHTTPRequestHandler):
             panes = list(MGR.panes.values())
             live = sum(1 for x in panes if x.state not in ("dead", "detached"))
             blocked = sum(len(x.pending) for x in panes)
+            # orphans_reaped: adapters a PREVIOUS hub left running that this
+            # one stopped at boot (Grok 2026-09-28). The count the pane-host
+            # decision (review §6, step 8) is waiting on.
+            reaped = sum(1 for v in getattr(MGR, "orphans", {}).values()
+                         if v in ("reaped", "killed"))
             return self._json({"ok": 1, "service": "corral-light",
                                "tick_age_s": age, "panes_live": live,
-                               "permissions_waiting": blocked})
+                               "permissions_waiting": blocked,
+                               "orphans_reaped": reaped,
+                               "not_restored": getattr(MGR, "not_restored", 0)})
 
         if self._edge_refused():
             return

@@ -262,8 +262,19 @@ class PaneBase:
                  # has no consult and no reaper, so it only carries the flag
                  # -- a pane written by either skin round-trips through the
                  # other (test_cross_tree_resume). Absent = False.
-                 "ephemeral")
+                 "ephemeral",
+                 # The adapter process this pane last spawned: pid, process
+                 # group, and an exec-stable start-time fingerprint (acp.
+                 # process_start_token). Written at spawn, cleared when the
+                 # pane stops it on purpose. A restarted hub reads them to
+                 # reap an adapter that OUTLIVED the old hub before anything
+                 # runs session/load on the same conversation (Grok 2026-09-28
+                 # "missed kill"; acp.reap_orphans). Absent in every older
+                 # meta and in anything full Corral writes today: both skins
+                 # read them with `.get`, and None means "nothing to reap".
+                 "pid", "pgid", "pid_start")
     ephemeral = False
+    pid = pgid = pid_start = None
 
     # Corral's own vocabulary is `model`/`effort`; adapters don't all use it.
     # Codex's ACP session (confirmed live, 2026-08-23, codex-acp 1.6.2) reports
@@ -471,6 +482,7 @@ class PaneBase:
         except Exception:                   # noqa: BLE001
             pass
         self.client = None
+        self.pid = self.pgid = self.pid_start = None   # nothing left to reap
 
     # ── event plumbing ───────────────────────────────────────────────────
     def emit(self, kind, payload, activity=True):
@@ -665,6 +677,7 @@ class PaneBase:
         if self.client:
             self.client.close()
         self.client = None
+        self.pid = self.pgid = self.pid_start = None   # stopped on purpose
         self.error = None                 # paused is not a fault
         self.emit("paused", {"dropped": dropped})
         self.save_meta()
@@ -684,6 +697,7 @@ class PaneBase:
     def stop(self):
         if self.client:
             self.client.close()
+        self.pid = self.pgid = self.pid_start = None   # stopped on purpose
         self.state = "dead"
         self.error = self.error or "closed by you"
         # Mark it closed ON DISK. restore() skips panes carrying this flag, and

@@ -232,6 +232,10 @@ class AcpClient:
         # later with os.getpgid() fails once the leader has exited, which is
         # precisely the moment its surviving children still need the signal.
         self.pgid = self.p.pid
+        # ...and WHEN it started, so a hub that restarts can tell its own
+        # orphan from an unrelated process that later reused the pid (Grok
+        # 2026-09-28, the missed kill path — see reap_orphans below).
+        self.start_token = process_start_token(self.p.pid)
         self.alive = True
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
@@ -725,6 +729,142 @@ class AcpClient:
         except Exception:
             pass
         _close_quietly(getattr(self.p, "stdin", None))           # the writer end is ours
+
+
+# ── orphans from a previous hub ─────────────────────────────────────────────
+# Grok, resilience review 2026-09-28 ("Missed kill"): every adapter is started
+# with start_new_session=True, so on a service manager that kills only the
+# hub's own process group (launchd without AbandonProcessGroup semantics on
+# a setsid child) the adapters OUTLIVE a hub exit, still holding their vendor
+# session. meta.json stored no pid, so the restarted hub could not reap them,
+# and the next resume ran a SECOND adapter on the same acp_session. The pane
+# records pid + pgid + start time at spawn; restore() hands them here BEFORE
+# any session/load. Identity is checked before any signal, because a pid is
+# only a number: after a reboot or a long outage it can belong to anything.
+ORPHAN_TERM_WAIT_S = 5      # SIGTERM grace for an orphaned adapter group: the
+                            # same order as close()'s 3 s + 2 s, and boot waits
+                            # for it once for ALL orphans, not once per pane
+ORPHAN_KILL_WAIT_S = 2      # after SIGKILL: delivery, not negotiation
+PS_TIMEOUT_S = 5            # one `ps` call; a hung ps must not hang the boot
+
+
+def process_start_token(pid):
+    """An exec-stable fingerprint of WHEN `pid` started, or None.
+
+    Start time, not argv: three of Light's lanes launch through a Python
+    launcher that os.exec()s the vendor binary, so the process's argv stops
+    matching the lane's spec the instant it is running, while its start time
+    never changes and, paired with the pid, names one process for good.
+    Linux reads /proc (clock ticks since boot); elsewhere `ps -o lstart=`.
+    """
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text()
+        # comm (field 2) may contain spaces and parens; split after the LAST ')'
+        return "proc:" + raw.rsplit(")", 1)[1].split()[19]
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))],
+                           capture_output=True, text=True, timeout=PS_TIMEOUT_S)
+        s = " ".join(r.stdout.split())
+        return ("ps:" + s) if r.returncode == 0 and s else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def process_args(pid):
+    """The command line of `pid` as one string, or None if it is gone."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        if raw:
+            return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except (OSError, ValueError):
+        pass
+    try:
+        r = subprocess.run(["ps", "-o", "args=", "-p", str(int(pid))],
+                           capture_output=True, text=True, timeout=PS_TIMEOUT_S)
+        return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def is_our_adapter(pid, pgid, start=None, argv=()):
+    """(verdict, why). True only when every check that CAN be made agrees.
+
+    - the pid is alive and still leads the group we recorded (our adapters
+      are session leaders, so pgid == pid);
+    - if a start time was recorded, it matches exactly — the strong check;
+    - with no start time (a meta written before one was kept, or a platform
+      that could not read it), the command line must contain the lane's
+      argv[0..1] — the weak check, which a launcher's exec defeats, so it
+      can only ever say "no" more often, never "yes" to a stranger.
+    Any doubt answers False: never signalling is the safe direction.
+    """
+    try:
+        pid, pgid = int(pid), int(pgid)
+    except (TypeError, ValueError):
+        return False, "no pid recorded"
+    if pid <= 1 or pgid <= 1:
+        return False, "refusing a system pid"
+    try:
+        if os.getpgid(pid) != pgid:
+            return False, f"pid {pid} no longer leads group {pgid}"
+    except ProcessLookupError:
+        return False, "not running"
+    except OSError as e:
+        return False, f"cannot inspect pid {pid}: {e}"
+    if start:
+        now = process_start_token(pid)
+        if now != start:
+            return False, (f"pid {pid} was reused by another process "
+                           f"(start {now!r} != recorded {start!r})")
+        return True, "start time matches"
+    args = process_args(pid) or ""
+    want = [a for a in list(argv)[:2] if a]
+    if want and all(a in args for a in want):
+        return True, "command line matches the lane"
+    return False, f"pid {pid} runs {args[:80]!r}, not this lane's adapter"
+
+
+def reap_orphans(candidates, term_wait=None, kill_wait=None):
+    """SIGTERM every verified orphan group, wait once, SIGKILL survivors.
+
+    `candidates`: [(key, pid, pgid, start, argv)]. Returns {key: outcome}
+    for every candidate, where outcome is "reaped", "killed", or a reason it
+    was left alone. One shared grace period, not one per orphan, so twelve
+    orphans cost the boot five seconds, not a minute.
+    """
+    term_wait = ORPHAN_TERM_WAIT_S if term_wait is None else term_wait
+    kill_wait = ORPHAN_KILL_WAIT_S if kill_wait is None else kill_wait
+    out, groups = {}, {}
+    for key, pid, pgid, start, argv in candidates:
+        ok, why = is_our_adapter(pid, pgid, start, argv)
+        if not ok:
+            out[key] = f"left alone: {why}"
+            continue
+        try:
+            os.killpg(int(pgid), signal.SIGTERM)
+            groups[key] = int(pgid)
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            out[key] = f"left alone: {e}"
+    deadline = time.time() + term_wait
+    while groups and time.time() < deadline:
+        if not any(_group_alive(g) for g in groups.values()):
+            break
+        time.sleep(0.05)
+    for key, g in groups.items():
+        if not _group_alive(g):
+            out[key] = "reaped"
+            continue
+        try:
+            os.killpg(g, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        end = time.time() + kill_wait
+        while time.time() < end and _group_alive(g):
+            time.sleep(0.05)
+        out[key] = "killed" if not _group_alive(g) else "still running after SIGKILL"
+    return out
 
 
 def _close_quietly(stream):
