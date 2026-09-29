@@ -189,6 +189,20 @@ class LaterOverTheCli(HubCase):
         self.assertIn("nothing scheduled", out)
 
 
+class SearchOverTheCli(HubCase):
+    def test_say_then_find_it(self):
+        pid = self.open()
+        self.cli("say", pid, "remember xylophone")
+        import transcripts
+        transcripts.refresh(force=True, state_dir=self.tmp / "state")   # skip the hub's throttle
+        rc, out, err = self.cli("search", "xylophone")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(pid, out)
+        rc, out, _ = self.cli("digest", "--hours", "1")
+        self.assertIn("What the agents did", out)
+        self.cli("close", pid)
+
+
 class TheLaneMatrix(HubCase):
     def test_the_fake_lane_remembers_and_refuses(self):
         r = subprocess.run([sys.executable, str(ROOT / "lane_matrix.py"), "--json", "--lane", "fake",

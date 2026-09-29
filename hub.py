@@ -419,6 +419,26 @@ class Handler(BaseHTTPRequestHandler):
             # pointed this at anything yet".
             import content
             return self._json(content.status())
+        if p == "/api/session/search":
+            # What was SAID in any pane, live or archived (transcripts.py).
+            # A broken index degrades to an error string in the payload.
+            import transcripts
+            try:
+                return self._json(transcripts.search(
+                    (q.get("q") or [""])[0],
+                    limit=int((q.get("n") or ["30"])[0] or 30),
+                    pane=(q.get("pane") or [None])[0]))
+            except Exception as e:                  # noqa: BLE001
+                return self._json({"hits": [], "error": str(e)[:200]})
+        if p == "/api/session/digest":
+            import transcripts
+            live = {x.id for x in list(MGR.panes.values())
+                    if x.state not in ("dead", "detached")}
+            try:
+                hours = float((q.get("hours") or ["24"])[0] or 24)
+            except ValueError:
+                hours = 24.0
+            return self._json({"text": transcripts.digest(hours, live=live)})
         if p == "/api/session/schedule":
             return self._json({"jobs": MGR.schedule.list()})
         if p == "/api/session/roles":

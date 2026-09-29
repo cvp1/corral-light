@@ -2363,6 +2363,9 @@ function paletteResults(query) {
   if (!needle || 'new conversation'.includes(needle)) {
     rows.push({ kind: 'action', label: 'New conversation', sub: 'action' });
   }
+  if (!needle || 'what the agents did digest'.includes(needle)) {
+    rows.push({ kind: 'digest', label: 'What the agents did — last 24h', sub: 'digest' });
+  }
 
   renderPalette(rows.slice(0, 30), needle);
   if (needle.length < 2) return;
@@ -2371,9 +2374,12 @@ function paletteResults(query) {
   // network, and an older response landing after a newer one would repaint
   // the list with results for a query that is no longer in the box.
   PAL.t = setTimeout(async () => {
-    let d;
-    try { d = await api('/api/search?q=' + encodeURIComponent(needle)); }
-    catch (e) { return; }                  // degrade to local matches only
+    // Two sources, each allowed to fail alone: notes (/api/search) and what
+    // was SAID in any pane, live or archived (/api/session/search,
+    // transcripts.py). One broken index must not empty the other's rows.
+    const [d, t] = await Promise.all([
+      api('/api/search?q=' + encodeURIComponent(needle)).catch(() => ({ hits: [] })),
+      api('/api/session/search?q=' + encodeURIComponent(needle)).catch(() => ({ hits: [] }))]);
     if (seq !== PAL.seq) return;
     const hits = (d.hits || []).map(h => ({
       kind: 'content', label: h.title, id: h.id,
@@ -2382,7 +2388,12 @@ function paletteResults(query) {
       // row can say what it will do. `focused` may be undefined — the row
       // then offers to open a pane, which is the honest fallback.
       pane: focused }));
-    renderPalette([...rows, ...hits].slice(0, 40), needle, d.error);
+    const said = (t.hits || []).slice(0, 15).map(h => ({
+      kind: 'said', label: h.title, paneId: h.pane, closed: h.closed,
+      sub: `${h.agent} · ${h.kind}${h.closed ? ' · archived' : ''}`,
+      snippet: h.snippet }));
+    const err = [d.error, t.error].filter(Boolean).join(' · ');
+    renderPalette([...rows, ...said, ...hits].slice(0, 50), needle, err);
   }, 160);
 }
 
@@ -2440,6 +2451,26 @@ function renderPalette(rows, needle, contentError) {
 async function activatePalette(row, newPane) {
   $('#palette').close();
   if (row.kind === 'action') return $('#new').click();
+  if (row.kind === 'said') {
+    // A hit in a closed conversation reopens it (detached, as Archive does).
+    if (!S.panes.has(row.paneId)) {
+      try { await api('/api/session/reopen', { pane: row.paneId }); await refresh(); }
+      catch (e) { return toast(e.message, true); }
+    }
+    return focusPane(row.paneId);
+  }
+  if (row.kind === 'digest') {
+    // Mechanical, counted from events — no model. Composition, not dispatch:
+    // it lands in a composer (or the clipboard), never sent by itself.
+    let d;
+    try { d = await api('/api/session/digest?hours=24'); }
+    catch (e) { return toast(e.message, true); }
+    const t = attachTarget();
+    if (t) return insertIntoComposer(t.id, d.text, 'digest of the last 24h — nothing sent');
+    try { await navigator.clipboard.writeText(d.text); toast('digest copied — no pane to put it in'); }
+    catch { toast('open a pane to receive the digest', true); }
+    return;
+  }
   if (row.kind === 'pane') {
     const target = newPane ? attachTarget() : null;   // ⇧↵ = quote, ↵ = focus
     if (target && target.id !== row.paneId) return quoteInto(row.paneId, target.id);
