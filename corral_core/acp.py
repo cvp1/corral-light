@@ -159,10 +159,46 @@ _SPAWNER = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="acp-spawn")
 
 
-def _spawn(fn):
+# K7 (Astra and Grok 2026-09-28): `_spawn` waited on Future.result() with NO
+# timeout, and there is ONE spawner thread — so a Popen that hung (a stuck
+# exec on a network filesystem, a launcher blocked before exec) froze every
+# later start and resume on every lane while /health stayed green. A fork+exec
+# takes milliseconds; thirty seconds is two orders of magnitude of slack for a
+# loaded laptop, and short enough that the operator gets an answer, not a spinner.
+SPAWN_TIMEOUT_S = 30
+
+
+def _reap_late(fut):
+    """A Popen that finished AFTER its caller gave up belongs to nobody: kill
+    its group so the timeout cannot become an orphaned agent."""
+    try:
+        p = fut.result()
+    except Exception:                               # noqa: BLE001
+        return
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        p.wait(timeout=2)
+    except Exception:                               # noqa: BLE001
+        pass
+    for s in (p.stdin, p.stdout, p.stderr):
+        _close_quietly(s)
+
+
+def _spawn(fn, timeout=None):
     """Run `fn` (a Popen) on the long-lived spawner thread and return its
-    result, re-raising its exception unchanged."""
-    return _SPAWNER.submit(fn).result()
+    result, re-raising its exception unchanged. Bounded: see SPAWN_TIMEOUT_S."""
+    fut = _SPAWNER.submit(fn)
+    try:
+        return fut.result(timeout=SPAWN_TIMEOUT_S if timeout is None else timeout)
+    except concurrent.futures.TimeoutError:
+        fut.add_done_callback(_reap_late)
+        raise AgentError(
+            f"the agent process did not start within "
+            f"{SPAWN_TIMEOUT_S if timeout is None else timeout}s — the spawner "
+            f"is stuck (every lane waits behind it); see the hub's log")
 
 
 class AcpClient:

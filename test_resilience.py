@@ -246,5 +246,192 @@ class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
         self.assertEqual(self.mgr.not_restored, 1)
 
 
+HUB_SCRIPT = r"""
+import os, sys, time, json
+sys.path.insert(0, os.environ["LIGHT_ROOT"])
+import sessions
+sessions.Manager.seed_catalogs = lambda self: None     # no live vendor probes
+sessions.AGENTS["fake"] = {"label": "Fake", "argv": [sys.executable, os.environ["FAKE"]],
+                           "posture_via_config_dir": False, "tools": True,
+                           "env": {"FAKE_ACP_DIR": os.environ["FAKE_ACP_DIR"]}}
+import hub
+p = hub.MGR.create("fake", os.environ["FAKE_ACP_DIR"])
+p.send("sleep 60")
+for _ in range(200):
+    if getattr(p, "_in_flight", None):
+        break
+    time.sleep(0.05)
+p.send("queued behind it")
+print("PANE " + p.id, flush=True)
+hub.serve("127.0.0.1", 0)
+"""
+
+
+class ShutdownWritesNotesNotPauses(FakeLaneCase):
+    """P0-b' (Astra/Grok 2026-09-28): SIGTERM names the interrupted turn."""
+
+    def _busy_pane(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: p._in_flight == "sleep 30"))
+        p.send("second, queued")
+        return p
+
+    def test_the_note_names_the_popped_prompt_and_the_queue(self):
+        p = self._busy_pane()
+        n = self.mgr.shutdown_notes("SIGTERM")
+        self.assertEqual(n, 1)
+        note = [e for e in p.events if e["kind"] == "note"][-1]["data"]
+        self.assertEqual(note["interrupted"], "sleep 30")
+        self.assertEqual(note["queued"], ["second, queued"])
+        self.assertIn("SIGTERM", note["text"])
+        self.assertNotIn("paused", self.kinds(p), "shutdown must not pause()")
+        self.assertEqual(p._queue, ["second, queued"], "the queue was touched")
+
+    def test_an_idle_pane_gets_no_note(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        self.assertEqual(self.mgr.shutdown_notes("SIGTERM"), 0)
+        self.assertNotIn("note", self.kinds(p))
+
+    def test_a_real_hub_process_writes_the_note_on_sigterm_and_exits(self):
+        import subprocess
+        state = tempfile.mkdtemp(prefix="corral-light-sigterm-")
+        env = {**os.environ, "CORRAL_LIGHT_STATE": state, "LIGHT_ROOT": str(ROOT),
+               "FAKE": str(FAKE), "FAKE_ACP_DIR": self.agent_dir}
+        pr = subprocess.Popen([sys.executable, "-c", HUB_SCRIPT], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+        pane_id, lines = None, []
+        try:
+            for line in pr.stdout:
+                lines.append(line)
+                if line.startswith("PANE "):
+                    pane_id = line.split()[1]
+                if line.startswith("corral-light: http://"):
+                    break
+            self.assertIsNotNone(pane_id, "".join(lines))
+            pr.send_signal(signal.SIGTERM)
+            rc = pr.wait(15)
+            err = pr.stderr.read()
+        finally:
+            if pr.poll() is None:
+                pr.kill()
+                pr.wait(5)
+            pr.stdout.close()
+            pr.stderr.close()
+            meta = json.loads((Path(state) / "panes" / str(pane_id) / "meta.json").read_text())
+            if meta.get("pgid"):                  # the adapter outlived the hub
+                try:
+                    os.killpg(meta["pgid"], signal.SIGKILL)
+                except OSError:
+                    pass
+        self.assertEqual(rc, 0, err)
+        self.assertIn("wrote 1 interrupted-turn note", err)
+        events = [json.loads(l) for l in
+                  (Path(state) / "panes" / pane_id / "events.jsonl").read_text().splitlines()]
+        notes = [e["data"] for e in events if e["kind"] == "note" and e["data"].get("shutdown")]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["interrupted"], "sleep 60")
+        self.assertEqual(notes[0]["queued"], ["queued behind it"])
+        self.assertNotIn("paused", [e["kind"] for e in events])
+
+    def test_the_unit_signals_the_hub_before_its_children(self):
+        unit = (ROOT / "corral-light.service").read_text(encoding="utf-8")
+        self.assertIn("\nKillMode=mixed\n", unit)
+
+
+class TheObserverTickSurvivesABadPane(unittest.TestCase):
+    """Astra/Grok 2026-09-28: one snapshot() exception froze tick_age_s."""
+
+    def test_tick_advances_past_a_raising_pane(self):
+        import hub
+        import types
+        calls = []
+
+        def boom(**kw):
+            raise RuntimeError("bad pane")
+        bad = types.SimpleNamespace(snapshot=boom)
+        good = types.SimpleNamespace(snapshot=lambda **kw: calls.append(1))
+        real = hub.MGR.panes
+        hub.MGR.panes = {"bad": bad, "good": good}
+        hub._TICK["at"], before = 0.0, hub._TICK["errors"]
+        try:
+            hub._observe_once()
+        finally:
+            hub.MGR.panes = real
+        self.assertGreater(hub._TICK["at"], 0)
+        self.assertEqual(calls, [1], "a pane after the bad one was never observed")
+        self.assertEqual(hub._TICK["errors"], before + 1)
+
+
+class SpawnIsBounded(unittest.TestCase):
+    """K7 (Astra/Grok 2026-09-28): one hung Popen froze every lane."""
+
+    def test_a_stuck_spawn_raises_and_the_late_process_is_reaped(self):
+        import acp
+        import subprocess
+        box = {}
+
+        def slow():
+            time.sleep(0.6)
+            box["p"] = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            return box["p"]
+        with self.assertRaises(acp.AgentError) as ar:
+            acp._spawn(slow, timeout=0.1)
+        self.assertIn("did not start", str(ar.exception))
+        self.assertTrue(wait_for(lambda: "p" in box and box["p"].poll() is not None),
+                        "a spawn that finished after its caller gave up was left running")
+
+
+class CatalogWriteIsAtomic(FakeLaneCase):
+    def test_concurrent_writers_leave_valid_json_and_no_tmp(self):
+        import sessions
+        ths = [threading.Thread(target=self.mgr.remember_catalog,
+                                args=(f"lane{i}", {"model": {"name": "M", "value": "x",
+                                                             "options": [{"value": "x"}]}}))
+               for i in range(8)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+        data = json.loads(sessions.CATALOG.read_text())
+        self.assertIsInstance(data, dict)
+        self.assertFalse(sessions.CATALOG.with_name(sessions.CATALOG.name + ".tmp").exists())
+
+
+class ALostContextIsSaid(FakeLaneCase):
+    """K4 (Astra/Grok 2026-09-28): Ollama's "context lost" chunk arrived inside
+    session/load and was swallowed with the replay."""
+
+    def test_a_load_notice_survives_replay_suppression(self):
+        self.sessions.AGENTS["fake"]["env"]["FAKE_ACP_NOTICE"] = "the model starts fresh"
+        p = self.mgr.create("fake", self.agent_dir)
+        p.pause()
+        p.resume()
+        notes = [e["data"] for e in p.events if e["kind"] == "note"]
+        self.assertTrue(any(n["text"] == "the model starts fresh" and n["contextLost"]
+                            for n in notes), notes)
+        self.assertNotIn("REPLAYED HISTORY", self.texts(p))
+
+    def test_ollama_puts_the_notice_in_the_load_result(self):
+        import ollama_acp
+        sent = []
+
+        class Out:
+            def write(self, s):
+                if s.strip():
+                    sent.append(json.loads(s))
+
+            def flush(self):
+                pass
+        srv = ollama_acp.Server(out=Out())
+        srv._config_options = lambda: []
+        srv.handle({"jsonrpc": "2.0", "id": 5, "method": "session/load",
+                    "params": {"sessionId": "s"}})
+        r = [m for m in sent if m.get("id") == 5][0]["result"]
+        self.assertEqual(r["_meta"]["corral/notice"], ollama_acp.RESUME_NOTICE)
+        self.assertTrue(r["_meta"]["corral/contextLost"])
+
+
 if __name__ == "__main__":
     unittest.main()
