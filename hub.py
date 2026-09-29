@@ -48,6 +48,7 @@ if sys.version_info < (3, 9):
         f"static-file containment check, arrived in 3.9.)")
 
 import auth
+import notify
 import sessions
 from corral_core import edge
 
@@ -154,6 +155,81 @@ def _observe_once():
             _TICK["errors"] += 1
         _TICK["at"] = time.time()
     _TICK["at"] = time.time()               # an empty roster still ticks
+
+
+# ── needs-you, off the glass (P0-e'; Astra and Grok 2026-09-28) ─────────────
+# The first plan notified when MGR.subscribers was empty. Both reviews: an SSE
+# subscriber proves a stream is OPEN, not that a human is LOOKING — a
+# backgrounded tab keeps one, which is exactly when you are not looking. So
+# the browser (and the CLI, when it prints) reports the highest seq a human
+# surface actually showed, per pane, and a `permission` or `dead` event that
+# nobody has seen after a grace period becomes a desktop notification.
+# In memory on purpose: after a restart nothing has been seen, which errs
+# toward telling you.
+NOTIFY_GRACE_S = 20         # a focused browser acks within a second or two;
+                            # twenty means "nobody looked", not "slow network"
+NOTIFY_KINDS = ("permission", "dead")
+SEEN = {}                   # pane id -> highest seq a human surface showed
+_NOTIFY_PENDING = {}        # pane id -> newest unseen notifiable event
+_NOTIFY_LOCK = threading.Lock()
+
+
+def mark_seen(pane_id, seq):
+    MGR.get(pane_id)                     # ValueError for a pane that is not here
+    seq = int(seq)
+    with _NOTIFY_LOCK:
+        if seq > SEEN.get(pane_id, 0):
+            SEEN[pane_id] = seq
+    return SEEN[pane_id]
+
+
+def _notify_event(ev):
+    """Consider one broadcast event; schedule at most one check per pane."""
+    if ev.get("kind") not in NOTIFY_KINDS or not ev.get("pane"):
+        return
+    pid = ev["pane"]
+    with _NOTIFY_LOCK:
+        first = pid not in _NOTIFY_PENDING
+        _NOTIFY_PENDING[pid] = ev          # coalesce: the newest one is checked
+    if first:
+        t = threading.Timer(NOTIFY_GRACE_S, _notify_check, args=(pid,))
+        t.daemon = True
+        t.start()
+
+
+def _notify_check(pane_id):
+    with _NOTIFY_LOCK:
+        ev = _NOTIFY_PENDING.pop(pane_id, None)
+        seen = SEEN.get(pane_id, 0)
+    if ev is None or seen >= ev.get("seq", 0):
+        return None                         # a human saw it
+    p = MGR.panes.get(pane_id)
+    if p is None:
+        return None                         # closed meanwhile
+    d = ev.get("data") or {}
+    if ev["kind"] == "permission":
+        if d.get("requestId") not in getattr(p, "pending", {}):
+            return None                     # answered meanwhile
+        title = f"{p.title} needs you"
+        body = f"permission: {d.get('title') or d.get('kind') or 'a tool call'}"
+    else:
+        if p.state != "dead":
+            return None                     # already resumed
+        title = f"{p.title} stopped"
+        body = str(d.get("reason") or "the agent exited")
+    shown, why = notify.desktop(f"Corral Light — {title}", body)
+    return shown, why
+
+
+def _notify_loop():
+    """Subscribe like a browser and feed _notify_event. Never dies."""
+    q = queue.Queue(maxsize=1000)
+    MGR.subscribe(q)
+    while True:
+        try:
+            _notify_event(q.get())
+        except Exception:                          # noqa: BLE001
+            pass
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -520,6 +596,11 @@ class Handler(BaseHTTPRequestHandler):
                 m = MGR.get(b.get("pane", "")).set_minimized(
                     b.get("minimized", True))
                 return self._json({"ok": True, "minimized": m})
+            if p == "/api/session/seen":
+                # A human surface SHOWED this pane up to `seq` (P0-e'). The
+                # browser calls it only while the page is visible and focused.
+                return self._json({"ok": True, "seen": mark_seen(
+                    b.get("pane", ""), b.get("seq") or 0)})
             if p == "/api/session/cancel":
                 return self._json({"ok": MGR.get(b.get("pane", "")).cancel()})
             if p == "/api/session/close":
@@ -602,6 +683,23 @@ def _on_shutdown_signal(signum, frame):              # noqa: ARG001
     raise SystemExit(0)
 
 
+def write_pidfile():
+    """STATE/hub.pid: who is serving, for `corral-light watch` (P0-d').
+    pid + start-time fingerprint, so a reused pid is not mistaken for us."""
+    try:
+        from corral_core.acp import process_start_token
+        sessions.STATE.mkdir(parents=True, exist_ok=True)
+        f = sessions.STATE / "hub.pid"
+        tmp = f.with_name("hub.pid.tmp")
+        tmp.write_text(json.dumps({"pid": os.getpid(),
+                                   "start": process_start_token(os.getpid())}),
+                       encoding="utf-8")
+        os.replace(tmp, f)
+    except OSError as e:
+        print(f"corral-light: could not write hub.pid: {e}", file=sys.stderr,
+              flush=True)
+
+
 def install_shutdown_handler():
     for s in (signal.SIGTERM, signal.SIGINT):
         signal.signal(s, _on_shutdown_signal)
@@ -619,9 +717,11 @@ def serve(bind=BIND, port=PORT):
     for _k in ("INVOCATION_ID", "JOURNAL_STREAM", "CC_SCHEDULED_JOB"):
         os.environ.pop(_k, None)
     threading.Thread(target=_observe_loop, daemon=True).start()
+    threading.Thread(target=_notify_loop, daemon=True).start()
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     install_shutdown_handler()
+    write_pidfile()
     # flush=True, and it is not cosmetic. Python line-buffers stdout only when
     # it is a TTY; under systemd, launchd, or `> log 2>&1` it is block-buffered,
     # so this line — the ONE signal that the server bound its port — sat in a

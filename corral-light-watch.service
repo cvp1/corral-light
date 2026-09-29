@@ -1,0 +1,19 @@
+# Corral Light's OUTSIDE watcher — systemd USER oneshot, fired by
+# corral-light-watch.timer. It pages (STATE/DEAD + a desktop notification,
+# quiet 21:00–05:00) and NEVER restarts the hub: a restart kills every live
+# pane's agent, and a stale observer tick is more often one bad pane than a
+# dead hub (resilience review 2026-09-28, P0-d'; Astra and Grok).
+#
+# Install next to corral-light.service:
+#   sed "s|%HERE%|$PWD|" corral-light-watch.service > ~/.config/systemd/user/corral-light-watch.service
+#   cp corral-light-watch.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now corral-light-watch.timer
+
+[Unit]
+Description=Corral Light — outside watcher (pages, never restarts)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %HERE%/watch.py
+# Exit 2 means "paged", which is the watcher doing its job, not failing.
+SuccessExitStatus=2
