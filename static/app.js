@@ -879,6 +879,14 @@ function updatePane(rec, p) {
 function paneHead(p) {
   const h = el('div', 'ph');
   h.appendChild(el('span', 'nm', p.title || p.label));
+  // The same five words the roster and the tab title use, on the pane itself:
+  // a maximized pane used to be the ONE surface with no state on it, so the
+  // answer to "is this waiting on me or working?" required looking away from
+  // the thing you were looking at. Raw enum on the tooltip, as everywhere.
+  const dsp = displayState(p);
+  const st = el('span', 'pill st d-' + dsp, DISPLAY_LABEL[dsp] || dsp);
+  st.title = `${p.state}${p.idleS >= 30 ? ` · quiet ${fmtAge(p.idleS)}` : ''}`;
+  h.appendChild(st);
   // Only claim a posture Corral actually imposed. `oc acp` runs under its own
   // policy, so a Grok pane wearing a `strict` pill was the UI asserting a
   // safety property nothing had established.
@@ -1406,8 +1414,59 @@ function fmtAge(s) {
 }
 
 /* ── rendering: shell ────────────────────────────────────────────────── */
+/* ── the display projection ───────────────────────────────────────────────
+ * Mirrors corral_core/sessions.py `display_state()` — the one opinion on what
+ * a pane's raw state MEANS to a human. Mirrored rather than read off the wire
+ * because the browser reduces events locally between polls: a `permission`
+ * event flips a pane to needs-you in the same tick it arrives, and a
+ * server-computed `display` would be stale exactly when it matters most. The
+ * two implementations are pinned to ONE case table,
+ * corral_core/display_cases.json, by selftest_display.mjs here and
+ * corral_core/test_display_state.py there — so this cannot drift quietly,
+ * which is the only way a mirror is honest.
+ *
+ * The raw `p.state` is still rendered beside it and still on the tooltip:
+ * this is triage, not a replacement for the record. `gateHold` is full
+ * Corral's runbook park and never arrives here; the branch stays so the two
+ * skins share one rule.
+ */
+const IDLE_DISPLAY_S = 1800;
+
+function displayState(p, unread) {
+  const state = p.state || 'starting';
+  const pending = ((p.pending || []).length) > 0;
+  const held = !!p.gateHold;
+  const since = p.idleS || 0;
+  if (pending || held || state === 'needs-you') return 'needs-you';
+  if (state === 'dead') return 'dead';
+  if (state === 'starting' || state === 'busy' || state === 'uncertain') return 'working';
+  if (state === 'ready') return (unread || since < IDLE_DISPLAY_S) ? 'your-turn' : 'idle';
+  return 'idle';                       // detached, and anything unrecognised
+}
+
+const DISPLAY_LABEL = {
+  'needs-you': 'needs you', 'working': 'working',
+  'your-turn': 'your turn', 'idle': 'idle', 'dead': 'dead',
+};
+
+/* The tab title: where the eye lands first when Corral is one tab among
+ * twenty. What needs you outranks what is merely waiting, and a quiet wall
+ * says nothing at all rather than inventing a reassuring number. */
+function setTitle(panes) {
+  let need = 0, turn = 0;
+  for (const p of panes) {
+    const d = displayState(p);
+    if (d === 'needs-you') need++;
+    else if (d === 'your-turn') turn++;
+  }
+  document.title = need ? `${need} need you · Corral`
+                 : turn ? `${turn} your turn · Corral`
+                 : 'Corral';
+}
+
 function render() {
   const panes = [...S.panes.values()];
+  setTitle(panes);
   markSeen();                  // whatever this render shows, a human can see
 
   // roster
@@ -1423,7 +1482,11 @@ function render() {
   // Archive below, but open by default: unlike Archive's closed history,
   // these are live conversations, so the default is visible, not hidden.
   const paneRow = p => {
-    const it = el('div', 'rit ' + p.state + (p.minimized ? ' min' : '') +
+    const disp = displayState(p);
+    // Both classes: `rit needs-you` is what the eye reads, and the raw state
+    // class stays so every rule style.css already had keeps working.
+    const it = el('div', 'rit d-' + disp + ' ' + p.state +
+                        (p.minimized ? ' min' : '') +
                         (S.focus === p.id ? ' on' : ''));
     it.appendChild(el('span', 'dot'));
     const t = el('div', 'txt');
@@ -1458,8 +1521,14 @@ function render() {
     // pane opened there showed "· CC" here and looked like a Claude Code
     // conversation. Tag the agent explicitly for every lane but the default.
     const agentTag = p.agent !== 'claude' ? p.label + ' · ' : '';
-    t.appendChild(el('div', 's',
-      p.state + quiet + ' · ' + agentTag + p.cwd.split('/').pop()));
+    const sub = el('div', 's',
+      (DISPLAY_LABEL[disp] || disp) + quiet + ' · ' + agentTag +
+      p.cwd.split('/').pop());
+    // The raw enum is the record and stays one hover away: the projection
+    // collapses six values into five words, and "which of the two busy-ish
+    // states is this" is a real question when a pane looks wedged.
+    sub.title = p.state;
+    t.appendChild(sub);
     it.appendChild(t);
 
     // A minimized pane blocked on a permission must still SHOW that it is —
@@ -1634,14 +1703,18 @@ function render() {
     for (const p of mins) {
       // A semantic <button>: a click-only div never takes focus, so
       // keyboard and :focus-visible can't reach it (panel, 2026-08-24).
-      const c = el('button', 'minchip ' + p.state);
+      const cdisp = displayState(p);
+      const c = el('button', 'minchip d-' + cdisp + ' ' + p.state);
       c.type = 'button';
       c.appendChild(el('span', 'd'));
       c.appendChild(el('span', 'mt', p.title || p.label));
       if (p.pending.length) c.appendChild(el('span', 'badge', String(p.pending.length)));
       // Full identity in the name: the visible label ellipsizes, and the
-      // state must not live in the dot's color alone.
-      const full = `${p.title || p.label} — ${p.state}, click to restore`;
+      // state must not live in the dot's color alone. The projection leads
+      // (it is what the roster and the tab title say); the raw enum follows
+      // in parentheses so the chip and the record never disagree.
+      const full = `${p.title || p.label} — ${DISPLAY_LABEL[cdisp] || cdisp}`
+                 + ` (${p.state}), click to restore`;
       c.title = full;
       c.setAttribute('aria-label', full);
       c.onclick = () => setMin(p, false);

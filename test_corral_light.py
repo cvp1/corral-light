@@ -3292,6 +3292,92 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
         self.assertEqual(edge_live.run(hub, auth), [])
 
 
+class TheWireCarriesTheDisplayProjection(unittest.TestCase):
+    """DESIGN-5 S1. `snapshot()` must carry `display` -- the five-word triage
+    projection over the raw enum -- so a consumer that is not this browser
+    (the CLI, a script, a future skin) gets the same opinion without
+    reimplementing it.
+
+    The browser mirrors the rule in JavaScript instead of reading this key,
+    because it reduces events locally between polls; that mirror is pinned
+    against the core by selftest_display.mjs, run below.
+    """
+
+    def _pane(self, state, pending=(), alive=True, exited=None):
+        import sessions
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.id = "disp-test"
+        p.agent = "claude"
+        p.cwd = "/tmp"
+        p.title = "display test"
+        p.title_locked = False
+        p.minimized = False
+        p.order = None
+        p.pinned = False
+        p.model = None
+        p.effort = None
+        p.config = {}
+        p.commands = []
+        p.posture = "auto"
+        p.posture_enforced = False
+        p.error = None
+        p.pending = {k: {} for k in pending}
+        p.usage = {}
+        p.created = "now"
+        p.mgr = types.SimpleNamespace(broadcast=lambda event: None)
+        p.client = types.SimpleNamespace(
+            alive=alive, p=types.SimpleNamespace(poll=lambda: exited))
+        p.state = state
+        p._expect_exit = False
+        p.last_activity = time.time()
+        p.events = []
+        p._seq = 0
+        p._lock = threading.Lock()
+        p._replaying = False
+        p._log = None
+        p._since_rotate_check = 0
+        return p
+
+    def test_snapshot_carries_display(self):
+        self.assertEqual(self._pane("ready").snapshot()["display"], "your-turn")
+        self.assertEqual(self._pane("busy").snapshot()["display"], "working")
+
+    def test_a_pending_card_shows_as_needs_you_even_though_state_says_ready(self):
+        snap = self._pane("ready", pending=("req-1",)).snapshot()
+        self.assertEqual(snap["state"], "ready",
+                         "the raw enum is the record and does not change")
+        self.assertEqual(snap["display"], "needs-you")
+
+    def test_the_projection_sees_snapshots_own_correction(self):
+        """snapshot() reports a process that has exited as `dead` WITHOUT
+        writing that back to self.state on this path. A projection computed
+        from the stale field would say `your-turn` about a corpse."""
+        snap = self._pane("ready", alive=False).snapshot()
+        self.assertEqual(snap["state"], "dead")
+        self.assertEqual(snap["display"], "dead")
+
+    def test_an_old_read_ready_pane_is_idle_not_your_turn(self):
+        import sessions
+        p = self._pane("ready")
+        p.last_activity = time.time() - sessions.IDLE_DISPLAY_S - 1
+        self.assertEqual(p.snapshot()["display"], "idle")
+
+    def test_the_javascript_mirror_answers_the_same_case_table(self):
+        """The one check that would catch app.js drifting from the core. Skipped
+        LOUDLY rather than silently when node is absent -- a check that did not
+        run must not read as a check that passed."""
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            raise unittest.SkipTest(
+                "node absent: selftest_display.mjs did NOT run, so the "
+                "browser's copy of display_state is unverified on this host")
+        r = subprocess.run([node, str(ROOT / "selftest_display.mjs")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.
