@@ -92,6 +92,8 @@ POSTURES = _core.POSTURES
 QUOTE_CHARS = _core.QUOTE_CHARS
 _now = _core._now
 
+_CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
+
 MAX_ROSTER = MAX_PANES * 5      # ALL panes tracked, live or detached. MAX_PANES
                                  # only counts live ones, so repeated
                                  # create-then-pause never tripped it: every
@@ -955,6 +957,7 @@ class Pane(_core.PaneBase):
         self._seq = 0             # monotonic for the life of the pane
         self._queue = []          # type-ahead; drained strictly in order
         self._turn_running = False
+        self._in_flight = None    # the prompt _drain popped and is running now
         self._turn_lock = threading.Lock()
         # Bumped every time self.client is replaced (pause, resume). A _drain
         # thread captures its generation before calling the blocking
@@ -1131,6 +1134,15 @@ class Pane(_core.PaneBase):
                                               self._mcp_servers())
             finally:
                 self._replaying = False
+            # A lane that must say something about the load itself (Ollama:
+            # "the model starts fresh") says it in the result's `_meta`, AFTER
+            # replay suppression has ended — its in-band chunk is swallowed
+            # with the replay (Astra/Grok 2026-09-28, K4).
+            notice = (((r or {}).get("_meta") or {}).get("corral/notice"))
+            if isinstance(notice, str) and notice.strip():
+                self.emit("note", {"text": notice.strip()[:500],
+                                   "contextLost": bool(((r or {}).get("_meta") or {})
+                                                       .get("corral/contextLost"))})
             self._absorb_config((r or {}).get("configOptions") or [])
             # session/load hands back a session at the AGENT's defaults, not
             # the ones this pane was started with. Without this the posture
@@ -1162,6 +1174,39 @@ class Pane(_core.PaneBase):
 
 
 
+
+    def shutdown_note(self, why):
+        """ONE transcript note naming what a hub exit is about to cut off.
+
+        Resilience review v2, P0-b' (Astra and Grok 2026-09-28): the first
+        plan persisted the queue and then called pause() — but pause()
+        CLEARS the queue, and the prompt actually running had already been
+        popped out of it, so that design lost the one message that mattered
+        and duplicated `user` events already on disk. This only writes: it
+        names the in-flight prompt and every still-queued one, and changes
+        nothing else. Returns the note's text, or None when the pane had
+        nothing in flight.
+        """
+        with self._turn_lock:
+            running = getattr(self, "_in_flight", None)
+            queued = list(getattr(self, "_queue", []))
+        if running is None and not queued:
+            return None
+
+        def show(t):
+            return repr(t[:PARKED_PREVIEW_CHARS] +
+                        ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+        parts = [f"the hub is shutting down ({why})"]
+        if running is not None:
+            parts.append(f"this turn was interrupted: {show(running)}")
+        if queued:
+            parts.append(f"{len(queued)} queued message(s) were not sent: "
+                         + "; ".join(show(t) for t in queued))
+        parts.append("nothing will be re-sent automatically")
+        text = " — ".join(parts)
+        self.emit("note", {"text": text, "shutdown": True,
+                           "interrupted": running, "queued": queued})
+        return text
 
     def _record_pid(self):
         """Persist the adapter's pid/pgid/start time the moment it exists.
@@ -1560,6 +1605,11 @@ class Pane(_core.PaneBase):
                     self._turn_running = False
                     return
                 text = self._queue.pop(0)
+                # The popped prompt exists nowhere else until turn_end: not in
+                # the queue, and in the transcript only as a `user` event.
+                # A shutdown note has to NAME it (Grok 2026-09-28, K3), so it
+                # is kept here for exactly as long as it is in flight.
+                self._in_flight = text
             try:
                 r = client.prompt(self.acp_session, text)
             except acp.AgentError as e:
@@ -1580,6 +1630,7 @@ class Pane(_core.PaneBase):
                     # Do not silently swallow what was still waiting.
                     dropped, self._queue = len(self._queue), []
                     self._turn_running = False
+                    self._in_flight = None
                 # Since 2026-08-31 a prompt carries NO deadline, so the only
                 # way to reach here is the agent process actually dying or its
                 # stdin closing — never a clock deciding the operator's session is
@@ -1605,6 +1656,7 @@ class Pane(_core.PaneBase):
                         return
                     dropped, self._queue = len(self._queue), []
                     self._turn_running = False
+                    self._in_flight = None
                 self.emit("note", {
                     "text": f"the turn could not be run ({type(e).__name__}: {e})"
                             + (f"; {dropped} queued message(s) were dropped"
@@ -1615,6 +1667,7 @@ class Pane(_core.PaneBase):
             with self._turn_lock:
                 if self._generation != gen:
                     return
+                self._in_flight = None
             self._flush_thought()       # a turn ending on a thought still shows it
             self.emit("turn_end", {"stopReason": (r or {}).get("stopReason"),
                                    "usage": self.usage,
@@ -1900,6 +1953,23 @@ class Manager(_core.ManagerBase):
         # next state() poll rather than blocking the UI on boot.
         threading.Thread(target=self.seed_catalogs, daemon=True).start()
 
+    def shutdown_notes(self, why):
+        """Write a shutdown note on every pane that has work in flight.
+
+        Called from the hub's signal handler, on the MAIN thread (P0-b').
+        Bounded by the roster; every pane is tried even if one fails, and
+        the count is returned for the exit line.
+        """
+        n = 0
+        for p in list(self.panes.values()):
+            try:
+                if p.shutdown_note(why):
+                    n += 1
+            except Exception as e:             # noqa: BLE001
+                print(f"corral-light: shutdown note for {p.id} failed: {e}",
+                      file=sys.stderr, flush=True)
+        return n
+
     def seed_catalogs(self):
         """Fill in the model list for lanes that can enumerate without a pane.
 
@@ -1976,11 +2046,19 @@ class Manager(_core.ManagerBase):
             have = {o.get("value") for o in model["options"]}
             model["options"] += [e for e in MODEL_EXTRAS.get(agent, ())
                                  if e["value"] not in have]
-        try:
-            CATALOG.parent.mkdir(parents=True, exist_ok=True)
-            CATALOG.write_text(json.dumps(self.catalog, indent=1), encoding="utf-8")
-        except OSError:
-            pass
+        # Atomic and serialized (K9; Astra 2026-09-28: "serialize writers as
+        # well as replacing atomically"). write_text truncated in place, so a
+        # crash mid-write — or two panes handshaking at once — left a partial
+        # catalog.json that _load_catalog reads as {} and the dialog's model
+        # lists vanished until the next handshake. Same shape as save_meta.
+        with _CATALOG_LOCK:
+            try:
+                CATALOG.parent.mkdir(parents=True, exist_ok=True)
+                tmp = CATALOG.with_name(CATALOG.name + ".tmp")
+                tmp.write_text(json.dumps(self.catalog, indent=1), encoding="utf-8")
+                os.replace(tmp, CATALOG)
+            except OSError:
+                pass
 
 
 

@@ -37,5 +37,15 @@ Environment=CORRAL_OLLAMA_URL=http://127.0.0.1:11434
 Restart=always
 RestartSec=3
 
+# mixed: on stop/restart, SIGTERM goes to the hub ALONE first; only after it
+# exits does systemd SIGKILL the rest of the cgroup (the agents). The default,
+# control-group, signals every process at once, so the hub's SIGTERM handler
+# ran beside dying children and could not reliably write its one job: a note
+# in each busy pane naming the turn being interrupted (resilience review
+# 2026-09-28, P0-b'; Grok). The agents still die with the unit — this changes
+# the ORDER, not the outcome. Anything that survives anyway is reaped by pid
+# at the next boot (restore(), P0-pid).
+KillMode=mixed
+
 [Install]
 WantedBy=default.target

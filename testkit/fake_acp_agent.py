@@ -121,7 +121,11 @@ def main():
         elif method == "session/load":
             sid = params.get("sessionId")
             chunk(sid, "REPLAYED HISTORY")          # the hub must suppress this
-            send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": []}})
+            result = {"configOptions": []}
+            if os.environ.get("FAKE_ACP_NOTICE"):  # like ollama_acp's context-lost notice
+                result["_meta"] = {"corral/notice": os.environ["FAKE_ACP_NOTICE"],
+                                   "corral/contextLost": True}
+            send({"jsonrpc": "2.0", "id": rid, "result": result})
         elif method == "session/prompt":
             threading.Thread(target=prompt, args=(rid, params), daemon=True).start()
         elif method == "session/cancel":

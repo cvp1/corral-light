@@ -90,6 +90,11 @@ def unavailable_reason():
     return None
 
 
+# Said on every session/load. See the load handler for why it travels in the
+# result as well as in a chunk.
+RESUME_NOTICE = ("resumed — this local lane keeps no context across a "
+                 "restart, so the model starts fresh from here")
+
 class Server:
     """One stdio ACP conversation host. One process per pane, so a session map
     of one is the normal case; it is a map because session/load may re-attach a
@@ -155,10 +160,17 @@ class Server:
                 self.sessions.setdefault(sid, {"model": self.model, "history": []})
                 self._update(sid, {"sessionUpdate": "agent_message_chunk",
                                    "content": {"type": "text", "text":
-                                               "_(resumed — this local lane keeps no "
-                                               "context across a restart, so the model "
-                                               "starts fresh from here)_\n\n"}})
-                return self._result(rid, {"configOptions": self._config_options()})
+                                               "_(" + RESUME_NOTICE + ")_\n\n"}})
+                # ...and in the RESULT, where a client cannot lose it. The
+                # chunk above arrives inside session/load, which is exactly
+                # the window a client suppresses as replayed history — Light
+                # did, so the pane looked continuous while the model had
+                # forgotten everything (Astra/Grok 2026-09-28, K4). `_meta`
+                # is ACP's extension slot; the key is namespaced so no other
+                # client mistakes it for protocol.
+                return self._result(rid, {"configOptions": self._config_options(),
+                                          "_meta": {"corral/notice": RESUME_NOTICE,
+                                                    "corral/contextLost": True}})
             if method == "session/set_config_option":
                 return self._set_config(rid, params)
             if method == "session/prompt":

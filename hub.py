@@ -27,6 +27,7 @@ import json
 import mimetypes
 import os
 import queue
+import signal
 import sys
 import threading
 import time
@@ -123,20 +124,36 @@ MGR = sessions.Manager()
 # own liveness — this one's is exposed as /health's tick_age_s, for a watcher
 # outside this process (P21).
 TICK_S = 5
-_TICK = {"at": 0.0}
+_TICK = {"at": 0.0, "errors": 0}
 
 
 def _observe_loop():
-    """Poll pane liveness. Failures skip a tick, never kill the thread — a
-    dead observer is exactly the silent failure this loop exists to end."""
+    """Poll pane liveness. Failures skip a PANE, never the tick or the thread.
+
+    The tick advances per pane, inside the loop (Astra and Grok 2026-09-28,
+    P0-d): it used to update only after the whole loop, so ONE pane whose
+    snapshot() raised froze tick_age_s for the entire hub — and a watchdog
+    judging that number would page (or, as first planned, restart and kill
+    twelve healthy panes) over one bad row. A failing pane is counted in
+    `errors`, which /health reports, instead of hiding the observer's pulse.
+    """
     while True:
         time.sleep(TICK_S)
+        _observe_once()
+
+
+def _observe_once():
+    try:
+        panes = list(MGR.panes.values())
+    except Exception:                              # noqa: BLE001
+        panes = []
+    for p in panes:
         try:
-            for p in list(MGR.panes.values()):
-                p.snapshot(since=1 << 60)   # for the edge-broadcast side effect
-            _TICK["at"] = time.time()
+            p.snapshot(since=1 << 60)       # for the edge-broadcast side effect
         except Exception:                          # noqa: BLE001
-            pass
+            _TICK["errors"] += 1
+        _TICK["at"] = time.time()
+    _TICK["at"] = time.time()               # an empty roster still ticks
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -251,6 +268,7 @@ class Handler(BaseHTTPRequestHandler):
                                "tick_age_s": age, "panes_live": live,
                                "permissions_waiting": blocked,
                                "orphans_reaped": reaped,
+                               "tick_errors": _TICK.get("errors", 0),
                                "not_restored": getattr(MGR, "not_restored", 0)})
 
         if self._edge_refused():
@@ -552,6 +570,41 @@ class Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+_SHUTTING_DOWN = {"sig": None}
+
+
+def _on_shutdown_signal(signum, frame):              # noqa: ARG001
+    """SIGTERM/SIGINT: say what is being cut off, then exit. Nothing else.
+
+    Resilience review v2, P0-b' (Astra and Grok 2026-09-28). Runs on the MAIN
+    thread (Python delivers signals there), where serve_forever is parked in
+    select() holding no pane lock, so emit() cannot deadlock. It writes one
+    `note` per pane with a turn in flight or messages queued, naming them —
+    the transcript on disk is then truthful about the interruption — and
+    does NOT pause(): pause clears the queue and the in-flight prompt was
+    already popped, so "persist then pause" lost exactly the message that
+    mattered. The adapters are left to the service manager (KillMode=mixed
+    signals them only after this returns) and, where they outlive the hub,
+    to the next boot's orphan reap. A second signal exits immediately.
+    """
+    name = signal.Signals(signum).name
+    if _SHUTTING_DOWN["sig"] is not None:
+        os._exit(128 + signum)
+    _SHUTTING_DOWN["sig"] = name
+    try:
+        n = MGR.shutdown_notes(name)
+    except Exception as e:                             # noqa: BLE001
+        n = f"? ({e})"
+    print(f"corral-light: {name} — wrote {n} interrupted-turn note(s); exiting",
+          file=sys.stderr, flush=True)
+    raise SystemExit(0)
+
+
+def install_shutdown_handler():
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, _on_shutdown_signal)
+
+
 def serve(bind=BIND, port=PORT):
     # The hub runs as a systemd unit, and every pane it spawns inherits its
     # environment -- so until 2026-09-09 every interactive agent under it
@@ -566,6 +619,7 @@ def serve(bind=BIND, port=PORT):
     threading.Thread(target=_observe_loop, daemon=True).start()
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
+    install_shutdown_handler()
     # flush=True, and it is not cosmetic. Python line-buffers stdout only when
     # it is a TTY; under systemd, launchd, or `> log 2>&1` it is block-buffered,
     # so this line — the ONE signal that the server bound its port — sat in a
