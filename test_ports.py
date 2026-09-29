@@ -120,5 +120,93 @@ class Roles(unittest.TestCase):
         self.assertIn('"/api/session/roles"', hub)
 
 
+class Later(unittest.TestCase):
+    """later.py — scheduled prompts, ported from full Corral's schedule.py."""
+
+    def setUp(self):
+        from test_resilience import FakeLaneCase
+        import later
+        self.later = later
+        # Borrow the fake-lane Manager the resilience tests use.
+        self.case = FakeLaneCase("run")
+        self.case.setUp()
+        self.addCleanup(self.case.doCleanups)
+        self.mgr = self.case.mgr
+        self.dir = self.case.agent_dir
+        self.s = later.Scheduler(self.mgr, Path(tempfile.mkdtemp()) / "schedule.json")
+
+    def iso(self, **delta):
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc) + timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_add_refuses_now_not_at_six_am(self):
+        for kw, why in ((dict(agent="nope"), "unknown agent"),
+                        (dict(prompt=""), "needs a prompt"),
+                        (dict(when=self.iso(hours=-5)), "well past"),
+                        (dict(action="remind"), "no attention queue"),
+                        (dict(posture="readonly"), "unknown posture"),
+                        (dict(repeat="hourly"), "unknown repeat")):
+            args = dict(agent="fake", cwd=self.dir, prompt="hi", when=self.iso(minutes=5))
+            args.update(kw)
+            with self.assertRaises(ValueError, msg=kw) as ar:
+                self.s.add(**args)
+            self.assertIn(why, str(ar.exception))
+
+    def test_a_due_job_opens_a_pane_and_sends_then_retires(self):
+        j = self.s.add("fake", self.dir, "remember fig", self.iso(seconds=-5))
+        self.s.tick()
+        self.assertEqual(self.s.list(), [], "a fired one-shot stayed on the queue")
+        p = next(iter(self.mgr.panes.values()))
+        from test_resilience import wait_for
+        self.assertTrue(wait_for(lambda: "ok" in self.case.texts(p)))
+        self.assertTrue(any("scheduled job" in (e["data"].get("text") or "")
+                            for e in p.events if e["kind"] == "note"))
+        self.assertTrue(json.loads(self.s.path.read_text()) == {"jobs": []})
+        self.assertEqual(j["title"], "remember fig")
+
+    def test_a_stale_job_is_skipped_loudly_and_kept_as_a_record(self):
+        from datetime import datetime, timedelta, timezone
+        j = self.s.add("fake", self.dir, "too late", self.iso(minutes=1))
+        later_now = datetime.now(timezone.utc) + timedelta(hours=5)
+        self.s.tick(now=later_now)
+        rec = self.s.list()[0]
+        self.assertTrue(rec["failed"])
+        self.assertIn("missed", rec["last_error"])
+        self.assertEqual(self.mgr.panes, {}, "a stale job stampeded")
+
+    def test_a_daily_walks_to_the_next_future_slot(self):
+        j = self.s.add("fake", self.dir, "morning", self.iso(seconds=-30), repeat="daily")
+        self.s.tick()
+        rec = self.s.list()[0]
+        from datetime import datetime, timezone
+        nxt = self.later.parse_when(rec["at"])
+        self.assertGreater(nxt, datetime.now(timezone.utc))
+        self.assertLess((nxt - datetime.now(timezone.utc)).total_seconds(), 86400)
+
+    def test_a_nudge_never_queues_behind_a_permission(self):
+        p = self.mgr.create("fake", self.dir)
+        self.s.add("", "", "hello", self.iso(seconds=-5), action="nudge", pane_id=p.id)
+        p.pending["r1"] = {}                 # blocked at a consent gate
+        self.s.tick()
+        rec = self.s.list()[0]
+        self.assertIn("permission gate", rec["last_error"])
+        self.assertEqual(p._queue, [])
+
+    def test_a_role_is_inlined_when_armed(self):
+        import roles
+        rdir = Path(tempfile.mkdtemp())
+        os.environ["CORRAL_LIGHT_ROLES_DIR"] = str(rdir)
+        self.addCleanup(os.environ.pop, "CORRAL_LIGHT_ROLES_DIR", None)
+        roles.create({"id": "nightly", "description": "a nightly summariser",
+                      "personality": "brief", "does": "summarise", "expects": "bullets",
+                      "data_class": "public"}, rdir=rdir)
+        j = self.s.add("fake", self.dir, "summarise", self.iso(minutes=5), role="nightly")
+        self.assertTrue(j["prompt"].startswith("You are working as `nightly`"))
+        self.assertTrue(j["prompt"].endswith("summarise"))
+        self.assertEqual(j["title"], "summarise")
+        (rdir / "prompts" / "nightly.md").write_text("EDITED AFTER ARMING")
+        self.assertNotIn("EDITED", self.s.list()[0]["prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()

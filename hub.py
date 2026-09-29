@@ -419,6 +419,8 @@ class Handler(BaseHTTPRequestHandler):
             # pointed this at anything yet".
             import content
             return self._json(content.status())
+        if p == "/api/session/schedule":
+            return self._json({"jobs": MGR.schedule.list()})
         if p == "/api/session/roles":
             # Every role, with the lanes each one can start on and why not
             # (roles.py). A broken role tree degrades the dialog to "no
@@ -662,6 +664,21 @@ class Handler(BaseHTTPRequestHandler):
                 m = MGR.get(b.get("pane", "")).set_minimized(
                     b.get("minimized", True))
                 return self._json({"ok": True, "minimized": m})
+            if p == "/api/session/schedule/add":
+                # later.py: the SAME create+send a click takes, at a time.
+                job = MGR.schedule.add(
+                    b.get("agent", ""), b.get("cwd") or str(sessions.default_cwd()),
+                    b.get("prompt", ""), b.get("when", ""),
+                    repeat=b.get("repeat") or "", posture=b.get("posture") or None,
+                    model=(b.get("model") or "").strip() or None,
+                    effort=(b.get("effort") or "").strip() or None,
+                    title=b.get("title") or "", action=b.get("action") or "start",
+                    pane_id=b.get("pane") or None,
+                    role=(b.get("role") or "").strip() or None)
+                return self._json({"ok": True, "job": job})
+            if p == "/api/session/schedule/remove":
+                return self._json({"ok": True,
+                                   "removed": MGR.schedule.remove(b.get("id", ""))})
             if p == "/api/session/seen":
                 # A human surface SHOWED this pane up to `seq` (P0-e'). The
                 # browser calls it only while the page is visible and focused.
@@ -784,6 +801,7 @@ def serve(bind=BIND, port=PORT):
         os.environ.pop(_k, None)
     threading.Thread(target=_observe_loop, daemon=True).start()
     threading.Thread(target=_notify_loop, daemon=True).start()
+    MGR.schedule.start()                    # later.py: scheduled prompts
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     install_shutdown_handler()

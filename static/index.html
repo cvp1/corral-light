@@ -103,6 +103,14 @@
       </select>
     </label>
     <p class="hint" id="posturehint"></p>
+    <!-- Later (later.py): with a time set, Start ARMS the conversation instead
+         of opening it now, and the prompt is what it will be asked. -->
+    <details id="f-later"><summary>Later…</summary>
+      <label>Start at<input id="f-when" type="datetime-local"></label>
+      <label>Repeat<select id="f-repeat"><option value="">once</option>
+        <option value="daily">daily</option><option value="weekly">weekly</option></select></label>
+      <label>Ask<textarea id="f-prompt" rows="3" placeholder="what it will be asked"></textarea></label>
+    </details>
     <menu>
       <button value="cancel" class="btn">Cancel</button>
       <button value="ok" class="btn go" id="f-go">Start</button>
