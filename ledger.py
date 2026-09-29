@@ -1,0 +1,189 @@
+#!/usr/bin/python3
+"""ledger — a durable, bounded record of every turn a pane accepted.
+
+WHY (resilience review v2, P0-ledger; Astra 2026-09-28)
+    `/api/session/send` answered ok after a VOLATILE queue insert. A hub
+    that died between that ack and the agent finishing the turn left no
+    record that the turn was ever accepted, dispatched, or cut off: the
+    `user` event on disk says what was typed, not whether it ran. Neither a
+    SIGTERM handler (SIGKILL and OOM skip it) nor a socket closes that window.
+    This file does: `accepted` is on disk — flushed AND fsynced — before the
+    send is acknowledged, and every later edge is appended as it happens.
+
+STATES, one line per edge, keyed by turn id
+    accepted -> dispatched -> completed | interrupted | uncertain
+
+    completed    the agent answered session/prompt (any stopReason, incl.
+                 cancelled — that is the agent's own answer)
+    interrupted  the turn cannot have finished: the agent died or the pane
+                 was paused while it ran, the hub stopped, or it never left
+                 the queue. The agent MAY have done part of it.
+    uncertain    something in Corral itself failed around the turn; whether
+                 the agent ran it is not known.
+
+    Nothing here is ever replayed. A turn left `accepted` or `dispatched`
+    when a hub died is marked `interrupted` by the next boot (recover()) and
+    surfaced in the pane as a note; re-sending it is the operator's call,
+    because a half-run turn re-run is a second set of side effects (P17).
+
+WHY A FILE PER PANE AND NOT A `turns` SECTION IN meta.json
+    meta.json is rewritten whole, atomically, on every human edit. Four
+    edges per turn would mean four full rewrites per turn contending with
+    save_meta's callers, and only one of those edges (`accepted`) needs to
+    be synchronous. An append-only JSONL line is the cheapest durable write
+    there is, and the transcript already set the pattern (events.jsonl).
+
+BOUNDED (P8): the file is folded back to the newest LEDGER_TURNS turns,
+atomically, once it passes LEDGER_MAX_LINES lines.
+"""
+import hashlib
+import json
+import os
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+LEDGER_TURNS = 200          # turns kept after a fold: days of normal use per
+                            # pane, and small enough that a fold is one quick read
+LEDGER_MAX_LINES = LEDGER_TURNS * 5   # ~4 edges per turn plus slack; past this, fold
+LEDGER_TEXT_CHARS = 2000    # of each prompt kept, with its full length and sha256:
+                            # enough to name it in a note, never a second transcript
+
+OPEN = ("accepted", "dispatched")
+TERMINAL = ("completed", "interrupted", "uncertain")
+STATES = OPEN + TERMINAL
+
+
+def _now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TurnLedger:
+    """One pane's turns. Thread-safe; every method is best-effort except
+    accept(), which raises if the acceptance cannot be made durable."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self._lines = None              # counted lazily, once
+
+    # ── writes ──────────────────────────────────────────────────────────
+    def _append(self, rec, sync=False):
+        line = json.dumps(rec, ensure_ascii=False) + "\n"
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
+                if sync:
+                    os.fsync(fh.fileno())
+            if self._lines is None:
+                self._lines = self._count()
+            else:
+                self._lines += 1
+            if self._lines > LEDGER_MAX_LINES:
+                self._fold_locked()
+
+    def accept(self, text):
+        """Record an accepted turn DURABLY and return its id. Raises OSError
+        when that is impossible — the caller must then refuse the send rather
+        than acknowledge a turn nothing recorded."""
+        text = text or ""
+        tid = uuid.uuid4().hex[:12]
+        self._append({"turn": tid, "state": "accepted", "at": _now(),
+                      "text": text[:LEDGER_TEXT_CHARS], "chars": len(text),
+                      "sha256": hashlib.sha256(text.encode("utf-8", "replace"))
+                      .hexdigest()}, sync=True)
+        return tid
+
+    def mark(self, tid, state, why=None, **extra):
+        """Append one edge. Never raises: a ledger that cannot write must not
+        take the turn it describes down with it."""
+        if not tid or state not in STATES:
+            return
+        rec = {"turn": tid, "state": state, "at": _now()}
+        if why:
+            rec["why"] = str(why)[:300]
+        rec.update(extra)
+        try:
+            self._append(rec)
+        except OSError:
+            pass
+
+    # ── reads ───────────────────────────────────────────────────────────
+    def _count(self):
+        try:
+            with self.path.open("rb") as fh:
+                return sum(1 for _ in fh)
+        except OSError:
+            return 0
+
+    def turns(self):
+        """{turn_id: folded record} in first-seen order; unparseable lines
+        are skipped (a torn last line after a crash is expected)."""
+        out = {}
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    tid = r.get("turn") if isinstance(r, dict) else None
+                    if not tid:
+                        continue
+                    cur = out.setdefault(tid, {"turn": tid})
+                    cur.update(r)
+                    cur.setdefault("accepted_at", r.get("at")
+                                   if r.get("state") == "accepted" else None)
+        except OSError:
+            return {}
+        return out
+
+    def open_turns(self):
+        return [r for r in self.turns().values() if r.get("state") in OPEN]
+
+    def recover(self, why="the hub stopped before this turn finished"):
+        """Boot: every turn still `accepted`/`dispatched` is `interrupted`.
+        Returns the records it closed (for the pane's note). Never replays."""
+        closed = []
+        for r in self.open_turns():
+            self.mark(r["turn"], "interrupted", why=why,
+                      was=r.get("state"))
+            closed.append(r)
+        return closed
+
+    # ── bound ───────────────────────────────────────────────────────────
+    def _fold_locked(self):
+        folded = list(self.turns_unlocked().values())[-LEDGER_TURNS:]
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for r in folded:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)
+        self._lines = len(folded)
+
+    # turns() takes no lock; the fold already holds it.
+    turns_unlocked = turns
+
+
+class NullLedger:
+    """For panes built without a directory (test stubs). Records nothing."""
+
+    def accept(self, text):
+        return None
+
+    def mark(self, *a, **k):
+        return None
+
+    def turns(self):
+        return {}
+
+    def open_turns(self):
+        return []
+
+    def recover(self, why=""):
+        return []

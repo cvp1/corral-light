@@ -47,6 +47,7 @@ from pathlib import Path
 import re
 
 import acp
+import ledger
 import mcp
 
 ROOT = Path(__file__).resolve().parent
@@ -93,6 +94,21 @@ QUOTE_CHARS = _core.QUOTE_CHARS
 _now = _core._now
 
 _CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
+
+
+class _QueuedText(str):
+    """A queued prompt that remembers its ledger turn id.
+
+    A str subclass so every existing reader of `_queue` — the core's pause()
+    counting it, notes quoting it, tests seeding it with plain strings —
+    keeps working unchanged; `turn` rides along for the ledger (P0-ledger).
+    """
+    turn = None
+
+    def __new__(cls, text, turn):
+        s = super().__new__(cls, text)
+        s.turn = turn
+        return s
 
 MAX_ROSTER = MAX_PANES * 5      # ALL panes tracked, live or detached. MAX_PANES
                                  # only counts live ones, so repeated
@@ -1081,6 +1097,10 @@ class Pane(_core.PaneBase):
             parked, self._queue = list(self._queue), []
             self._turn_running = False
             self._generation += 1        # retire any drain still holding the old client
+        for t in parked:
+            self._turns().mark(getattr(t, "turn", None), "interrupted",
+                               why="the agent stopped before it was sent",
+                               was="accepted")
         if parked:
             names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
                                    ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
@@ -1175,6 +1195,43 @@ class Pane(_core.PaneBase):
 
 
 
+    def _turns(self):
+        """This pane's turn ledger (ledger.py), created on first use.
+
+        Lazy because panes come into being three ways (and test stubs a
+        fourth) and only the ones with a directory can keep one.
+        """
+        lg = getattr(self, "_ledger", None)
+        if lg is None:
+            d = getattr(self, "dir", None)
+            lg = ledger.TurnLedger(d / "turns.jsonl") if d else ledger.NullLedger()
+            self._ledger = lg
+        return lg
+
+    def _close_open_turns(self, why):
+        """Mark the in-flight turn and every queued one `interrupted`.
+
+        Called where a pane stops running work on purpose or loses it —
+        pause, close, a hub shutdown — so the ledger never leaves a turn
+        looking like it might still be running (P0-ledger).
+        """
+        with self._turn_lock:
+            items = ([getattr(self, "_in_flight", None)]
+                     + list(getattr(self, "_queue", [])))
+        lg = self._turns()
+        for i, t in enumerate(x for x in items if x is not None):
+            lg.mark(getattr(t, "turn", None), "interrupted", why=why,
+                    was="dispatched" if (i == 0 and items[0] is not None)
+                    else "accepted")
+
+    def pause(self):
+        self._close_open_turns("paused")
+        return super().pause()
+
+    def stop(self):
+        self._close_open_turns("closed")
+        return super().stop()
+
     def shutdown_note(self, why):
         """ONE transcript note naming what a hub exit is about to cut off.
 
@@ -1204,6 +1261,7 @@ class Pane(_core.PaneBase):
                          + "; ".join(show(t) for t in queued))
         parts.append("nothing will be re-sent automatically")
         text = " — ".join(parts)
+        self._close_open_turns(f"hub shutdown ({why})")
         self.emit("note", {"text": text, "shutdown": True,
                            "interrupted": running, "queued": queued})
         return text
@@ -1566,8 +1624,17 @@ class Pane(_core.PaneBase):
                 raise ValueError(
                     f"{MAX_QUEUED_TURNS} messages already waiting on this pane "
                     f"— it is still working through them")
-            self._queue.append(text)
-            self.emit("user", {"text": text})
+            # DURABLE BEFORE ACKNOWLEDGED (P0-ledger, Astra 2026-09-28). The
+            # hub answers ok the moment this returns, so the acceptance has to
+            # be on disk (fsynced) first; if it cannot be, the send is refused
+            # rather than acknowledged with nothing behind it.
+            try:
+                tid = self._turns().accept(text)
+            except OSError as e:
+                raise ValueError(f"could not record this turn durably, so it "
+                                 f"was not accepted: {e}")
+            self._queue.append(_QueuedText(text, tid))
+            self.emit("user", {"text": text, "turn": tid})
             if text == "/clear":
                 # The SDK special-cases this literal text: it resets ITS OWN
                 # context and emits a `conversation_reset` notification that
@@ -1585,9 +1652,10 @@ class Pane(_core.PaneBase):
                 self.emit("cleared", {})
             self.state = "busy"
             if self._turn_running:
-                return
+                return tid
             self._turn_running = True
             threading.Thread(target=self._drain, daemon=True).start()
+            return tid
 
     def _drain(self):
         """Run queued prompts strictly in order until the pane is empty."""
@@ -1610,6 +1678,9 @@ class Pane(_core.PaneBase):
                 # A shutdown note has to NAME it (Grok 2026-09-28, K3), so it
                 # is kept here for exactly as long as it is in flight.
                 self._in_flight = text
+            lg = self._turns()
+            tid = getattr(text, "turn", None)
+            lg.mark(tid, "dispatched")
             try:
                 r = client.prompt(self.acp_session, text)
             except acp.AgentError as e:
@@ -1628,9 +1699,15 @@ class Pane(_core.PaneBase):
                         # finding 4.
                         return
                     # Do not silently swallow what was still waiting.
-                    dropped, self._queue = len(self._queue), []
+                    lost, self._queue = self._queue, []
+                    dropped = len(lost)
                     self._turn_running = False
                     self._in_flight = None
+                lg.mark(tid, "interrupted", why=str(e), was="dispatched")
+                for t in lost:
+                    lg.mark(getattr(t, "turn", None), "interrupted",
+                            why="the agent stopped before it was sent",
+                            was="accepted")
                 # Since 2026-08-31 a prompt carries NO deadline, so the only
                 # way to reach here is the agent process actually dying or its
                 # stdin closing — never a clock deciding Craig's session is
@@ -1654,9 +1731,16 @@ class Pane(_core.PaneBase):
                 with self._turn_lock:
                     if self._generation != gen:
                         return
-                    dropped, self._queue = len(self._queue), []
+                    lost, self._queue = self._queue, []
+                    dropped = len(lost)
                     self._turn_running = False
                     self._in_flight = None
+                # A bug in US around the turn: whether the agent ran it is
+                # not known, so it is `uncertain` — and never replayed.
+                lg.mark(tid, "uncertain", why=f"{type(e).__name__}: {e}")
+                for t in lost:
+                    lg.mark(getattr(t, "turn", None), "interrupted",
+                            why="dropped after an internal error", was="accepted")
                 self.emit("note", {
                     "text": f"the turn could not be run ({type(e).__name__}: {e})"
                             + (f"; {dropped} queued message(s) were dropped"
@@ -1668,9 +1752,10 @@ class Pane(_core.PaneBase):
                 if self._generation != gen:
                     return
                 self._in_flight = None
+            lg.mark(tid, "completed", stopReason=(r or {}).get("stopReason"))
             self._flush_thought()       # a turn ending on a thought still shows it
             self.emit("turn_end", {"stopReason": (r or {}).get("stopReason"),
-                                   "usage": self.usage,
+                                   "usage": self.usage, "turn": tid,
                                    "queued": len(self._queue)})
             if self.state != "dead":
                 self.state = "needs-you" if self.pending else (
@@ -2194,6 +2279,23 @@ class Manager(_core.ManagerBase):
                       f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
                 continue
             self.panes[m["id"]] = p
+            # P0-ledger: a turn the previous hub accepted or dispatched and
+            # never closed was cut off by that hub's exit. Say so, once, and
+            # never re-send it (Astra 2026-09-28).
+            try:
+                cut = p._turns().recover()
+            except Exception:                # noqa: BLE001
+                cut = []
+            if cut:
+                def _show(r):
+                    t = r.get("text") or ""
+                    return repr(t[:PARKED_PREVIEW_CHARS] +
+                                ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                p.emit("note", {
+                    "text": f"{len(cut)} turn(s) were interrupted when the hub "
+                            f"stopped and will not be re-sent: "
+                            + "; ".join(f"{_show(r)} ({r.get('state')})" for r in cut),
+                    "interrupted_turns": [r["turn"] for r in cut]})
             outcome = self.orphans.get(m["id"])
             if outcome in ("reaped", "killed"):
                 p.emit("note", {"text": "the agent process from before the hub "
