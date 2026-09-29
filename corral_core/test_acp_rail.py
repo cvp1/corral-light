@@ -281,3 +281,24 @@ class AFailedSendLeavesNothingBehind(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArgvPieceMatchesAcrossInterpreterReexec(unittest.TestCase):
+    """macOS framework Python re-execs as `.../MacOS/Python` (dogma-2,
+    2026-09-29); the weak orphan check must still see our own script."""
+
+    def test_interpreter_matches_by_family_script_by_path(self):
+        args = ("/Library/Developer/CommandLineTools/Library/Frameworks/"
+                "Python3.framework/Versions/3.9/Resources/Python.app/Contents/"
+                "MacOS/Python /home/x/corral-light/grok_launcher.py")
+        self.assertTrue(acp._argv_piece_present("/usr/bin/python3", args))
+        self.assertTrue(acp._argv_piece_present(
+            "/home/x/corral-light/grok_launcher.py", args))
+        self.assertFalse(acp._argv_piece_present(
+            "/home/x/corral-light/codex_launcher.py", args))
+
+    def test_a_non_interpreter_never_matches_by_family(self):
+        self.assertFalse(acp._argv_piece_present("/usr/bin/sleep",
+                                                 "/usr/bin/python3 foo.py"))
+        self.assertFalse(acp._argv_piece_present("/usr/bin/python3",
+                                                 "/usr/bin/sleep 30"))
