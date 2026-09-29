@@ -3366,16 +3366,59 @@ class TheWireCarriesTheDisplayProjection(unittest.TestCase):
         """The one check that would catch app.js drifting from the core. Skipped
         LOUDLY rather than silently when node is absent -- a check that did not
         run must not read as a check that passed."""
-        import shutil
-        import subprocess
-        node = shutil.which("node")
-        if not node:
-            raise unittest.SkipTest(
-                "node absent: selftest_display.mjs did NOT run, so the "
-                "browser's copy of display_state is unverified on this host")
-        r = subprocess.run([node, str(ROOT / "selftest_display.mjs")],
-                           capture_output=True, text=True, timeout=60)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        _run_node_selftest(self, "selftest_display.mjs",
+                           "the browser's copy of display_state")
+
+
+def _run_node_selftest(case, name, what):
+    """Run one .mjs selftest as a subprocess. Skips LOUDLY when node is absent:
+    a check that did not run must not read as a check that passed."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        raise unittest.SkipTest(
+            f"node absent: {name} did NOT run, so {what} is unverified here")
+    r = subprocess.run([node, str(ROOT / name)],
+                       capture_output=True, text=True, timeout=60)
+    case.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
+    """DESIGN-5 S2. `postureEnforced: false` covered three different promises
+    -- the vendor decides, our own adapter asks and fails closed, or the lane
+    has no tools at all -- under one `agent-set` pill. The wire now carries
+    `rail` so the pill can tell them apart.
+
+    No lane in THIS product sets `rail` today (its sovereign lane is Ollama,
+    chat-only, which has no rail to enforce and says so). The key exists and is
+    exercised anyway: the rule lives in one place across both skins, and a
+    branch only one product has ever run is a branch nobody has tested.
+    """
+
+    def test_the_wire_carries_rail(self):
+        import sessions
+        p = TheWireCarriesTheDisplayProjection._pane(self, "ready")
+        self.assertIn("rail", p.snapshot())
+        self.assertFalse(p.snapshot()["rail"])
+        try:
+            sessions.AGENTS["claude"]["rail"] = True
+            self.assertTrue(p.snapshot()["rail"])
+        finally:
+            sessions.AGENTS["claude"].pop("rail", None)
+
+    def test_the_chat_only_lane_declares_it_has_no_tools(self):
+        """The `chat only` pill is derived from `tools`, which the ollama lane
+        has always declared. If that ever flips, the pill must stop claiming
+        there is nothing to ask about."""
+        import sessions
+        self.assertFalse(sessions.AGENTS["ollama"].get("tools"))
+        self.assertFalse(sessions.AGENTS["ollama"].get("rail"),
+                         "a lane with a rail must not also read as chat-only")
+
+    def test_the_posture_pill_and_the_new_dialog_are_honest(self):
+        _run_node_selftest(self, "selftest_posture.mjs",
+                           "the posture pill and the New dialog")
 
 
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent

@@ -1987,6 +1987,14 @@ class Pane(_core.PaneBase):
             # Whether this lane can read a file itself — what attaching a note
             # to it means (a reference, or a quoted excerpt).
             "tools": bool(AGENTS[self.agent].get("tools")),
+            # Whether the ADAPTER enforces a fail-closed permission rail of its
+            # own, even though Corral cannot set the posture MODE on this lane.
+            # `postureEnforced: false` alone cannot tell "the vendor decides"
+            # from "our own adapter asks before every write" — two very
+            # different promises that wore the same `agent-set` pill. No lane
+            # in this product sets it today; the key exists so the pill asks
+            # the lane rather than hardcoding a list of lane names.
+            "rail": bool(AGENTS[self.agent].get("rail")),
             "state": state, "error": self.error, "created": self.created,
             # The triage projection over `state` — one opinion, computed in the
             # core and rendered (never re-derived) by the roster, the chips,

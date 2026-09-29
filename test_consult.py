@@ -322,5 +322,53 @@ class LaneNames(unittest.TestCase):
         self.assertEqual(consult.lane_key("delegate:foo"), "delegate:foo")
 
 
+class AnUnsetPostureIsNotAClaim(unittest.TestCase):
+    """DESIGN-5 S2. `open_pane` used to default `posture="strict"`, so every
+    scripted arm -- every panel run, every eval pass -- wrote `strict` into the
+    pane's meta.json, including on the lanes where nothing can impose it. 244
+    of 446 panes on this fleet carry that annotation. No historic meta is
+    rewritten (a stored fact stays a fact); the point is that no NEW pane gets
+    an unearned one.
+    """
+
+    LANES = [{"key": "grok", "label": "Grok", "available": True,
+              "postureEnforced": False}]
+
+    class Lane(StubHub):
+        def get(self, path, timeout=None):
+            st = super().get(path, timeout=timeout)
+            st["agents"] = AnUnsetPostureIsNotAClaim.LANES
+            return st
+
+        def post(self, path, body, timeout=None):
+            self.posts.append((path, body))
+            if path == "/api/session/new":
+                return {"pane": {"id": "P1", "agent": body["agent"]}}
+            return {"ok": True}
+
+    def _new_body(self, **kw):
+        hub = self.Lane([{"state": "ready", "events": []}])
+        consult.open_pane(hub, "grok", "/tmp", **kw)
+        return next(b for p, b in hub.posts if p == "/api/session/new")
+
+    def test_no_posture_means_no_posture_key(self):
+        self.assertNotIn("posture", self._new_body(),
+                         "an unset posture must post NO key, not an empty "
+                         "string and not a default the hub never chose")
+
+    def test_an_explicit_posture_is_still_posted(self):
+        self.assertEqual(self._new_body(posture="strict")["posture"], "strict")
+
+    def test_the_cli_no_longer_defaults_to_strict(self):
+        """The default lived in TWO places -- the function signature and the
+        argparse flag -- and fixing only one would leave every command-line
+        caller posting `strict` exactly as before."""
+        for verb in ("ask", "fanout"):
+            args = consult.build_parser().parse_args(
+                [verb, "--lane", "grok", "--prompt", "x"])
+            self.assertIsNone(args.posture,
+                              f"consult {verb} still defaults --posture")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
