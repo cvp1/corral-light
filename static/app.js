@@ -803,7 +803,16 @@ function buildPane(p) {
 }
 
 function composerKind(p) {
-  return p.state === 'dead' ? 'none' : p.state === 'detached' ? 'detached' : 'live';
+  // A dead pane with a conversation to load takes a message like a live one:
+  // sending resumes it (P0-a', resilience review 2026-09-28 — Astra/Grok).
+  // Only a pane that died before it ever had a session has nothing to offer.
+  if (p.state === 'dead') return p.resumable ? 'live' : 'none';
+  return p.state === 'detached' ? 'detached' : 'live';
+}
+
+async function resumePane(p) {
+  try { await api('/api/session/resume', { pane: p.id }); await refresh(); }
+  catch (e) { toast(e.message, true); }
 }
 
 function updatePane(rec, p) {
@@ -1446,6 +1455,14 @@ function render() {
     if (p.pending.length) it.appendChild(el('span', 'badge', String(p.pending.length)));
 
     const acts = el('div', 'acts');
+    if (p.state === 'dead' && p.resumable) {
+      // ↻ beside ✕: a pane whose agent stopped on its own comes back in one
+      // click, on the same conversation (P0-a', 2026-09-28). Before this the
+      // only way back was dismiss -> Archived -> reopen -> resume.
+      const r = el('button', 'a', '↻'); r.title = 'resume — restart the agent on this conversation';
+      r.onclick = async e => { e.stopPropagation(); await resumePane(p); };
+      acts.appendChild(r);
+    }
     if (p.state === 'dead') {
       const f = el('button', 'a', '✕'); f.title = 'dismiss — remove from the list';
       f.onclick = async e => {
@@ -1700,6 +1717,13 @@ function render() {
       try { await api('/api/session/forget', { pane: p.id }); await refresh(); }
       catch (e) { toast(e.message, true); }
     };
+    if (p.resumable) {
+      const acts = el('div', 'facts');
+      const rb = el('button', 'fbtn', 'Resume');
+      rb.onclick = async e => { e.stopPropagation(); await resumePane(p); };
+      acts.appendChild(rb);
+      c.appendChild(acts);
+    }
     n.appendChild(c); items++;
   }
   // An `uncertain` pane is alive, mid-turn, and has emitted nothing for

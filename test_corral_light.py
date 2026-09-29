@@ -3106,8 +3106,6 @@ class AnAckIsNotAdoption(unittest.TestCase):
         self.assertFalse([e for e in p.events if e["kind"] == "note"])
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class PanesFeedPanes(unittest.TestCase):
@@ -3286,3 +3284,13 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
         import auth
         from corral_core import edge_live
         self.assertEqual(edge_live.run(hub, auth), [])
+
+
+# The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
+# processes through kill, resume, shutdown and restore. Collected here so the
+# one documented command runs it.
+from test_resilience import *                    # noqa: F401,F403,E402
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

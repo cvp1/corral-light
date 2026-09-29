@@ -102,6 +102,9 @@ MAX_PROMPT = 200_000
                                # backlog without bound; past this, auto-refuse
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 STALL_S = 300                  # busy with nothing emitted for this long = suspect
+PARKED_PREVIEW_CHARS = 120     # of each parked message quoted in the note: enough
+                               # to recognise what you typed, short enough that
+                               # four of them stay one readable transcript line
 
 # Permission postures Corral offers, mapped to Claude Code's own modes. The
 # descriptions are the AGENT's, read off session/new's configOptions:
@@ -1041,12 +1044,65 @@ class Pane(_core.PaneBase):
 
 
 
+    # RESUMABLE FROM `dead`, not only `detached` (resilience review
+    # 2026-09-28, P0-a'; both rival arms, Astra and Grok, 2026-09-28). A pane
+    # whose adapter crashed or whose vendor cut the session used to have no
+    # way back but dismiss -> Archived -> reopen -> resume, four clicks you
+    # had to already know; full Corral fixed the same gap on 2026-09-04
+    # (corral/sessions.py resume). Grok's review is why this is more than the
+    # one-line predicate change: resume() overwrote self.client without
+    # closing the old one, and agent_exit leaves `_queue` in place, so the
+    # next send would have DRAINED the dead attachment's stale type-ahead
+    # into the new process — prompts the operator may no longer mean, sent
+    # without being shown. So: close the old client first, PARK the queue
+    # (never drain it) and say in the transcript exactly what was parked.
+    # A `close()`d pane is popped out of the roster entirely, so any `dead`
+    # pane still here died on its own and is safe to reattach to the same
+    # acp_session exactly like a detached one.
+    RESUMABLE = ("detached", "dead")
+
+    def _park_stale_queue(self):
+        """Drop a dead attachment's type-ahead and name every message dropped.
+
+        Never re-sent: the process that would have run them is gone, and a
+        prompt typed minutes ago into a pane that then crashed is not
+        consent to run it against a fresh process now (P17). The text goes
+        into a `note` so nothing the operator typed silently disappears; he
+        can copy it back into the composer if he still wants it.
+        """
+        with self._turn_lock:
+            parked, self._queue = list(self._queue), []
+            self._turn_running = False
+            self._generation += 1        # retire any drain still holding the old client
+        if parked:
+            names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
+                                   ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                              for t in parked)
+            self.emit("note", {"text": f"{len(parked)} queued message(s) were "
+                                       f"not sent when the agent stopped, and "
+                                       f"will not be sent now: {names}",
+                               "parked": parked})
+        return parked
+
     def resume(self):
-        """Attach a fresh agent process to this pane's existing conversation."""
-        if self.state != "detached":
-            raise ValueError(f"pane is {self.state}, not detached")
+        """Attach a fresh agent process to this pane's existing conversation.
+
+        From `detached` (paused, or restored after a restart) or from `dead`
+        (the agent exited on its own). See RESUMABLE above.
+        """
+        if self.state not in self.RESUMABLE:
+            raise ValueError(f"pane is {self.state}, not detached or dead")
         if not self.acp_session:
             raise ValueError("this pane has no agent session to resume")
+        prior = self.state
+        if prior == "dead":
+            # Close the crashed client BEFORE anything else, so its reader
+            # thread's late agent_exit cannot land on the new attachment (the
+            # generation fence in _bind() is the second half of that), and
+            # its process group is reaped rather than orphaned.
+            self._expect_exit = True
+            self._reap_failed_client()
+            self._park_stale_queue()
         self.mgr._reserve_live(self)
         try:
             if self._log is None:      # pause() closed it; reopen for this attachment
@@ -1056,10 +1112,11 @@ class Pane(_core.PaneBase):
             self._expect_exit = False        # a NEW process; its exit is real news
             with self._turn_lock:
                 self._generation += 1        # a new attachment; retire any stale drain
+                gen = self._generation
+            self.error = None
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
-                                        on_event=self._on_event,
-                                        on_permission=self._on_permission,
-                                        strip_env=strip_prefixes())
+                                        strip_env=strip_prefixes(),
+                                        **self._bind(gen))
             self.client.initialize()
             # The agent replays the whole transcript on load. We already have
             # it; emitting it again would double the conversation on screen.
@@ -1082,22 +1139,46 @@ class Pane(_core.PaneBase):
             self.state = "ready"
             self.emit("resumed", {"model": self.model, "effort": self.effort,
                                   "config": self.config,
-                                  "postureEnforced": self.posture_enforced})
+                                  "postureEnforced": self.posture_enforced,
+                                  "from": prior})
         except acp.AgentError as e:
             self._reap_failed_client()      # same leak as start(); see there
             self.state, self.error = "dead", f"could not resume: {e}"
             self.emit("dead", {"reason": self.error})
         except Exception:
             # Reservation marked us `starting` (counts as live). A spawn that
-            # never happened must not keep the slot.
+            # never happened must not keep the slot — and a pane that was
+            # dead goes back to dead, not to a `detached` it never was.
             if self.state == "starting":
-                self.state = "detached"
+                self.state = prior
             raise
         self.save_meta()
         return self
 
 
 
+
+    def _bind(self, gen):
+        """The callbacks for ONE attachment, fenced by its generation.
+
+        Resuming a dead pane closes the old client and starts a new one
+        (Grok 2026-09-28, P0-a'). The old client's reader thread reports its
+        exit ASYNCHRONOUSLY — it can land after the new client is up and
+        `_expect_exit` has been reset to False, and would then flip the
+        freshly resumed pane back to `dead` and clear its permissions. Every
+        event from an attachment that is no longer the pane's current one is
+        dropped here; the pane already said what happened to it.
+        """
+        def on_event(kind, data):
+            if gen != self._generation:
+                return
+            self._on_event(kind, data)
+
+        def on_permission(req):
+            if gen != self._generation:
+                return
+            self._on_permission(req)
+        return {"on_event": on_event, "on_permission": on_permission}
 
     def _on_event(self, kind, data):
         if kind != "agent_thought_chunk":
@@ -1192,9 +1273,8 @@ class Pane(_core.PaneBase):
         self._expect_exit = False        # a NEW process; its exit is real news
         try:
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
-                                        on_event=self._on_event,
-                                        on_permission=self._on_permission,
-                                        strip_env=strip_prefixes())
+                                        strip_env=strip_prefixes(),
+                                        **self._bind(self._generation))
             info = self.client.initialize()
             new = self.client.new_session_full(self.cwd, self._mcp_servers())
             self.acp_session = new.get("sessionId")
@@ -1371,7 +1451,12 @@ class Pane(_core.PaneBase):
         return seed_config_dir(self.dir / "config", self.posture)
 
     def send(self, text):
-        if self.state == "detached":
+        # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
+        # stopped means "bring it back", exactly as it does for a paused one.
+        # resume() parks — never sends — whatever was queued when it died.
+        if self.state in self.RESUMABLE:
+            if not (text or "").strip():
+                raise ValueError("empty prompt")
             self.resume()            # implicit: typing into a pane means using it
             if self.state == "dead":
                 raise acp.AgentError(self.error or "could not resume")
@@ -1680,6 +1765,9 @@ class Pane(_core.PaneBase):
             "tools": bool(AGENTS[self.agent].get("tools")),
             "state": state, "error": self.error, "created": self.created,
             "pending": list(self.pending.keys()),
+            # Whether ↻ / typing can bring this pane back: a conversation id
+            # to load. A pane that died before session/new has none.
+            "resumable": bool(getattr(self, "acp_session", None)),
             "usage": self.usage, "alive": alive,
             "events": [e for e in self.events if e["seq"] > since],
             "seq": self.events[-1]["seq"] if self.events else 0,
@@ -1963,7 +2051,7 @@ class Manager(_core.ManagerBase):
             if len(live) >= MAX_PANES:
                 raise ValueError(
                     f"{MAX_PANES} live panes is the cap — close or pause one first")
-            if pane.state == "detached":
+            if pane.state in ("detached", "dead"):   # dead: P0-a', 2026-09-28
                 pane.state = "starting"
 
 
