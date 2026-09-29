@@ -857,9 +857,31 @@ def is_our_adapter(pid, pgid, start=None, argv=()):
         return True, "start time matches"
     args = process_args(pid) or ""
     want = [a for a in list(argv)[:2] if a]
-    if want and all(a in args for a in want):
+    if want and all(_argv_piece_present(a, args) for a in want):
         return True, "command line matches the lane"
     return False, f"pid {pid} runs {args[:80]!r}, not this lane's adapter"
+
+
+def _argv_piece_present(piece, args):
+    """Is one recorded argv element visible in a live command line?
+
+    A script path is matched literally. An INTERPRETER is matched by its
+    basename family, because macOS's framework Python re-execs itself as
+    `.../Python.app/Contents/MacOS/Python` (measured on mac-host,
+    2026-09-29): the spec says `/usr/bin/python3`, `ps` shows `.../Python`,
+    and a literal compare left every orphan alone on the one host whose
+    launchd does not reap them -- the weak check was blind exactly where it
+    mattered. Family match on the interpreter alone would still be too
+    loose, which is why the script (argv[1]) stays a literal match and this
+    is only ever consulted when no start time was recorded.
+    """
+    if piece in args:
+        return True
+    base = os.path.basename(piece).lower()
+    if not base.startswith("python"):
+        return False
+    head = args.split(" ", 1)[0]
+    return os.path.basename(head).lower().startswith("python")
 
 
 def reap_orphans(candidates, term_wait=None, kill_wait=None):
