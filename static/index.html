@@ -74,6 +74,10 @@
 <dialog id="newdlg">
   <form method="dialog" class="dlg">
     <h2>New conversation</h2>
+    <!-- A role presets lane / effort / posture and puts its instructions in
+         the composer (roles.py). Never authority; nothing is sent by it. -->
+    <label>Role<select id="f-role"><option value="">None</option></select></label>
+    <p class="hint" id="rolehint"></p>
     <label>Agent<select id="f-agent"></select></label>
     <!-- Shown only when the chosen agent is a GROUP. Light ships one group, so
          this stays hidden — it is kept because the picker code that fills and

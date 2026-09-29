@@ -419,6 +419,17 @@ class Handler(BaseHTTPRequestHandler):
             # pointed this at anything yet".
             import content
             return self._json(content.status())
+        if p == "/api/session/roles":
+            # Every role, with the lanes each one can start on and why not
+            # (roles.py). A broken role tree degrades the dialog to "no
+            # roles", never to a 500.
+            try:
+                import roles
+                out = [dict(r, resolvableOn=roles.resolvable_on(r["id"]))
+                       if not r.get("error") else r for r in roles.list_roles()]
+                return self._json({"roles": out, "dir": str(roles.roles_dir())})
+            except Exception as e:                  # noqa: BLE001
+                return self._json({"roles": [], "error": str(e)[-200:]})
         if p == "/api/session/pending":
             # The AUTHORITATIVE pending permission payloads, with the digest
             # an approval must carry (Astra/Grok 2026-09-28, CLI). The event
@@ -530,12 +541,32 @@ class Handler(BaseHTTPRequestHandler):
         try:
             b = self._body()
             if p == "/api/session/new":
-                pane = MGR.create(b.get("agent", ""),
-                                  b.get("cwd") or str(sessions.default_cwd()),
-                                  b.get("posture") or sessions.DEFAULT_POSTURE,
-                                  (b.get("model") or "").strip() or None,
-                                  (b.get("effort") or "").strip() or None)
-                return self._json({"ok": True, "pane": pane.snapshot()})
+                agent = b.get("agent", "")
+                posture = b.get("posture") or sessions.DEFAULT_POSTURE
+                effort = (b.get("effort") or "").strip() or None
+                role = (b.get("role") or "").strip() or None
+                role_sha, preamble, notes = None, "", []
+                if role:
+                    # Resolved before anything is created, so a refusal costs
+                    # no process and reads as a message on the dialog.
+                    import roles
+                    try:
+                        r = roles.resolve(role, lane=agent or None,
+                                          posture=b.get("posture") or None,
+                                          effort=effort)
+                    except roles.RoleError as e:
+                        return self._json({"error": str(e)[:400]}, 400)
+                    agent, effort = r.agent, r.effort
+                    posture = r.posture or sessions.DEFAULT_POSTURE
+                    role_sha, preamble, notes = r.sha256, r.preamble, r.notes
+                pane = MGR.create(agent, b.get("cwd") or str(sessions.default_cwd()),
+                                  posture, (b.get("model") or "").strip() or None,
+                                  effort, role=role, role_sha=role_sha)
+                # The preamble comes BACK rather than being sent from here:
+                # it lands in the composer, visible, and goes as the first
+                # turn only when you press send (P17).
+                return self._json({"ok": True, "pane": pane.snapshot(),
+                                   "preamble": preamble, "notes": notes})
             if p == "/api/content/attach":
                 # What "attach a note to a pane" MEANS lives here, in one
                 # place, because it is not the same thing for every lane and

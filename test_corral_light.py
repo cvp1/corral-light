@@ -3291,6 +3291,7 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
 # one documented command runs it.
 from test_resilience import *                    # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
+from test_ports import *                         # noqa: F401,F403,E402
 
 
 if __name__ == "__main__":

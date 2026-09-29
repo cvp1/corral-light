@@ -2031,6 +2031,32 @@ const HINTS = {
 };
 function wireDialog() {
   const dlg = $('#newdlg');
+  // Roles (roles.py): fetched each time the dialog opens — a role file edited
+  // a minute ago must show up without a reload. A role with a lane selects it.
+  const fillRoles = async () => {
+    const sel = $('#f-role'), hint = $('#rolehint');
+    let d = { roles: [] };
+    try { d = await api('/api/session/roles'); } catch (e) { /* no roles */ }
+    S.roles = d.roles || [];
+    sel.replaceChildren(el('option', null, 'None'));
+    sel.firstChild.value = '';
+    for (const r of S.roles) {
+      const o = el('option', null, r.error ? `${r.id} (broken)` : `${r.id} — ${r.description}`);
+      o.value = r.error ? '' : r.id;
+      o.disabled = !!r.error;
+      o.title = r.error || '';
+      sel.appendChild(o);
+    }
+    hint.textContent = S.roles.length ? '' : `no roles yet — add them in ${d.dir || 'the roles folder'}`;
+  };
+  $('#f-role').onchange = () => {
+    const r = (S.roles || []).find(x => x.id === $('#f-role').value);
+    $('#rolehint').textContent = r ? `${r.data_class} · instructions go into the composer; nothing is sent until you press send` : '';
+    if (r && r.lane && [...$('#f-agent').options].some(o => o.value === r.lane)) {
+      $('#f-agent').value = r.lane;
+      $('#f-agent').dispatchEvent(new Event('change'));
+    }
+  };
   $('#new').onclick = () => {
     // Agents that belong to a GROUP collapse to one entry (the operator, 2026-08-31:
     // "consolidate the SSH connections under one main SSH tab and then break it
@@ -2188,6 +2214,7 @@ function wireDialog() {
     fillHost();
     fillCfg();
     fillPosture();
+    fillRoles();
     dlg.showModal();
   };
   $('#f-posture').onchange = e => { $('#posturehint').textContent = HINTS[e.target.value]; };
@@ -2203,7 +2230,8 @@ function wireDialog() {
     localStorage.setItem('corral.posture', $('#f-posture').value);
     const common = { agent: dlg._chosenAgent(), cwd,
                      posture: $('#f-posture').value,
-                     model: $('#f-model').value, effort: $('#f-effort').value };
+                     model: $('#f-model').value, effort: $('#f-effort').value,
+                     role: $('#f-role').value };
     try {
       const d = await api('/api/session/new', common);
       S.panes.set(d.pane.id, d.pane);
@@ -2212,6 +2240,9 @@ function wireDialog() {
       S.focus = d.pane.id;
       render();
       if (d.pane.state === 'dead') toast('agent failed to start: ' + (d.pane.error || ''), true);
+      else if (d.preamble) insertIntoComposer(d.pane.id, d.preamble + '\n\n---\n\n',
+        `role ${common.role}: its instructions are in the box — add your ask and send`);
+      for (const n of (d.notes || [])) toast(n);
     } catch (e) { toast(e.message, true); }
   });
 }
