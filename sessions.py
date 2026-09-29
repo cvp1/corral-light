@@ -2577,6 +2577,14 @@ class Manager(_core.ManagerBase):
                 # start a pane. The host knows its own home; the client should
                 # not be guessing at it.
                 "defaultCwd": str(default_cwd()),
+                # Where transcripts live on THIS machine. The empty state says
+                # it, because "is my conversation going to someone's cloud?"
+                # is the first question a self-hosted agent workspace has to
+                # answer and an empty room answers it badly. From the host,
+                # never guessed by the browser -- the same lesson as
+                # defaultCwd above, which shipped as a hardcoded path from
+                # another machine.
+                "dataDir": str(STATE),
                 # Somewhere to START from. The field was free text with one
                 # default, so choosing a directory meant knowing and typing an
                 # absolute path — on a new machine, the one thing you do not

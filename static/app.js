@@ -1796,8 +1796,34 @@ function render() {
   if (!shown.length) {
     const e = el('div', 'empty');
     if (!panes.length) {
+      // The FIRST screen a new install shows, and it used to be two
+      // sentences that describe the emptiness without saying what to do
+      // about it. Three lines now: the thing to press, the thing that gets
+      // you around, and where your conversations live on disk — the last
+      // because "is this in someone's cloud?" is the first question a
+      // self-hosted agent workspace has to answer, and silence answers it
+      // badly. createElement only: `dataDir` comes off the wire.
       e.appendChild(el('h2', null, 'Nothing running.'));
-      e.appendChild(el('div', null, 'Start a conversation and it appears here.'));
+      const start = el('button', 'btn go emptygo', '＋ New conversation');
+      start.type = 'button';
+      start.onclick = () => $('#new').click();
+      e.appendChild(start);
+      const l2 = el('div', 'emptyline');
+      l2.appendChild(el('kbd', null, '⌘K'));
+      l2.appendChild(el('span', null, ' search and jump to any conversation · '));
+      l2.appendChild(el('kbd', null, '?'));
+      l2.appendChild(el('span', null, ' every shortcut'));
+      e.appendChild(l2);
+      const where = S.dataDir;
+      const l3 = el('div', 'emptyline dim');
+      l3.appendChild(el('span', null, where
+        ? 'Transcripts stay on this machine, in '
+        : 'Transcripts stay on this machine. Nothing is uploaded.'));
+      if (where) {
+        l3.appendChild(el('code', null, where));
+        l3.appendChild(el('span', null, '. Nothing is uploaded.'));
+      }
+      e.appendChild(l3);
     } else {
       e.appendChild(el('h2', null, 'All minimized.'));
       e.appendChild(el('div', null, 'They are still running. Click one above to bring it back.'));
@@ -2029,6 +2055,7 @@ async function refresh() {
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
+  S.dataDir = d.dataDir || S.dataDir || '';
   S.cwdSuggestions = d.cwdSuggestions || S.cwdSuggestions || [];
   S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
@@ -2797,11 +2824,86 @@ function wirePalette() {
   // reach a note while writing the message that needs it, which is the whole
   // point of attach. Escape is the dialog's own.
   document.addEventListener('keydown', e => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-      e.preventDefault();
-      $('#palette').open ? $('#palette').close() : openPalette();
+    for (const k of KEYS) {
+      if (k.match && k.match(e)) { e.preventDefault(); k.run(); return; }
     }
   });
+}
+
+/* ── the keyboard, in one place ──────────────────────────────────────────
+ * ONE table. The global key handler dispatches from it and the `?` overlay
+ * lists it, so a binding cannot exist without being documented and the
+ * overlay cannot advertise a key that does nothing. That second direction is
+ * the one that matters: a help screen listing a shortcut the code dropped is
+ * worse than no help screen, because it is believed.
+ *
+ * Entries WITHOUT `match` are bindings owned by a control that already has
+ * focus (the composer, the find bar). They are documented here and
+ * implemented there — the table cannot dispatch them, because the composer
+ * has to see the event first. Each says where it applies, so nobody presses
+ * Enter on the roster and wonders why nothing sent.
+ */
+const KEYS = [
+  { combo: '⌘K', alt: 'Ctrl+K', what: 'Search conversations and jump to one',
+    match: e => (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k',
+    run: () => { $('#palette').open ? $('#palette').close() : openPalette(); } },
+  { combo: '?', what: 'Show this list',
+    match: e => e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey
+                && !isTypingTarget(e.target),
+    run: () => toggleKeys() },
+  { combo: 'Esc', what: 'Close this list, or the search',
+    match: e => e.key === 'Escape' && $('#keysdlg') && $('#keysdlg').open,
+    run: () => toggleKeys(false) },
+  { combo: 'Enter', where: 'in a message box', what: 'Send' },
+  { combo: 'Shift+Enter', where: 'in a message box', what: 'Newline, do not send' },
+  { combo: '⌘Enter', alt: 'Ctrl+Enter', where: 'in a message box',
+    what: 'Send to EVERY pane that can take a prompt' },
+  { combo: '1…9', where: 'on a pane with a permission card',
+    what: 'Answer the card with that option' },
+  { combo: 'Esc', where: 'on a pane with a permission card',
+    what: 'Refuse the card; on a busy pane, interrupt the turn' },
+  { combo: '↑ / ↓', where: 'in an empty terminal box',
+    what: 'Walk back through what you typed before' },
+  { combo: 'Ctrl+C', where: 'in an empty terminal box',
+    what: 'Interrupt the running command' },
+];
+
+/* A key that means "help" must not swallow a question mark someone is
+ * typing. Checked by what has focus, not by a flag somebody has to remember
+ * to set. */
+function isTypingTarget(t) {
+  if (!t) return false;
+  const tag = (t.tagName || '').toUpperCase();
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+      || t.isContentEditable === true;
+}
+
+function toggleKeys(want) {
+  const dlg = $('#keysdlg');
+  if (!dlg) return;
+  const open = want === undefined ? !dlg.open : want;
+  if (!open) return dlg.close();
+  const body = $('#keys-body');
+  body.replaceChildren();
+  for (const k of KEYS) {
+    const row = el('div', 'keysrow');
+    const combo = el('span', 'keyscombo', k.combo + (k.alt ? ` / ${k.alt}` : ''));
+    row.appendChild(combo);
+    const what = el('span', 'keyswhat', k.what);
+    row.appendChild(what);
+    // Where it applies, when that is not "anywhere". Silence here means
+    // global, which is the only claim this overlay makes implicitly.
+    if (k.where) row.appendChild(el('span', 'keyswhere', k.where));
+    body.appendChild(row);
+  }
+  dlg.showModal();
+}
+
+function wireKeysButton() {
+  const b = $('#keysbtn');
+  // A page served without the button wires nothing rather than throwing on
+  // boot — the same posture every other wire* function here takes.
+  if (b) b.onclick = () => toggleKeys();
 }
 
 function wireMobileActions() {
@@ -2847,6 +2949,7 @@ async function start() {
   wireRail();
   wireCopySelect();
   wirePalette();
+  wireKeysButton();
   wireMobileActions();
   // Stream FIRST, then snapshot. The reverse order left a window between the
   // snapshot and the EventSource opening in which every event was dropped and

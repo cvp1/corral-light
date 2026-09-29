@@ -13,9 +13,17 @@ One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is
 1. Install Seed into `~/aios` (or `--into` a workspace you already have — that folder then *is* `~/aios` for this purpose). See the Seed README. Do not install Seed into this repo.
 2. Clone this repo, then:
    ```
+   cd spike && npm install && cd ..    # the Claude and ChatGPT adapters
    ./corral-light doctor
    ./corral-light serve
    ```
+   The adapters for Claude Code and ChatGPT (Codex) are an npm package, and
+   `spike/node_modules/` is gitignored — so no clone arrives with them. Skip
+   this step and those two lanes report `not installed: …/spike/node_modules/.bin/claude-agent-acp`,
+   which reads like a broken install rather than a step you have not run yet.
+   `doctor` names the step if the directory is missing. Needs Node.js.
+   The other three lanes (Grok, Antigravity, Ollama) resolve their programs
+   outside this tree and are unaffected.
    Open http://127.0.0.1:8098, then in another terminal `./corral-light pair <code>` with the code on screen.
 3. New Claude conversation. Working directory = `~/aios`.
 4. Done when `/status` answers.
@@ -28,8 +36,8 @@ Corral Light connects to software installed and signed in on your computer.
 
 | Assistant | What you need | Notes |
 | --- | --- | --- |
-| Claude Code | Claude Code and its Agent Client Protocol adapter | Supports model and effort selection. |
-| ChatGPT (Codex) | The Codex adapter and a Codex login | Uses a separate configuration directory. |
+| Claude Code | Claude Code, and the adapter from `cd spike && npm install` | Supports model and effort selection. |
+| ChatGPT (Codex) | The same npm install, plus a Codex login | Uses a separate configuration directory. |
 | Grok | The Grok command-line tool and `grok login` | The Grok tool manages its own sign-in. |
 | Antigravity (Gemini) | Run `python3 install_antigravity_acp.py --install` | The included installer currently supports Linux x86-64. It also selects your Google login (`oauth-personal`) in `~/.gemini/antigravity-acp/settings.json` when no sign-in method is set; a method you chose yourself is left alone. |
 | Ollama | Ollama and at least one downloaded model | Chat only; it cannot edit files or run commands. |
@@ -42,7 +50,7 @@ The availability check is intentionally honest: an assistant is marked unavailab
 
 ## Search and attach files
 
-Press `⌘K` to search open conversations, archived conversations, notes, and other configured text files.
+Press `⌘K` to search open conversations, archived conversations, notes, and other configured text files. Press `?` for every keyboard shortcut — that list is generated from the same table the key handler dispatches from, so it cannot advertise a key that does nothing.
 
 By default, Corral Light searches `~/notes` when that directory exists. Add other directories in `~/.config/corral-light/content.json`:
 
@@ -133,12 +141,26 @@ The default address is local-only by design. If you change `CORRAL_LIGHT_BIND` t
 
 ## Run in the background
 
-The repository includes service definitions for running Corral Light as your signed-in user:
+```
+./corral-light install-service --print   # show the file, write nothing
+./corral-light install-service           # write it, and print how to start it
+```
 
-- **Linux:** `corral-light.service` for systemd user services
-- **macOS:** the included launchd plist
+This writes a systemd user unit (Linux) or a launchd agent (macOS) with every
+path resolved from the checkout that is running — the interpreter, the working
+directory, and the log path. It **does not enable and does not start
+anything**: writing a file is reversible, and starting a daemon that holds a
+port and spawns assistants with your filesystem access is your decision. The
+exact enable command is printed for you to run. An existing file is left alone
+unless you pass `--force`.
 
-Update executable paths, the working directory, and log paths for your installation. Do not run the service as root; assistants need the permissions and sign-ins of the user who starts them.
+The repository also ships the two files as templates (`corral-light.service`,
+`com.cvp1.corral-light.plist`) if you would rather edit them by hand.
+
+Do not run the service as root; assistants need the permissions and sign-ins
+of the user who starts them. Do not point a service at a worktree —
+`spike/node_modules/` is gitignored, so a worktree has neither vendor adapter
+and both those lanes go dark in a way that looks like a vendor outage.
 
 The systemd unit uses `KillMode=mixed`: on a stop or restart the hub is signalled first and writes one note in every pane that had a turn running, naming the interrupted message and anything queued behind it. Nothing is re-sent automatically. If an agent process outlives the hub anyway (launchd), the next start stops it before any conversation is resumed.
 
@@ -212,6 +234,7 @@ Use the command that matches the problem:
 
 ```
 ./corral-light doctor        # Check installation and sign-in requirements
+                             # (names the npm step if the adapters are absent)
 ./corral-light diagnose      # Test a complete assistant conversation
 python3 content.py status    # Check search configuration and index status
 ```
