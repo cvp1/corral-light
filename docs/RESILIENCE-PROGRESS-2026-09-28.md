@@ -23,3 +23,5 @@ script; item 1 moved it to the end.
 
 - Suite (`python3 test_corral_light.py`): 199 run (3 skipped) before item 1 → 283 run (3 skipped) after 7d, all green; `test_consult` 21 OK; `corral_core` discovery 23 OK; full Corral's `test_cross_tree_resume` (run read-only against a temp state dir) OK after every core change.
 - Nothing pushed. No service restarted; the full Corral hub (8099) and ../corral were only read.
+
+| 6b | lane matrix: codex row | (this commit) | LIVE 2026-09-29 07:05 MST, private hub 18199, scratch state, `CORRAL_CODEX_HOME=~/.codex` (the operator's fresh login that morning): opens on gpt-5.6-sol, pause→resume, remembers the word; **no permission card** for `touch` — Codex `agent` mode auto-approves inside its workspace-write sandbox. | Light's posture is not mapped onto Codex's ACP `mode` (read-only / agent / agent-full-access). Worth a follow-up: `strict` → `read-only` would make the card appear, at the cost of Codex refusing every write. The operator's call. |

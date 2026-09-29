@@ -202,8 +202,9 @@ Everything the browser does with a pane, a terminal can do too, on every lane �
 | claude | yes | opus | yes | yes | yes | asked, refused | |
 | grok | yes | grok-4.6 | yes | yes | yes | **no card — ran the command without asking** | posture shows `agent-set` (not enforceable on this lane); the probe file was created in the scratch dir and removed |
 | gemini | yes | gemini-3.7-flash-high | yes | yes | yes | asked, refused | |
+| codex | yes | gpt-5.6-sol | yes | yes | yes | **no card — ran the command without asking** | measured 2026-09-29 07:05 MST with the launcher pointed at a fresh `codex login` (`CORRAL_CODEX_HOME=~/.codex`). Not a Light gap: the pane runs Codex's `agent` mode (workspace-write sandbox, `approval_policy = on-request`), where a command inside the working tree is auto-approved and only an escalation outside the sandbox raises a card. Its ACP `mode` option also offers `read-only`; Light does not map its posture onto it (`posture_via_acp_mode` is false for this lane), so the pill reads `agent-set`. The probe file was created in the scratch dir and removed |
 
-Not measured: **codex** (the host had no ChatGPT device login, which needs a person), **ollama** (no local Ollama on that host; by design it keeps no context across a restart and now says so in the pane), SSH lanes (a shell has nothing to remember). Re-run the matrix after any adapter upgrade.
+Not measured: **ollama** (no local Ollama on that host; by design it keeps no context across a restart and now says so in the pane), SSH lanes (a shell has nothing to remember). Re-run the matrix after any adapter upgrade.
 
 ## Troubleshooting
 
