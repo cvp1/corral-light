@@ -118,6 +118,21 @@
   </form>
 </dialog>
 
+<!-- Port (port.py): carry this conversation's TRANSCRIPT to another lane.
+     The preview is the exact text that will be sent; Send is bound to its sha. -->
+<dialog id="portdlg">
+  <form method="dialog" class="dlg">
+    <h2>Carry this conversation to…</h2>
+    <label>Lane<select id="p-agent"></select></label>
+    <p class="hint" id="p-hint"></p>
+    <pre id="p-text" class="porttext"></pre>
+    <menu>
+      <button value="cancel" class="btn">Cancel</button>
+      <button value="ok" class="btn go" id="p-go" disabled>Send</button>
+    </menu>
+  </form>
+</dialog>
+
 <dialog id="palette">
   <div class="paldlg">
     <input id="pal-q" type="text" spellcheck="false" autocomplete="off"

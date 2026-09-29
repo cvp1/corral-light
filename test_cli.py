@@ -203,6 +203,22 @@ class SearchOverTheCli(HubCase):
         self.cli("close", pid)
 
 
+class PortOverTheCli(HubCase):
+    def test_port_needs_the_sha_and_delivers(self):
+        pid = self.open()
+        self.cli("say", pid, "remember pecan")
+        rc, out, err = self.cli("port", pid, "--lane", "fake")
+        self.assertEqual(rc, 2)
+        self.assertIn("--sha", err)
+        sha = out.strip().splitlines()[-1].split("sha ")[-1]
+        self.assertIn("## The original ask", out)
+        rc, out, err = self.cli("port", pid, "--lane", "fake", "--sha", sha[:12])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("delivered", out.splitlines()[-1])
+        for line in self.cli("panes")[1].splitlines():
+            self.cli("close", line.split()[0])
+
+
 class TheLaneMatrix(HubCase):
     def test_the_fake_lane_remembers_and_refuses(self):
         r = subprocess.run([sys.executable, str(ROOT / "lane_matrix.py"), "--json", "--lane", "fake",
