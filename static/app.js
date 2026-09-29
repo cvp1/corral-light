@@ -1590,7 +1590,7 @@ function render() {
     }
   }
 
-  // Scheduled (later.py): what will start on its own, and any one-shot that
+  // Scheduled (schedule.py): what will start on its own, and any one-shot that
   // failed or was missed — a record until dismissed, never silently gone.
   const jobs = S.schedule || [];
   if (jobs.length) {
@@ -2252,7 +2252,7 @@ function wireDialog() {
     dlg.showModal();
   };
   $('#f-posture').onchange = e => { $('#posturehint').textContent = HINTS[e.target.value]; };
-  // "Later…" (later.py, 2026-09-29): with a time set, Start ARMS the
+  // "Later…" (schedule.py, 2026-09-29): with a time set, Start ARMS the
   // conversation instead of opening it — the same form posted to
   // /api/session/schedule/add. Without a time it is Start, now, as before.
   dlg.addEventListener('close', async () => {

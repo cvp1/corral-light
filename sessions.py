@@ -2038,8 +2038,8 @@ class Manager(_core.ManagerBase):
         self.subscribers = []
         self.not_restored = 0
         self.orphans = {}          # pane id -> what restore() did to its old adapter
-        import later               # scheduled prompts; the hub starts its ticker
-        self.schedule = later.Scheduler(self, STATE / "schedule.json")
+        import schedule               # scheduled prompts; the hub starts its ticker
+        self.schedule = schedule.Scheduler(self, STATE / "schedule.json")
         self._lock = threading.Lock()
         self.mcp = mcp.Registry()
         self.catalog = self._load_catalog()
@@ -2518,7 +2518,7 @@ class Manager(_core.ManagerBase):
                 # disk and invisible in the product, which is fine only if the
                 # product SAYS so — an unannounced drop reads as a deletion.
                 "notRestored": self.not_restored,
-                # Scheduled prompts (later.py) — what will start on its own.
+                # Scheduled prompts (schedule.py) — what will start on its own.
                 "schedule": (self.schedule.list()
                              if getattr(self, "schedule", None) else []),
                 "at": int(time.time())}

@@ -196,8 +196,14 @@ class StructuralIndependence(unittest.TestCase):
         Everything else on this list still has a fleet-shaped dependency and
         stays out. Moving a name off this list is a decision, not a fix.
         """
+        # `schedule` came OFF this list on 2026-09-29 (Craig: "lift the ban"):
+        # Light's schedule.py is the full Corral's scheduled prompts ported
+        # without the runs registry, `refire` and `remind` -- no fleet-shaped
+        # dependency remains, and the module keeps the name the feature has
+        # everywhere else. It shipped one commit as `later.py` while the ban
+        # stood.
         heavy = ("fleet", "estate", "finops", "runs", "attention", "asks",
-                 "push", "schedule", "library", "mail", "today", "residency",
+                 "push", "library", "mail", "today", "residency",
                  "delegates", "browser_ui", "foreign", "aios_memory",
                  "gmail_local", "local_acp", "herdr_bridge")
         for name in heavy:
