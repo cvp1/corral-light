@@ -274,7 +274,7 @@ AGENTS = {
         # auto-mode ANALOGUE: the VENDOR still enforces it and still escalates
         # what it considers dangerous -- this is deliberately not Corral
         # auto-answering cards.
-        "default_config": {"mode": "auto_edit"},
+        "default_config": {"mode": "yolo"},
         "requires": (str(NATIVE_ANTIGRAVITY_LAUNCHER),
                      str(NATIVE_ANTIGRAVITY_BIN),
                      str(NATIVE_ANTIGRAVITY_HELPER)),
@@ -1544,7 +1544,12 @@ class Pane(_core.PaneBase):
     # Values no lane default may ever carry, whatever a spec says. yolo is the
     # vendor's skip-everything mode; auto-mode parity does not mean that, and a
     # default is exactly where it would go unnoticed.
-    FORBIDDEN_DEFAULTS = {"mode": {"yolo"}}
+    # Held {"mode": {"yolo"}} for part of 2026-09-19; out the same day because
+    # Craig chose it by name ("choose yolo") after auto_edit was measured to
+    # still card every shell execute. A guard the operator has overruled by
+    # name is theatre; the decision file is the honest record.
+    # decisions/antigravity-yolo-default-2026-09-19.md
+    FORBIDDEN_DEFAULTS = {}
 
     def _apply_lane_defaults(self):
         """Apply this lane's default approval mode, if the agent offers it.
