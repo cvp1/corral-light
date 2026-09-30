@@ -106,7 +106,8 @@ offers every eligible pane (an MCP server named `corral-seats`):
 - `seat_list()` — who can be addressed and what state each is in (`your-turn`,
   `working`, `needs-you`, `paused`, …). No titles, no transcripts.
 - `seat_send(seat, text)` — one message, answered `delivered` (with a turn id),
-  `refused` (with the reason), or `failed`.
+  `refused` (with the reason), `failed`, or — only in the one case below —
+  `queued`.
 - `seat_broadcast(text)` — the same message to every other seated pane, one
   `seat_send` per seat: a list of answers, one per seat. A refusal for one seat
   does not stop or undo the others; each seat counts as one send against the
@@ -122,9 +123,9 @@ offers every eligible pane (an MCP server named `corral-seats`):
   paused or dead seat ends the wait `blocked`; a hub restart ends it
   `interrupted`. The waiting happens in the pane's own tool process, never in
   the hub. **A waiting pane is working**, so a message sent to it while it
-  waits is refused `busy` — waiting is for sequencing ("go when @reviewer is
-  done"), not for hearing back; to hear back, send and end the turn, and the
-  reply arrives as a turn of its own.
+  waits is refused `busy` — with one exception: the reply from the very seat
+  it is waiting on, sent during the turn it is waiting on, is **queued** and
+  arrives as the waiting pane's next turn once its current turn ends (below).
 
 A message arrives in the other pane as its own block, marked **from @author**
 and **untrusted** — never as that pane's human, never lifting a runbook park.
@@ -132,6 +133,27 @@ It is refused, not queued, when the target is busy, waiting on a permission
 card, paused (after a restart every pane is), or dead. After **four** messages
 pass between panes with no human turn on them, sending stops until a human
 speaks. Each pane may try **30** sends an hour; refusals count.
+
+**The one queue: a reply to a pane that is waiting on you.** If @author is in
+`seat_wait` on the turn @reviewer is running, @reviewer's `seat_send` to
+@author answers `queued` (naming the turn it waits behind) — not `delivered`:
+nothing has reached @author yet. When @author's turn ends, the message goes
+through every check again (card, runbook park, paused, the four-message chain,
+the data gate) and is either delivered as @author's next turn or recorded as
+refused. It is bounded four ways:
+
+- **one** queued message per pane (`PEER_QUEUE_MAX`); a second is refused
+  `queue-full`, with no hint to retry;
+- **600 s** at most (`PEER_QUEUE_TTL_S`, the longest a wait can be); after that
+  it `expired`;
+- the **same size and envelope checks** as any `seat_send`, at the time it is
+  queued;
+- **memory only**: closing, cancelling, pausing or losing @author's agent, or
+  restarting the hub, drops it. Nothing is saved or re-sent.
+
+Every outcome — queued, delivered, refused, expired, dropped — is written into
+**both** panes' transcripts. Anyone else sending to a waiting pane is still
+refused `busy`.
 
 **What the sender label is, and is not.** The hub decides who sent a message
 from a token it mints for each pane at every spawn and keeps only in memory.

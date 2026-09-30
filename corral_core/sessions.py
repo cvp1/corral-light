@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from corral_core import acp
+from corral_core import seat_mcp as _seat_mcp      # stdlib only; its bounds
 
 # ── injected by each product's configure() ────────────────────────────────
 # Declared here so the shared methods below resolve them in THIS namespace,
@@ -235,6 +236,24 @@ PEER_TOKEN_HEADER = "X-Corral-Pane-Token"
 PEER_FENCE = "corral-peer"      # the envelope tag; a body containing it is
                                 # refused, so the envelope cannot be forged
                                 # from inside (section 7, blocker 2)
+# The ONE exception to "not ready -> refused busy" (DESIGN-5 S11b; Craig on
+# Docket 83a33d7c5b63, 2026-09-30: "Do B but make sure the queue is bounded").
+# A pane blocked in `seat_wait` on a turn its SENDER is running is mid-turn,
+# so the reply it is waiting for used to be refused `busy` and lost. That one
+# message -- from the awaited seat, during the awaited turn -- is held and
+# delivered as the waiter's next turn. Every bound is here:
+PEER_QUEUE_MAX = 1              # per TARGET pane. One wait in flight per pane
+                                # (T11.2) means one legitimate replier; a
+                                # second is refused `queue-full`, no retry hint
+PEER_QUEUE_TTL_S = _seat_mcp.PEER_WAIT_MAX_S   # undelivered this long ->
+                                # `expired`, recorded on both panes
+PEER_WAIT_SEEN_S = 5.0          # a wait is "in flight" while its MCP child
+                                # polled /api/peer/turn this recently (it
+                                # polls every PEER_WAIT_POLL_S = 1 s). A child
+                                # that died, or a wait that returned without
+                                # its turn ending, goes stale in 5 s.
+# Held messages live in memory ONLY: a hub restart, or the waiter being
+# closed, cancelled, paused or dying, drops them and records `dropped`.
 
 
 # ── shared helpers ────────────────────────────────────────────────────────
@@ -553,6 +572,10 @@ class PaneBase:
     # Derived, never persisted: True when an earlier-created open pane holds
     # the same seat (see withheld_seats). Only a human rebind clears it.
     seat_withheld = False
+    # The QueuedText whose prompt() is running now, or None. Set and cleared
+    # by each skin's _drain under `_turn_lock`; the S11b reply queue reads it
+    # to know which turn a waiter is in and which turn a sender is running.
+    _in_flight = None
 
     # Corral's own vocabulary is `model`/`effort`; adapters don't all use it.
     # Codex's ACP session (confirmed live, 2026-08-23, codex-acp 1.6.2) reports
@@ -945,6 +968,9 @@ class PaneBase:
 
     def cancel(self):
         if self.client and self.acp_session:
+            # The human stopped this turn: a reply held for its end is not
+            # delivered into what comes next (S11b).
+            self._drop_held_peers("cancelled")
             self.client.cancel(self.acp_session)
             self.emit("cancelled", {})
             return True
@@ -970,7 +996,9 @@ class PaneBase:
         self._clear_pending("paused")
         with self._turn_lock:
             dropped, self._queue = len(self._queue), []
+            self._drop_held_peers_locked("paused")
             self._turn_running = False
+            self._in_flight = None        # the retired drain will not clear it
             # Retire any _drain() thread still blocked in the OLD client's
             # prompt(): once this changes, its captured generation is stale
             # and it will touch nothing when prompt() finally returns.
@@ -996,6 +1024,7 @@ class PaneBase:
         return self
 
     def stop(self):
+        self._drop_held_peers("closed")
         if self.client:
             self.client.close()
         self.pid = self.pgid = self.pid_start = None   # stopped on purpose
@@ -1024,7 +1053,7 @@ class PaneBase:
         self.emit("renamed", {"title": title})
         return title
 
-    def _dispatch(self, item):
+    def _dispatch(self, item, at=None):
         """The dispatch half of send(): queue one prompt and make sure a drain
         thread is running. Split out for DESIGN-5 S7 so a peer message can be
         queued WITHOUT the human half -- this emits nothing, touches no runbook
@@ -1033,8 +1062,14 @@ class PaneBase:
         The CALLER HOLDS `_turn_lock`. The lock is not reentrant, and admission
         and enqueue must happen under ONE acquisition (section 7.3) or a card
         could land between the check and the queue; so this never takes it.
+
+        `at` puts the item at that queue position instead of the end: a reply
+        held for a waiter's turn to end (S11b) runs as its NEXT turn.
         """
-        self._queue.append(item)
+        if at is None:
+            self._queue.append(item)
+        else:
+            self._queue.insert(at, item)
         self.state = "busy"
         if self._turn_running:
             return
@@ -1059,6 +1094,40 @@ class PaneBase:
         if not self._queue:
             self.state = "needs-you" if (self.pending or
                                          getattr(self, "_gate_hold", False)) else "ready"
+
+    # ── the S11b reply queue, pane side ──────────────────────────────────
+    # The held messages themselves live in `self._peer_held` (a list, at most
+    # PEER_QUEUE_MAX long), touched only under `_turn_lock`. The manager
+    # decides what is held and what happens to it; these are the hooks the
+    # lifecycle calls.
+
+    def _release_held_peers_locked(self):
+        """Each skin's _drain calls this at the top of every loop, WITH
+        `_turn_lock` held -- i.e. the moment the turn a reply was held behind
+        has ended. The manager re-runs the full admission in this same
+        acquisition and either queues the message as the next turn or records
+        why not."""
+        if self.__dict__.get("_peer_held"):
+            self.mgr._peer_release_locked(self)
+
+    def _drop_held_peers_locked(self, reason):
+        """The caller holds `_turn_lock`. Drop every held message, cancel its
+        expiry, and record `dropped` with `reason` on both panes."""
+        held = self.__dict__.get("_peer_held")
+        if not held:
+            return
+        items, self._peer_held = list(held), []
+        for h in items:
+            self.mgr._peer_queue_drop(self, h, reason)
+
+    def _drop_held_peers(self, reason):
+        """The same, taking `_turn_lock` itself -- for paths that do not hold
+        it (close, cancel, an agent that died)."""
+        lock = getattr(self, "_turn_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._drop_held_peers_locked(reason)
 
     def last_answer(self):
         """The agent's most recent answer, as (text, complete).
@@ -1344,15 +1413,16 @@ class ManagerBase:
         """One message from one pane's agent to another pane, by seat.
 
         -> {"result": "delivered", "turn", "hop", ...}
+         | {"result": "queued", "behind_turn", "qid", ...}      (S11b only)
          | {"result": "refused", "reason", "why"[, "retry_after"]}
          | {"result": "failed",  "reason", "why"}
 
         NEVER through send(): send() is the human -- it emits `user` and ends
         a runbook park -- and a peer message is neither. It lands as its own
         `peer` event, fenced and attributed by the hub, and is dispatched to
-        the agent through _dispatch(). Nothing is ever held for later:
-        `refused` is final, and a card that arrives after admission fails the
-        turn rather than queueing it behind the human (section 7.3).
+        the agent through _dispatch(). `refused` is final, and a card that
+        arrives after admission fails the turn rather than queueing it behind
+        the human (section 7.3).
 
         Admission, in this order, each with its own reason: unknown seat;
         self; an SSH lane at either end; target dead, or paused; a pending
@@ -1360,6 +1430,14 @@ class ManagerBase:
         transfer gate; the body; the source's hourly budget; the hop chain.
         Everything from `dead` down is checked under the target's _turn_lock,
         and the enqueue happens under the same acquisition.
+
+        THE ONE EXCEPTION to `busy` (S11b): the target is blocked in
+        `seat_wait` on a turn THIS sender is running. Then every other check
+        still runs, and the message is HELD -- at most PEER_QUEUE_MAX per
+        target, for at most PEER_QUEUE_TTL_S -- and goes through this whole
+        admission again when the target's turn ends (_peer_release_locked).
+        The answer is `queued`, never `delivered`: nothing has reached the
+        other agent yet, and it may still be refused, expire or be dropped.
         """
         now = time.time() if now is None else now
         src = self.get(from_pane_id)
@@ -1375,81 +1453,283 @@ class ManagerBase:
             return self._refused("host-lane", "an SSH shell is not a conversation "
                                               "and cannot send or receive messages")
         with dst._turn_lock:
-            if dst.state == "dead":
-                return self._refused("dead", f"@{to_seat} has stopped; a human "
-                                             f"must restart it")
-            if dst.state == "detached":
-                # No retry hint, on purpose (section 7.4): a paused pane never
-                # becomes ready by itself, and after every hub restart EVERY
-                # seat is paused. "Retry later" here is a loop until morning.
-                return self._refused("paused", f"@{to_seat} is paused — a human "
-                                               f"must resume it")
-            if dst.pending:
-                return self._refused("card-pending",
-                                     f"@{to_seat} is waiting on its human to "
-                                     f"answer a permission card")
-            if getattr(dst, "_gate_hold", False):
-                return self._refused("gate-hold",
-                                     f"@{to_seat} is parked by the runbook "
-                                     f"gate until its human replies")
+            r = self._peer_target_refusal(dst, to_seat)
+            if r:
+                return r
+            behind = None
             if dst.state != "ready" or dst._queue:
-                return self._refused("busy", f"@{to_seat} is working on a turn",
-                                     retry_after="your-turn")
+                behind = self._awaited_turn(src, dst, now)
+                if behind is None:
+                    return self._refused("busy", f"@{to_seat} is working on a turn",
+                                         retry_after="your-turn")
+                if len(dst.__dict__.get("_peer_held") or ()) >= PEER_QUEUE_MAX:
+                    # No retry hint: the slot frees only when the waiter's
+                    # turn ends, and then the waiter is `your-turn` anyway.
+                    return self._refused(
+                        "queue-full",
+                        f"@{to_seat} already has {PEER_QUEUE_MAX} message "
+                        f"queued for when its turn ends; this one was not "
+                        f"queued")
             why = self._refuse_transfer(src, dst)
             if why:
                 return self._refused("transfer-gate", why)
-            body = (text or "").strip() if isinstance(text, str) else ""
-            if not body:
-                return self._refused("empty", "the message is empty")
-            if len(body) > MAX_PEER_CHARS:
-                return self._refused("too-long",
-                                     f"the message is {len(body)} characters; "
-                                     f"the limit is {MAX_PEER_CHARS}")
-            if _PEER_FENCE_RE.search(body):
-                return self._refused("envelope",
-                                     f"the message contains the <{PEER_FENCE}> "
-                                     f"tag the hub uses to fence it, which "
-                                     f"would let it forge its own sender")
+            body, r = self._peer_body(text)
+            if r:
+                return r
             if over_budget:
                 return self._refused("rate",
                                      f"this pane has tried {MAX_PEER_SENDS_PER_HOUR} "
                                      f"sends in the last hour; that is the limit")
-            hop = 1 + max(peer_hop_in(src), peer_hop_in(dst))
-            if hop > MAX_PEER_HOPS:
-                return self._refused("peer-chain",
-                                     f"{MAX_PEER_HOPS} messages have passed "
-                                     f"between panes since a human last spoke "
-                                     f"on either; a human must speak before "
-                                     f"another is sent")
-            # ADMITTED. Turn id: the target's durable ledger when it has one
-            # (Light; accepted and fsynced before this returns), else minted.
-            turns = getattr(dst, "_turns", None)
-            try:
-                tid = turns().accept(body, kind="peer") if turns else None
-            except OSError as e:
-                return {"result": "failed", "reason": "ledger",
-                        "why": f"could not record the message durably: {e}"}
-            tid = tid or new_turn_id()
-            nonce = uuid.uuid4().hex[:8]
-            from_label = f"@{src.seat}" if (src.seat and not src.seat_withheld) \
-                else f"pane {src.id}"
-            item = QueuedText(peer_envelope(from_label, to_seat, body, nonce), tid)
-            item.peer = True
-            # activity=False: a peer message is not the human, and must not
-            # keep an ephemeral pane alive past its reap (section 7, T7.14).
-            dst.emit("peer", {"from_pane": src.id, "from_seat": src.seat,
-                              "to_seat": to_seat, "turn": tid, "hop": hop,
-                              "nonce": nonce, "text": body}, activity=False)
-            try:
-                dst._dispatch(item)
-            except Exception as e:                   # noqa: BLE001
-                dst.emit("peer_result", {"turn": tid, "delivered": False,
-                                         "reason": f"{type(e).__name__}: {e}"},
-                         activity=False)
-                return {"result": "failed", "reason": "dispatch",
-                        "why": f"the message could not be queued: {e}"}
+            hop, r = self._peer_hop(src, dst)
+            if r:
+                return r
+            if behind is not None:
+                return self._peer_hold_locked(src, dst, to_seat, body, behind)
+            return self._peer_admit_locked(src, dst, to_seat, body, hop)
+
+    # Each check below is shared by admission at send time and re-admission
+    # of a held message at delivery (S11b bound 5), so the two cannot drift.
+
+    def _peer_target_refusal(self, dst, to_seat):
+        """dead, paused, card-pending, gate-hold -- or None. Under the
+        target's _turn_lock."""
+        if dst.state == "dead":
+            return self._refused("dead", f"@{to_seat} has stopped; a human "
+                                         f"must restart it")
+        if dst.state == "detached":
+            # No retry hint, on purpose (section 7.4): a paused pane never
+            # becomes ready by itself, and after every hub restart EVERY
+            # seat is paused. "Retry later" here is a loop until morning.
+            return self._refused("paused", f"@{to_seat} is paused — a human "
+                                           f"must resume it")
+        if dst.pending:
+            return self._refused("card-pending",
+                                 f"@{to_seat} is waiting on its human to "
+                                 f"answer a permission card")
+        if getattr(dst, "_gate_hold", False):
+            return self._refused("gate-hold",
+                                 f"@{to_seat} is parked by the runbook "
+                                 f"gate until its human replies")
+        return None
+
+    def _peer_body(self, text):
+        """-> (body, None) or (None, refusal): empty, too-long, envelope."""
+        body = (text or "").strip() if isinstance(text, str) else ""
+        if not body:
+            return None, self._refused("empty", "the message is empty")
+        if len(body) > MAX_PEER_CHARS:
+            return None, self._refused("too-long",
+                                       f"the message is {len(body)} characters; "
+                                       f"the limit is {MAX_PEER_CHARS}")
+        if _PEER_FENCE_RE.search(body):
+            return None, self._refused("envelope",
+                                       f"the message contains the <{PEER_FENCE}> "
+                                       f"tag the hub uses to fence it, which "
+                                       f"would let it forge its own sender")
+        return body, None
+
+    def _peer_hop(self, src, dst):
+        """-> (hop, None) or (None, refusal `peer-chain`)."""
+        hop = 1 + max(peer_hop_in(src), peer_hop_in(dst))
+        if hop > MAX_PEER_HOPS:
+            return None, self._refused("peer-chain",
+                                       f"{MAX_PEER_HOPS} messages have passed "
+                                       f"between panes since a human last spoke "
+                                       f"on either; a human must speak before "
+                                       f"another is sent")
+        return hop, None
+
+    def _peer_admit_locked(self, src, dst, to_seat, body, hop, at=None):
+        """ADMITTED: record and dispatch, under the caller's acquisition of
+        the target's _turn_lock. `at` is the queue position (S11b's release
+        puts a held reply first)."""
+        # Turn id: the target's durable ledger when it has one (Light;
+        # accepted and fsynced before this returns), else minted.
+        turns = getattr(dst, "_turns", None)
+        try:
+            tid = turns().accept(body, kind="peer") if turns else None
+        except OSError as e:
+            return {"result": "failed", "reason": "ledger",
+                    "why": f"could not record the message durably: {e}"}
+        tid = tid or new_turn_id()
+        nonce = uuid.uuid4().hex[:8]
+        from_label = f"@{src.seat}" if (src.seat and not src.seat_withheld) \
+            else f"pane {src.id}"
+        item = QueuedText(peer_envelope(from_label, to_seat, body, nonce), tid)
+        item.peer = True
+        # activity=False: a peer message is not the human, and must not
+        # keep an ephemeral pane alive past its reap (section 7, T7.14).
+        dst.emit("peer", {"from_pane": src.id, "from_seat": src.seat,
+                          "to_seat": to_seat, "turn": tid, "hop": hop,
+                          "nonce": nonce, "text": body}, activity=False)
+        try:
+            dst._dispatch(item, at=at)
+        except Exception as e:                   # noqa: BLE001
+            dst.emit("peer_result", {"turn": tid, "delivered": False,
+                                     "reason": f"{type(e).__name__}: {e}"},
+                     activity=False)
+            return {"result": "failed", "reason": "dispatch",
+                    "why": f"the message could not be queued: {e}"}
         return {"result": "delivered", "turn": tid, "hop": hop,
                 "to_seat": to_seat, "to_pane": dst.id}
+
+    # ── the S11b reply queue, manager side ────────────────────────────────
+
+    def _awaited_turn(self, src, dst, now):
+        """The turn id `dst` is running, IF `dst` is blocked in seat_wait on
+        a turn `src` is running right now; else None.
+
+        What the hub knows about a wait is what seat_wait's polls told it
+        (peer_turn records each one). All of these must hold: the waiter
+        polled within PEER_WAIT_SEEN_S; about THIS sender; from the turn it
+        is still in; and the turn it waits on is the one the sender is
+        running -- so a reply from a later turn, a stale wait, or any other
+        pane is still `busy`."""
+        rec = self.__dict__.get("_peer_waits", {}).get(dst.id)
+        running = getattr(getattr(dst, "_in_flight", None), "turn", None)
+        if not rec or running is None:
+            return None
+        if rec["to_pane"] != src.id or rec["waiter_turn"] != running:
+            return None
+        if now - rec["at"] > PEER_WAIT_SEEN_S:
+            return None
+        if getattr(getattr(src, "_in_flight", None), "turn", None) != rec["turn"]:
+            return None
+        return running
+
+    def _peer_hold_locked(self, src, dst, to_seat, body, behind):
+        """Hold one admitted reply for the end of `dst`'s turn `behind`.
+        Under the target's _turn_lock. In memory only; an expiry timer is
+        armed now, and the record goes on both panes."""
+        h = {"qid": uuid.uuid4().hex[:8], "from_pane": src.id,
+             "from_seat": src.seat, "to_seat": to_seat, "to_pane": dst.id,
+             "behind_turn": behind, "body": body, "mono": time.monotonic(),
+             "ttl": PEER_QUEUE_TTL_S}
+        timer = threading.Timer(h["ttl"], self._peer_queue_expire,
+                                args=(dst, h["qid"]))
+        timer.daemon = True
+        h["timer"] = timer
+        dst.__dict__.setdefault("_peer_held", []).append(h)
+        timer.start()
+        self._peer_queue_record(dst, h, "queued", ttl_s=h["ttl"])
+        return {"result": "queued", "to_seat": to_seat, "to_pane": dst.id,
+                "behind_turn": behind, "qid": h["qid"],
+                "expires_in_s": h["ttl"],
+                "why": f"@{to_seat} is waiting on the turn you are running, so "
+                       f"this is held and delivered as its NEXT turn once its "
+                       f"current turn ({behind}) ends. It has NOT been "
+                       f"delivered: it is checked again then, and is dropped "
+                       f"if not delivered within {h['ttl']:g} s or "
+                       f"if that pane is paused, cancelled or closed."}
+
+    def _peer_queue_record(self, dst, h, status, **extra):
+        """The fact, on BOTH panes: `peer_queue` with a status (queued,
+        delivered, refused, expired, dropped). Never the body -- the target
+        sees it only if it is delivered, as the `peer` event. activity=False:
+        bookkeeping is not the pane doing anything."""
+        data = {k: h.get(k) for k in ("qid", "from_pane", "from_seat",
+                                       "to_pane", "to_seat", "behind_turn")}
+        data.update(status=status, chars=len(h.get("body") or ""))
+        data.update({k: v for k, v in extra.items() if v is not None})
+        dst.emit("peer_queue", {**data, "side": "to"}, activity=False)
+        src = self.panes.get(h["from_pane"])
+        if src is not None and src is not dst:
+            src.emit("peer_queue", {**data, "side": "from"}, activity=False)
+
+    @staticmethod
+    def _peer_timer_cancel(h):
+        t = h.get("timer")
+        if t is not None:
+            t.cancel()
+
+    def _peer_queue_drop(self, dst, h, reason):
+        """A held message the waiter's lifecycle ended (the caller holds the
+        target's _turn_lock and has already taken it off the list)."""
+        self._peer_timer_cancel(h)
+        self._peer_queue_record(dst, h, "dropped", reason=reason,
+                                why=f"@{h['to_seat']} was {reason} before its "
+                                    f"turn ended; the message was not delivered")
+
+    def _peer_queue_expire(self, dst, qid):
+        """The expiry timer. Takes the target's _turn_lock ONCE (it runs on
+        its own thread, never inside another acquisition)."""
+        with dst._turn_lock:
+            held = dst.__dict__.get("_peer_held") or []
+            h = next((x for x in held if x["qid"] == qid), None)
+            if h is None:
+                return                        # delivered or dropped already
+            held.remove(h)
+            self._peer_queue_record(
+                dst, h, "expired",
+                why=f"not delivered within {h['ttl']:g} s: "
+                    f"@{h['to_seat']}'s turn had not ended")
+
+    def _peer_release_locked(self, dst):
+        """The waiter's turn has ended: re-admit every held message, in
+        order, under the drain's ONE acquisition of dst._turn_lock (never
+        re-taken here). Admitted -> queued as the next turn(s), the hop
+        stamped NOW; anything else -> recorded, not delivered."""
+        items, dst._peer_held = list(dst._peer_held), []
+        at = 0
+        for h in items:
+            self._peer_timer_cancel(h)
+            if time.monotonic() - h["mono"] > h["ttl"]:
+                self._peer_queue_record(
+                    dst, h, "expired",
+                    why=f"not delivered within {h['ttl']:g} s")
+                continue
+            if dst.state in ("dead", "detached") or dst.client is None:
+                self._peer_queue_drop(
+                    dst, h, "dead" if dst.state == "dead" else "paused")
+                continue
+            src = self.panes.get(h["from_pane"])
+            if src is None:
+                r = self._refused("sender-closed", "the sending pane was "
+                                                   "closed before delivery")
+            else:
+                r = self._peer_target_refusal(dst, h["to_seat"])
+            if r is None:
+                why = self._refuse_transfer(src, dst)
+                r = self._refused("transfer-gate", why) if why else None
+            hop = None
+            if r is None:
+                hop, r = self._peer_hop(src, dst)
+            if r is not None:
+                self._peer_queue_record(dst, h, "refused", reason=r["reason"],
+                                        why=r["why"])
+                continue
+            res = self._peer_admit_locked(src, dst, h["to_seat"], h["body"],
+                                          hop, at=at)
+            if res["result"] == "delivered":
+                at += 1
+                self._peer_queue_record(dst, h, "delivered", turn=res["turn"],
+                                        hop=hop)
+            else:
+                self._peer_queue_record(dst, h, "failed", reason=res["reason"],
+                                        why=res["why"])
+
+    def _peer_queue_orphans(self):
+        """After a restart: a `queued` record with no outcome after it is a
+        message the old hub held in memory and lost. Record `dropped` on the
+        pane that holds the record -- each side recorded its own `queued`, so
+        each records its own drop. Recorded, never re-sent."""
+        for p in list(self.panes.values()):
+            open_q = {}
+            for ev in list(getattr(p, "events", None) or []):
+                if ev.get("kind") != "peer_queue":
+                    continue
+                d = ev.get("data") or {}
+                if d.get("status") == "queued":
+                    open_q[d.get("qid")] = d
+                else:
+                    open_q.pop(d.get("qid"), None)
+            for d in open_q.values():
+                out = {k: v for k, v in d.items() if k != "ttl_s"}
+                out.update(status="dropped", reason="hub-restart",
+                           why="the hub restarted while this message was "
+                               "queued; held messages are kept in memory "
+                               "only, so it was not delivered")
+                p.emit("peer_queue", out, activity=False)
 
     def broadcast_peer(self, from_pane_id, text, now=None):
         """One message to every OTHER seated pane (DESIGN-5 S10).
@@ -1551,7 +1831,7 @@ class ManagerBase:
             return 200, self.peer_turn(pane.id, b.get("seat"), b.get("turn"))
         return 404, {"error": "no such peer route"}
 
-    def peer_turn(self, from_pane_id, to_seat, turn):
+    def peer_turn(self, from_pane_id, to_seat, turn, now=None):
         """Has a turn this pane SENT ended? (DESIGN-5 S11, what `seat_wait`
         polls.) Read-only and immediate: the waiting happens in the caller's
         MCP child, never here.
@@ -1592,6 +1872,17 @@ class ManagerBase:
             return self._refused("unknown-turn",
                                  f"no message this pane sent to @{to_seat} has "
                                  f"turn id {str(turn)[:40]!r} in the hub's memory")
+        # What the hub knows about a wait in flight is exactly this poll
+        # (S11b): the caller, from inside its own current turn, is waiting on
+        # `tid` at `dst`. A reply from `dst` during `tid` may then be held
+        # (_awaited_turn). One record per waiter -- one wait per pane.
+        waits = self.__dict__.setdefault("_peer_waits", {})
+        if ended or not_run:
+            waits.pop(src.id, None)
+        else:
+            mine = getattr(getattr(src, "_in_flight", None), "turn", None)
+            waits[src.id] = {"to_pane": dst.id, "turn": tid, "waiter_turn": mine,
+                             "at": time.time() if now is None else now}
         return {"result": "turn", "seat": to_seat, "turn": tid,
                 "ended": ended, "not_run": not_run, "stop_reason": stop,
                 "display": display_state(dst)["state"]}

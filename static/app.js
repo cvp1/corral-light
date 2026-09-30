@@ -617,6 +617,21 @@ function renderLog(p) {
           log.appendChild(el('div', 'sys', `that message was not run — ${d.reason || 'unknown'}`));
         }
         break;
+      case 'peer_queue':
+        // DESIGN-5 S11b: a reply held for a pane that is waiting on its
+        // sender, recorded on BOTH panes. On the receiving side `delivered`
+        // prints nothing -- the `peer` block right after it says so.
+        if (!(d.side === 'to' && d.status === 'delivered')) {
+          flush();
+          const who = d.side === 'from' ? `to @${d.to_seat || '?'}`
+                                        : `from @${d.from_seat || d.from_pane || '?'}`;
+          const what = d.status === 'queued'
+            ? (d.side === 'from' ? `queued until @${d.to_seat || '?'}'s turn ends`
+                                 : 'queued until this turn ends')
+            : `${d.status || '?'}` + (d.reason ? ` — ${d.reason}` : '');
+          log.appendChild(el('div', 'sys', `message ${who}: ${what}`));
+        }
+        break;
       case 'tool':
         flushText();
         if (d.id) xseen.add(d.id);
