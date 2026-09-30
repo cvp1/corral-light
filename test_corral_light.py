@@ -3774,6 +3774,18 @@ class LightDeliversPeers(_FakeLaneCase):
         rec = b._turns().turns()[tid]
         self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
 
+    def test_a_wait_on_a_ledgered_turn_ends_with_its_turn_end(self):
+        """DESIGN-5 S11 on Light: the turn id the ledger minted at admission is
+        the one the drain's turn_end carries, so the sender's wait ends."""
+        a, b = self.pair()
+        r = self.mgr.deliver_peer(a.id, "reviewer", "tell me when")
+        self.assertEqual(r["result"], "delivered", r)
+        self.assertTrue(_wait_for(lambda: self.mgr.peer_turn(
+            a.id, "reviewer", r["turn"])["ended"]))
+        self.assertEqual(b._turns().turns()[r["turn"]].get("state"), "completed")
+        self.assertEqual(self.mgr.peer_turn(b.id, "author", r["turn"])["reason"],
+                         "unknown-turn")
+
 
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the

@@ -1546,7 +1546,55 @@ class ManagerBase:
         if method == "POST" and path == "/api/peer/broadcast":
             b = body if isinstance(body, dict) else {}
             return 200, self.broadcast_peer(pane.id, b.get("text"))
+        if method == "GET" and path == "/api/peer/turn":
+            b = body if isinstance(body, dict) else {}   # the query string
+            return 200, self.peer_turn(pane.id, b.get("seat"), b.get("turn"))
         return 404, {"error": "no such peer route"}
+
+    def peer_turn(self, from_pane_id, to_seat, turn):
+        """Has a turn this pane SENT ended? (DESIGN-5 S11, what `seat_wait`
+        polls.) Read-only and immediate: the waiting happens in the caller's
+        MCP child, never here.
+
+        -> {"result": "turn", "seat", "turn", "ended", "not_run",
+            "stop_reason", "display"} -- no text, ever: whether the other
+        agent answers is for it to decide, through its own seat_send.
+
+        Only a turn whose `peer` event names this caller as `from_pane` is
+        known; anyone else's turn id, a human's, or one that has left the
+        in-memory ring is refused `unknown-turn` -- the same answer, so the
+        route cannot be used to learn another pane's turn ids."""
+        src = self.get(from_pane_id)
+        dst = self.seat(to_seat) if isinstance(to_seat, str) else None
+        if dst is None:
+            return self._refused("unknown-seat",
+                                 f"no open pane answers to @{str(to_seat)[:40]} "
+                                 f"— call seat_list to see who does")
+        if dst.id == src.id:
+            return self._refused("self", "a pane cannot wait on itself")
+        tid = turn if isinstance(turn, str) else None
+        with dst._lock:
+            events = list(dst.events)
+        known, ended, not_run, stop = False, False, None, None
+        for ev in events:
+            d = ev.get("data") or {}
+            if not known:
+                known = (tid is not None and ev.get("kind") == "peer"
+                         and d.get("turn") == tid and d.get("from_pane") == src.id)
+            elif d.get("turn") == tid and ev.get("kind") == "turn_end":
+                ended, stop = True, d.get("stopReason")
+                break
+            elif d.get("turn") == tid and ev.get("kind") == "peer_result" \
+                    and d.get("delivered") is False:
+                not_run = str(d.get("reason") or "not run")[:200]
+                break
+        if not known:
+            return self._refused("unknown-turn",
+                                 f"no message this pane sent to @{to_seat} has "
+                                 f"turn id {str(turn)[:40]!r} in the hub's memory")
+        return {"result": "turn", "seat": to_seat, "turn": tid,
+                "ended": ended, "not_run": not_run, "stop_reason": stop,
+                "display": display_state(dst)["state"]}
 
     # ── seats (DESIGN-5 S6) ──────────────────────────────────────────────
 
