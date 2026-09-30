@@ -170,6 +170,48 @@ meant to use; they do not create an identity a same-user process cannot forge.
 **Who can send.** Every lane whose adapter accepts MCP servers is offered the tools. The Ollama lane's adapter takes none, so a pane there can **receive** a message but not send one; SSH panes neither send nor receive. `seat_list` says which panes were offered the tools. `CORRAL_NATIVE_MCP=0` in the hub's environment turns the
 tools off for every pane.
 
+## Asking the human
+
+An agent that needs your decision cannot raise it by writing a question at the
+end of its reply: a reply that ends in a question looks exactly like a pane that
+simply finished, and nothing tells you. So every pane that is offered the seat
+tools also gets **`ask_human(question)`**. Its description tells the model to
+use it whenever it needs your decision, answer or attention, and then to end its
+turn — prose alone raises nothing.
+
+- **What you see.** The pane reads **needs you** (in the roster, on the pane,
+  on a minimized chip, and in the tab title's count), the roster row carries an
+  `asks: …` preview, and a banner with the full question sits between the
+  pane's header and its transcript. The transcript records it as the agent
+  asking — never as your message, never as a system instruction.
+- **One open question per pane.** Asking again replaces the earlier question
+  (the transcript says so). A question is at most **2000** characters
+  (`MAX_ASK_CHARS`); a longer one is refused, never cut. The tool can only ask
+  on its own pane: the hub decides which pane is asking from the pane's token,
+  never from anything the model sends.
+- **What answers it.** Any turn you send the pane — typed, or from the command
+  line or a script — closes it. A message from another pane's agent, or a
+  rig's opening prompt, does **not**. Closing the pane or its agent stopping
+  also closes it; the transcript says which.
+- **A loop that hits the message limit raises itself.** When a message between
+  panes is refused at the four-message limit (a direct send, a broadcast, or a
+  queued reply at delivery), Corral itself opens a question on the **sending**
+  pane — "Loop paused … Refused: @sender → @target" — marked as Corral's, never
+  the agent's. It reads needs you like any question and closes on your next
+  message to that pane, which also restarts the count for **both** panes so the
+  loop can carry on. If that pane's agent already has its own question open, it
+  is left alone (the pane already needs you) and only the refusal is recorded.
+  The other pane is not flagged: one item per stall.
+- **Restarts.** The open question is saved with the pane's metadata, so it
+  survives a hub restart: the pane comes back paused and still reads needs you.
+- **Turns you did not start.** When a turn that another pane's agent or a rig
+  started ends, the pane reads **idle**, not **your turn** — you did not start
+  it, so nothing is waiting on you. An agent that does need you uses
+  `ask_human`.
+- The same boundary as the seat tools applies: any process running as the hub's
+  own user could call the route as a pane, or send a turn that closes a
+  question.
+
 ## Rigs: bring your seats back with one verb
 
 A **rig** is your seated panes, saved by name: `rigs/<name>.toml` in the state
