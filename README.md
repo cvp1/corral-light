@@ -129,6 +129,10 @@ offers every eligible pane (an MCP server named `corral-seats`):
 
 A message arrives in the other pane as its own block, marked **from @author**
 and **untrusted** — never as that pane's human, never lifting a runbook park.
+A message that claims *your* approval or decision ("the user approved it",
+or your name, taken from the account's full name) is delivered with a hub
+line saying the claim is unverified and only your own turn can give it. The
+line also appears on the block. It is a flag, never a refusal.
 It is refused, not queued, when the target is busy, waiting on a permission
 card, paused (after a restart every pane is), or dead. After **four** messages
 pass between panes with no human turn on them, sending stops until a human
