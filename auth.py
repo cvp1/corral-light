@@ -31,7 +31,9 @@ import hmac
 import json
 import os
 import secrets
+import socket
 import time
+import uuid
 from pathlib import Path
 
 # Its own state dir, NOT the full Corral's. The session key lives here, so
@@ -118,6 +120,25 @@ def _prune(d, now=None):
     d["pending"] = {c: v for c, v in d.get("pending", {}).items()
                     if v.get("expires", 0) > now}
     return d
+
+
+def host_id():
+    """An opaque tag for THIS machine, served with every pairing code so a
+    client can tell "the hub's store is on my host but is not the one I read"
+    (fail fast) from "the hub is elsewhere, maybe behind an ssh -L tunnel to
+    127.0.0.1" (wait for its human). A URL cannot tell those apart; this can.
+    Salted hash: /api/pair/new is unauthenticated, so the tag names nothing."""
+    raw = ""
+    for f in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            raw = Path(f).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if raw:
+            break
+    if not raw:                                          # macOS: no machine-id
+        raw = f"{socket.gethostname()}:{uuid.getnode()}"
+    return hashlib.sha256(b"corral-pair-host\0" + raw.encode()).hexdigest()[:16]
 
 
 def new_code(now=None):

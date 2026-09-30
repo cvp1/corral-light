@@ -423,7 +423,8 @@ class Handler(BaseHTTPRequestHandler):
             except auth.TooMany as e:
                 return self._json({"error": str(e)}, 429)
             return self._json({"code": code, "ttl": ttl,
-                               "how": f"corral-light pair {code}"})
+                               "how": f"corral-light pair {code}",
+                               "host": auth.host_id()})
         if p == "/api/pair/claim":
             tok, status = auth.claim((q.get("code") or [""])[0])
             if not tok:
