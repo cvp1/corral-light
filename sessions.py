@@ -1701,7 +1701,6 @@ class Pane(_core.PaneBase):
             # The null ledger (a pane with no durable record) returns no id;
             # a turn still needs one for its `turn_end` to be matched to it.
             tid = tid or _core.new_turn_id()
-            self._queue.append(_QueuedText(text, tid))
             user = {"text": text, "turn": tid}
             if via:
                 user["via"] = via
@@ -1721,11 +1720,9 @@ class Pane(_core.PaneBase):
                 # existing "load earlier" affordance, never a silent loss
                 # (PRINCIPLES 18).
                 self.emit("cleared", {})
-            self.state = "busy"
-            if self._turn_running:
-                return tid
-            self._turn_running = True
-            threading.Thread(target=self._drain, daemon=True).start()
+            # The queue-and-drain half is shared with peer delivery (DESIGN-5
+            # S7); everything ABOVE this line is what makes it the human's.
+            self._dispatch(_QueuedText(text, tid))
             return tid
 
     def _drain(self):
@@ -1744,6 +1741,13 @@ class Pane(_core.PaneBase):
                     self._turn_running = False
                     return
                 text = self._queue.pop(0)
+                # A PEER message is admitted only onto a pane with no card, but
+                # _on_permission does not take this lock: re-check at the last
+                # moment before prompt(), and fail the peer turn rather than run
+                # it under the human's nose (DESIGN-5 section 7.3).
+                if getattr(text, "peer", False) and self.pending:
+                    self._peer_withdrawn(text, "card-pending")
+                    continue
                 # The popped prompt exists nowhere else until turn_end: not in
                 # the queue, and in the transcript only as a `user` event.
                 # A shutdown note has to NAME it (Grok 2026-09-28, K3), so it
@@ -1775,6 +1779,9 @@ class Pane(_core.PaneBase):
                     self._turn_running = False
                     self._in_flight = None
                 lg.mark(tid, "interrupted", why=str(e), was="dispatched")
+                if getattr(text, "peer", False):
+                    self.emit("peer_result", {"turn": tid, "delivered": False,
+                                              "reason": str(e)}, activity=False)
                 for t in lost:
                     lg.mark(getattr(t, "turn", None), "interrupted",
                             why="the agent stopped before it was sent",
@@ -2439,8 +2446,11 @@ class Manager(_core.ManagerBase):
             if cut:
                 def _show(r):
                     t = r.get("text") or ""
-                    return repr(t[:PARKED_PREVIEW_CHARS] +
-                                ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                    # A cut-off PEER message says so: re-sending it is not the
+                    # operator re-asking their own question (DESIGN-5 S7).
+                    return ("a message from another pane, " if r.get("kind") == "peer"
+                            else "") + repr(t[:PARKED_PREVIEW_CHARS] +
+                                            ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
                 p.emit("note", {
                     "text": f"{len(cut)} turn(s) were interrupted when the hub "
                             f"stopped and will not be re-sent: "

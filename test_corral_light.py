@@ -3656,6 +3656,13 @@ class TheSeatIsOnThePane(unittest.TestCase):
         _run_node_selftest(self, "selftest_seats.mjs", "the seat pill and ⌘K")
 
 
+class APeerMessageRendersAsWhatItIs(unittest.TestCase):
+    """DESIGN-5 S7, T7.6/T7.18 in the browser."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_peer.mjs", "the peer block and reducer")
+
+
 from test_resilience import FakeLaneCase as _FakeLaneCase, wait_for as _wait_for  # noqa: E402
 
 
@@ -3696,6 +3703,60 @@ class LightTurnsHaveIds(_FakeLaneCase):
         self.assertEqual(len(p.events), before, "a refused send still emitted")
 
 
+class LightDeliversPeers(_FakeLaneCase):
+    """DESIGN-5 S7 on Light's own drain and ledger (the core's admission is
+    covered in full Corral's test_peer.py; this is what Light forks)."""
+
+    def pair(self):
+        a = self.mgr.create("fake", self.agent_dir)
+        b = self.mgr.create("fake", self.agent_dir)
+        self.mgr.bind_seat(a.id, "author")
+        self.mgr.bind_seat(b.id, "reviewer")
+        return a, b
+
+    def test_delivered_through_lights_drain(self):
+        a, b = self.pair()
+        r = self.mgr.deliver_peer(a.id, "reviewer", "hello from a peer")
+        self.assertEqual(r["result"], "delivered", r)
+        self.assertTrue(_wait_for(lambda: "turn_end" in self.kinds(b)[-3:]))
+        self.assertNotIn("user", self.kinds(b)[-6:])
+        self.assertIn('<corral-peer from="@author"', self.texts(b))
+        self.assertEqual([e for e in b.events if e["kind"] == "turn_end"][-1]["data"]["turn"],
+                         r["turn"])
+
+    def test_the_ledger_names_a_peer_turn_and_recover_reports_it(self):
+        """T7.15 (section 7.5): accepted with kind: peer, dispatched,
+        completed -- and one a restart cut off is reported interrupted, named
+        as a peer message, never re-sent."""
+        a, b = self.pair()
+        r = self.mgr.deliver_peer(a.id, "reviewer", "ledger me")
+        self.assertTrue(_wait_for(lambda: "turn_end" in self.kinds(b)[-3:]))
+        rec = b._turns().turns()[r["turn"]]
+        self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
+        tid = b._turns().accept("cut off by a restart", kind="peer")
+        closed = b._turns().recover()
+        self.assertEqual([(c["turn"], c.get("kind")) for c in closed], [(tid, "peer")])
+        self.assertEqual(b._turns().turns()[tid]["state"], "interrupted")
+
+    def test_a_card_after_admission_fails_the_peer_turn_in_lights_drain(self):
+        """T7.12 on Light's forked _drain."""
+        a, b = self.pair()
+        with b._turn_lock:
+            b._turn_running = True
+        r = self.mgr.deliver_peer(a.id, "reviewer", "must not run")
+        b.pending["late"] = {"title": "arrived after admission"}
+        with b._turn_lock:
+            b._turn_running = False
+        import threading as _t
+        _t.Thread(target=b._drain, daemon=True).start()
+        self.assertTrue(_wait_for(lambda: "peer_result" in self.kinds(b)))
+        res = [e for e in b.events if e["kind"] == "peer_result"][-1]["data"]
+        self.assertEqual((res["turn"], res["reason"]), (r["turn"], "card-pending"))
+        self.assertNotIn("must not run", self.texts(b))
+        self.assertEqual(b._turns().turns()[r["turn"]]["state"], "interrupted")
+        b.pending.clear()
+
+
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.
@@ -3704,6 +3765,8 @@ from test_cli import *                           # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402
 # DESIGN-5 S6: seats, the forked half (restore/reopen/from_meta/snapshot).
 from test_seats import *                         # noqa: F401,F403,E402
+# DESIGN-5 S7: every consumer of the `peer` kind (port pack, index, digest).
+from test_peer_consumers import ThePortPack, TheIndex   # noqa: F401,E402
 
 
 if __name__ == "__main__":

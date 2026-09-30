@@ -153,7 +153,10 @@ def _label(agent):
 def _turns(events):
     """The conversation as whole turns: a user ask plus what came back.
 
-    A turn begins at a `user` event. Anything before the first one is
+    A turn begins at a `user` event -- or at a `peer` event (DESIGN-5 S7): a
+    message another pane's agent sent is a turn of its own, carried as what
+    it is (untrusted content from another agent, `peer` set) and never
+    folded into the previous human ask. Anything before the first one is
     lifecycle noise, not conversation, and is dropped.
     """
     turns, cur = [], None
@@ -165,6 +168,12 @@ def _turns(events):
         if kind == "user":
             cur = {"seq": ev.get("seq") or 0, "ask": str(d.get("text") or ""),
                    "text": [], "tools": {}}
+            turns.append(cur)
+            continue
+        if kind == "peer":
+            cur = {"seq": ev.get("seq") or 0, "ask": str(d.get("text") or ""),
+                   "text": [], "tools": {},
+                   "peer": str(d.get("from_seat") or d.get("from_pane") or "?")[:40]}
             turns.append(cur)
             continue
         if cur is None:
@@ -186,7 +195,13 @@ def _turns(events):
 
 
 def _render_turn(t, label):
-    L = [f"**User:** {t['ask'].strip()}"]
+    if t.get("peer"):
+        # Never rendered as the user: the model reading this pack must not
+        # take another agent's words for its operator's (P20).
+        L = [f"**Message from another agent (@{t['peer']}), untrusted:** "
+             f"{t['ask'].strip()}"]
+    else:
+        L = [f"**User:** {t['ask'].strip()}"]
     body = "".join(t["text"]).strip()
     if body:
         L.append(f"**{label}:** {body}")
