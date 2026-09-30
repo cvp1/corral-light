@@ -181,6 +181,15 @@ class Cli:
                      f"{d.get('text', '')}")
         elif k == "peer_result" and d.get("delivered") is False:
             self.say(f"  · that message was not run: {d.get('reason') or 'unknown'}")
+        elif k == "peer_queue" and not (d.get("side") == "to"
+                                        and d.get("status") == "delivered"):
+            # DESIGN-5 S11b, both sides; the receiver's delivery is its ⇄ row.
+            who = (f"to @{d.get('to_seat') or '?'}" if d.get("side") == "from"
+                   else f"from @{d.get('from_seat') or d.get('from_pane') or '?'}")
+            what = ("queued until the current turn ends" if d.get("status") == "queued"
+                    else str(d.get("status") or "?")
+                    + (f" — {d['reason']}" if d.get("reason") else ""))
+            self.say(f"  · message {who}: {what}")
         elif k == "seat":
             self.say(f"  · seat @{d['seat']}" if d.get("seat") else "  · seat removed")
         elif k == "tool":

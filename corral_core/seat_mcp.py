@@ -7,6 +7,7 @@ DESIGN-5 S8 (S10, S11). Four tools, nothing else:
                                 tool}] -- no titles, no transcripts
     seat_send(seat, text)    -> the hub's answer, verbatim: delivered (with a
                                 turn id) | refused (with the reason) | failed
+                                | queued (S11b: held for a waiter's next turn)
     seat_broadcast(text)     -> one seat_send per OTHER seated pane, each with
                                 its own answer; one refusal unsends nothing
     seat_wait(seat, turn|until, timeout_s)
@@ -103,7 +104,11 @@ TOOLS = [
          "arrives in that pane's transcript as a message from THIS pane, "
          "fenced and marked untrusted -- never as that pane's human. The "
          "result is `delivered` (with a turn id), `refused` (with a reason), "
-         "or `failed`. " + REFUSAL_GUIDANCE + " After four messages pass "
+         "`failed`, or `queued`: the other seat is waiting on the turn YOU "
+         "are running, so the message is held and delivered as its next turn "
+         "once its current turn ends -- it has NOT been delivered yet, and it "
+         "can still be refused, expire, or be dropped (at most one is held "
+         "per seat). " + REFUSAL_GUIDANCE + " After four messages pass "
          "between panes with no human turn, sending is refused until a human "
          "speaks. The sender label is the supported path, not proof: any "
          "process running as this user could send as this pane."),
@@ -143,10 +148,11 @@ TOOLS = [
          "was withdrawn before it ran), `interrupted` (the hub restarted or "
          "stopped answering) or `refused`. It returns the seat's state and "
          "whether the turn ended -- NEVER what the other agent wrote; if it "
-         "has something for you, it sends it with its own `seat_send` -- and "
-         "while you wait you are working, so that message is refused `busy`. "
-         "Wait to sequence work (go when the other seat is done); to hear "
-         "back, send and end your turn instead. One wait at a time."),
+         "has something for you, it sends it with its own `seat_send`. While "
+         "you wait you are working: only a message from the seat you wait on, "
+         "sent during the turn you wait on, is queued for you; it arrives as "
+         "your NEXT turn, after this one ends. Anyone else is refused `busy`. "
+         "One wait at a time."),
      "inputSchema": {"type": "object",
                      "properties": {
                          "seat": {"type": "string",

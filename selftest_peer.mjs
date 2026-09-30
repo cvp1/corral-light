@@ -94,6 +94,22 @@ check(failed.children[0] && failed.children[0].textContent.includes('card-pendin
 check(render('peer_result', { turn: 't', delivered: true }).children.length === 0,
       'a successful peer_result printed a line');
 
+// DESIGN-5 S11b: the reply queue's record, on both sides, as text.
+const qTo = render('peer_queue', { status: 'queued', side: 'to', from_seat: 'reviewer' });
+check(qTo.children[0] && qTo.children[0].textContent === 'message from @reviewer: queued until this turn ends',
+      `the waiter's queued line reads "${qTo.children[0] && qTo.children[0].textContent}"`);
+const qFrom = render('peer_queue', { status: 'expired', side: 'from', to_seat: 'author' });
+check(qFrom.children[0] && qFrom.children[0].textContent === 'message to @author: expired',
+      "the sender's expiry line is wrong");
+const qDrop = render('peer_queue', { status: 'dropped', side: 'to', from_seat: 'r',
+                                     reason: '<b>paused</b>' });
+check(qDrop.children[0].textContent.endsWith('dropped — <b>paused</b>')
+      && [...qDrop.walk()].every(n => n.tag !== 'b'), 'a drop reason was parsed as markup');
+check(render('peer_queue', { status: 'delivered', side: 'to' }).children.length === 0,
+      "the receiving side repeated a delivery its peer block already shows");
+check(render('peer_queue', { status: 'delivered', side: 'from', to_seat: 'a' }).children[0]
+      .textContent === 'message to @a: delivered', "the sender never learns it was delivered");
+
 /* ── T7.18 the reducer ────────────────────────────────────────────────── */
 const a = src.indexOf("    if (ev.kind === 'permission') { p.pending.push(d.requestId);");
 const b = src.indexOf("    if (ev.kind === 'renamed')", a);
