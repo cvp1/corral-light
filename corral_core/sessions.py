@@ -1451,6 +1451,40 @@ class ManagerBase:
         return {"result": "delivered", "turn": tid, "hop": hop,
                 "to_seat": to_seat, "to_pane": dst.id}
 
+    def broadcast_peer(self, from_pane_id, text, now=None):
+        """One message to every OTHER seated pane (DESIGN-5 S10).
+
+        -> {"results": [deliver_peer's answer + "to_seat", ...], "delivered",
+            "refused", "failed"} -- one entry per seat, in seat order.
+
+        `fanout` semantics, not `crossfeed`'s: each seat gets its own admission
+        through deliver_peer (its own lock, gate, hop and budget check), and a
+        refusal for one seat does not unsend another -- a prompt() already
+        handed to an adapter cannot be taken back, so all-or-nothing is not
+        on offer. Each seat is one attempt against the source's hourly
+        budget. At most MAX_PANES seats are tried; any beyond are REPORTED
+        `broadcast-cap`, never silently left out. No seat to send to is an
+        empty list with a reason, not an error."""
+        now = time.time() if now is None else now
+        src = self.get(from_pane_id)
+        seats = sorted(p.seat for p in list(self.panes.values())
+                       if p.seat and not p.seat_withheld and p.id != src.id)
+        results = []
+        for i, seat in enumerate(seats):
+            if i >= MAX_PANES:
+                r = self._refused("broadcast-cap",
+                                  f"a broadcast reaches at most {MAX_PANES} "
+                                  f"seats; @{seat} was not tried")
+            else:
+                r = self.deliver_peer(src.id, seat, text, now=now)
+            results.append({**r, "to_seat": seat})
+        out = {"results": results}
+        for k in ("delivered", "refused", "failed"):
+            out[k] = sum(1 for r in results if r["result"] == k)
+        if not results:
+            out["why"] = "no other pane has a seat — nothing was sent"
+        return out
+
     # ── the seat tools' hub side (DESIGN-5 S8) ────────────────────────────
 
     def mint_pane_token(self, pane):
@@ -1493,7 +1527,7 @@ class ManagerBase:
         return out
 
     def peer_http(self, method, path, token, body=None):
-        """The two routes the seat tools call, as (status, json).
+        """The routes the seat tools call, as (status, json).
 
         The TOKEN decides who is sending -- the pane it was minted for -- and
         nothing in the body can say otherwise: only `seat` and `text` are
@@ -1509,6 +1543,9 @@ class ManagerBase:
         if method == "POST" and path == "/api/peer/send":
             b = body if isinstance(body, dict) else {}
             return 200, self.deliver_peer(pane.id, b.get("seat"), b.get("text"))
+        if method == "POST" and path == "/api/peer/broadcast":
+            b = body if isinstance(body, dict) else {}
+            return 200, self.broadcast_peer(pane.id, b.get("text"))
         return 404, {"error": "no such peer route"}
 
     # ── seats (DESIGN-5 S6) ──────────────────────────────────────────────

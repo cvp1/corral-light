@@ -100,13 +100,18 @@ second bill.
 
 A **seat** is a name you give a pane — `@reviewer`, `@author` — with the ＠ in
 its header (or `corral-light seat <pane> <name>`; `-` removes it). One open pane per name; a closed pane holds nothing. Once a pane
-has a seat, the agent in another pane can reach it through two tools Corral
+has a seat, the agent in another pane can reach it through tools Corral
 offers every eligible pane (an MCP server named `corral-seats`):
 
 - `seat_list()` — who can be addressed and what state each is in (`your-turn`,
   `working`, `needs-you`, `paused`, …). No titles, no transcripts.
 - `seat_send(seat, text)` — one message, answered `delivered` (with a turn id),
   `refused` (with the reason), or `failed`.
+- `seat_broadcast(text)` — the same message to every other seated pane, one
+  `seat_send` per seat: a list of answers, one per seat. A refusal for one seat
+  does not stop or undo the others; each seat counts as one send against the
+  hourly limit; at most 12 seats are tried and any beyond are reported, not
+  skipped.
 
 A message arrives in the other pane as its own block, marked **from @author**
 and **untrusted** — never as that pane's human, never lifting a runbook park.

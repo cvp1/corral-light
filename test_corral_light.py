@@ -3756,6 +3756,24 @@ class LightDeliversPeers(_FakeLaneCase):
         self.assertEqual(b._turns().turns()[r["turn"]]["state"], "interrupted")
         b.pending.clear()
 
+    def test_a_broadcast_through_lights_drain_and_ledger(self):
+        """DESIGN-5 S10 on Light: each seat's message is its own ledgered peer
+        turn; a refused seat leaves the delivered ones standing."""
+        a, b = self.pair()
+        c = self.mgr.create("fake", self.agent_dir)
+        self.mgr.bind_seat(c.id, "critic")
+        c.pending["r1"] = {"title": "t"}
+        out = self.mgr.broadcast_peer(a.id, "to everyone")
+        c.pending.clear()
+        self.assertEqual([(r["to_seat"], r["result"]) for r in out["results"]],
+                         [("critic", "refused"), ("reviewer", "delivered")])
+        tid = out["results"][1]["turn"]
+        self.assertTrue(_wait_for(lambda: "turn_end" in self.kinds(b)[-3:]))
+        self.assertIn("to everyone", self.texts(b))
+        self.assertNotIn("peer", self.kinds(c))
+        rec = b._turns().turns()[tid]
+        self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
+
 
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the

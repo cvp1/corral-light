@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The seat tools' MCP server and the descriptor that offers it (DESIGN-5 S8).
 
-  T8.1  the server answers initialize and tools/list with exactly the two
+  T8.1  the server answers initialize and tools/list with exactly the seat
         tools and their schemas; tools/call seat_send posts to the hub with
         the token FROM ITS ENVIRONMENT, and only `seat` and `text` leave it.
   T8.3  the descriptor carries the three env entries, a fresh token per spawn
@@ -9,6 +9,7 @@
         and registry descriptors are passed through unchanged.
   T8.6  it is named `corral-seats` -- never `acp`, and a registry entry that
         takes the name is dropped rather than left beside the real one.
+  S10   seat_broadcast posts only `text`; the per-seat loop is the hub's.
   and   the server is a real subprocess speaking line-delimited JSON-RPC.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
@@ -77,14 +78,15 @@ class TheServer(unittest.TestCase):
         self.env = {"CORRAL_HUB_URL": self.hub.url, "CORRAL_PANE_TOKEN": "tok-123",
                     "CC_RUNBOOK_SESSION": "pane1"}
 
-    def test_initialize_and_exactly_two_tools(self):
+    def test_initialize_and_exactly_the_seat_tools(self):
         init = seat_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                                 "params": {}})
         self.assertEqual(init["result"]["serverInfo"]["name"], "corral-seats")
         self.assertIn("tools", init["result"]["capabilities"])
         tools = seat_mcp.handle({"jsonrpc": "2.0", "id": 2,
                                  "method": "tools/list"})["result"]["tools"]
-        self.assertEqual([t["name"] for t in tools], ["seat_list", "seat_send"])
+        self.assertEqual([t["name"] for t in tools],
+                         ["seat_list", "seat_send", "seat_broadcast"])
         send = tools[1]
         self.assertEqual(send["inputSchema"]["required"], ["seat", "text"])
         self.assertFalse(send["inputSchema"]["additionalProperties"])
@@ -109,6 +111,28 @@ class TheServer(unittest.TestCase):
         self.assertEqual((method, path), ("POST", "/api/peer/send"))
         self.assertEqual(headers.get("X-Corral-Pane-Token"), "tok-123")
         self.assertEqual(body, {"seat": "reviewer", "text": "hi"})
+
+    def test_seat_broadcast_posts_only_the_text(self):
+        """S10: one POST; the hub does the per-seat loop. Nothing but `text`
+        leaves -- a caller cannot hand the hub a list of seats, a source, or
+        a pane to leave out."""
+        tools = {t["name"]: t for t in seat_mcp.TOOLS}
+        b = tools["seat_broadcast"]
+        self.assertEqual(b["inputSchema"]["required"], ["text"])
+        self.assertFalse(b["inputSchema"]["additionalProperties"])
+        self.assertIn(seat_mcp.REFUSAL_GUIDANCE, b["description"])
+        self.assertIn("does not stop or undo", b["description"])
+        out, is_error = seat_mcp.call_tool(
+            "seat_broadcast", {"text": "all hands", "seats": ["x"], "from": "op"},
+            env=self.env)
+        self.assertFalse(is_error)
+        method, path, headers, body = self.hub.calls[-1]
+        self.assertEqual((method, path), ("POST", "/api/peer/broadcast"))
+        self.assertEqual(headers.get("X-Corral-Pane-Token"), "tok-123")
+        self.assertEqual(body, {"text": "all hands"})
+        out, is_error = seat_mcp.call_tool("seat_broadcast", {}, env=self.env)
+        self.assertEqual((out["result"], out["reason"], is_error),
+                         ("refused", "arguments", False))
 
     def test_seat_list_is_a_get_with_the_token(self):
         out, is_error = seat_mcp.call_tool("seat_list", {}, env=self.env)
