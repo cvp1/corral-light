@@ -335,12 +335,14 @@ class Handler(BaseHTTPRequestHandler):
                                             "UNIX user" + ("" if uid is not None else
                                             " (the caller could not be identified)")},
                                   403)
-        body = None
         if method == "POST":
             try:
                 body = self._body()
             except ValueError as e:
                 return self._json({"error": str(e)}, 400)
+        else:       # a GET's arguments are its query (S11's /api/peer/turn)
+            body = {k: v[0] for k, v in
+                    parse_qs(urlparse(self.path).query).items()}
         status, obj = MGR.peer_http(method, p,
                                     self.headers.get(sessions._core.PEER_TOKEN_HEADER),
                                     body)

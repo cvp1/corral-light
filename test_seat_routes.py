@@ -8,6 +8,9 @@
         cookie); a token from a previous spawn is refused; every OTHER route
         still 401s without the cookie.
   S10   POST /api/peer/broadcast: the token is the source, one answer per seat.
+  S11   GET /api/peer/turn?seat=&turn=: the hub reads the QUERY (a GET has no
+        body), answers only about a turn the token's pane sent, and a
+        turn_end with another id does not end it (T11.3 over the wire).
 
 The panes are restored from metas (detached, no agent process), so a delivery
 comes back `refused: paused` -- which is the hub answering through
@@ -180,6 +183,37 @@ class Routes(unittest.TestCase):
                           for r in out["results"]],
                          [("reviewer", "refused", "paused")])
         self.assertEqual((out["delivered"], out["refused"]), (0, 1))
+
+    def test_the_turn_route_reads_the_query_and_answers_only_the_sender(self):
+        from urllib.parse import urlencode
+        b = self.mgr.panes["bbb"]
+        b.emit("peer", {"from_pane": "aaa", "from_seat": "author",
+                        "to_seat": "reviewer", "turn": "s11turn00001", "hop": 1,
+                        "nonce": "n", "text": "x"}, activity=False)
+        path = "/api/peer/turn?" + urlencode({"seat": "reviewer",
+                                               "turn": "s11turn00001"})
+        st, _ = self.req("GET", path, cookie=True)
+        self.assertEqual(st, 401, "a cookie alone reached the turn route")
+        tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])
+        st, out = self.req("GET", path, token=tok)
+        self.assertEqual((st, out.get("result"), out.get("ended"), out.get("display")),
+                         (200, "turn", False, "paused"), out)
+        b.emit("turn_end", {"stopReason": "end_turn", "turn": "another0001"},
+               activity=False)
+        self.assertFalse(self.req("GET", path, token=tok)[1]["ended"])
+        b.emit("turn_end", {"stopReason": "end_turn", "turn": "s11turn00001"},
+               activity=False)
+        st, out = self.req("GET", path, token=tok)
+        self.assertEqual((out["ended"], out["stop_reason"]), (True, "end_turn"))
+        self.assertNotIn("text", out)
+        # The same turn id, asked by a pane that did not send it, is unknown.
+        other = self.mgr.mint_pane_token(self.mgr.panes["ccc"])
+        st, out = self.req("GET", path, token=other)
+        self.assertEqual((st, out["result"], out["reason"]),
+                         (200, "refused", "unknown-turn"))
+        # No query at all is an unknown seat, not a crash.
+        st, out = self.req("GET", "/api/peer/turn", token=tok)
+        self.assertEqual((st, out["reason"]), (200, "unknown-seat"))
 
     def test_an_unknown_peer_route_is_404_not_a_fallthrough(self):
         tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])
