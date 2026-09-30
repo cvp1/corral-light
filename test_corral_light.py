@@ -3838,6 +3838,14 @@ class LightAskHuman(AskCases, _FakeLaneCase):
     pass
 
 
+# The hop limit raises itself to the human (testkit/hop_pause_cases.py).
+from hop_pause_cases import HopPauseCases        # noqa: E402
+
+
+class LightHopPause(HopPauseCases, _FakeLaneCase):
+    pass
+
+
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.

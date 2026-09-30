@@ -193,6 +193,15 @@ turn — prose alone raises nothing.
   line or a script — closes it. A message from another pane's agent, or a
   rig's opening prompt, does **not**. Closing the pane or its agent stopping
   also closes it; the transcript says which.
+- **A loop that hits the message limit raises itself.** When a message between
+  panes is refused at the four-message limit (a direct send, a broadcast, or a
+  queued reply at delivery), Corral itself opens a question on the **sending**
+  pane — "Loop paused … Refused: @sender → @target" — marked as Corral's, never
+  the agent's. It reads needs you like any question and closes on your next
+  message to that pane, which also restarts the count for **both** panes so the
+  loop can carry on. If that pane's agent already has its own question open, it
+  is left alone (the pane already needs you) and only the refusal is recorded.
+  The other pane is not flagged: one item per stall.
 - **Restarts.** The open question is saved with the pane's metadata, so it
   survives a hub restart: the pane comes back paused and still reads needs you.
 - **Turns you did not start.** When a turn that another pane's agent or a rig
