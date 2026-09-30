@@ -79,6 +79,16 @@ POLL_S = 2.0
 MAX_TEXT = 300_000              # chars of one answer kept; the pane log holds the rest
 MAX_LANES = 6                   # a fan-out wider than this is not a consultation
 PAIR_WAIT_S = 120               # how long to wait for a human `corral-light pair` elsewhere
+# auth.approve's answer when the code is not in the pairing store THIS
+# process reads. When the hub says it runs on this host (auth.host_id), it
+# minted the code a moment ago into a store on this machine, so "unknown" means
+# this shell's CORRAL_LIGHT_STATE is not the hub's -- a private hub driven from a
+# shell without its scratch state. That hung the DESIGN-5 S12 live run for the
+# whole PAIR_WAIT_S (2026-09-30), so it fails fast. A hub on another host --
+# including one behind an ssh -L tunnel to 127.0.0.1, which a URL cannot tell
+# from a local hub -- or one too old to say, keeps the wait: a human there can
+# still approve (reviewer, 2026-09-30).
+NOT_IN_OUR_STORE = "unknown or expired code"
 HTTP_TIMEOUT_S = 30
 HANDSHAKE_S = 200               # /api/session/new blocks on the adapter's ACP
                                 # handshake (acp.HANDSHAKE_TIMEOUT = 180); a
@@ -203,14 +213,24 @@ def _save_token(token, url):
 def _approve_locally(code):
     """The `corral-light pair` step, done by this process. Works only when
     this process IS the operator's account on the hub host — auth.py's whole
-    gate."""
+    gate.
+    Returns (ok, msg, the pairing store it read — None if it read none)."""
     try:
         sys.path.insert(0, str(HERE))
         import auth                                     # noqa: WPS433 (in-repo)
         ok, msg = auth.approve(code)
-        return bool(ok), msg
+        return bool(ok), msg, str(auth.STATE)
     except Exception as e:                              # noqa: BLE001
-        return False, f"{type(e).__name__}: {e}"
+        return False, f"{type(e).__name__}: {e}", None
+
+
+def _local_host_id():
+    try:
+        sys.path.insert(0, str(HERE))
+        import auth                                     # noqa: WPS433 (in-repo)
+        return auth.host_id()
+    except Exception:                                   # noqa: BLE001
+        return None
 
 
 def pair(hub):
@@ -218,7 +238,14 @@ def pair(hub):
     if status != 200 or not obj.get("code"):
         raise ConsultError(f"could not mint a pairing code: {obj}")
     code = obj["code"]
-    ok, msg = _approve_locally(code)
+    ok, msg, store = _approve_locally(code)
+    same_host = bool(obj.get("host")) and obj.get("host") == _local_host_id()
+    if not ok and msg == NOT_IN_OUR_STORE and same_host:
+        raise ConsultError(
+            f"pairing code {code} is not in this client's pairing store ({store}), "
+            f"so this shell's CORRAL_LIGHT_STATE is most likely not the hub's. Re-run with "
+            f"the hub's CORRAL_LIGHT_STATE; the step this replaces, on the hub host:  "
+            f"corral-light pair {code}")
     if not ok:
         print(f"consult: pairing needs you — on the hub host run:  corral-light pair {code}"
               f"  ({msg})", file=sys.stderr, flush=True)

@@ -287,6 +287,114 @@ class CookieScope(unittest.TestCase):
             consult.CFG = old
 
 
+class PairHub:
+    """/api/pair/new and /api/pair/claim only; counts every claim poll."""
+
+    def __init__(self, code, claim_ok_after=None, url="http://127.0.0.1:18231",
+                 host=None):
+        self.code, self.claims, self.claim_ok_after = code, 0, claim_ok_after
+        self.host_tag = host
+        self.url = url
+        self.token = None
+
+    def _do(self, method, path, body=None, timeout=None):
+        class R:
+            def getheader(self, name):
+                return f"{consult.COOKIE_NAME}=tok-ok; Path=/"
+        if path == "/api/pair/new":
+            obj = {"code": self.code}
+            if self.host_tag is not None:
+                obj["host"] = self.host_tag
+            return 200, R(), obj
+        self.claims += 1
+        if self.claim_ok_after is not None and self.claims >= self.claim_ok_after:
+            return 200, R(), {"status": "ok"}
+        return 200, R(), {"status": "pending"}
+
+
+class PairingAgainstAnotherStore(unittest.TestCase):
+    """A private hub driven from a shell without its scratch CORRAL_LIGHT_STATE: the
+    client approves the hub's fresh code against the WRONG pairing store.
+    It used to wait out all of PAIR_WAIT_S (the S12 live 'hang'); it must fail
+    at once, naming the cause and the exact `corral-light pair CODE` line — while the
+    genuine wait-for-a-human case keeps its wait."""
+
+    def setUp(self):
+        import tempfile
+        import auth
+        self.auth = auth
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.saved = {k: getattr(auth, k) for k in ("STATE", "LOCKFILE", "PAIRFILE", "KEYFILE")}
+        auth.STATE, auth.LOCKFILE = d / "state", d / "state" / "pair.lock"
+        auth.PAIRFILE, auth.KEYFILE = d / "state" / "pairing.json", d / "state" / "session.key"
+        self.cfg, consult.CFG = consult.CFG, d / "tui.json"
+        self.wait, consult.PAIR_WAIT_S = consult.PAIR_WAIT_S, 3
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(self.auth, k, v)
+        consult.CFG, consult.PAIR_WAIT_S = self.cfg, self.wait
+        self.tmp.cleanup()
+
+    def test_a_code_our_store_never_saw_fails_fast_and_says_why(self):
+        # This host's hub, a store this shell does not read.
+        hub = PairHub("ABC-DEF", host=self.auth.host_id())
+        t = time.monotonic()
+        with self.assertRaises(consult.ConsultError) as cm:
+            consult.pair(hub)
+        self.assertLess(time.monotonic() - t, 1.0)
+        self.assertEqual(hub.claims, 0, "nothing can approve it, so nothing polls")
+        msg = str(cm.exception)
+        self.assertIn("corral-light pair ABC-DEF", msg)
+        self.assertIn("CORRAL_LIGHT_STATE", msg)
+        self.assertIn(str(self.auth.STATE), msg)
+        self.assertIsNone(hub.token)
+
+    def test_the_shared_store_still_pairs(self):
+        code, _ttl = self.auth.new_code()       # the hub and this client share a store
+        hub = PairHub(code, claim_ok_after=1)
+        consult.pair(hub)
+        self.assertEqual(hub.token, "tok-ok")
+
+    def test_a_tunnelled_hub_on_another_host_still_waits(self):
+        # ssh -L to another host: the URL is 127.0.0.1, the store is over
+        # there, this client's own store never saw the code, and a human
+        # there approves it. Real local approval, separate stores: it polls.
+        hub = PairHub("ABC-DEF", claim_ok_after=2, url="http://127.0.0.1:8098",
+                      host="0123456789abcdef")
+        consult.pair(hub)
+        self.assertEqual(hub.claims, 2)
+        self.assertEqual(hub.token, "tok-ok")
+        self.assertEqual(consult._load_token(hub.url), "tok-ok")
+
+    def test_a_hub_too_old_to_name_its_host_still_waits(self):
+        hub = PairHub("ABC-DEF", claim_ok_after=2)          # no "host" field
+        consult.pair(hub)
+        self.assertEqual(hub.claims, 2)
+        self.assertEqual(hub.token, "tok-ok")
+
+    def test_the_host_tag_is_stable_and_names_nothing(self):
+        import socket
+        tag = self.auth.host_id()
+        self.assertEqual(tag, self.auth.host_id())
+        self.assertRegex(tag, r"^[0-9a-f]{16}$")
+        self.assertNotIn(socket.gethostname().lower(), tag)
+
+    def test_a_genuine_wait_for_a_human_still_waits(self):
+        # Not this account (or auth would not import): a human elsewhere can
+        # still approve, so the claim poll keeps its PAIR_WAIT_S.
+        real = consult._approve_locally
+        consult._approve_locally = lambda code: (False, "PermissionError: not yours", None)
+        try:
+            hub = PairHub("ABC-DEF", claim_ok_after=2)
+            consult.pair(hub)
+        finally:
+            consult._approve_locally = real
+        self.assertEqual(hub.claims, 2)
+        self.assertEqual(hub.token, "tok-ok")
+
+
 class HubErrors(unittest.TestCase):
     def test_http_exception_is_a_clean_consult_error(self):
         import http.client
