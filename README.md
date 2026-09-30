@@ -411,6 +411,16 @@ If an assistant works in its normal terminal tool but not in Corral Light:
 
 If the browser cannot connect, confirm that the server is running and that the browser uses the configured port.
 
+**A Claude pane stopped with `Authentication required`.** The Claude Code
+sign-in has lapsed (its refresh token expires after a few weeks). In a
+terminal run `claude auth login` — it opens your browser — and the pane
+resumes by itself once you are signed in; the message that was in flight was
+not sent, so send it again. Typing `/login` inside a pane cannot do this.
+The needs-you rail warns 48 hours before the sign-in expires, and the
+new-conversation dialog says so next to the Claude lane; `python3
+claude_auth.py` prints the same verdict (exit 0 ok, 3 expiring, 1 expired,
+2 could not read the credential).
+
 ## Development
 
 Run the test suite with Python’s standard library:

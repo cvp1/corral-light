@@ -155,6 +155,12 @@ def _observe_once():
             _TICK["errors"] += 1
         _TICK["at"] = time.time()
     _TICK["at"] = time.time()               # an empty roster still ticks
+    # The Claude login, on the same pulse: warn before it lapses, and bring
+    # back what it killed once the operator has signed in again (2026-09-30).
+    try:
+        MGR.auth_sweep()
+    except Exception:                              # noqa: BLE001
+        _TICK["errors"] += 1
 
 
 # ── needs-you, off the glass (P0-e'; Astra and Grok 2026-09-28) ─────────────

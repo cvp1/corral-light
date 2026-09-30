@@ -3873,6 +3873,8 @@ class LightHopPause(HopPauseCases, _FakeLaneCase):
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.
 from test_resilience import *                    # noqa: F401,F403,E402
+# 2026-09-30: the Claude login foreseen (claude_auth) and survived (auth_sweep).
+from test_claude_auth import *                   # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402
 # DESIGN-5 S6: seats, the forked half (restore/reopen/from_meta/snapshot).

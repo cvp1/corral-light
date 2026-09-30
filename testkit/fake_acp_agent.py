@@ -155,6 +155,12 @@ def main():
                                    "corral/contextLost": True}
             send({"jsonrpc": "2.0", "id": rid, "result": result})
         elif method == "session/prompt":
+            if os.environ.get("FAKE_ACP_AUTH_FAIL"):
+                # The claude-code-acp adapter's own shape for a lapsed login:
+                # RequestError.authRequired() → -32000 "Authentication required".
+                send({"jsonrpc": "2.0", "id": rid,
+                      "error": {"code": -32000, "message": "Authentication required"}})
+                continue
             threading.Thread(target=prompt, args=(rid, params), daemon=True).start()
         elif method == "session/cancel":
             _cancel.set()

@@ -2084,6 +2084,18 @@ function render() {
   // did nothing at all and the agent stayed blocked.
   const n = $('#needs'); n.innerHTML = '';
   let items = 0;
+  // The Claude login, ahead of the pane it would kill (2026-09-30: a pane
+  // died at its first prompt on a lapsed refresh token that the credential
+  // had been announcing for days). Expired reads as a dead card; expiring
+  // reads as a plain one. Both carry the exact remedy. Gone when it is fine.
+  const ca = S.claudeAuth;
+  if (ca && (ca.ok === false || ca.warn)) {
+    const c = el('div', 'ncard' + (ca.ok === false ? ' dead' : ''));
+    c.appendChild(el('div', 't', ca.ok === false ? 'Claude login expired'
+                                                  : 'Claude login expiring'));
+    c.appendChild(el('div', 'm', ca.why || ''));
+    n.appendChild(c); items++;
+  }
   for (const p of panes) {
     for (const rid of p.pending) {
       const ev = [...p.events].reverse()
@@ -2291,6 +2303,7 @@ async function refresh() {
   } catch (e) { if (e.status === 401) return relock(); throw e; }
   if (seq !== refreshSeq) return;      // a newer refresh() has since been issued
   S.agents = d.agents || [];
+  S.claudeAuth = d.claudeAuth || null;
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
