@@ -195,11 +195,54 @@ POSTURES = {
 
 QUOTE_CHARS = 12_000           # of one pane's last answer carried into another
 
+# Where a scripted send says it came from (DESIGN-5 S5). CLIENT-DECLARED, not
+# hub-stamped: pairing is possession of the UNIX account, so a script could
+# claim anything and this is a label on the supported path, never a control.
+# What it buys is that a turn a script sent is visible as one in the
+# transcript instead of reading as the human. A value outside this set is
+# refused, loudly -- a free-text origin would be a second, unbounded channel
+# into every renderer.
+TURN_VIAS = ("consult", "cli")
+
 
 # ── shared helpers ────────────────────────────────────────────────────────
 
 def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def new_turn_id():
+    """An id for one accepted turn: 12 hex characters, the same shape Light's
+    ledger has always minted, so the two products' ids are interchangeable."""
+    return uuid.uuid4().hex[:12]
+
+
+def check_via(via):
+    """`via` as a send may carry it: None, or one of TURN_VIAS. Anything else
+    raises ValueError with the allowed set in the message (P4)."""
+    if via in (None, ""):
+        return None
+    if via not in TURN_VIAS:
+        raise ValueError(f"via must be one of {', '.join(TURN_VIAS)} "
+                         f"(or absent), not {str(via)[:40]!r}")
+    return via
+
+
+class QueuedText(str):
+    """A queued prompt that remembers its turn id.
+
+    A str subclass so every existing reader of `_queue` -- pause() counting
+    it, notes quoting it, tests seeding it with plain strings -- keeps working
+    unchanged; `turn` rides along to the `turn_end` that closes it (and, in
+    Light, to the ledger). Moved here from Light for DESIGN-5 S5 so both
+    products queue the same thing.
+    """
+    turn = None
+
+    def __new__(cls, text, turn):
+        s = super().__new__(cls, text)
+        s.turn = turn
+        return s
 
 
 # The words a human reads off a pane. The raw enum
@@ -814,8 +857,8 @@ class PaneBase:
     def last_answer(self):
         """The agent's most recent answer, as (text, complete).
 
-        Read off the bounded ring, newest first, back to the `user` event
-        that asked for it: every `text` chunk in between IS the answer (tool
+        Read off the bounded ring, newest first, back to the `user` (or
+        `peer`) event that asked for it: every `text` chunk in between IS the answer (tool
         rows, thoughts and notes are not). `complete` is whether a
         `turn_end` has landed since that user event -- a cross-feed that
         quotes a half-written answer would hand the other arms a sentence
@@ -826,7 +869,10 @@ class PaneBase:
         chunks, complete = [], False
         for ev in reversed(self.events):
             k = ev["kind"]
-            if k == "user":
+            # A `peer` message opens a turn exactly as a human's does (DESIGN-5
+            # S5). Stopping only at `user` would stitch the reply to a peer
+            # onto the previous human turn's answer and quote the pair as one.
+            if k in ("user", "peer"):
                 break
             if k == "turn_end":
                 complete = True

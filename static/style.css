@@ -1096,3 +1096,7 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 /* port.py preview: the exact pack that will be sent, readable and bounded */
 .porttext{max-height:45vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
   font-size:12px;background:var(--bg2, rgba(127,127,127,.08));padding:8px;border-radius:6px}
+
+/* A turn a script sent (DESIGN-5 S5): same bubble, a small mark saying so. */
+.msg.user .viatag{font-family:var(--mono);font-size:10px;letter-spacing:.6px;
+  text-transform:uppercase;color:var(--faint);margin-right:8px}

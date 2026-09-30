@@ -526,7 +526,9 @@ def send_and_wait(hub, pid, text, timeout_s, label=""):
     t0 = time.time()
     p = _await_ready(hub, pid, timeout_s, label)
     seq0 = int(p.get("seq") or 0)
-    hub.post("/api/session/send", {"pane": pid, "text": text})
+    # `via` marks this turn as script-originated in the transcript (DESIGN-5
+    # S5). An older hub ignores the key, so this is safe against either.
+    hub.post("/api/session/send", {"pane": pid, "text": text, "via": "consult"})
     rec = _pane_record(hub, pid)
     remaining = max(1, int(timeout_s - (time.time() - t0)))
     try:

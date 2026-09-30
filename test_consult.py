@@ -370,5 +370,22 @@ class AnUnsetPostureIsNotAClaim(unittest.TestCase):
                               f"consult {verb} still defaults --posture")
 
 
+class AScriptedTurnSaysSo(unittest.TestCase):
+    """DESIGN-5 S5, T5.3: a turn this script sends is marked `via: consult`
+    in the transcript, so it never reads as the human typing. Client-declared
+    -- the hub ignores the key on an older build, which is why it is safe to
+    send to either."""
+
+    def test_send_and_wait_declares_consult(self):
+        hub = StubHub([
+            {"state": "ready", "events": []},
+            {"state": "ready", "events": [ev(1, "user", text="q"),
+                                          ev(2, "text", text="a"), ev(3, "turn_end")]},
+        ])
+        consult.send_and_wait(hub, "P1", "q", timeout_s=10)
+        path, body = next((p, b) for p, b in hub.posts if p == "/api/session/send")
+        self.assertEqual(body.get("via"), "consult", body)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

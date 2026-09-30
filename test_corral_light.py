@@ -3648,6 +3648,46 @@ class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
                            "the empty state and the ? overlay")
 
 
+from test_resilience import FakeLaneCase as _FakeLaneCase, wait_for as _wait_for  # noqa: E402
+
+
+class LightTurnsHaveIds(_FakeLaneCase):
+    """DESIGN-5 S5 on the product that already minted ids for its ledger: the
+    id comes back from send(), rides on `user` and on the `turn_end` that
+    closes it, a pane with NO ledger still gets one, and `via` is bounded."""
+
+    def _ends(self, p):
+        return [e for e in p.events if e["kind"] == "turn_end"]
+
+    def test_send_returns_the_id_the_turn_end_carries(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        a, b = p.send("first"), p.send("second")
+        self.assertNotEqual(a, b)
+        self.assertTrue(_wait_for(lambda: len(self._ends(p)) == 2))
+        self.assertEqual([e["data"]["turn"] for e in self._ends(p)], [a, b])
+
+    def test_a_pane_with_no_ledger_still_gets_an_id(self):
+        """The null ledger returns None from accept(); a turn_end with no id
+        cannot be matched to anything, so the core mints one instead."""
+        import ledger
+        p = self.mgr.create("fake", self.agent_dir)
+        p._turns = lambda: ledger.NullLedger()
+        tid = p.send("no ledger here")
+        self.assertRegex(tid or "", r"^[0-9a-f]{12}$")
+        self.assertTrue(_wait_for(lambda: self._ends(p)))
+        self.assertEqual(self._ends(p)[-1]["data"]["turn"], tid)
+
+    def test_via_is_carried_and_bounded(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        p.send("from the terminal", via="cli")
+        self.assertEqual([e for e in p.events if e["kind"] == "user"][-1]["data"]["via"],
+                         "cli")
+        before = len(p.events)
+        with self.assertRaises(ValueError):
+            p.send("x", via="anything-a-script-likes")
+        self.assertEqual(len(p.events), before, "a refused send still emitted")
+
+
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.

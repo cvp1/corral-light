@@ -414,7 +414,8 @@ def v_open(c, a):
         if a.ask:
             import roles
             text = roles.compose(r["preamble"], a.ask)
-            sr = c.post("/api/session/send", {"pane": p["id"], "text": text})
+            sr = c.post("/api/session/send", {"pane": p["id"], "text": text,
+                                              "via": "cli"})
             return c.follow(p["id"], turn=sr.get("turn"), seq0=int(p.get("seq") or 0))
         print(f"corral-light: role instructions NOT sent (pass --ask to send them "
               f"with your first message):\n{r['preamble']}", file=sys.stderr, flush=True)
@@ -424,7 +425,9 @@ def v_open(c, a):
 def v_say(c, a):
     p = c.pane(a.pane)
     text = _text(a)
-    r = c.post("/api/session/send", {"pane": p["id"], "text": text},
+    # `via: cli` -- a turn typed at a terminal is still the human, but it is
+    # not the browser, and the transcript says which (DESIGN-5 section 7.11).
+    r = c.post("/api/session/send", {"pane": p["id"], "text": text, "via": "cli"},
                timeout=consult.HANDSHAKE_S)       # a dead pane resumes first
     return c.follow(p["id"], turn=r.get("turn"), seq0=int(p.get("seq") or 0))
 

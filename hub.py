@@ -638,7 +638,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": r["sent"] > 0, **r})
                 # `turn` is the ledger id, durable before this ack
                 # (P0-ledger): a client can ask later what became of it.
-                tid = MGR.get(b.get("pane", "")).send(b.get("text", ""))
+                # `via` is the CALLER's word for where this came from
+                # ("consult", "cli"); the browser sends none. A label on the
+                # supported path, not a control -- see TURN_VIAS.
+                tid = MGR.get(b.get("pane", "")).send(b.get("text", ""),
+                                                      via=b.get("via") or None)
                 return self._json({"ok": True, "turn": tid})
             if p == "/api/session/quote":
                 # Composer text only, like content attach: nothing is sent

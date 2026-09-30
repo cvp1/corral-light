@@ -576,7 +576,18 @@ function renderLog(p) {
           c.append(el('span', 'pr', '❯'), ' ', d.text || '');
           log.appendChild(c);
         } else {
-          log.appendChild(el('div', 'msg user', d.text || ''));
+          const u = el('div', 'msg user', d.text || '');
+          // A turn a script sent (consult, the CLI) says so on its face
+          // (DESIGN-5 S5): it is still a human-path turn, but it was not typed
+          // in this box, and reading it as if it were is how an operator ends
+          // up answering a question they never asked. `via` is the CALLER's
+          // word -- a label on the supported path, not proof of origin.
+          if (d.via) {
+            u.classList.add('via');
+            u.prepend(el('span', 'viatag', 'via ' + d.via));
+            u.title = `sent by ${d.via}, not typed here`;
+          }
+          log.appendChild(u);
         }
         break;
       case 'tool':
