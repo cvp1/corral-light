@@ -3292,12 +3292,483 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
         self.assertEqual(edge_live.run(hub, auth), [])
 
 
+class TheWireCarriesTheDisplayProjection(unittest.TestCase):
+    """DESIGN-5 S1. `snapshot()` must carry `display` -- the five-word triage
+    projection over the raw enum -- so a consumer that is not this browser
+    (the CLI, a script, a future skin) gets the same opinion without
+    reimplementing it.
+
+    The browser mirrors the rule in JavaScript instead of reading this key,
+    because it reduces events locally between polls; that mirror is pinned
+    against the core by selftest_display.mjs, run below.
+    """
+
+    def _pane(self, state, pending=(), alive=True, exited=None):
+        import sessions
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.id = "disp-test"
+        p.agent = "claude"
+        p.cwd = "/tmp"
+        p.title = "display test"
+        p.title_locked = False
+        p.minimized = False
+        p.order = None
+        p.pinned = False
+        p.model = None
+        p.effort = None
+        p.config = {}
+        p.commands = []
+        p.posture = "auto"
+        p.posture_enforced = False
+        p.error = None
+        p.pending = {k: {} for k in pending}
+        p.usage = {}
+        p.created = "now"
+        p.mgr = types.SimpleNamespace(broadcast=lambda event: None)
+        p.client = types.SimpleNamespace(
+            alive=alive, p=types.SimpleNamespace(poll=lambda: exited))
+        p.state = state
+        p._expect_exit = False
+        p.last_activity = time.time()
+        p.events = []
+        p._seq = 0
+        p._lock = threading.Lock()
+        p._replaying = False
+        p._log = None
+        p._since_rotate_check = 0
+        return p
+
+    def test_snapshot_carries_display(self):
+        self.assertEqual(self._pane("ready").snapshot()["display"], "your-turn")
+        self.assertEqual(self._pane("busy").snapshot()["display"], "working")
+
+    def test_a_pending_card_shows_as_needs_you_even_though_state_says_ready(self):
+        snap = self._pane("ready", pending=("req-1",)).snapshot()
+        self.assertEqual(snap["state"], "ready",
+                         "the raw enum is the record and does not change")
+        self.assertEqual(snap["display"], "needs-you")
+
+    def test_the_projection_sees_snapshots_own_correction(self):
+        """snapshot() reports a process that has exited as `dead` WITHOUT
+        writing that back to self.state on this path. A projection computed
+        from the stale field would say `your-turn` about a corpse."""
+        snap = self._pane("ready", alive=False).snapshot()
+        self.assertEqual(snap["state"], "dead")
+        self.assertEqual(snap["display"], "dead")
+
+    def test_a_detached_pane_is_paused_on_the_wire(self):
+        """DESIGN-5 section 7: a human must resume it, which `idle` did not say."""
+        snap = self._pane("detached").snapshot()
+        self.assertEqual((snap["state"], snap["display"]), ("detached", "paused"))
+
+    def test_an_old_read_ready_pane_is_idle_not_your_turn(self):
+        import sessions
+        p = self._pane("ready")
+        p.last_activity = time.time() - sessions.IDLE_DISPLAY_S - 1
+        self.assertEqual(p.snapshot()["display"], "idle")
+
+    def test_the_javascript_mirror_answers_the_same_case_table(self):
+        """The one check that would catch app.js drifting from the core. Skipped
+        LOUDLY rather than silently when node is absent -- a check that did not
+        run must not read as a check that passed."""
+        _run_node_selftest(self, "selftest_display.mjs",
+                           "the browser's copy of display_state")
+
+
+def _run_node_selftest(case, name, what):
+    """Run one .mjs selftest as a subprocess. Skips LOUDLY when node is absent:
+    a check that did not run must not read as a check that passed."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        raise unittest.SkipTest(
+            f"node absent: {name} did NOT run, so {what} is unverified here")
+    r = subprocess.run([node, str(ROOT / name)],
+                       capture_output=True, text=True, timeout=60)
+    case.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
+    """DESIGN-5 S2. `postureEnforced: false` covered three different promises
+    -- the vendor decides, our own adapter asks and fails closed, or the lane
+    has no tools at all -- under one `agent-set` pill. The wire now carries
+    `rail` so the pill can tell them apart.
+
+    No lane in THIS product sets `rail` today (its sovereign lane is Ollama,
+    chat-only, which has no rail to enforce and says so). The key exists and is
+    exercised anyway: the rule lives in one place across both skins, and a
+    branch only one product has ever run is a branch nobody has tested.
+    """
+
+    def test_the_wire_carries_rail(self):
+        import sessions
+        p = TheWireCarriesTheDisplayProjection._pane(self, "ready")
+        self.assertIn("rail", p.snapshot())
+        self.assertFalse(p.snapshot()["rail"])
+        try:
+            sessions.AGENTS["claude"]["rail"] = True
+            self.assertTrue(p.snapshot()["rail"])
+        finally:
+            sessions.AGENTS["claude"].pop("rail", None)
+
+    def test_the_chat_only_lane_declares_it_has_no_tools(self):
+        """The `chat only` pill is derived from `tools`, which the ollama lane
+        has always declared. If that ever flips, the pill must stop claiming
+        there is nothing to ask about."""
+        import sessions
+        self.assertFalse(sessions.AGENTS["ollama"].get("tools"))
+        self.assertFalse(sessions.AGENTS["ollama"].get("rail"),
+                         "a lane with a rail must not also read as chat-only")
+
+    def test_the_posture_pill_and_the_new_dialog_are_honest(self):
+        _run_node_selftest(self, "selftest_posture.mjs",
+                           "the posture pill and the New dialog")
+
+
+class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
+    """DESIGN-5 S3b. The repo shipped two service TEMPLATES: the Linux one
+    needs a `sed s|%HERE%|$PWD|` the reader has to notice and type in the
+    right directory, and the macOS one carries absolute paths from the
+    machine it was written on -- so copying it points launchd at a home
+    that does not exist, and launchd's complaint is a log line nobody is
+    watching on their first day.
+
+    Two properties: every path is RESOLVED from the running checkout, and
+    nothing is enabled or started. Writing a file is `rm`-reversible and
+    inert; starting a daemon that holds a port and spawns agents with the
+    user's filesystem access is the operator's call, so the enable command
+    is printed instead of run.
+    """
+
+    def _plan(self, platform, home):
+        import install_service
+        return install_service.plan(platform=platform, root=ROOT,
+                                    python="/usr/bin/python3", home=home)
+
+    def test_the_linux_unit_resolves_the_checkout_and_the_interpreter(self):
+        with tempfile.TemporaryDirectory() as home:
+            p = self._plan("linux", home)
+            self.assertIn(f"ExecStart=/usr/bin/python3 {ROOT}/hub.py", p["text"])
+            self.assertIn(f"WorkingDirectory={ROOT}", p["text"])
+            self.assertTrue(Path(f"{ROOT}/hub.py").is_file(),
+                            "ExecStart names a file that does not exist")
+            self.assertTrue((ROOT).is_dir())
+            self.assertNotIn("%HERE%", p["text"],
+                             "the template placeholder survived — the reader "
+                             "is back to running sed by hand")
+            self.assertEqual(p["path"],
+                             Path(home) / ".config/systemd/user/corral-light.service")
+
+    def test_the_macos_plist_resolves_the_same_way_from_a_linux_host(self):
+        """Rendered for darwin ON THIS HOST. The generator takes the platform
+        rather than reading it, so the Mac answer is testable without a Mac —
+        which is the only way the macOS path gets tested at all here."""
+        with tempfile.TemporaryDirectory() as home:
+            p = self._plan("darwin", home)
+            self.assertIn(f"<string>{ROOT}/hub.py</string>", p["text"])
+            self.assertIn(f"<string>{ROOT}</string>", p["text"])
+            self.assertIn("/usr/bin/python3", p["text"])
+            self.assertIn(str(Path(home) / "Library/Logs/corral-light.log"),
+                          p["text"])
+            self.assertEqual(
+                p["path"],
+                Path(home) / "Library/LaunchAgents/com.cvande.corral-light.plist")
+
+    def test_an_unknown_platform_refuses_and_names_itself(self):
+        """P4. A systemd unit written hopefully into a directory that means
+        nothing on that OS is worse than a refusal."""
+        with tempfile.TemporaryDirectory() as home:
+            with self.assertRaises(SystemExit) as e:
+                self._plan("sunos5", home)
+            self.assertIn("sunos5", str(e.exception))
+
+    def test_print_writes_nothing(self):
+        import contextlib
+        import io
+        import install_service
+        with tempfile.TemporaryDirectory() as home:
+            target = install_service.plan(platform=sys.platform, root=ROOT,
+                                          home=home)["path"]
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = install_service.main(["--print"])
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+            self.assertEqual(rc, 0)
+            self.assertFalse(target.exists(),
+                             "--print wrote the file it promised only to show")
+            self.assertFalse(target.parent.exists(),
+                             "--print created the directory")
+            self.assertIn("hub.py", buf.getvalue())
+
+    def test_writing_it_enables_nothing_and_says_what_to_run(self):
+        import contextlib
+        import io
+        import install_service
+        with tempfile.TemporaryDirectory() as home:
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = install_service.main([])
+                out = buf.getvalue()
+                target = install_service.plan(platform=sys.platform, root=ROOT,
+                                              home=home)["path"]
+                self.assertEqual(rc, 0)
+                self.assertTrue(target.exists())
+                self.assertIn(str(target), out, "it does not say what it wrote")
+                self.assertIn("NOT enabled", out)
+                self.assertIn("enable" if sys.platform.startswith("linux")
+                              else "bootstrap", out,
+                              "the enable command is not printed, so the "
+                              "operator has to go and find it")
+                # A re-run must not clobber an installed file someone edited.
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc2 = install_service.main([])
+                self.assertEqual(rc2, 1)
+                self.assertIn("already exists", err.getvalue())
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+
+    def test_the_generated_files_name_no_host_or_account(self):
+        """T3.5. This repository is PUBLIC. The TEMPLATES must carry no home
+        path — the paths arrive at render time from whatever checkout is
+        running, which is the whole point of generating them."""
+        import re
+        import install_service
+        bad = re.compile(r"ranch-server|dogma-2|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
+        src = Path(install_service.__file__).read_text(encoding="utf-8")
+        for i, line in enumerate(src.splitlines(), 1):
+            m = bad.search(line)
+            self.assertIsNone(m, f"install_service.py:{i} names a host or "
+                                 f"account in a public repository: "
+                                 f"{line.strip()[:90]}")
+
+
+class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
+    """DESIGN-5 S3a. `spike/node_modules` is gitignored, so NO clone arrives
+    with the Claude and ChatGPT adapters. Both lanes then refuse with the
+    path they looked at -- a true sentence that reads like a broken install
+    rather than the one setup step the README never had. On someone's first
+    ten minutes, that is the difference between a product and a dead end.
+    """
+
+    LANES = [{"key": "claude", "label": "Claude Code", "available": False,
+              "why": "not installed: …/spike/node_modules/.bin/claude-agent-acp"}]
+
+    def test_doctor_names_the_npm_step_when_the_adapters_are_absent(self):
+        import doctor
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "spike").mkdir()
+            (Path(tmp) / "spike" / "package.json").write_text("{}", encoding="utf-8")
+            lines = doctor.report(root=tmp, agents=self.LANES)
+        blob = "\n".join(lines)
+        self.assertIn("npm install", blob,
+                      "doctor does not name the command that fixes it")
+        self.assertIn(str(Path(tmp) / "spike"), blob,
+                      "doctor does not say WHERE to run it")
+        self.assertIn("Claude Code", blob, "the lane list is gone")
+
+    def test_doctor_is_quiet_about_npm_once_it_is_installed(self):
+        """Edge-trigger (P7): a note that appears on every healthy run is a
+        note nobody reads on the run that matters."""
+        import doctor
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "spike" / "node_modules").mkdir(parents=True)
+            (Path(tmp) / "spike" / "package.json").write_text("{}", encoding="utf-8")
+            lines = doctor.report(root=tmp, agents=self.LANES)
+        self.assertNotIn("npm install", "\n".join(lines))
+
+    def test_an_incomplete_checkout_is_a_different_sentence(self):
+        """No package.json at all is not a missing npm install — telling
+        someone to run it there would send them down a dead end."""
+        import doctor
+        with tempfile.TemporaryDirectory() as tmp:
+            problem = doctor.npm_problem(root=tmp)
+        self.assertIn("no package.json", problem)
+        self.assertNotIn("npm install", problem)
+
+    def test_the_real_checkout_answers_too(self):
+        """Against THIS tree, whatever state it is in — the function must not
+        depend on a fixture to run at all."""
+        import doctor
+        self.assertIn(doctor.npm_problem(root=ROOT), (None,))
+
+    def test_the_gemini_lane_names_the_platform_it_cannot_run_on(self):
+        """S3e. Already true before this story (the installer's
+        platform_problem names both the pinned platform and this host);
+        asserted here so it stays true, since `doctor` is now the surface
+        that carries it."""
+        from install_antigravity_acp import platform_problem
+        import platform as _p
+        problem = platform_problem()
+        if problem is None:
+            self.assertEqual((_p.system(), "x86_64"),
+                             ("Linux", "x86_64"),
+                             "no platform problem reported on a host that is "
+                             "not the pinned platform")
+            raise unittest.SkipTest(
+                "this host IS Linux x86-64, so the refusal cannot be observed "
+                "here; the message's shape is asserted on a fake below")
+        self.assertIn(_p.system(), problem)
+        self.assertIn(_p.machine(), problem)
+
+    def test_the_platform_refusal_says_both_platforms(self):
+        """Driven with a fake platform so it is checked on every host, not
+        only on the Macs where it fires."""
+        import install_antigravity_acp as ia
+        real = ia.platform.system, ia.platform.machine
+        try:
+            ia.platform.system = lambda: "Darwin"
+            ia.platform.machine = lambda: "arm64"
+            problem = ia.platform_problem()
+        finally:
+            ia.platform.system, ia.platform.machine = real
+        self.assertIsNotNone(problem)
+        for needle in ("Linux", "x86_64", "Darwin", "arm64"):
+            self.assertIn(needle, problem,
+                          f"the refusal does not name {needle} — 'unavailable' "
+                          f"without the platform invites an install that "
+                          f"cannot work")
+
+    def test_the_empty_state_and_the_shortcut_overlay(self):
+        _run_node_selftest(self, "selftest_onboarding.mjs",
+                           "the empty state and the ? overlay")
+
+
+class TheSeatIsOnThePane(unittest.TestCase):
+    """DESIGN-5 S6, T6.6: the header pill, a withheld seat shown as withheld,
+    ⌘K by seat, and the dialog in the shipped page."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_seats.mjs", "the seat pill and ⌘K")
+
+
+class APeerMessageRendersAsWhatItIs(unittest.TestCase):
+    """DESIGN-5 S7, T7.6/T7.18 in the browser."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_peer.mjs", "the peer block and reducer")
+
+
+from test_resilience import FakeLaneCase as _FakeLaneCase, wait_for as _wait_for  # noqa: E402
+
+
+class LightTurnsHaveIds(_FakeLaneCase):
+    """DESIGN-5 S5 on the product that already minted ids for its ledger: the
+    id comes back from send(), rides on `user` and on the `turn_end` that
+    closes it, a pane with NO ledger still gets one, and `via` is bounded."""
+
+    def _ends(self, p):
+        return [e for e in p.events if e["kind"] == "turn_end"]
+
+    def test_send_returns_the_id_the_turn_end_carries(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        a, b = p.send("first"), p.send("second")
+        self.assertNotEqual(a, b)
+        self.assertTrue(_wait_for(lambda: len(self._ends(p)) == 2))
+        self.assertEqual([e["data"]["turn"] for e in self._ends(p)], [a, b])
+
+    def test_a_pane_with_no_ledger_still_gets_an_id(self):
+        """The null ledger returns None from accept(); a turn_end with no id
+        cannot be matched to anything, so the core mints one instead."""
+        import ledger
+        p = self.mgr.create("fake", self.agent_dir)
+        p._turns = lambda: ledger.NullLedger()
+        tid = p.send("no ledger here")
+        self.assertRegex(tid or "", r"^[0-9a-f]{12}$")
+        self.assertTrue(_wait_for(lambda: self._ends(p)))
+        self.assertEqual(self._ends(p)[-1]["data"]["turn"], tid)
+
+    def test_via_is_carried_and_bounded(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        p.send("from the terminal", via="cli")
+        self.assertEqual([e for e in p.events if e["kind"] == "user"][-1]["data"]["via"],
+                         "cli")
+        before = len(p.events)
+        with self.assertRaises(ValueError):
+            p.send("x", via="anything-a-script-likes")
+        self.assertEqual(len(p.events), before, "a refused send still emitted")
+
+
+class LightDeliversPeers(_FakeLaneCase):
+    """DESIGN-5 S7 on Light's own drain and ledger (the core's admission is
+    covered in full Corral's test_peer.py; this is what Light forks)."""
+
+    def pair(self):
+        a = self.mgr.create("fake", self.agent_dir)
+        b = self.mgr.create("fake", self.agent_dir)
+        self.mgr.bind_seat(a.id, "author")
+        self.mgr.bind_seat(b.id, "reviewer")
+        return a, b
+
+    def test_delivered_through_lights_drain(self):
+        a, b = self.pair()
+        r = self.mgr.deliver_peer(a.id, "reviewer", "hello from a peer")
+        self.assertEqual(r["result"], "delivered", r)
+        self.assertTrue(_wait_for(lambda: "turn_end" in self.kinds(b)[-3:]))
+        self.assertNotIn("user", self.kinds(b)[-6:])
+        self.assertIn('<corral-peer from="@author"', self.texts(b))
+        self.assertEqual([e for e in b.events if e["kind"] == "turn_end"][-1]["data"]["turn"],
+                         r["turn"])
+
+    def test_the_ledger_names_a_peer_turn_and_recover_reports_it(self):
+        """T7.15 (section 7.5): accepted with kind: peer, dispatched,
+        completed -- and one a restart cut off is reported interrupted, named
+        as a peer message, never re-sent."""
+        a, b = self.pair()
+        r = self.mgr.deliver_peer(a.id, "reviewer", "ledger me")
+        self.assertTrue(_wait_for(lambda: "turn_end" in self.kinds(b)[-3:]))
+        rec = b._turns().turns()[r["turn"]]
+        self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
+        tid = b._turns().accept("cut off by a restart", kind="peer")
+        closed = b._turns().recover()
+        self.assertEqual([(c["turn"], c.get("kind")) for c in closed], [(tid, "peer")])
+        self.assertEqual(b._turns().turns()[tid]["state"], "interrupted")
+
+    def test_a_card_after_admission_fails_the_peer_turn_in_lights_drain(self):
+        """T7.12 on Light's forked _drain."""
+        a, b = self.pair()
+        with b._turn_lock:
+            b._turn_running = True
+        r = self.mgr.deliver_peer(a.id, "reviewer", "must not run")
+        b.pending["late"] = {"title": "arrived after admission"}
+        with b._turn_lock:
+            b._turn_running = False
+        import threading as _t
+        _t.Thread(target=b._drain, daemon=True).start()
+        self.assertTrue(_wait_for(lambda: "peer_result" in self.kinds(b)))
+        res = [e for e in b.events if e["kind"] == "peer_result"][-1]["data"]
+        self.assertEqual((res["turn"], res["reason"]), (r["turn"], "card-pending"))
+        self.assertNotIn("must not run", self.texts(b))
+        self.assertEqual(b._turns().turns()[r["turn"]]["state"], "interrupted")
+        b.pending.clear()
+
+
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.
 from test_resilience import *                    # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402
+# DESIGN-5 S6: seats, the forked half (restore/reopen/from_meta/snapshot).
+from test_seats import *                         # noqa: F401,F403,E402
+# DESIGN-5 S7: every consumer of the `peer` kind (port pack, index, digest).
+from test_peer_consumers import ThePortPack, TheIndex   # noqa: F401,E402
+# DESIGN-5 S8: the seat tools' routes on THIS hub, over a real socket.
+from test_seat_routes import Routes as SeatRoutes      # noqa: F401,E402
 
 
 if __name__ == "__main__":

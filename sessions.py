@@ -84,6 +84,9 @@ ADAPTER = Path(os.environ.get("CORRAL_CLAUDE_ADAPTER",
 from corral_core import sessions as _core                        # noqa: E402
 
 DEFAULT_POSTURE = _core.DEFAULT_POSTURE
+DISPLAY_STATES = _core.DISPLAY_STATES
+IDLE_DISPLAY_S = _core.IDLE_DISPLAY_S
+display_state = _core.display_state
 MAX_EVENTS = _core.MAX_EVENTS
 MAX_LOG_BYTES = _core.MAX_LOG_BYTES
 MAX_PANES = _core.MAX_PANES
@@ -96,19 +99,10 @@ _now = _core._now
 _CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
 
 
-class _QueuedText(str):
-    """A queued prompt that remembers its ledger turn id.
-
-    A str subclass so every existing reader of `_queue` — the core's pause()
-    counting it, notes quoting it, tests seeding it with plain strings —
-    keeps working unchanged; `turn` rides along for the ledger (P0-ledger).
-    """
-    turn = None
-
-    def __new__(cls, text, turn):
-        s = super().__new__(cls, text)
-        s.turn = turn
-        return s
+# The queued-prompt type is the core's since DESIGN-5 S5; the old name stays
+# so nothing that imported it from here breaks.
+_QueuedText = _core.QueuedText
+TURN_VIAS = _core.TURN_VIAS
 
 MAX_ROSTER = MAX_PANES * 5      # ALL panes tracked, live or detached. MAX_PANES
                                  # only counts live ones, so repeated
@@ -297,6 +291,9 @@ AGENTS = {
         # a pane here has to QUOTE it, because handing a path to an agent with
         # no filesystem is a dead end that looks like a working feature.
         "tools": False,
+        # ollama_acp.py reads no `mcpServers`: the seat tools are not offered,
+        # so a pane here can receive a peer message but not send one (S8).
+        "mcp": False,
         "needs": "answers from the local Ollama — no key, works offline; "
                  "chat only, no tools and no permission rail",
         "catalog_probe": lambda: _probe_ollama(),
@@ -1053,6 +1050,10 @@ class Pane(_core.PaneBase):
         # Same hole for `ephemeral`: Light never sets it, but a Corral seat
         # resumed here and saved again must still be one Corral will reap.
         p.ephemeral = bool(meta.get("ephemeral"))
+        # Absent in every pre-DESIGN-5 meta; None = unaddressable, which is the
+        # right answer for those (S6). Read with .get, like ported_from.
+        p.seat = meta.get("seat")
+        p.seat_withheld = False
         # Roles are Light's since 2026-09-29 (roles.py). Restored for the same
         # reason as `ported_from`: META_KEYS persists them, so a restore that
         # dropped them blanked them on the next save.
@@ -1636,7 +1637,10 @@ class Pane(_core.PaneBase):
     def _config_dir(self):
         return seed_config_dir(self.dir / "config", self.posture)
 
-    def send(self, text):
+    def send(self, text, via=None):
+        # `via` first: a script that declared an origin nobody allows is
+        # refused before anything is resumed, titled or queued.
+        via = _core.check_via(via)
         # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
         # stopped means "bring it back", exactly as it does for a paused one.
         # resume() parks — never sends — whatever was queued when it died.
@@ -1697,8 +1701,13 @@ class Pane(_core.PaneBase):
             except OSError as e:
                 raise ValueError(f"could not record this turn durably, so it "
                                  f"was not accepted: {e}")
-            self._queue.append(_QueuedText(text, tid))
-            self.emit("user", {"text": text, "turn": tid})
+            # The null ledger (a pane with no durable record) returns no id;
+            # a turn still needs one for its `turn_end` to be matched to it.
+            tid = tid or _core.new_turn_id()
+            user = {"text": text, "turn": tid}
+            if via:
+                user["via"] = via
+            self.emit("user", user)
             if text == "/clear":
                 # The SDK special-cases this literal text: it resets ITS OWN
                 # context and emits a `conversation_reset` notification that
@@ -1714,11 +1723,9 @@ class Pane(_core.PaneBase):
                 # existing "load earlier" affordance, never a silent loss
                 # (PRINCIPLES 18).
                 self.emit("cleared", {})
-            self.state = "busy"
-            if self._turn_running:
-                return tid
-            self._turn_running = True
-            threading.Thread(target=self._drain, daemon=True).start()
+            # The queue-and-drain half is shared with peer delivery (DESIGN-5
+            # S7); everything ABOVE this line is what makes it the human's.
+            self._dispatch(_QueuedText(text, tid))
             return tid
 
     def _drain(self):
@@ -1737,6 +1744,13 @@ class Pane(_core.PaneBase):
                     self._turn_running = False
                     return
                 text = self._queue.pop(0)
+                # A PEER message is admitted only onto a pane with no card, but
+                # _on_permission does not take this lock: re-check at the last
+                # moment before prompt(), and fail the peer turn rather than run
+                # it under the human's nose (DESIGN-5 section 7.3).
+                if getattr(text, "peer", False) and self.pending:
+                    self._peer_withdrawn(text, "card-pending")
+                    continue
                 # The popped prompt exists nowhere else until turn_end: not in
                 # the queue, and in the transcript only as a `user` event.
                 # A shutdown note has to NAME it (Grok 2026-09-28, K3), so it
@@ -1768,6 +1782,9 @@ class Pane(_core.PaneBase):
                     self._turn_running = False
                     self._in_flight = None
                 lg.mark(tid, "interrupted", why=str(e), was="dispatched")
+                if getattr(text, "peer", False):
+                    self.emit("peer_result", {"turn": tid, "delivered": False,
+                                              "reason": str(e)}, activity=False)
                 for t in lost:
                     lg.mark(getattr(t, "turn", None), "interrupted",
                             why="the agent stopped before it was sent",
@@ -1984,8 +2001,28 @@ class Pane(_core.PaneBase):
             # Whether this lane can read a file itself — what attaching a note
             # to it means (a reference, or a quoted excerpt).
             "tools": bool(AGENTS[self.agent].get("tools")),
+            # Whether the ADAPTER enforces a fail-closed permission rail of its
+            # own, even though Corral cannot set the posture MODE on this lane.
+            # `postureEnforced: false` alone cannot tell "the vendor decides"
+            # from "our own adapter asks before every write" — two very
+            # different promises that wore the same `agent-set` pill. No lane
+            # in this product sets it today; the key exists so the pill asks
+            # the lane rather than hardcoding a list of lane names.
+            "rail": bool(AGENTS[self.agent].get("rail")),
             "state": state, "error": self.error, "created": self.created,
+            # The triage projection over `state` — one opinion, computed in the
+            # core and rendered (never re-derived) by the roster, the chips,
+            # the pane header and the tab title. `state` above stays the
+            # record and stays on the tooltip. `unread` is False here because
+            # the hub cannot know what a particular human has already read.
+            "display": _core.display_state(self, state=state)["state"],
             "pending": list(self.pending.keys()),
+            # The pane's address for other panes (DESIGN-5 S6). A WITHHELD
+            # seat is not served -- another open pane was there first -- but
+            # it is shown for what it is, so the operator can see why a peer
+            # cannot reach this one.
+            "seat": None if self.seat_withheld else self.seat,
+            "seatWithheld": self.seat if self.seat_withheld else None,
             # Whether ↻ / typing can bring this pane back: a conversation id
             # to load. A pane that died before session/new has none.
             "resumable": bool(getattr(self, "acp_session", None)),
@@ -2412,8 +2449,11 @@ class Manager(_core.ManagerBase):
             if cut:
                 def _show(r):
                     t = r.get("text") or ""
-                    return repr(t[:PARKED_PREVIEW_CHARS] +
-                                ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                    # A cut-off PEER message says so: re-sending it is not the
+                    # operator re-asking their own question (DESIGN-5 S7).
+                    return ("a message from another pane, " if r.get("kind") == "peer"
+                            else "") + repr(t[:PARKED_PREVIEW_CHARS] +
+                                            ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
                 p.emit("note", {
                     "text": f"{len(cut)} turn(s) were interrupted when the hub "
                             f"stopped and will not be re-sent: "
@@ -2428,6 +2468,9 @@ class Manager(_core.ManagerBase):
                                         "agent to it"})
             if m.get("pgid") or m.get("pid"):
                 _clear_pid_record(p.dir)     # the previous hub's process is handled
+        # Two open metas naming one seat (DESIGN-5 S6): the earlier-created
+        # keeps it, the later is withheld and says so. No file is rewritten.
+        self._withhold_colliding_seats(metas)
         self.not_restored = skipped + unreadable   # said out loud, not dropped
 
     def _reserve_live(self, pane):
@@ -2476,6 +2519,7 @@ class Manager(_core.ManagerBase):
                     f"detached — close or forget one before reopening another")
             self.panes[pane_id] = pane
         pane.emit("reopened", {})
+        self._withhold_if_taken(pane)
         return pane
 
 
@@ -2560,6 +2604,14 @@ class Manager(_core.ManagerBase):
                 # start a pane. The host knows its own home; the client should
                 # not be guessing at it.
                 "defaultCwd": str(default_cwd()),
+                # Where transcripts live on THIS machine. The empty state says
+                # it, because "is my conversation going to someone's cloud?"
+                # is the first question a self-hosted agent workspace has to
+                # answer and an empty room answers it badly. From the host,
+                # never guessed by the browser -- the same lesson as
+                # defaultCwd above, which shipped as a hardcoded path from
+                # another machine.
+                "dataDir": str(STATE),
                 # Somewhere to START from. The field was free text with one
                 # default, so choosing a directory meant knowing and typing an
                 # absolute path — on a new machine, the one thing you do not

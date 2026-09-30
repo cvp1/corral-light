@@ -96,7 +96,9 @@ SEARCH_MAX_LIMIT = 200
 SNIPPET_TOKENS = 14
 
 # Bodies that are searchable.
-BODY_KINDS = ("user", "text", "tool", "note", "dead")
+# `peer` (DESIGN-5 S7): a message another pane's agent sent is findable by what
+# it said, like a human's ask -- and counted apart from one (digest).
+BODY_KINDS = ("user", "peer", "text", "tool", "note", "dead")
 # Stored with an EMPTY body: countable by the digest, never findable by text.
 FACT_KINDS = ("permission", "permission_answered", "permission_expired")
 KEEP_KINDS = frozenset(BODY_KINDS + FACT_KINDS)
@@ -121,7 +123,9 @@ def _panes_dir(state_dir=None):
 # kind of drift nothing would ever notice; the index is derived and
 # disposable, so the honest migration is to throw it away and re-read the
 # logs (P5).
-INDEX_VERSION = 3
+# v4 (DESIGN-5 S7): `peer` rows exist. A v3 index would silently miss every
+# peer message, so it is rebuilt rather than trusted.
+INDEX_VERSION = 4
 
 
 def _connect(state_dir=None):
@@ -636,7 +640,7 @@ def digest(hours, state_dir=None, live=None):
         c.close()
     by = {}
     for pid, seq, at, kind, meta, body in rows:
-        d = by.setdefault(pid, {"last": "", "turns": 0, "asks": [],
+        d = by.setdefault(pid, {"last": "", "turns": 0, "asks": [], "peers": 0,
                                 "toolrows": [], "tools": 0,
                                 "files": [], "perm": 0, "answered": 0,
                                 "expired": 0, "dead": None})
@@ -665,6 +669,11 @@ def digest(hours, state_dir=None, live=None):
             else:
                 d["toolrows"].append({"id": "", "title": "", "kind": "",
                                       "status": "", "paths": []})
+        elif kind == "peer":
+            # Counted APART from the human's turns: "3 turns" that were really
+            # one ask and two messages from another agent would misreport who
+            # drove this pane (DESIGN-5 S7, T7.8).
+            d["peers"] += 1
         elif kind == "permission":
             d["perm"] += 1
         elif kind == "permission_answered":
@@ -698,6 +707,8 @@ def digest(hours, state_dir=None, live=None):
             first = d["asks"][0].replace("\n", " ")[:DIGEST_ASK_CHARS]
             more = len(d["asks"]) - 1
             L.append(f'- asked: "{first}"' + (f" (+{more} more)" if more else ""))
+        if d["peers"]:
+            L.append(f"- peer messages received: {d['peers']}")
         if d["tools"]:
             files = d["files"]
             line = f"- tools: {d['tools']} calls"

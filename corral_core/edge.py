@@ -123,3 +123,57 @@ def audience_ok(user, headers, peer=None):
     if user == SERVE_USER:
         return via_serve(headers, peer)
     return bool(user)
+
+
+# ── who owns the socket calling the peer routes (DESIGN-5 S8, measured) ──────
+# The seat tools' token is handed to each adapter in its MCP descriptor, and
+# the Claude adapter puts that descriptor on the `claude` process's COMMAND
+# LINE -- measured live 2026-09-29. /proc/<pid>/cmdline is world-readable on a
+# host whose /proc is not mounted hidepid (this one is not), so without a
+# further check ANY local user could read a pane's token with `ps` and send as
+# that pane. The documented boundary is "the same UNIX user"; this makes it
+# true on Linux: the kernel records which user opened each TCP socket, and a
+# loopback caller's own socket is in /proc/net/tcp with that uid.
+
+PROC_NET = "/proc/net"
+
+
+def _hex_addr(ip, port):
+    a = ipaddress.ip_address(ip)
+    if a.version == 4:
+        host = "".join(f"{b:02X}" for b in reversed(a.packed))
+    else:
+        p = a.packed
+        host = "".join("".join(f"{b:02X}" for b in reversed(p[i:i + 4]))
+                       for i in range(0, 16, 4))
+    return f"{host}:{int(port):04X}"
+
+
+def local_peer_uid(client, server, proc_net=PROC_NET):
+    """The uid that owns the CLIENT end of a local TCP connection, or None.
+
+    `client` and `server` are (ip, port) as the server sees them: the peer
+    address, and the accepted socket's own address (getsockname -- NOT the
+    listening address, which may be 0.0.0.0). The client's socket is the
+    /proc/net/tcp row whose local address is `client` and remote is `server`;
+    its uid column is who opened it. None when it cannot be found -- the
+    caller must treat that as "unknown", never as "fine" (P4).
+    """
+    try:
+        want_local, want_rem = _hex_addr(*client[:2]), _hex_addr(*server[:2])
+    except (ValueError, TypeError):
+        return None
+    for name in ("tcp", "tcp6"):
+        try:
+            with open(f"{proc_net}/{name}", encoding="ascii") as fh:
+                next(fh, None)                               # header
+                for line in fh:
+                    f = line.split()
+                    if len(f) > 7 and f[1] == want_local and f[2] == want_rem:
+                        try:
+                            return int(f[7])
+                        except ValueError:
+                            return None
+        except OSError:
+            continue
+    return None

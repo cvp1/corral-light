@@ -174,6 +174,15 @@ class Cli:
             state["in_text"] = False
         if k == "user":
             self.say(f"\n› {d.get('text', '')}")
+        elif k == "peer":
+            # Another pane's agent, not the human (DESIGN-5 S7): never the `›`
+            # the operator's own lines wear.
+            self.say(f"\n⇄ from @{d.get('from_seat') or d.get('from_pane') or '?'}: "
+                     f"{d.get('text', '')}")
+        elif k == "peer_result" and d.get("delivered") is False:
+            self.say(f"  · that message was not run: {d.get('reason') or 'unknown'}")
+        elif k == "seat":
+            self.say(f"  · seat @{d['seat']}" if d.get("seat") else "  · seat removed")
         elif k == "tool":
             status = d.get("status") or ""
             self.say(f"  ⚙ {d.get('title') or d.get('kind') or 'tool'}"
@@ -376,15 +385,22 @@ def v_panes(c, a):
     if a.json:
         c.say(json.dumps([{k: p.get(k) for k in ("id", "state", "agent", "model",
                                                  "effort", "title", "cwd", "pending",
-                                                 "resumable")} for p in rows],
+                                                 "resumable", "seat", "seatWithheld")}
+                          for p in rows],
                          indent=2))
         return 0
     if not rows:
         c.say("no panes")
     for p in rows:
         pend = len(p.get("pending") or [])
+        # The seat column: `@name`, or `(@name withheld)` when another open
+        # pane holds it -- shown, so the operator can see why a peer cannot
+        # reach this one (DESIGN-5 S6).
+        seat = (f"@{p['seat']}" if p.get("seat") else
+                f"(@{p['seatWithheld']} withheld)" if p.get("seatWithheld") else "-")
         c.say(f"{p['id']}  {p.get('state', ''):<10} {p.get('agent', ''):<10} "
-              f"{(p.get('model') or '-'):<18} {('!' + str(pend)) if pend else '  '}  "
+              f"{(p.get('model') or '-'):<18} {seat:<16} "
+              f"{('!' + str(pend)) if pend else '  '}  "
               f"{p.get('title') or ''}")
     if st.get("notRestored"):
         c.say(f"({st['notRestored']} pane(s) were not restored — see the hub log)")
@@ -414,7 +430,8 @@ def v_open(c, a):
         if a.ask:
             import roles
             text = roles.compose(r["preamble"], a.ask)
-            sr = c.post("/api/session/send", {"pane": p["id"], "text": text})
+            sr = c.post("/api/session/send", {"pane": p["id"], "text": text,
+                                              "via": "cli"})
             return c.follow(p["id"], turn=sr.get("turn"), seq0=int(p.get("seq") or 0))
         print(f"corral-light: role instructions NOT sent (pass --ask to send them "
               f"with your first message):\n{r['preamble']}", file=sys.stderr, flush=True)
@@ -424,7 +441,9 @@ def v_open(c, a):
 def v_say(c, a):
     p = c.pane(a.pane)
     text = _text(a)
-    r = c.post("/api/session/send", {"pane": p["id"], "text": text},
+    # `via: cli` -- a turn typed at a terminal is still the human, but it is
+    # not the browser, and the transcript says which (DESIGN-5 section 7.11).
+    r = c.post("/api/session/send", {"pane": p["id"], "text": text, "via": "cli"},
                timeout=consult.HANDSHAKE_S)       # a dead pane resumes first
     return c.follow(p["id"], turn=r.get("turn"), seq0=int(p.get("seq") or 0))
 
@@ -513,6 +532,16 @@ def _simple(route, key="pane"):
 def v_rename(c, a):
     p = c.pane(a.pane)
     c.say(c.post("/api/session/rename", {"pane": p["id"], "title": " ".join(a.title)})["title"])
+    return 0
+
+
+def v_seat(c, a):
+    """Bind a seat (DESIGN-5 S6), or unbind it with `-`. A human verb: this is
+    the operator at a terminal, holding the same pairing the browser does."""
+    p = c.pane(a.pane)
+    name = "" if a.name == "-" else a.name
+    r = c.post("/api/session/seat", {"pane": p["id"], "seat": name})
+    c.say(f"@{r['seat']}" if r.get("seat") else "unbound")
     return 0
 
 
@@ -682,6 +711,12 @@ def main(argv=None):
     s.add_argument("pane")
     s.add_argument("title", nargs="+")
     s.set_defaults(fn=v_rename)
+
+    s = sub.add_parser("seat", help="name a pane so other panes can address it "
+                                     "(`-` unbinds)")
+    s.add_argument("pane")
+    s.add_argument("name")
+    s.set_defaults(fn=v_seat)
 
     s = sub.add_parser("config", help="set model / effort / fast")
     s.add_argument("pane")

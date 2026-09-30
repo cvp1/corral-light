@@ -1,0 +1,57 @@
+{
+  "_why": "ONE table, two languages. `display_state()` lives in corral_core/sessions.py, and both web skins must mirror it in JavaScript -- the browser reduces events locally between polls, so it cannot ask the server what a pane means at the moment a permission card arrives. A mirror that is not pinned is a fork waiting to happen, so every case below is asserted against BOTH implementations: corral_core/test_display_state.py (python) and selftest_display.mjs in each skin (javascript). Full Corral's TUI reads the hub's `display` key and is pinned to this table's LEGACY column too, for the hub that predates it. Add a case here and every consumer has to answer it.",
+  "_fields": "pane = the duck-typed attributes display_state reads (state, pending, gate_hold, idle_s); want = the display state. There is NO read-receipt input: the hub has no source for it, so each surface overlays its own (DESIGN-5 section 7).",
+  "_removal": "deleted with display_state itself (DESIGN-5 S1, section 5).",
+  "cases": [
+    {"why": "a fresh pane is working, not idle",
+     "pane": {"state": "starting", "idle_s": 0}, "want": "working"},
+
+    {"why": "mid-turn",
+     "pane": {"state": "busy", "idle_s": 2}, "want": "working"},
+
+    {"why": "a wedged adapter is still working, never idle -- the whole point of the uncertain state",
+     "pane": {"state": "uncertain", "idle_s": 9999}, "want": "working"},
+
+    {"why": "just answered",
+     "pane": {"state": "ready", "idle_s": 0}, "want": "your-turn"},
+
+    {"why": "one second inside the threshold",
+     "pane": {"state": "ready", "idle_s": 1799}, "want": "your-turn"},
+
+    {"why": "IDLE_DISPLAY_S exactly: the boundary belongs to idle",
+     "pane": {"state": "ready", "idle_s": 1800}, "want": "idle"},
+
+    {"why": "quiet for half an hour: this is what `idle` exists to say",
+     "pane": {"state": "ready", "idle_s": 1801}, "want": "idle"},
+
+    {"why": "a pending card is needs-you EVEN THOUGH the raw state says ready",
+     "pane": {"state": "ready", "pending": ["req-1"], "idle_s": 0}, "want": "needs-you"},
+
+    {"why": "the runbook gate parked it: no card, but only a human releases it",
+     "pane": {"state": "ready", "gate_hold": true, "idle_s": 0}, "want": "needs-you"},
+
+    {"why": "a gate hold on a stale pane still wants the human, not `idle`",
+     "pane": {"state": "ready", "gate_hold": true, "idle_s": 99999}, "want": "needs-you"},
+
+    {"why": "the raw needs-you state with EMPTY pending and NO gate hold (the card not yet in `pending`)",
+     "pane": {"state": "needs-you", "idle_s": 5}, "want": "needs-you"},
+
+    {"why": "a card outranks death: the core clears pending on exit, so where these overlap it is a bug and hiding it is worse",
+     "pane": {"state": "dead", "pending": ["req-1"], "idle_s": 10}, "want": "needs-you"},
+
+    {"why": "dead",
+     "pane": {"state": "dead", "idle_s": 10}, "want": "dead"},
+
+    {"why": "restored from disk, deliberately not running: PAUSED -- a human must resume it, which is not the same as merely quiet",
+     "pane": {"state": "detached", "idle_s": 100000}, "want": "paused"},
+
+    {"why": "a freshly detached pane is paused too; age is not what makes it paused",
+     "pane": {"state": "detached", "idle_s": 0}, "want": "paused"},
+
+    {"why": "an enum value this function does not know is NOT claimed to be working -- the raw label is rendered beside it",
+     "pane": {"state": "hibernating", "idle_s": 3}, "want": "idle"},
+
+    {"why": "no state at all (a stripped object): treated as starting",
+     "pane": {}, "want": "working"}
+  ]
+}

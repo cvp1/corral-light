@@ -39,7 +39,10 @@
     </button>
     <div class="lab">Conversations</div>
     <div id="roster" class="roster"></div>
-    <div class="foot"><span id="conn" class="conn">connecting…</span><div class="themes" id="themes"></div></div>
+    <div class="foot"><span id="conn" class="conn">connecting…</span>
+      <button class="keysbtn" id="keysbtn" type="button" title="Keyboard shortcuts (?)"
+              aria-label="Keyboard shortcuts">?</button>
+      <div class="themes" id="themes"></div></div>
   </aside>
 
   <!-- No room nav. Light is one room; a tab bar with a single tab is chrome
@@ -125,10 +128,46 @@
     <h2>Carry this conversation to…</h2>
     <label>Lane<select id="p-agent"></select></label>
     <p class="hint" id="p-hint"></p>
+    <p class="hint" id="p-seatnote"></p>
     <pre id="p-text" class="porttext"></pre>
     <menu>
       <button value="cancel" class="btn">Cancel</button>
       <button value="ok" class="btn go" id="p-go" disabled>Send</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- Built by toggleKeys() from the KEYS table in app.js — the same table the
+     global key handler dispatches from, so this list cannot advertise a
+     shortcut that does nothing. Empty here on purpose; a hand-written copy is
+     exactly the drift it exists to prevent. -->
+<dialog id="keysdlg">
+  <form method="dialog" class="dlg">
+    <h2>Keyboard</h2>
+    <div id="keys-body" class="keysbody"></div>
+    <menu><button value="cancel" class="btn">Close</button></menu>
+  </form>
+</dialog>
+
+<!-- A seat (DESIGN-5 S6): a name the operator gives a pane so other panes can
+     address it. `pattern` is the server's grammar, so the browser refuses a
+     bad name before it is posted; the server refuses it again regardless. -->
+<dialog id="seatdlg">
+  <form method="dialog" class="dlg">
+    <h2>Seat</h2>
+    <p class="hint">A name other panes can address <b id="seat-for"></b> by.
+      One open pane per name.</p>
+    <label>Name<input id="seat-name" autocomplete="off" spellcheck="false"
+        maxlength="32" pattern="[a-z][a-z0-9\-]{0,31}"
+        placeholder="reviewer"
+        title="a lowercase letter, then up to 31 lowercase letters, digits or -"></label>
+    <p class="hint">A lowercase letter, then up to 31 lowercase letters, digits
+      or <code>-</code>. Leave it on this pane when you port it — the new pane
+      starts without one.</p>
+    <menu>
+      <button value="cancel" class="btn" formnovalidate>Cancel</button>
+      <button value="unbind" class="btn" id="seat-unbind" formnovalidate>Remove</button>
+      <button value="ok" class="btn go">Bind</button>
     </menu>
   </form>
 </dialog>

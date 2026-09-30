@@ -3,6 +3,11 @@
 #   corral-light pair ABC-123   authorize the browser showing that code
 #   corral-light serve          run the hub in the foreground
 #   corral-light doctor         say which lanes can start here, and why not
+#   corral-light install-service  write this checkout's systemd unit (Linux) or
+#                               launchd plist (macOS) with the paths resolved.
+#                               It does NOT enable or start anything — the
+#                               enable command is printed for you to run.
+#                               --print shows the file and writes nothing.
 #   corral-light diagnose       run one lane end to end and report everything
 #   corral-light consult ...    ask a lane from a script — the assistant's way to
 #                               get a second opinion on your subscriptions, not
@@ -13,7 +18,7 @@
 #                               corral-light-watch timer (README).
 #   corral-light watch <pane>   ...with a pane id: follow that pane live (cli.py)
 #   corral-light panes | open | say | pending | ok | no | cancel | pause |
-#                resume | close | forget | reopen | rename | config |
+#                resume | close | forget | reopen | rename | seat | config |
 #                attach | quote     the whole pane surface from a terminal
 #                               (cli.py --help; `say` answers permissions in
 #                               the same terminal and never cancels on a timer)
@@ -27,15 +32,8 @@ PY="${CORRAL_LIGHT_PYTHON:-python3}"
 case "${1:-}" in
   pair)  exec "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); import auth; ok,msg=auth.approve(sys.argv[2] if len(sys.argv)>2 else ''); print(msg, flush=True); sys.exit(0 if ok else 2)" "$D" "${2:-}" ;;
   serve) exec "$PY" "$D/hub.py" ;;
-  doctor) exec "$PY" -c "
-import sys; sys.path.insert(0,'$D')
-import sessions
-lanes = sessions.available_agents()
-for a in lanes:
-    print(('  ok  ' if a['available'] else '  --  ')+a['label']+(' — '+a['why'] if a['why'] else ''))
-note = (lanes[0].get('envNote') if lanes else None)
-if note: print('\n  !   ' + note)
-" ;;
+  doctor) exec "$PY" "$D/doctor.py" ;;
+  install-service) shift; exec "$PY" "$D/install_service.py" "$@" ;;
   diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;
   consult) shift; exec "$PY" "$D/consult.py" "$@" ;;
   watch)
@@ -43,8 +41,8 @@ if note: print('\n  !   ' + note)
     # bare, or with --flags, it is the outside hub watcher (watch.py).
     if [ $# -ge 2 ] && [[ "$2" != -* ]]; then exec "$PY" "$D/cli.py" "$@"; fi
     shift; exec "$PY" "$D/watch.py" "$@" ;;
-  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|later|search|digest|port)
+  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|seat|config|attach|quote|later|search|digest|port)
     exec "$PY" "$D/cli.py" "$@" ;;
   cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote}"; exit 2 ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote}"; exit 2 ;;
 esac
