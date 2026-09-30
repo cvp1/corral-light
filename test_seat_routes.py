@@ -151,6 +151,21 @@ class Routes(unittest.TestCase):
                          token=tok)
         self.assertEqual(st, 401, "a pane token reached the HUMAN send path")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the uid check is Linux-only")
+    def test_another_unix_user_or_an_unknown_caller_is_refused(self):
+        """A token alone is not enough: the Claude adapter puts it on a
+        world-readable command line, so the kernel's record of who opened
+        the calling socket decides (measured live, S9)."""
+        tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])
+        from corral_core import edge
+        for fake, why in ((os.getuid() + 1, "another user"), (None, "unknown")):
+            with mock.patch.object(edge, "local_peer_uid", lambda *a, **k: fake):
+                st, out = self.req("GET", "/api/peer/seats", token=tok)
+            self.assertEqual(st, 403, (why, out))
+            self.assertIn("UNIX user", out.get("error", ""))
+        self.assertEqual(self.req("GET", "/api/peer/seats", token=tok)[0], 200,
+                         "the real check refused this test's own user")
+
     def test_an_unknown_peer_route_is_404_not_a_fallthrough(self):
         tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])
         self.assertEqual(self.req("GET", "/api/peer/state", token=tok)[0], 404)

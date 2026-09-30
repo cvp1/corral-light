@@ -117,9 +117,13 @@ speaks. Each pane may try **30** sends an hour; refusals count.
 
 **What the sender label is, and is not.** The hub decides who sent a message
 from a token it mints for each pane at every spawn and keeps only in memory.
-That token is a label for the supported path, **not a secret**: any process
-running as the same user can read it from `/proc/<pid>/environ` and send as
-that pane — and an agent with a shell could already type into any pane
+That token is a label for the supported path, **not a secret**. Some adapters
+put it on a process command line (the Claude adapter does), where any local
+user can read it — so on Linux the hub also checks, from `/proc/net/tcp`, that
+the calling process belongs to the hub's own UNIX user, and refuses anything
+else (including a caller it cannot identify). On other platforms that check is
+not made. Within that boundary, any process running **as the same user** can
+send as a pane, and an agent with a shell could already type into any pane
 through the local API. Seats add provenance and a gate to the path agents are
 meant to use; they do not create an identity a same-user process cannot forge.
 

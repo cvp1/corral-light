@@ -25,13 +25,18 @@ WHO IS SENDING
     process's environment -- never in meta.json, never on disk.
 
 WHAT THE TOKEN IS NOT (the honest threat statement, DESIGN-5 section 7.9)
-    It is a LABEL for the supported path, not a secret. Any process running
-    as the same UNIX user can read it from /proc/<pid>/environ of this server
-    or of the adapter, and send as that pane. And an agent with a shell
-    (Codex and Grok were measured running one without a permission card)
-    can already type into any pane through `corral consult send`. What this
-    path adds is provenance and a gate on the path that is SUPPOSED to be
-    used -- not a principal those panes cannot forge.
+    It is a LABEL for the supported path, not a secret. It sits in this
+    process's environment, and -- measured live 2026-09-29 -- the Claude
+    adapter also puts it on the `claude` process's COMMAND LINE, which any
+    local user can read with `ps` on a host whose /proc is not hidepid. So the
+    hub does not trust the token alone: on Linux it looks up who opened the
+    calling socket (/proc/net/tcp) and refuses any caller that is not the
+    hub's own UNIX user. What remains is the documented boundary: any process
+    running AS THAT USER can send as a pane -- and an agent with a shell
+    (Codex and Grok were measured running one without a permission card) can
+    already type into any pane through `corral consult send`. This path adds
+    provenance and a gate on the route that is SUPPOSED to be used, not a
+    principal those processes cannot forge.
 
 BOUNDS
     Every hub call has a timeout; a response is capped; the tool text a model

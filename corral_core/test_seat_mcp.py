@@ -271,5 +271,41 @@ class TheHubsAnswer(unittest.TestCase):
         self.assertEqual(self.mgr.peer_http("GET", "/api/peer/anything", self.tok)[0], 404)
 
 
+class TheCallerIsTheHubsOwnUser(unittest.TestCase):
+    """edge.local_peer_uid (DESIGN-5 S8, after the live finding that the Claude
+    adapter puts the pane token on a world-readable command line): the uid
+    that owns the CLIENT end of a loopback connection, from /proc/net/tcp."""
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "/proc/net/tcp is Linux")
+    def test_a_real_loopback_connection_is_owned_by_this_user(self):
+        import socket
+        from corral_core import edge
+        srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        cli = socket.create_connection(srv.getsockname())
+        conn, peer = srv.accept()
+        try:
+            self.assertEqual(edge.local_peer_uid(peer, conn.getsockname()), os.getuid())
+        finally:
+            for s in (cli, conn, srv):
+                s.close()
+
+    def test_the_row_for_the_CLIENT_end_decides_not_the_servers(self):
+        import tempfile
+        from corral_core import edge
+        d = tempfile.mkdtemp()
+        # Two rows for one connection: the server's accepted socket (uid 1000)
+        # and the client's (uid 4242). Only the client row may answer.
+        rows = ["  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+                "   0: 0100007F:4747 0100007F:D431 01 00000000:00000000 00:00000000 00000000  1000        0 1",
+                "   1: 0100007F:D431 0100007F:4747 01 00000000:00000000 00:00000000 00000000  4242        0 2"]
+        Path(d, "tcp").write_text("\n".join(rows) + "\n")
+        self.assertEqual(edge.local_peer_uid(("127.0.0.1", 0xD431), ("127.0.0.1", 0x4747),
+                                             proc_net=d), 4242)
+        self.assertIsNone(edge.local_peer_uid(("127.0.0.1", 1), ("127.0.0.1", 2), proc_net=d))
+        self.assertIsNone(edge.local_peer_uid(("not-an-ip", 1), ("127.0.0.1", 2), proc_net=d))
+        self.assertIsNone(edge.local_peer_uid(("127.0.0.1", 1), ("127.0.0.1", 2),
+                                              proc_net=d + "/nope"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
