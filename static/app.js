@@ -637,12 +637,28 @@ function renderLog(p) {
       case 'question':
         flush();
         {
-          const b = el('div', 'msg question');
-          b.appendChild(el('div', 'qwho', d.replaces ? 'the agent asks you, replacing its earlier question'
-                                                     : 'the agent asks you'));
+          const hub = d.source === 'hop-limit';
+          const b = el('div', 'msg question' + (hub ? ' hub' : ''));
+          b.appendChild(el('div', 'qwho', hub ? 'Corral paused this loop — not the agent'
+            : d.replaces ? 'the agent asks you, replacing its earlier question'
+                         : 'the agent asks you'));
           b.appendChild(el('div', 'qtext', d.text || ''));
           log.appendChild(b);
         }
+        break;
+      // A message this pane sent was refused at the pane-to-pane limit. When
+      // it raised the hub's question, that block says it; otherwise (the
+      // agent's own question was open) this line is the record.
+      case 'peer_paused':
+        if (!d.raised) {
+          flush();
+          log.appendChild(el('div', 'sys',
+            `message to @${d.to_seat || '?'} refused at the pane-to-pane limit`));
+        }
+        break;
+      case 'peer_chain_reset':
+        flush();
+        log.appendChild(el('div', 'sys', 'a human answered the loop pause — the message limit restarts'));
         break;
       case 'question_cleared':
         flush();
@@ -1657,12 +1673,20 @@ const ASK_PREVIEW_CHARS = 80;           // the roster line; the banner shows it 
 function questionBanner(p) {
   const q = p.question;
   if (!q || !q.text) return null;
-  const b = el('div', 'qbanner');
+  // `source: hop-limit` is the HUB's own words (a loop stopped at the
+  // pane-to-pane message limit), never the agent's -- labelled as such.
+  const hub = q.source === 'hop-limit';
+  const b = el('div', 'qbanner' + (hub ? ' hub' : ''));
   const who = p.seat ? '@' + p.seat : 'the agent';
-  b.appendChild(el('div', 'qwho', `${who} asks you — answer by sending a message`));
+  b.appendChild(el('div', 'qwho', hub
+    ? 'Corral paused this loop — send any message to let it continue'
+    : `${who} asks you — answer by sending a message`));
   b.appendChild(el('div', 'qtext', q.text));
-  b.title = 'Raised by this pane\'s agent with ask_human. It stays until you '
-          + 'send this pane a message, or the pane closes or stops.';
+  b.title = hub
+    ? 'Raised by Corral, not by the agent: a message between panes was refused '
+      + 'at the limit. It stays until you send this pane a message.'
+    : 'Raised by this pane\'s agent with ask_human. It stays until you '
+      + 'send this pane a message, or the pane closes or stops.';
   return b;
 }
 
@@ -1673,7 +1697,7 @@ function askLine(p) {
   const flat = String(q.text).replace(/\s+/g, ' ').trim();
   const short = flat.length > ASK_PREVIEW_CHARS
     ? flat.slice(0, ASK_PREVIEW_CHARS - 1) + '…' : flat;
-  const line = el('div', 'ask', 'asks: ' + short);
+  const line = el('div', 'ask', (q.source === 'hop-limit' ? 'paused: ' : 'asks: ') + short);
   line.title = q.text;
   return line;
 }
@@ -2384,7 +2408,8 @@ function connect() {
     if (ev.kind === 'peer') { p.state = 'busy'; p.turnVia = 'peer'; }
     // ask_human: the agent raised (or replaced) its question; a human turn,
     // a close or the agent's death closed it. The server owns both.
-    if (ev.kind === 'question') p.question = { text: d.text, at: d.at, turn: d.turn };
+    if (ev.kind === 'question') p.question = { text: d.text, at: d.at, turn: d.turn,
+                                              source: d.source || null };
     if (ev.kind === 'question_cleared') p.question = null;
     if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';

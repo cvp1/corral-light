@@ -81,6 +81,9 @@
     {"why": "a peer-started turn that asked the human is needs-you, not idle",
      "pane": {"state": "ready", "turn_via": "peer", "question": {"text": "ok?"}, "idle_s": 0}, "want": "needs-you"},
 
+    {"why": "the HUB's loop pause (a hop-limit refusal) is needs-you too: the loop is stalled until a human speaks",
+     "pane": {"state": "ready", "turn_via": "peer", "question": {"text": "Loop paused", "source": "hop-limit"}, "idle_s": 0}, "want": "needs-you"},
+
     {"why": "a peer-started turn still running is working",
      "pane": {"state": "busy", "turn_via": "peer", "idle_s": 0}, "want": "working"}
   ]

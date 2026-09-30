@@ -231,6 +231,11 @@ AGENT_ORIGIN_VIAS = ("peer", "rig")
 # human (the seat tools' fifth tool). The bound is the tool's, refused over it
 # on both sides of the wire and never clipped.
 MAX_ASK_CHARS = _seat_mcp.MAX_ASK_CHARS
+# The hub raises a question of its OWN on a pane when that pane's message is
+# refused at the MAX_PEER_HOPS limit (2026-09-30: a review loop stalled
+# silently at hop 4). `source` marks it as the hub's words, never the agent's
+# (P20); an agent's own question is never overwritten by one.
+HOP_PAUSE_SOURCE = "hop-limit"
 
 # A seat is a human-chosen name for a pane (DESIGN-5 S6): the address another
 # pane's agent uses to reach it. One grammar, one rule string, so the refusal
@@ -400,7 +405,7 @@ def peer_hop_in(pane):
     or 0. A human turn resets the chain; a peer message continues it."""
     for ev in reversed(getattr(pane, "events", None) or []):
         k = ev.get("kind")
-        if k == "user":
+        if k in ("user", "peer_chain_reset"):
             return 0
         if k == "peer":
             try:
@@ -1173,21 +1178,30 @@ class PaneBase:
             self._drop_held_peers_locked(reason)
 
     # ── ask_human: the agent's one open question for its human ─────────
-    def ask(self, text):
-        """Record THIS pane's agent's question for its human, replacing any
-        open one. -> the stored question. The caller (ManagerBase.ask_human)
-        has already validated `text`.
+    def ask(self, text, source=None, pair=None):
+        """Record a question for this pane's human, replacing any open one.
+        -> the stored question. The caller has already validated `text`.
 
-        The `question` event is the agent's words, attributed to the agent:
-        renderers show it as the agent asking, never as the human or as a
-        system instruction (P20)."""
-        prev = self.question
+        `source=None` is the pane's AGENT (ask_human); `source=
+        HOP_PAUSE_SOURCE` is the HUB (a loop paused at the hop limit), with
+        `pair` naming the other pane of the paused loop. The `question`
+        event carries `source`, so renderers attribute it to whoever said it
+        -- never to the human, never as a system instruction (P20)."""
+        prev = self.question or {}
+        # An agent asking over a hub pause keeps the pause's pair: answering
+        # either still lets the loop continue.
+        if pair is None and prev.get("pair"):
+            pair = prev["pair"]
         q = {"text": text, "at": _now(),
              "turn": getattr(getattr(self, "_in_flight", None), "turn", None)}
+        if source:
+            q["source"] = source
+        if pair:
+            q["pair"] = pair
         self.question = q
         self.save_meta()
         self.emit("question", {"text": text, "turn": q["turn"], "at": q["at"],
-                               "replaces": (prev or {}).get("at")},
+                               "replaces": prev.get("at"), "source": source},
                   activity=False)
         return q
 
@@ -1195,12 +1209,14 @@ class PaneBase:
         """Close the open question, if any, and say why in the transcript."""
         q = self.question
         if not q:
-            return
+            return None
         self.question = None
         self.save_meta()
         self.emit("question_cleared", {"reason": reason,
-                                       "asked_at": (q or {}).get("at")},
+                                       "asked_at": (q or {}).get("at"),
+                                       "source": q.get("source")},
                   activity=False)
+        return q
 
     def _note_turn(self, via):
         """Each skin's send() calls this where it emits `user`, and peer
@@ -1209,7 +1225,17 @@ class PaneBase:
         another pane or a rig does not answer it."""
         self.turn_via = via
         if via not in AGENT_ORIGIN_VIAS:
-            self._clear_question("answered")
+            q = self._clear_question("answered")
+            other = ((q or {}).get("pair") or {}).get("to_pane")
+            peer = (getattr(self.mgr, "panes", None) or {}).get(other) if other else None
+            if peer is not None:
+                # The human answered a loop pause that named BOTH panes: the
+                # chain restarts on the other one too, or one message each
+                # way would re-stall it on the old count (peer_hop_in).
+                peer.emit("peer_chain_reset",
+                          {"by_pane": self.id,
+                           "reason": "a human answered the loop pause"},
+                          activity=False)
 
     @staticmethod
     def restore_question(meta):
@@ -1221,8 +1247,15 @@ class PaneBase:
         if not q:
             return None
         if isinstance(q, dict) and isinstance(q.get("text"), str) and q["text"]:
-            return {"text": q["text"][:MAX_ASK_CHARS], "at": q.get("at"),
-                    "turn": q.get("turn")}
+            out = {"text": q["text"][:MAX_ASK_CHARS], "at": q.get("at"),
+                   "turn": q.get("turn")}
+            if q.get("source") == HOP_PAUSE_SOURCE:
+                out["source"] = HOP_PAUSE_SOURCE
+            pair = q.get("pair")
+            if isinstance(pair, dict) and isinstance(pair.get("to_pane"), str):
+                out["pair"] = {"to_pane": pair["to_pane"],
+                               "to_seat": pair.get("to_seat")}
+            return out
         return {"text": "(this pane's agent asked a question that could not "
                         "be read back from disk)", "at": None, "turn": None}
 
@@ -1579,7 +1612,7 @@ class ManagerBase:
                                      f"sends in the last hour; that is the limit")
             hop, r = self._peer_hop(src, dst)
             if r:
-                return r
+                return self._hop_paused(src, dst, to_seat, r)
             if behind is not None:
                 return self._peer_hold_locked(src, dst, to_seat, body, behind)
             return self._peer_admit_locked(src, dst, to_seat, body, hop)
@@ -1635,6 +1668,40 @@ class ManagerBase:
                                        f"on either; a human must speak before "
                                        f"another is sent")
         return hop, None
+
+    def _hop_paused(self, src, dst, to_seat, refusal):
+        """A message was refused at the hop limit: say so to the HUMAN, on
+        the sending pane, without the agents' cooperation (2026-09-30).
+        -> the refusal, annotated for the agent.
+
+        Opens a hub-originated question on `src` (needs-you, the attention
+        item, the push page, the banner; cleared by the next human turn,
+        which also restarts the chain for `dst`). An agent's OWN open
+        question is left exactly as it is -- the pane already reads
+        needs-you -- and only the `peer_paused` record is written. The
+        target is not flagged: one item per stall is enough, and the sender
+        is the pane whose message is waiting. Called under dst's _turn_lock;
+        touches only src (a different pane: `self` is refused first)."""
+        src_label = (f"@{src.seat}" if src.seat and not src.seat_withheld
+                     else f"pane {src.id}")
+        dst_label = f"@{to_seat}"
+        own = bool(src.question) and \
+            (src.question or {}).get("source") != HOP_PAUSE_SOURCE
+        if not own:
+            src.ask(f"Loop paused — the {MAX_PEER_HOPS}-message limit between "
+                    f"panes was reached; send any message to this pane to let "
+                    f"{src_label} and {dst_label} continue. Refused: "
+                    f"{src_label} → {dst_label}",
+                    source=HOP_PAUSE_SOURCE,
+                    pair={"to_pane": dst.id, "to_seat": to_seat})
+        src.emit("peer_paused", {"to_seat": to_seat, "to_pane": dst.id,
+                                 "raised": not own}, activity=False)
+        out = dict(refusal, raised_to_human=not own)
+        out["why"] = (refusal["why"] + (" — the hub has raised this to your "
+                                        "human; end your turn" if not own else
+                                        " — your open question already asks "
+                                        "your human; end your turn"))
+        return out
 
     def _peer_admit_locked(self, src, dst, to_seat, body, hop, at=None):
         """ADMITTED: record and dispatch, under the caller's acquisition of
@@ -1792,6 +1859,8 @@ class ManagerBase:
             hop = None
             if r is None:
                 hop, r = self._peer_hop(src, dst)
+                if r is not None:
+                    r = self._hop_paused(src, dst, h["to_seat"], r)
             if r is not None:
                 self._peer_queue_record(dst, h, "refused", reason=r["reason"],
                                         why=r["why"])

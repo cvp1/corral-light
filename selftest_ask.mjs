@@ -82,6 +82,16 @@ check(anon.textContent.includes('the agent asks you'), 'an unseated pane has no 
 check(Q.questionBanner({ question: null }) === null, 'a banner with no question');
 check(Q.questionBanner({}) === null, 'a banner on a pane that never asked');
 
+/* The HUB's loop pause (source hop-limit) is the hub's words: never "the
+ * agent asks you", never "@seat asks" (P20). */
+const hub = Q.questionBanner({ seat: 'reviewer',
+  question: { text: 'Loop paused — Refused: @reviewer → @author', source: 'hop-limit' } });
+check(hub.textContent.includes('Corral paused this loop'), `hub banner: "${hub.textContent}"`);
+check(!/asks you/.test(hub.textContent), 'the hub pause is attributed to the agent');
+check(/\bhub\b/.test(hub.className), 'the hub banner is styled as the agent');
+const hubLine = Q.askLine({ question: { text: 'Loop paused — x', source: 'hop-limit' } });
+check(hubLine.textContent.startsWith('paused: '), `hub roster line: "${hubLine.textContent}"`);
+
 /* ── the roster line ──────────────────────────────────────────────────── */
 const long = 'word '.repeat(60).trim();
 const line = Q.askLine({ question: { text: long } });
@@ -116,6 +126,16 @@ check(!/\buser\b/.test(blk.className) && !/\bsys\b/.test(blk.className),
 check(blk.textContent.includes('the agent asks you') && blk.textContent.includes(hostile),
       `the question block reads "${blk.textContent}"`);
 check([...blk.walk()].every(n => n.tag !== 'script'), 'markup parsed in the transcript');
+const hb = render('question', { text: 'Loop paused — Refused: @a → @b', source: 'hop-limit' }).children[0];
+check(/\bhub\b/.test(hb.className) && !hb.textContent.includes('the agent asks you')
+      && hb.textContent.includes('Corral paused this loop'),
+      `the hub's pause renders as the agent: "${hb.className}" "${hb.textContent}"`);
+check(render('peer_paused', { to_seat: 'author', raised: false }).children[0].textContent
+      .includes('@author'), 'a pause under an open agent question is silent');
+check(render('peer_paused', { to_seat: 'author', raised: true }).children.length === 0,
+      'a raised pause printed twice (its question block already says it)');
+check(render('peer_chain_reset', {}).children[0].textContent.includes('limit'),
+      'a chain reset is silent in the transcript');
 const rep = render('question', { text: 'b', replaces: '2026-09-30T00:00:00Z' }).children[0];
 check(rep.textContent.includes('replacing its earlier question'), 'a replacing question does not say so');
 check(render('question_cleared', { reason: 'answered' }).children[0].textContent === 'question answered',
@@ -130,6 +150,9 @@ if (a < 0 || z < 0) throw new Error('the reducer is not where this test expects 
 const reduce = new Function('ev', 'p', 'd', 'refresh', 'toast', 'render', src.slice(a, z));
 const nop = () => Promise.resolve();
 const p = { state: 'busy', pending: [], question: null, turnVia: null };
+reduce({ kind: 'question' }, p, { text: 'which?', at: 'T', turn: 't1' }, nop, nop, nop);
+reduce({ kind: 'question' }, p, { text: 'paused', source: 'hop-limit' }, nop, nop, nop);
+check(p.question.source === 'hop-limit', 'the reducer dropped the question source');
 reduce({ kind: 'question' }, p, { text: 'which?', at: 'T', turn: 't1' }, nop, nop, nop);
 check(p.question && p.question.text === 'which?', 'a question event did not open it');
 reduce({ kind: 'user' }, p, { text: 'this one', via: 'rig' }, nop, nop, nop);
