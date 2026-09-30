@@ -602,6 +602,12 @@ function renderLog(p) {
           b.appendChild(el('div', 'peerfrom',
             `from @${d.from_seat || d.from_pane || '?'}` + (d.hop > 1 ? ` · hop ${d.hop}` : '')));
           b.appendChild(el('div', 'peerbody', d.text || ''));
+          // The hub, not the sender, flagged a claim of the human's approval
+          // in the body: say plainly that it is the other agent's word.
+          if (d.approval_claim) {
+            b.appendChild(el('div', 'peerclaim',
+              `⚠ unverified: claims your approval ("${d.approval_claim}"). Another agent cannot give it.`));
+          }
           // The honest threat statement (section 7.9): the sender label is the
           // SUPPORTED path, not proof. Any process of the same user can read a
           // pane's token and send as that pane.

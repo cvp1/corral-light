@@ -1118,6 +1118,8 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 .msg.peer .peerfrom{font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;
   color:var(--dusk);margin-bottom:4px}
 .msg.peer .peerbody{white-space:pre-wrap;word-break:break-word}
+.msg.peer .peerclaim{font-family:var(--mono);font-size:10.5px;color:var(--ember);
+  margin-top:6px;word-break:break-word}
 
 /* ask_human: an agent's open question for its human. Gold like every other
    needs-you signal; the banner sits between the header and the transcript
