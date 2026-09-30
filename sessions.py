@@ -291,6 +291,9 @@ AGENTS = {
         # a pane here has to QUOTE it, because handing a path to an agent with
         # no filesystem is a dead end that looks like a working feature.
         "tools": False,
+        # ollama_acp.py reads no `mcpServers`: the seat tools are not offered,
+        # so a pane here can receive a peer message but not send one (S8).
+        "mcp": False,
         "needs": "answers from the local Ollama — no key, works offline; "
                  "chat only, no tools and no permission rail",
         "catalog_probe": lambda: _probe_ollama(),

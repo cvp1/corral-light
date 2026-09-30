@@ -96,6 +96,36 @@ it once in its instructions file ("to ask another model, use `corral-light
 consult`, never an API key by default") and second opinions stop costing a
 second bill.
 
+## Seats: panes that can message each other
+
+A **seat** is a name you give a pane — `@reviewer`, `@author` — with the ＠ in
+its header (or `corral-light seat <pane> <name>`; `-` removes it). One open pane per name; a closed pane holds nothing. Once a pane
+has a seat, the agent in another pane can reach it through two tools Corral
+offers every eligible pane (an MCP server named `corral-seats`):
+
+- `seat_list()` — who can be addressed and what state each is in (`your-turn`,
+  `working`, `needs-you`, `paused`, …). No titles, no transcripts.
+- `seat_send(seat, text)` — one message, answered `delivered` (with a turn id),
+  `refused` (with the reason), or `failed`.
+
+A message arrives in the other pane as its own block, marked **from @author**
+and **untrusted** — never as that pane's human, never lifting a runbook park.
+It is refused, not queued, when the target is busy, waiting on a permission
+card, paused (after a restart every pane is), or dead. After **four** messages
+pass between panes with no human turn on them, sending stops until a human
+speaks. Each pane may try **30** sends an hour; refusals count.
+
+**What the sender label is, and is not.** The hub decides who sent a message
+from a token it mints for each pane at every spawn and keeps only in memory.
+That token is a label for the supported path, **not a secret**: any process
+running as the same user can read it from `/proc/<pid>/environ` and send as
+that pane — and an agent with a shell could already type into any pane
+through the local API. Seats add provenance and a gate to the path agents are
+meant to use; they do not create an identity a same-user process cannot forge.
+
+**Who can send.** Every lane whose adapter accepts MCP servers is offered the tools. The Ollama lane's adapter takes none, so a pane there can **receive** a message but not send one; SSH panes neither send nor receive. `seat_list` says which panes were offered the tools. `CORRAL_NATIVE_MCP=0` in the hub's environment turns the
+tools off for every pane.
+
 ## Security
 
 The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
