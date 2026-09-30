@@ -47,6 +47,7 @@ from pathlib import Path
 import re
 
 import acp
+import claude_auth
 import ledger
 import mcp
 
@@ -213,17 +214,20 @@ AGENTS = {
         "catalog_probe": lambda: __import__("lane_probe").catalog_probe("claude"),
         "probe_config": lambda a: __import__("lane_probe").full_config(a),
         "live_probe": True,
-        # KNOWN GAP, left open deliberately. Every other lane refuses at pick
-        # time when its credential is missing; this one cannot check cheaply
-        # without risking the opposite lie. A pane seeds its config dir from
-        # `~/.claude/.credentials.json`, so testing for that file looks like
-        # the obvious probe — but on macOS Claude Code can keep its
-        # credential in the Keychain instead, where an absent file proves
-        # nothing. Refusing a lane that works is the same class of wrong as
-        # offering one that doesn't, so until there is a real check (asking
-        # the CLI, not guessing at a path), this lane stays optimistic and an
-        # unauthenticated pane fails at its first prompt with the vendor's own
-        # message.
+        # The handshake above cannot see a LAPSED login: session/new succeeds
+        # without a token and auth only surfaces at the first prompt. The
+        # credential itself says when the refresh token expires, so the
+        # picker asks it too (claude_auth; dogma-2 2026-09-30, 05:41).
+        "auth_status": lambda: __import__("claude_auth").status(),
+        # (Formerly a KNOWN GAP: every other lane refused at pick time on a
+        # missing credential and this one could not check cheaply without
+        # risking the opposite lie, because on macOS the credential lives in
+        # the Keychain where an absent file proves nothing. claude_auth reads
+        # the Keychain itself — timestamps only — so the lane now refuses a
+        # lapsed login and warns ahead of one. What it still cannot see is a
+        # token revoked EARLY; that one surfaces at the first prompt, in
+        # English, and Manager.auth_sweep resumes the pane after the next
+        # sign-in.)
     },
     "codex": {
         # ChatGPT via OpenAI's codex, over the ACP-org adapter
@@ -895,9 +899,20 @@ def available_agents():
         if spec.get("live_probe") and not missing:
             import lane_probe
             r = lane_probe.probe(key)
+            ok, why = bool(r["ok"]), r["error"] or spec.get("needs", "")
+            # A handshake that passed with a login that has lapsed is the
+            # green light that lies: the pane dies at its first prompt with
+            # `Authentication required` (2026-09-30). The credential's own
+            # expiry overrides — refuse with the remedy, or warn ahead of it.
+            auth = spec.get("auth_status")
+            if ok and auth:
+                a = auth() or {}
+                if a.get("ok") is False:
+                    ok, why = False, a.get("why") or why
+                elif a.get("why"):
+                    why = a["why"]
             out.append({"key": key, "label": spec["label"],
-                        "available": bool(r["ok"]),
-                        "why": r["error"] or spec.get("needs", ""),
+                        "available": ok, "why": why,
                         "postureEnforced": posture_enforceable(spec),
                         "tools": bool(spec.get("tools"))})
             continue
@@ -947,6 +962,8 @@ class Pane(_core.PaneBase):
         which made /api/state 500 for EVERY pane after a restart.
         """
         self.error = None
+        self.dead_cause = None            # "auth" when the login killed it
+        self.dead_login = None            # the login (refresh expiry) it died under
         self.events = []
         self.pending = {}                 # requestId -> the permission payload
         self.client = None
@@ -1149,6 +1166,7 @@ class Pane(_core.PaneBase):
                 self._generation += 1        # a new attachment; retire any stale drain
                 gen = self._generation
             self.error = None
+            self.dead_cause = self.dead_login = None
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         strip_env=strip_prefixes(),
                                         **self._bind(gen))
@@ -1188,8 +1206,7 @@ class Pane(_core.PaneBase):
                                   "from": prior})
         except acp.AgentError as e:
             self._reap_failed_client()      # same leak as start(); see there
-            self.state, self.error = "dead", f"could not resume: {e}"
-            self.emit("dead", {"reason": self.error})
+            self._dead(f"could not resume: {e}")
         except Exception:
             # Reservation marked us `starting` (counts as live). A spawn that
             # never happened must not keep the slot — and a pane that was
@@ -1392,8 +1409,27 @@ class Pane(_core.PaneBase):
                 self.error = None                  # deliberate: not a fault
                 self.emit("closed", {"reason": data.get("reason")})
             else:
-                self.error = data.get("reason")
-                self.emit("dead", {"reason": self.error})
+                self._dead(data.get("reason"))
+
+    def _dead(self, reason):
+        """The one way a pane records that its agent stopped on its own.
+
+        Four sites used to write `state, error = "dead", <reason>` and emit
+        the same dict by hand; the reason reached the operator as whatever
+        the wire said. For a lapsed Claude login that was a JSON-RPC error
+        code (`-32000 Authentication required`) — true, and useless. Here the
+        reason is classified once (claude_auth): an auth death carries the
+        remedy in English, a `cause` the rail and the sweep can act on, and
+        the login it died under, so auth_sweep resumes it only after a NEW
+        sign-in and never in a loop against the same dead credential.
+        """
+        cause = "auth" if claude_auth.is_auth_error(reason) else None
+        self.state = "dead"
+        self.error = claude_auth.explain(reason)
+        self.dead_cause = cause
+        self.dead_login = (claude_auth.status().get("refreshExpiresAt")
+                           if cause else None)
+        self.emit("dead", {"reason": self.error, "cause": cause})
 
 
 
@@ -1448,8 +1484,7 @@ class Pane(_core.PaneBase):
             # whole group, invisibly, until reboot (Gemini adversarial review
             # 2026-08-31, finding 4). close() tolerates an already-dead group.
             self._reap_failed_client()
-            self.state, self.error = "dead", str(e)
-            self.emit("dead", {"reason": str(e)})
+            self._dead(str(e))
         return self
 
 
@@ -1799,10 +1834,9 @@ class Pane(_core.PaneBase):
                 # the orphan that bug left behind. That timeout is gone now;
                 # the reaping is still right.)
                 client.close()
-                self.state, self.error = "dead", str(e)
                 self._drop_held_peers("dead")
-                self.emit("dead", {"reason": str(e) + (
-                    f" ({dropped} queued message(s) were not sent)" if dropped else "")})
+                self._dead(str(e) + (
+                    f" ({dropped} queued message(s) were not sent)" if dropped else ""))
                 return
             except Exception as e:              # noqa: BLE001
                 # Anything else is a bug in us, and a bug that kills this
@@ -2033,6 +2067,9 @@ class Pane(_core.PaneBase):
             # Whether ↻ / typing can bring this pane back: a conversation id
             # to load. A pane that died before session/new has none.
             "resumable": bool(getattr(self, "acp_session", None)),
+            # "auth" when a lapsed login killed it: the rail says so in
+            # words, and auth_sweep brings it back after the next sign-in.
+            "deadCause": getattr(self, "dead_cause", None),
             "role": getattr(self, "role", None),
             # A transcript carried here from another lane (port.py) — the
             # header says so, so nobody mistakes it for the model's memory.
@@ -2151,6 +2188,65 @@ class Manager(_core.ManagerBase):
         # the same catalog the dialog reads, so a seeded list appears on the
         # next state() poll rather than blocking the UI on boot.
         threading.Thread(target=self.seed_catalogs, daemon=True).start()
+
+
+    # ── the Claude login, watched ────────────────────────────────────────
+    AUTO_RESUME_MAX = 8        # panes brought back per sweep; bounded (P8)
+
+    def auth_sweep(self, now=None, notify_fn=None):
+        """Edge-triggered watch on the Claude login (claude_auth.status).
+
+        Runs from the hub's observe tick. Two edges, each acted on once:
+
+          * a NEW sign-in (the credential's refresh expiry moved) — every pane
+            that died of `Authentication required` under the OLD login is
+            resumed on its own conversation, and told so. Only across that
+            edge: resuming against the same dead credential would churn a
+            process every tick and die again at the first prompt.
+          * the login expired, or is inside WARN_H of expiring — one desktop
+            notification with the remedy, once per (state, expiry), so the
+            steady state is silent (P: edge-trigger).
+
+        Never raises; the tick must survive a Keychain that will not answer.
+        Returns what it did, for tests and for `doctor`.
+        """
+        acted = {"resumed": [], "failed": [], "notified": None}
+        try:
+            st = claude_auth.status(now=now) or {}
+        except Exception:                          # noqa: BLE001
+            return acted
+        ok, ref = st.get("ok"), st.get("refreshExpiresAt")
+        if ok:
+            victims = [p for p in list(self.panes.values())
+                       if getattr(p, "state", None) == "dead"
+                       and getattr(p, "dead_cause", None) == "auth"
+                       and getattr(p, "acp_session", None)
+                       and getattr(p, "dead_login", None) != ref]
+            for p in victims[:self.AUTO_RESUME_MAX]:
+                try:
+                    p.resume()
+                    if p.state != "dead":
+                        p.emit("note", {"text": "Claude login is back — this pane "
+                                                "resumed by itself; send your last "
+                                                "message again (it was not sent)"})
+                        acted["resumed"].append(p.id)
+                    else:
+                        acted["failed"].append(p.id)
+                except Exception:                  # noqa: BLE001
+                    acted["failed"].append(p.id)
+                    p.dead_login = ref             # not again until the next login
+        key = (ok, bool(st.get("warn")), ref)
+        if key != getattr(self, "_auth_said", None):
+            self._auth_said = key
+            if ok is False or st.get("warn"):
+                try:
+                    import notify
+                    (notify_fn or notify.desktop)("Corral Light — Claude login",
+                                                  st.get("why") or "")
+                except Exception:                  # noqa: BLE001
+                    pass
+                acted["notified"] = st.get("why")
+        return acted
 
     def port_preview(self, from_id, to_agent):
         """The exact pack a port would send, its sha, and who receives it.
@@ -2597,6 +2693,9 @@ class Manager(_core.ManagerBase):
         # raises RuntimeError and 500s /api/state.
         return {"panes": [p.snapshot(since.get(p.id, 0)) for p in list(self.panes.values())],
                 "agents": available_agents(),
+                # The Claude login's own expiry, for the rail's early warning
+                # (claude_auth; cached, one `security` read a minute at most).
+                "claudeAuth": claude_auth.status(),
                 # Ships WITH `agents`, not beside it: the per-lane `group` tag
                 # is meaningless without the definitions that name and order the
                 # groups. They were briefly served from local.py instead — a
