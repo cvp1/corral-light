@@ -62,6 +62,7 @@ const D = new Function('S', 'renderHook', `
   ${constant('IDLE_DISPLAY_S')}
   ${constant('DISPLAY_TICK_MS')}
   ${fn('paneAge')}
+  ${constant('AGENT_ORIGIN_VIAS')}
   ${fn('displayState')}
   ${constant('DISPLAY_LABEL')}
   let displaySig = '';
@@ -92,6 +93,8 @@ const onWire = (pane) => ({
   pending: pane.pending || [],
   gateHold: !!pane.gate_hold,
   idleS: pane.idle_s || 0,
+  question: pane.question || null,
+  turnVia: pane.turn_via === undefined ? null : pane.turn_via,
 });
 
 /* T1.6 — projection parity. Every case in the table the python answers, the
@@ -148,6 +151,17 @@ check(document.title === 'Corral',
 setTitle([pane('needs-you'), pane('ready'), pane('ready'), pane('ready')]);
 check(document.title === '1 need you · Corral',
       `one blocked pane among three answered ones gave "${document.title}"`);
+
+/* ask_human: an open question counts as needing you, and a turn another
+ * pane's agent started does NOT count as your turn -- the two ways a pane
+ * read "your turn" on 2026-09-30 when it was nothing of the kind. */
+setTitle([pane('ready', { question: { text: 're-scope?' } }),
+          pane('ready', { turnVia: 'peer' }), pane('ready', { turnVia: 'rig' })]);
+check(document.title === '1 need you · Corral',
+      `a question and two agent-started turn ends gave "${document.title}"`);
+setTitle([pane('ready', { turnVia: 'peer' }), pane('ready', { turnVia: null })]);
+check(document.title === '1 your turn · Corral',
+      `a peer-started turn end counted as your turn: "${document.title}"`);
 
 /* ── the same tick a permission arrives ────────────────────────────────── */
 /* The reducer mutates the pane in place and then calls render(), and render()

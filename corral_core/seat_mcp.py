@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """corral-seats — the MCP server a pane's agent uses to reach other panes.
 
-DESIGN-5 S8 (S10, S11). Four tools, nothing else:
+DESIGN-5 S8 (S10, S11), plus ask_human. Five tools, nothing else:
 
     seat_list()              -> who can be addressed: [{seat, display, lane,
                                 tool}] -- no titles, no transcripts
@@ -14,6 +14,10 @@ DESIGN-5 S8 (S10, S11). Four tools, nothing else:
                              -> block HERE, bounded, until a turn this pane
                                 sent has ended or the seat shows a state:
                                 {result, state, turn_ended} -- never text
+    ask_human(question)      -> raise ONE open question on THIS pane for its
+                                human: the roster reads needs-you and shows
+                                it until a human sends the pane a turn. A
+                                second ask replaces the first.
 
 Stdlib JSON-RPC over stdio, one message per line -- the same three methods
 Corral's registry proxy speaks (initialize, tools/list, tools/call). The hub
@@ -75,6 +79,7 @@ WAIT_UNTIL = ("your-turn", "idle", "needs-you", "dead")
 WAIT_BLOCKED = ("paused", "dead")
 _WAIT_LOCK = threading.Lock()     # one wait in flight per process
 MAX_RESPONSE_BYTES = 256 * 1024
+MAX_ASK_CHARS = 2000              # one question for a human; more is REFUSED
 TOKEN_HEADER = "X-Corral-Pane-Token"
 PROTOCOL = "2024-11-05"           # what Corral's registry proxy speaks today
 
@@ -168,6 +173,27 @@ TOOLS = [
                                        "description": "seconds, default "
                                                       f"{PEER_WAIT_S}"}},
                      "required": ["seat"],
+                     "additionalProperties": False}},
+    {"name": "ask_human",
+     "description": (
+         "Ask YOUR human -- the person at this Corral wall -- for a decision, "
+         "an answer, or their attention. Use this WHENEVER you need them "
+         "before you can continue, then end your turn. Prose alone will not "
+         "raise anything: a question written only in your reply looks exactly "
+         "like a pane that simply finished, and nobody is told. This marks "
+         "your pane `needs-you` and shows the question on the wall until the "
+         "human sends you a message (their answer arrives as your next turn). "
+         "One open question per pane: asking again replaces the previous "
+         "one. Not for talking to other panes -- that is `seat_send`. "
+         f"At most {MAX_ASK_CHARS} characters; longer is refused, not cut."),
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "question": {"type": "string",
+                                      "maxLength": MAX_ASK_CHARS,
+                                      "description": "the question, in full, "
+                                                     "as the human should "
+                                                     "read it"}},
+                     "required": ["question"],
                      "additionalProperties": False}},
 ]
 
@@ -347,6 +373,19 @@ def call_tool(name, args, env=None):
                         env=env), False
         if name == "seat_wait":
             return seat_wait(args, env=env)
+        if name == "ask_human":
+            q = args.get("question")
+            if not isinstance(q, str) or not q.strip():
+                return {"result": "refused", "reason": "arguments",
+                        "why": "ask_human needs a `question` string"}, False
+            if len(q) > MAX_ASK_CHARS:
+                return {"result": "refused", "reason": "too-long",
+                        "why": f"the question is {len(q)} characters; the "
+                               f"limit is {MAX_ASK_CHARS}. Shorten it -- it "
+                               f"was not sent"}, False
+            # Only the question leaves this process: the token decides
+            # WHICH pane is asking, never a field the caller supplies.
+            return _hub("POST", "/api/peer/ask", {"question": q}, env=env), False
     except HubError as e:
         return {"result": "failed", "reason": "hub", "why": str(e)}, True
     return {"result": "failed", "reason": "unknown-tool",

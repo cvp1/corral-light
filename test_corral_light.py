@@ -3668,6 +3668,14 @@ class APeerMessageRendersAsWhatItIs(unittest.TestCase):
         _run_node_selftest(self, "selftest_peer.mjs", "the peer block and reducer")
 
 
+class AnAgentsQuestionRendersAsTheAgentAsking(unittest.TestCase):
+    """ask_human in the browser: the banner, the roster preview, the
+    transcript block and the reducer (selftest_ask.mjs)."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_ask.mjs", "the ask_human banner and reducer")
+
+
 from test_resilience import FakeLaneCase as _FakeLaneCase, wait_for as _wait_for  # noqa: E402
 
 
@@ -3819,6 +3827,23 @@ class LightRigs(RigCases, _FakeLaneCase):
         import sessions
         self.assertIs(sessions._core.ROLE_RESOLVER, sessions._rig_role)
         self.assertEqual(sessions._core.ROSTER_CAP, sessions.MAX_ROSTER)
+
+
+# ask_human: an agent's question for its human, the same cases full Corral
+# runs (testkit/ask_cases.py), through Light's own send(), drain and ledger.
+from ask_cases import AskCases                   # noqa: E402
+
+
+class LightAskHuman(AskCases, _FakeLaneCase):
+    pass
+
+
+# The hop limit raises itself to the human (testkit/hop_pause_cases.py).
+from hop_pause_cases import HopPauseCases        # noqa: E402
+
+
+class LightHopPause(HopPauseCases, _FakeLaneCase):
+    pass
 
 
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent

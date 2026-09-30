@@ -217,6 +217,26 @@ QUOTE_CHARS = 12_000           # of one pane's last answer carried into another
 # human's words, written into the rig file by hand and sent by `rig up`.
 TURN_VIAS = ("consult", "cli", "rig")
 
+# Where a turn came from that the HUMAN did not start at the glass: another
+# pane's agent (`peer`) or a rig's opening prompt sent by `rig up` (`rig`).
+# Two consequences, both read from this one tuple: when such a turn ends the
+# pane displays `idle`, not `your-turn` (the human did not start it, so it is
+# not the human's turn -- an agent that wants the human calls ask_human); and
+# such a turn does NOT answer an open ask_human question. `consult` and `cli`
+# are the human's side of the wall (a script or a terminal the human ran) and
+# count as the human's. Retired with ask_human (DESIGN-5 section 5).
+AGENT_ORIGIN_VIAS = ("peer", "rig")
+
+# ask_human: one open question per pane, from the pane's own agent to its
+# human (the seat tools' fifth tool). The bound is the tool's, refused over it
+# on both sides of the wire and never clipped.
+MAX_ASK_CHARS = _seat_mcp.MAX_ASK_CHARS
+# The hub raises a question of its OWN on a pane when that pane's message is
+# refused at the MAX_PEER_HOPS limit (2026-09-30: a review loop stalled
+# silently at hop 4). `source` marks it as the hub's words, never the agent's
+# (P20); an agent's own question is never overwritten by one.
+HOP_PAUSE_SOURCE = "hop-limit"
+
 # A seat is a human-chosen name for a pane (DESIGN-5 S6): the address another
 # pane's agent uses to reach it. One grammar, one rule string, so the refusal
 # can quote the rule it enforces.
@@ -385,7 +405,7 @@ def peer_hop_in(pane):
     or 0. A human turn resets the chain; a peer message continues it."""
     for ev in reversed(getattr(pane, "events", None) or []):
         k = ev.get("kind")
-        if k == "user":
+        if k in ("user", "peer_chain_reset"):
             return 0
         if k == "peer":
             try:
@@ -455,7 +475,8 @@ def display_state(pane, now=None, state=None):
     in an hour read the same as one that had just finished.
 
     Built from what the HUB knows and nothing else: state, pending cards, the
-    runbook gate hold, and age. Whether a reply has been READ is deliberately
+    runbook gate hold, an open ask_human question, where the last turn came
+    from (`turn_via`), and age. Whether a reply has been READ is deliberately
     absent. No core source for it exists -- the TUI keeps its own `seen`, Light
     keeps a hub-side map outside the Manager, full Corral has none -- so a
     core `unread` would be a guess rendered with the face of a measurement.
@@ -476,8 +497,12 @@ def display_state(pane, now=None, state=None):
     # on a client-side double. Light has neither and reads False.
     held = bool(getattr(pane, "_gate_hold", False)
                 or getattr(pane, "gate_held", False))
+    # An agent's open ask_human question. Survives a hub restart (meta), so
+    # it is checked ahead of `paused` too: the question is still unanswered.
+    asked = bool(getattr(pane, "question", None))
+    via = getattr(pane, "turn_via", None)
     since = _idle_seconds(pane, now)
-    if pending or held or state == "needs-you":
+    if pending or held or asked or state == "needs-you":
         # Ahead of `dead` on purpose. The core clears pending on agent exit
         # (`_clear_pending`), so the two do not overlap in practice; where they
         # somehow do, "look at this" is the direction that cannot hide work.
@@ -488,6 +513,10 @@ def display_state(pane, now=None, state=None):
         out = "working"
     elif state == "detached":
         out = "paused"
+    elif state == "ready" and via in AGENT_ORIGIN_VIAS:
+        # The turn that just ended was not the human's: nothing is waiting
+        # on them. An agent that needs them says so with ask_human.
+        out = "idle"
     elif state == "ready":
         out = "your-turn" if since < IDLE_DISPLAY_S else "idle"
     else:
@@ -577,10 +606,17 @@ class PaneBase:
                  # save_meta writes every key from the attribute, so a loader
                  # that forgot it would blank it on the next save (the
                  # `ported_from` lesson).
-                 "seat")
+                 "seat",
+                 # The agent's open ask_human question, {text, at, turn} or
+                 # None. Persisted so a hub restart does not silently drop a
+                 # question nobody has answered; both skins' from_meta read
+                 # it through `restore_question`.
+                 "question")
     ephemeral = False
     pid = pgid = pid_start = None
     seat = None
+    question = None     # the agent's open ask_human question, or None
+    turn_via = None     # where the most recent turn came from (None = human)
     # Derived, never persisted: True when an earlier-created open pane holds
     # the same seat (see withheld_seats). Only a human rebind clears it.
     seat_withheld = False
@@ -1141,6 +1177,88 @@ class PaneBase:
         with lock:
             self._drop_held_peers_locked(reason)
 
+    # ── ask_human: the agent's one open question for its human ─────────
+    def ask(self, text, source=None, pair=None):
+        """Record a question for this pane's human, replacing any open one.
+        -> the stored question. The caller has already validated `text`.
+
+        `source=None` is the pane's AGENT (ask_human); `source=
+        HOP_PAUSE_SOURCE` is the HUB (a loop paused at the hop limit), with
+        `pair` naming the other pane of the paused loop. The `question`
+        event carries `source`, so renderers attribute it to whoever said it
+        -- never to the human, never as a system instruction (P20)."""
+        prev = self.question or {}
+        # An agent asking over a hub pause keeps the pause's pair: answering
+        # either still lets the loop continue.
+        if pair is None and prev.get("pair"):
+            pair = prev["pair"]
+        q = {"text": text, "at": _now(),
+             "turn": getattr(getattr(self, "_in_flight", None), "turn", None)}
+        if source:
+            q["source"] = source
+        if pair:
+            q["pair"] = pair
+        self.question = q
+        self.save_meta()
+        self.emit("question", {"text": text, "turn": q["turn"], "at": q["at"],
+                               "replaces": prev.get("at"), "source": source},
+                  activity=False)
+        return q
+
+    def _clear_question(self, reason):
+        """Close the open question, if any, and say why in the transcript."""
+        q = self.question
+        if not q:
+            return None
+        self.question = None
+        self.save_meta()
+        self.emit("question_cleared", {"reason": reason,
+                                       "asked_at": (q or {}).get("at"),
+                                       "source": q.get("source")},
+                  activity=False)
+        return q
+
+    def _note_turn(self, via):
+        """Each skin's send() calls this where it emits `user`, and peer
+        delivery where it emits `peer`: remember where the latest turn came
+        from, and let a HUMAN turn answer the open question. A turn from
+        another pane or a rig does not answer it."""
+        self.turn_via = via
+        if via not in AGENT_ORIGIN_VIAS:
+            q = self._clear_question("answered")
+            other = ((q or {}).get("pair") or {}).get("to_pane")
+            peer = (getattr(self.mgr, "panes", None) or {}).get(other) if other else None
+            if peer is not None:
+                # The human answered a loop pause that named BOTH panes: the
+                # chain restarts on the other one too, or one message each
+                # way would re-stall it on the old count (peer_hop_in).
+                peer.emit("peer_chain_reset",
+                          {"by_pane": self.id,
+                           "reason": "a human answered the loop pause"},
+                          activity=False)
+
+    @staticmethod
+    def restore_question(meta):
+        """The `question` from a meta, for from_meta. A malformed value
+        degrades LOUDLY toward the human (P4): it still reads needs-you,
+        with text that says the question could not be read, rather than
+        vanishing."""
+        q = (meta or {}).get("question")
+        if not q:
+            return None
+        if isinstance(q, dict) and isinstance(q.get("text"), str) and q["text"]:
+            out = {"text": q["text"][:MAX_ASK_CHARS], "at": q.get("at"),
+                   "turn": q.get("turn")}
+            if q.get("source") == HOP_PAUSE_SOURCE:
+                out["source"] = HOP_PAUSE_SOURCE
+            pair = q.get("pair")
+            if isinstance(pair, dict) and isinstance(pair.get("to_pane"), str):
+                out["pair"] = {"to_pane": pair["to_pane"],
+                               "to_seat": pair.get("to_seat")}
+            return out
+        return {"text": "(this pane's agent asked a question that could not "
+                        "be read back from disk)", "at": None, "turn": None}
+
     def last_answer(self):
         """The agent's most recent answer, as (text, complete).
 
@@ -1494,7 +1612,7 @@ class ManagerBase:
                                      f"sends in the last hour; that is the limit")
             hop, r = self._peer_hop(src, dst)
             if r:
-                return r
+                return self._hop_paused(src, dst, to_seat, r)
             if behind is not None:
                 return self._peer_hold_locked(src, dst, to_seat, body, behind)
             return self._peer_admit_locked(src, dst, to_seat, body, hop)
@@ -1551,6 +1669,40 @@ class ManagerBase:
                                        f"another is sent")
         return hop, None
 
+    def _hop_paused(self, src, dst, to_seat, refusal):
+        """A message was refused at the hop limit: say so to the HUMAN, on
+        the sending pane, without the agents' cooperation (2026-09-30).
+        -> the refusal, annotated for the agent.
+
+        Opens a hub-originated question on `src` (needs-you, the attention
+        item, the push page, the banner; cleared by the next human turn,
+        which also restarts the chain for `dst`). An agent's OWN open
+        question is left exactly as it is -- the pane already reads
+        needs-you -- and only the `peer_paused` record is written. The
+        target is not flagged: one item per stall is enough, and the sender
+        is the pane whose message is waiting. Called under dst's _turn_lock;
+        touches only src (a different pane: `self` is refused first)."""
+        src_label = (f"@{src.seat}" if src.seat and not src.seat_withheld
+                     else f"pane {src.id}")
+        dst_label = f"@{to_seat}"
+        own = bool(src.question) and \
+            (src.question or {}).get("source") != HOP_PAUSE_SOURCE
+        if not own:
+            src.ask(f"Loop paused — the {MAX_PEER_HOPS}-message limit between "
+                    f"panes was reached; send any message to this pane to let "
+                    f"{src_label} and {dst_label} continue. Refused: "
+                    f"{src_label} → {dst_label}",
+                    source=HOP_PAUSE_SOURCE,
+                    pair={"to_pane": dst.id, "to_seat": to_seat})
+        src.emit("peer_paused", {"to_seat": to_seat, "to_pane": dst.id,
+                                 "raised": not own}, activity=False)
+        out = dict(refusal, raised_to_human=not own)
+        out["why"] = (refusal["why"] + (" — the hub has raised this to your "
+                                        "human; end your turn" if not own else
+                                        " — your open question already asks "
+                                        "your human; end your turn"))
+        return out
+
     def _peer_admit_locked(self, src, dst, to_seat, body, hop, at=None):
         """ADMITTED: record and dispatch, under the caller's acquisition of
         the target's _turn_lock. `at` is the queue position (S11b's release
@@ -1574,6 +1726,7 @@ class ManagerBase:
         dst.emit("peer", {"from_pane": src.id, "from_seat": src.seat,
                           "to_seat": to_seat, "turn": tid, "hop": hop,
                           "nonce": nonce, "text": body}, activity=False)
+        dst._note_turn("peer")        # not the human's turn; answers nothing
         try:
             dst._dispatch(item, at=at)
         except Exception as e:                   # noqa: BLE001
@@ -1706,6 +1859,8 @@ class ManagerBase:
             hop = None
             if r is None:
                 hop, r = self._peer_hop(src, dst)
+                if r is not None:
+                    r = self._hop_paused(src, dst, h["to_seat"], r)
             if r is not None:
                 self._peer_queue_record(dst, h, "refused", reason=r["reason"],
                                         why=r["why"])
@@ -1818,13 +1973,37 @@ class ManagerBase:
         out.sort(key=lambda r: r["seat"])
         return out
 
+    def ask_human(self, pane_id, question):
+        """The calling pane's agent asks its human (the `ask_human` tool).
+
+        -> {"result": "raised", "at", "replaced"}
+         | {"result": "refused", "reason", "why"}
+
+        `pane_id` comes from the pane token, never from the body, so an agent
+        can raise a question only on its own pane. Over MAX_ASK_CHARS is
+        refused, never clipped: the clipped clause could be the one that
+        mattered."""
+        p = self.get(pane_id)
+        if not isinstance(question, str) or not question.strip():
+            return self._refused("empty", "the question is empty")
+        q = question.strip()
+        if len(q) > MAX_ASK_CHARS:
+            return self._refused("too-long",
+                                 f"the question is {len(q)} characters; the "
+                                 f"limit is {MAX_ASK_CHARS}")
+        replaced = bool(p.question)
+        rec = p.ask(q)
+        return {"result": "raised", "at": rec["at"], "replaced": replaced,
+                "why": "your human will see this on the wall; end your turn "
+                       "now -- their answer arrives as your next turn"}
+
     def peer_http(self, method, path, token, body=None):
         """The routes the seat tools call, as (status, json).
 
         The TOKEN decides who is sending -- the pane it was minted for -- and
-        nothing in the body can say otherwise: only `seat` and `text` are
-        read. Each hub calls this from a branch that runs BEFORE its cookie
-        check and never consults the cookie (section 7.8)."""
+        nothing in the body can say otherwise: only `seat`, `text` and
+        `question` are read. Each hub calls this from a branch that runs
+        BEFORE its cookie check and never consults the cookie (section 7.8)."""
         pane = self.pane_for_token(token)
         if pane is None:
             return 401, {"error": "unknown or expired pane token — tokens are "
@@ -1838,6 +2017,9 @@ class ManagerBase:
         if method == "POST" and path == "/api/peer/broadcast":
             b = body if isinstance(body, dict) else {}
             return 200, self.broadcast_peer(pane.id, b.get("text"))
+        if method == "POST" and path == "/api/peer/ask":
+            b = body if isinstance(body, dict) else {}
+            return 200, self.ask_human(pane.id, b.get("question"))
         if method == "GET" and path == "/api/peer/turn":
             b = body if isinstance(body, dict) else {}   # the query string
             return 200, self.peer_turn(pane.id, b.get("seat"), b.get("turn"))
@@ -1997,6 +2179,7 @@ class ManagerBase:
         print(f"corral: close pane {p.id} ({p.agent}) by {by or 'local'} "
               f"{p.title!r}",
               file=sys.stderr, flush=True)
+        p._clear_question("closed")
         p.stop()
         self.panes.pop(pane_id, None)
         return p
