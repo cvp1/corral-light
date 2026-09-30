@@ -100,7 +100,8 @@ class TheServer(unittest.TestCase):
         tools = seat_mcp.handle({"jsonrpc": "2.0", "id": 2,
                                  "method": "tools/list"})["result"]["tools"]
         self.assertEqual([t["name"] for t in tools],
-                         ["seat_list", "seat_send", "seat_broadcast", "seat_wait"])
+                         ["seat_list", "seat_send", "seat_broadcast", "seat_wait",
+                          "ask_human"])
         send = tools[1]
         self.assertEqual(send["inputSchema"]["required"], ["seat", "text"])
         self.assertFalse(send["inputSchema"]["additionalProperties"])
@@ -147,6 +148,44 @@ class TheServer(unittest.TestCase):
         out, is_error = seat_mcp.call_tool("seat_broadcast", {}, env=self.env)
         self.assertEqual((out["result"], out["reason"], is_error),
                          ("refused", "arguments", False))
+
+    def test_ask_human_is_offered_and_tells_the_model_prose_raises_nothing(self):
+        """The tool exists because prose at the end of a turn is
+        indistinguishable from a pane that simply finished: the description
+        must say so, and say to END the turn after calling it."""
+        a = {t["name"]: t for t in seat_mcp.TOOLS}["ask_human"]
+        self.assertEqual(a["inputSchema"]["required"], ["question"])
+        self.assertFalse(a["inputSchema"]["additionalProperties"])
+        self.assertEqual(a["inputSchema"]["properties"]["question"]["maxLength"],
+                         seat_mcp.MAX_ASK_CHARS)
+        d = a["description"]
+        self.assertIn("end your turn", d)
+        self.assertIn("prose alone", d.lower())
+
+    def test_ask_human_posts_only_the_question_with_the_token(self):
+        """Only `question` leaves this process: a `pane` or `from` a caller
+        adds cannot aim the question at another pane -- the token decides."""
+        out, is_error = seat_mcp.call_tool(
+            "ask_human", {"question": "re-scope?", "pane": "other", "from": "op"},
+            env=self.env)
+        self.assertFalse(is_error)
+        method, path, headers, body = self.hub.calls[-1]
+        self.assertEqual((method, path), ("POST", "/api/peer/ask"))
+        self.assertEqual(headers.get("X-Corral-Pane-Token"), "tok-123")
+        self.assertEqual(body, {"question": "re-scope?"})
+
+    def test_ask_human_over_the_bound_is_refused_not_truncated(self):
+        """MAX_ASK_CHARS is a refusal, never a silent clip, and nothing is
+        sent: a clipped question could lose the one clause that matters."""
+        for bad in ({}, {"question": 7}, {"question": "   "},
+                    {"question": "x" * (seat_mcp.MAX_ASK_CHARS + 1)}):
+            out, is_error = seat_mcp.call_tool("ask_human", bad, env=self.env)
+            self.assertEqual((out["result"], is_error), ("refused", False), bad)
+        self.assertEqual(self.hub.calls, [], "a refused ask reached the hub")
+        out, _ = seat_mcp.call_tool("ask_human",
+                                    {"question": "x" * seat_mcp.MAX_ASK_CHARS},
+                                    env=self.env)
+        self.assertEqual(len(self.hub.calls[-1][3]["question"]), seat_mcp.MAX_ASK_CHARS)
 
     def test_seat_list_is_a_get_with_the_token(self):
         out, is_error = seat_mcp.call_tool("seat_list", {}, env=self.env)
@@ -575,6 +614,18 @@ class TheHubsAnswer(unittest.TestCase):
             {"seat": "reviewer", "text": "hi", "from": "bbb", "from_pane": "bbb"})
         self.assertEqual(status, 200)
         self.assertEqual(self.calls, [("aaa", "reviewer", "hi")])
+
+    def test_ask_goes_to_the_token_s_pane_and_only_the_question_is_read(self):
+        got = []
+        self.mgr.ask_human = lambda pid, q: got.append((pid, q)) or {"result": "raised"}
+        status, out = self.mgr.peer_http(
+            "POST", "/api/peer/ask", self.tok,
+            {"question": "which way?", "pane": "bbb", "from_pane": "bbb"})
+        self.assertEqual((status, out["result"]), (200, "raised"))
+        self.assertEqual(got, [("aaa", "which way?")])
+        self.assertEqual(self.mgr.peer_http("POST", "/api/peer/ask", "nope",
+                                            {"question": "q"})[0], 401)
+        self.assertEqual(len(got), 1, "an unknown token reached ask_human")
 
     def test_unknown_route_is_404(self):
         self.assertEqual(self.mgr.peer_http("GET", "/api/peer/anything", self.tok)[0], 404)

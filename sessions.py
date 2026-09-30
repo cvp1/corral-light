@@ -1061,6 +1061,7 @@ class Pane(_core.PaneBase):
         # Absent in every pre-DESIGN-5 meta; None = unaddressable, which is the
         # right answer for those (S6). Read with .get, like ported_from.
         p.seat = meta.get("seat")
+        p.question = _core.PaneBase.restore_question(meta)   # ask_human
         p.seat_withheld = False
         # Roles are Light's since 2026-09-29 (roles.py). Restored for the same
         # reason as `ported_from`: META_KEYS persists them, so a restore that
@@ -1402,6 +1403,7 @@ class Pane(_core.PaneBase):
             self.state = "dead"
             self._drop_held_peers("dead")
             self._clear_pending("agent_exit")
+            self._clear_question("dead")
             if data.get("closed"):
                 self.error = None                  # deliberate: not a fault
                 self.emit("closed", {"reason": data.get("reason")})
@@ -1717,6 +1719,7 @@ class Pane(_core.PaneBase):
             if via:
                 user["via"] = via
             self.emit("user", user)
+            self._note_turn(via)     # a human turn answers an open question
             if text == "/clear":
                 # The SDK special-cases this literal text: it resets ITS OWN
                 # context and emits a `conversation_reset` notification that
@@ -2036,6 +2039,13 @@ class Pane(_core.PaneBase):
             # cannot reach this one.
             "seat": None if self.seat_withheld else self.seat,
             "seatWithheld": self.seat if self.seat_withheld else None,
+            # The agent's open ask_human question ({text, at, turn}) or None.
+            # The agent's words: every surface renders it as the agent asking,
+            # never as the human (P20). `turnVia` is where the latest turn
+            # came from (None = the human) -- the browser's display mirror
+            # reads it the way display_state does.
+            "question": self.question,
+            "turnVia": self.turn_via,
             # Whether ↻ / typing can bring this pane back: a conversation id
             # to load. A pane that died before session/new has none.
             "resumable": bool(getattr(self, "acp_session", None)),

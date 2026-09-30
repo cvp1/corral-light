@@ -1,6 +1,6 @@
 {
   "_why": "ONE table, two languages. `display_state()` lives in corral_core/sessions.py, and both web skins must mirror it in JavaScript -- the browser reduces events locally between polls, so it cannot ask the server what a pane means at the moment a permission card arrives. A mirror that is not pinned is a fork waiting to happen, so every case below is asserted against BOTH implementations: corral_core/test_display_state.py (python) and selftest_display.mjs in each skin (javascript). Full Corral's TUI reads the hub's `display` key and is pinned to this table's LEGACY column too, for the hub that predates it. Add a case here and every consumer has to answer it.",
-  "_fields": "pane = the duck-typed attributes display_state reads (state, pending, gate_hold, idle_s); want = the display state. There is NO read-receipt input: the hub has no source for it, so each surface overlays its own (DESIGN-5 section 7).",
+  "_fields": "pane = the duck-typed attributes display_state reads (state, pending, gate_hold, idle_s, question, turn_via); want = the display state. `question` is the agent's open ask_human question (an object, or absent); `turn_via` is where the pane's most recent turn came from (null = the human's own send; `peer` = another pane's agent; otherwise a TURN_VIAS label). There is NO read-receipt input: the hub has no source for it, so each surface overlays its own (DESIGN-5 section 7).",
   "_removal": "deleted with display_state itself (DESIGN-5 S1, section 5).",
   "cases": [
     {"why": "a fresh pane is working, not idle",
@@ -52,6 +52,36 @@
      "pane": {"state": "hibernating", "idle_s": 3}, "want": "idle"},
 
     {"why": "no state at all (a stripped object): treated as starting",
-     "pane": {}, "want": "working"}
+     "pane": {}, "want": "working"},
+
+    {"why": "ask_human: an open question is needs-you, not your-turn -- the whole defect was that it read like any finished pane",
+     "pane": {"state": "ready", "question": {"text": "re-scope?"}, "idle_s": 0}, "want": "needs-you"},
+
+    {"why": "an open question does not age into idle: the agent is still waiting on the human",
+     "pane": {"state": "ready", "question": {"text": "re-scope?"}, "idle_s": 99999}, "want": "needs-you"},
+
+    {"why": "a question survives a hub restart (meta): the paused pane still wants the human",
+     "pane": {"state": "detached", "question": {"text": "re-scope?"}, "idle_s": 5}, "want": "needs-you"},
+
+    {"why": "a turn another pane's agent started, now ended: the human did not start it, so it is not the human's turn",
+     "pane": {"state": "ready", "turn_via": "peer", "idle_s": 0}, "want": "idle"},
+
+    {"why": "a rig's opening prompt ended: `rig up` sent it, not the human at the glass",
+     "pane": {"state": "ready", "turn_via": "rig", "idle_s": 0}, "want": "idle"},
+
+    {"why": "a scripted consult turn is still the human's side of the wall: your-turn",
+     "pane": {"state": "ready", "turn_via": "consult", "idle_s": 0}, "want": "your-turn"},
+
+    {"why": "the human's own turn (no via) ended: your-turn",
+     "pane": {"state": "ready", "turn_via": null, "idle_s": 0}, "want": "your-turn"},
+
+    {"why": "a peer-started turn with a card pending still needs the human",
+     "pane": {"state": "ready", "turn_via": "peer", "pending": ["req-1"], "idle_s": 0}, "want": "needs-you"},
+
+    {"why": "a peer-started turn that asked the human is needs-you, not idle",
+     "pane": {"state": "ready", "turn_via": "peer", "question": {"text": "ok?"}, "idle_s": 0}, "want": "needs-you"},
+
+    {"why": "a peer-started turn still running is working",
+     "pane": {"state": "busy", "turn_via": "peer", "idle_s": 0}, "want": "working"}
   ]
 }
