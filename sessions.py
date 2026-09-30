@@ -1047,6 +1047,10 @@ class Pane(_core.PaneBase):
         # Same hole for `ephemeral`: Light never sets it, but a Corral seat
         # resumed here and saved again must still be one Corral will reap.
         p.ephemeral = bool(meta.get("ephemeral"))
+        # Absent in every pre-DESIGN-5 meta; None = unaddressable, which is the
+        # right answer for those (S6). Read with .get, like ported_from.
+        p.seat = meta.get("seat")
+        p.seat_withheld = False
         # Roles are Light's since 2026-09-29 (roles.py). Restored for the same
         # reason as `ported_from`: META_KEYS persists them, so a restore that
         # dropped them blanked them on the next save.
@@ -2003,6 +2007,12 @@ class Pane(_core.PaneBase):
             # the hub cannot know what a particular human has already read.
             "display": _core.display_state(self, state=state)["state"],
             "pending": list(self.pending.keys()),
+            # The pane's address for other panes (DESIGN-5 S6). A WITHHELD
+            # seat is not served -- another open pane was there first -- but
+            # it is shown for what it is, so the operator can see why a peer
+            # cannot reach this one.
+            "seat": None if self.seat_withheld else self.seat,
+            "seatWithheld": self.seat if self.seat_withheld else None,
             # Whether ↻ / typing can bring this pane back: a conversation id
             # to load. A pane that died before session/new has none.
             "resumable": bool(getattr(self, "acp_session", None)),
@@ -2445,6 +2455,9 @@ class Manager(_core.ManagerBase):
                                         "agent to it"})
             if m.get("pgid") or m.get("pid"):
                 _clear_pid_record(p.dir)     # the previous hub's process is handled
+        # Two open metas naming one seat (DESIGN-5 S6): the earlier-created
+        # keeps it, the later is withheld and says so. No file is rewritten.
+        self._withhold_colliding_seats(metas)
         self.not_restored = skipped + unreadable   # said out loud, not dropped
 
     def _reserve_live(self, pane):
@@ -2493,6 +2506,7 @@ class Manager(_core.ManagerBase):
                     f"detached — close or forget one before reopening another")
             self.panes[pane_id] = pane
         pane.emit("reopened", {})
+        self._withhold_if_taken(pane)
         return pane
 
 

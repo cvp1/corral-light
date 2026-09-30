@@ -204,6 +204,13 @@ QUOTE_CHARS = 12_000           # of one pane's last answer carried into another
 # into every renderer.
 TURN_VIAS = ("consult", "cli")
 
+# A seat is a human-chosen name for a pane (DESIGN-5 S6): the address another
+# pane's agent uses to reach it. One grammar, one rule string, so the refusal
+# can quote the rule it enforces.
+SEAT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+SEAT_RULE = ("a seat is 1-32 characters: a lowercase letter, then lowercase "
+             "letters, digits or '-'")
+
 
 # ── shared helpers ────────────────────────────────────────────────────────
 
@@ -226,6 +233,65 @@ def check_via(via):
         raise ValueError(f"via must be one of {', '.join(TURN_VIAS)} "
                          f"(or absent), not {str(via)[:40]!r}")
     return via
+
+
+def check_seat(name):
+    """A seat name as a human may bind it: None or '' unbinds (-> None);
+    anything else must match SEAT_RE exactly, or ValueError quoting the rule.
+    Uppercase is refused, not folded: a name that is silently changed on the
+    way in is not the name the operator typed."""
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        raise ValueError(SEAT_RULE)
+    name = name.strip()
+    if not name:
+        return None
+    if not SEAT_RE.match(name):
+        raise ValueError(f"{SEAT_RULE} — not {name[:40]!r}")
+    return name
+
+
+def withheld_seats(metas):
+    """Which panes do NOT get their seat, given every non-closed meta.
+
+    -> {pane_id: (seat, holder_id)}. Two metas naming the same seat can exist
+    on disk (two hubs over one state dir, a hand edit, a restore from backup):
+    the EARLIER-created keeps it and every later one is withheld. Nothing is
+    rewritten -- a withheld pane keeps `seat` in its meta, is simply not
+    addressable by it, and says so -- so the decision is re-derivable from the
+    files and costs nothing to reverse.
+    """
+    by_seat = {}
+    for m in metas:
+        if m.get("closed") or not m.get("seat") or not m.get("id"):
+            continue
+        by_seat.setdefault(m["seat"], []).append(m)
+    out = {}
+    for seat, ms in by_seat.items():
+        ms.sort(key=lambda m: (m.get("created") or "", m["id"]))
+        for m in ms[1:]:
+            out[m["id"]] = (seat, ms[0]["id"])
+    return out
+
+
+def open_metas(root=None):
+    """Every NON-closed meta.json on disk, parsed. The seat namespace is the
+    whole state dir, not the panes this hub happened to restore: full Corral
+    brings back at most MAX_PANES, and a seat held by the thirteenth is still
+    held."""
+    root = Path(root) if root else (STATE / "panes")
+    out = []
+    if not root.is_dir():
+        return out
+    for d in root.iterdir():
+        try:
+            m = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(m, dict) and m.get("id") and not m.get("closed"):
+            out.append(m)
+    return out
 
 
 class QueuedText(str):
@@ -403,9 +469,19 @@ class PaneBase:
                  # "missed kill"; acp.reap_orphans). Absent in every older
                  # meta and in anything full Corral writes today: both skins
                  # read them with `.get`, and None means "nothing to reap".
-                 "pid", "pgid", "pid_start")
+                 "pid", "pgid", "pid_start",
+                 # A human-chosen address for this pane (DESIGN-5 S6); None =
+                 # unaddressable. Both skins' from_meta read it with `.get`:
+                 # save_meta writes every key from the attribute, so a loader
+                 # that forgot it would blank it on the next save (the
+                 # `ported_from` lesson).
+                 "seat")
     ephemeral = False
     pid = pgid = pid_start = None
+    seat = None
+    # Derived, never persisted: True when an earlier-created open pane holds
+    # the same seat (see withheld_seats). Only a human rebind clears it.
+    seat_withheld = False
 
     # Corral's own vocabulary is `model`/`effort`; adapters don't all use it.
     # Codex's ACP session (confirmed live, 2026-08-23, codex-acp 1.6.2) reports
@@ -1117,6 +1193,82 @@ class ManagerBase:
                     p.order if p.order is not None else 10_000,
                     p.created or "")
         self.panes = {p.id: p for p in sorted(self.panes.values(), key=key)}
+
+    # ── seats (DESIGN-5 S6) ──────────────────────────────────────────────
+
+    def seat(self, name):
+        """The live pane addressable as `name`, or None. A withheld seat is not
+        an address: two panes answering to one name is the ambiguity the
+        whole scheme exists to rule out."""
+        if not name:
+            return None
+        for p in list(self.panes.values()):
+            if p.seat == name and not p.seat_withheld:
+                return p
+        return None
+
+    def _seat_holder(self, name, except_id):
+        """The id of another OPEN pane holding `name`, looking at every
+        non-closed meta on disk and every pane in memory, or None."""
+        for p in list(self.panes.values()):
+            if p.id != except_id and p.seat == name and not p.seat_withheld:
+                return p.id
+        for m in open_metas():
+            if m["id"] != except_id and m.get("seat") == name \
+                    and m["id"] not in self.panes:
+                return m["id"]
+        return None
+
+    def bind_seat(self, pane_id, name):
+        """Give a pane a seat, or take it away ('' / None). A HUMAN verb: the
+        hub exposes it only behind the pairing cookie, and no agent-facing
+        path reaches it.
+
+        Refused, with the holder named, when another open pane -- live, or
+        only on disk -- already holds the name. A closed pane holds nothing.
+        """
+        p = self.get(pane_id)
+        name = check_seat(name)
+        if name:
+            holder = self._seat_holder(name, pane_id)
+            if holder:
+                h = self.panes.get(holder)
+                raise ValueError(
+                    f"seat @{name} is held by pane {holder}"
+                    + (f" ({h.title})" if h is not None else " (not open here)")
+                    + " — unbind it there, or close that pane, first")
+        p.seat = name
+        p.seat_withheld = False
+        p.save_meta()
+        # activity=False: naming a pane is not the pane doing anything, and
+        # must not reset the idle clock the display state is derived from.
+        p.emit("seat", {"seat": name}, activity=False)
+        return p
+
+    def _withhold_colliding_seats(self, metas):
+        """Mark the later of any two open panes sharing a seat as withheld,
+        and say so in its transcript. Files are NOT rewritten."""
+        for pid, (seat, holder) in withheld_seats(metas).items():
+            p = self.panes.get(pid)
+            if p is None:
+                continue
+            p.seat_withheld = True
+            p.emit("note", {"text": f"seat @{seat} is withheld: pane {holder} "
+                                    f"holds it and was created first. Rebind "
+                                    f"this pane to resolve."}, activity=False)
+
+    def _withhold_if_taken(self, pane):
+        """reopen(): an archived pane coming back does not take a seat an OPEN
+        pane is using, whichever was created first -- the open one is the one
+        a peer is addressing right now."""
+        if not pane.seat:
+            return
+        holder = self._seat_holder(pane.seat, pane.id)
+        if holder:
+            pane.seat_withheld = True
+            pane.emit("note", {"text": f"seat @{pane.seat} is withheld: pane "
+                                       f"{holder} is using it. Rebind this "
+                                       f"pane to resolve."}, activity=False)
 
     def close(self, pane_id, by=None):
         """Close AND remove. Closing used to leave a dead row in the roster and

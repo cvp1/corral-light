@@ -887,6 +887,68 @@ function updatePane(rec, p) {
   return rec.root;
 }
 
+/* ── seats (DESIGN-5 S6) ──────────────────────────────────────────────────
+ * A seat is a name the OPERATOR gives a pane so other panes can address it.
+ * A human verb: it is bound here, behind the pairing cookie, and nothing an
+ * agent can call reaches it. Edited in a dialog, not inline in the header,
+ * because the header is rebuilt on every event and would eat the name
+ * mid-word -- the hazard the roster's rename box already guards against. */
+function seatPill(p) {
+  let b;
+  if (p.seat) {
+    b = el('button', 'pill seat', '@' + p.seat);
+    b.title = `other panes can address this one as @${p.seat} — click to change or remove`;
+  } else if (p.seatWithheld) {
+    // Shown for what it is: the meta still says this name, but an open pane
+    // created earlier already answers to it, so this one is not reachable.
+    b = el('button', 'pill seat withheld', '@' + p.seatWithheld + ' withheld');
+    b.title = `another open pane already answers to @${p.seatWithheld} and was `
+            + `there first, so this one is not addressable by it — click to rebind`;
+  } else {
+    b = el('button', 'x seatadd', '＠');
+    b.title = 'give this pane a seat — a name other panes can address it by';
+  }
+  b.type = 'button';
+  b.onclick = () => openSeat(p);
+  return b;
+}
+
+function openSeat(p) {
+  const dlg = $('#seatdlg');
+  if (!dlg) return toast('this page has no seat dialog', true);
+  dlg._pane = p.id;
+  $('#seat-for').textContent = p.title || p.label;
+  $('#seat-name').value = p.seat || p.seatWithheld || '';
+  $('#seat-unbind').disabled = !(p.seat || p.seatWithheld);
+  dlg.showModal();
+}
+
+function wireSeat() {
+  const dlg = $('#seatdlg');
+  if (!dlg) return;
+  // Enter in the name box BINDS. Left to the browser, Enter submits the form
+  // through its FIRST submit button -- which is Cancel -- so typing a name and
+  // pressing Enter silently did nothing (found in a real browser, DESIGN-5 S6
+  // live step; a mini-DOM has no default button). reportValidity() shows the
+  // grammar's own message on a bad name instead of posting it.
+  $('#seat-name').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if ($('#seat-name').reportValidity()) dlg.close('ok');
+  });
+  dlg.addEventListener('close', async () => {
+    const how = dlg.returnValue;
+    if (how !== 'ok' && how !== 'unbind') return;
+    // Unbind posts "" -- the server's word for "no seat", not a name.
+    const seat = how === 'unbind' ? '' : $('#seat-name').value.trim();
+    try {
+      const r = await api('/api/session/seat', { pane: dlg._pane, seat });
+      toast(r.seat ? `this pane is now @${r.seat}` : 'seat removed');
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
 /* What the pill says on a lane whose posture Corral cannot set.
  *
  * `agent-set` was one word for three different promises, and the differences
@@ -935,6 +997,7 @@ function paneHead(p) {
   const st = el('span', 'pill st d-' + dsp, DISPLAY_LABEL[dsp] || dsp);
   st.title = `${p.state}${p.idleS >= 30 ? ` · quiet ${fmtAge(p.idleS)}` : ''}`;
   h.appendChild(st);
+  h.appendChild(seatPill(p));
   // Only claim a posture Corral actually imposed. `oc acp` runs under its own
   // policy, so a Grok pane wearing a `strict` pill was the UI asserting a
   // safety property nothing had established.
@@ -2222,6 +2285,7 @@ function connect() {
     if (ev.kind === 'state' && d.state) p.state = d.state;
     if (ev.kind === 'resumed') { p.state = 'ready'; refresh(); }
     if (ev.kind === 'renamed') p.title = d.title;
+    if (ev.kind === 'seat') { p.seat = d.seat || null; p.seatWithheld = null; }
     if (ev.kind === 'config' || ev.kind === 'ready') {
       if (d.model) p.model = d.model;
       if (d.effort) p.effort = d.effort;
@@ -2501,6 +2565,11 @@ async function openPort(src) {
   for (const a of S.agents.filter(a => a.available && !a.key.startsWith('host:'))) {
     const o = el('option', null, a.label); o.value = a.key; sel.appendChild(o);
   }
+  // A seat does not travel (DESIGN-5 S6 v1): the name stays with this pane,
+  // and the new one starts unaddressable until someone names it.
+  const seatNote = $('#p-seatnote');
+  if (seatNote) seatNote.textContent = src.seat
+    ? `@${src.seat} stays with this pane — the new one starts without a seat.` : '';
   let pack = null;
   const load = async () => {
     go.disabled = true; pack = null;
@@ -2595,9 +2664,14 @@ function paletteResults(query) {
 
   for (const [id, p] of S.panes || []) {
     const label = p.title || p.label;
+    // A seat is searchable with or without its @ (DESIGN-5 S6): "revi" and
+    // "@revi" both find @reviewer.
+    const seat = p.seat ? '@' + p.seat : '';
     if (!needle || label.toLowerCase().includes(needle)
-        || (p.cwd || '').toLowerCase().includes(needle)) {
-      rows.push({ kind: 'pane', label, paneId: id, ssh: p.agent.startsWith('host:'),
+        || (p.cwd || '').toLowerCase().includes(needle)
+        || (seat && seat.includes(needle.startsWith('@') ? needle : '@' + needle))) {
+      rows.push({ kind: 'pane', label: seat ? `${label} ${seat}` : label,
+                  paneId: id, ssh: p.agent.startsWith('host:'),
                   sub: p.state + ' · ' + ((p.cwd || '').split('/').pop() || '') });
     }
   }
@@ -2997,6 +3071,7 @@ async function start() {
   wireRail();
   wireCopySelect();
   wirePalette();
+  wireSeat();
   wireKeysButton();
   wireMobileActions();
   // Stream FIRST, then snapshot. The reverse order left a window between the
