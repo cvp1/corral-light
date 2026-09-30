@@ -174,6 +174,15 @@ class Cli:
             state["in_text"] = False
         if k == "user":
             self.say(f"\n› {d.get('text', '')}")
+        elif k == "peer":
+            # Another pane's agent, not the human (DESIGN-5 S7): never the `›`
+            # the operator's own lines wear.
+            self.say(f"\n⇄ from @{d.get('from_seat') or d.get('from_pane') or '?'}: "
+                     f"{d.get('text', '')}")
+        elif k == "peer_result" and d.get("delivered") is False:
+            self.say(f"  · that message was not run: {d.get('reason') or 'unknown'}")
+        elif k == "seat":
+            self.say(f"  · seat @{d['seat']}" if d.get("seat") else "  · seat removed")
         elif k == "tool":
             status = d.get("status") or ""
             self.say(f"  ⚙ {d.get('title') or d.get('kind') or 'tool'}"

@@ -1107,3 +1107,11 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 .ph .pill.seat.withheld{color:var(--faint);border-style:dashed}
 .ph .x.seatadd{opacity:.55}
 .ph .x.seatadd:hover{opacity:1}
+
+/* a message from another pane's agent (DESIGN-5 S7) -- visibly NOT the
+   operator's bubble: left-aligned, outlined, its sender on its own line */
+.msg.peer{border:1px dashed var(--line2);background:transparent;border-radius:8px;
+  padding:8px 11px;margin:8px 0;max-width:92%}
+.msg.peer .peerfrom{font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;
+  color:var(--dusk);margin-bottom:4px}
+.msg.peer .peerbody{white-space:pre-wrap;word-break:break-word}

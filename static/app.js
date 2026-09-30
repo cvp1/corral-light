@@ -590,6 +590,33 @@ function renderLog(p) {
           log.appendChild(u);
         }
         break;
+      // A message from another pane's agent (DESIGN-5 S7). Its OWN block,
+      // never the human bubble: it is untrusted content from another model
+      // (P20), and the hub -- not the sender -- wrote the `from` line.
+      // textContent only (el() never parses), so a body carrying markup
+      // renders as the characters it is.
+      case 'peer':
+        flush();
+        {
+          const b = el('div', 'msg peer');
+          b.appendChild(el('div', 'peerfrom',
+            `from @${d.from_seat || d.from_pane || '?'}` + (d.hop > 1 ? ` · hop ${d.hop}` : '')));
+          b.appendChild(el('div', 'peerbody', d.text || ''));
+          // The honest threat statement (section 7.9): the sender label is the
+          // SUPPORTED path, not proof. Any process of the same user can read a
+          // pane's token and send as that pane.
+          b.title = `Sent by the agent in @${d.from_seat || d.from_pane || '?'} through `
+                  + `Corral's seat tool. Not proof of origin: any process running `
+                  + `as this user could send as that pane.`;
+          log.appendChild(b);
+        }
+        break;
+      case 'peer_result':
+        if (d.delivered === false) {
+          flush();
+          log.appendChild(el('div', 'sys', `that message was not run — ${d.reason || 'unknown'}`));
+        }
+        break;
       case 'tool':
         flushText();
         if (d.id) xseen.add(d.id);
@@ -637,7 +664,7 @@ function renderLog(p) {
     // busy pane produces anyway \u2014 no timer of its own.
     let t0 = null;
     for (let i = visible.length - 1; i >= 0; i--) {
-      if (visible[i].kind === 'user') { t0 = visible[i].at; break; }
+      if (visible[i].kind === 'user' || visible[i].kind === 'peer') { t0 = visible[i].at; break; }
     }
     const secs = t0 ? Math.max(0, Math.round((Date.now() - new Date(t0)) / 1000)) : null;
     const w = el('div', 'sys working');
@@ -2276,6 +2303,11 @@ function connect() {
     }
     if (ev.kind === 'paused') { p.state = 'detached'; p.pending = []; }
     if (ev.kind === 'user') p.state = 'busy';
+    // A peer message starts a turn exactly as a human's does; without this
+    // the roster and title said `your turn` for the whole of a peer-driven
+    // turn while the server said busy (DESIGN-5 section 7, T7.18).
+    if (ev.kind === 'peer') p.state = 'busy';
+    if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';
     if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; }
     if (ev.kind === 'closed') { p.state = 'dead'; p.error = null; refresh(); }
