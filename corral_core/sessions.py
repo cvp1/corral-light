@@ -176,6 +176,46 @@ def vendor_env_note(stripped):
             f"set {ALLOW_VENDOR_ENV_VAR}=1 to use it.")
 
 
+# ── one login, shared — never a per-pane copy ─────────────────────────────
+#
+# A pane's private config dir used to hold a COPY of the user's OAuth
+# credential. Claude Code rotates refresh tokens: whoever refreshes first
+# invalidates every other holder's refresh token. So a copy is only good
+# until some other holder — the user's terminal, or another pane — refreshes
+# first; then the pane dies "OAuth session expired and could not be
+# refreshed" (measured 2026-09-30: the source refreshed at 19:36Z, a
+# 2.5-hour-old pane failed at 19:37Z; 19 other pane copies held an older
+# refresh token than the source). The reverse race logs the terminal out.
+#
+# A symlink makes every holder share one file, which is how several terminal
+# sessions already share it. Read from the vendor's bundle (2026-09-30):
+# the credential is written with writeFileSync (follows the link), deleted
+# with unlink (removes only the link), and a refresh re-reads the file after
+# taking its lock and again after a failed refresh, so the loser of a race
+# picks up the winner's token instead of failing. The lock is per config
+# dir, so two holders can refresh at once; the re-read is what resolves it.
+
+def link_shared_credential(src, dst):
+    """Make `dst` a symlink to `src`, replacing a stale copy or a wrong link.
+
+    -> True when `dst` now points at `src`. Never reads either file's content.
+    The swap is atomic (a fresh link renamed over `dst`), so a running agent
+    never sees the credential missing.
+    """
+    src, dst = Path(src), Path(dst)
+    try:
+        if dst.is_symlink() and os.readlink(dst) == str(src):
+            return True
+        tmp = dst.with_name(f".{dst.name}.{os.getpid()}.link")
+        if tmp.is_symlink() or tmp.exists():
+            tmp.unlink()
+        tmp.symlink_to(src)
+        os.replace(tmp, dst)
+        return True
+    except OSError:
+        return False
+
+
 # ── bounds, identical in both products ────────────────────────────────────
 
 # `auto` because that is what Craig actually uses (2026-08-01: "I use auto by
