@@ -322,6 +322,19 @@ class Handler(BaseHTTPRequestHandler):
             local = False
         if not local:
             return self._json({"error": "peer routes answer only on this machine"}, 403)
+        # SAME UNIX USER, checked by the kernel, not assumed (measured
+        # 2026-09-29: the Claude adapter puts the pane token on a world-
+        # readable command line). On Linux the calling socket's owner is in
+        # /proc/net/tcp; unknown is refused, never waved through (P4). Other
+        # platforms have no such table here -- the README says so.
+        if sys.platform.startswith("linux"):
+            uid = edge.local_peer_uid(self.client_address,
+                                      self.connection.getsockname())
+            if uid != os.getuid():
+                return self._json({"error": "peer routes answer only the hub's own "
+                                            "UNIX user" + ("" if uid is not None else
+                                            " (the caller could not be identified)")},
+                                  403)
         body = None
         if method == "POST":
             try:
