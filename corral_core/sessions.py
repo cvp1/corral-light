@@ -1451,6 +1451,40 @@ class ManagerBase:
         return {"result": "delivered", "turn": tid, "hop": hop,
                 "to_seat": to_seat, "to_pane": dst.id}
 
+    def broadcast_peer(self, from_pane_id, text, now=None):
+        """One message to every OTHER seated pane (DESIGN-5 S10).
+
+        -> {"results": [deliver_peer's answer + "to_seat", ...], "delivered",
+            "refused", "failed"} -- one entry per seat, in seat order.
+
+        `fanout` semantics, not `crossfeed`'s: each seat gets its own admission
+        through deliver_peer (its own lock, gate, hop and budget check), and a
+        refusal for one seat does not unsend another -- a prompt() already
+        handed to an adapter cannot be taken back, so all-or-nothing is not
+        on offer. Each seat is one attempt against the source's hourly
+        budget. At most MAX_PANES seats are tried; any beyond are REPORTED
+        `broadcast-cap`, never silently left out. No seat to send to is an
+        empty list with a reason, not an error."""
+        now = time.time() if now is None else now
+        src = self.get(from_pane_id)
+        seats = sorted(p.seat for p in list(self.panes.values())
+                       if p.seat and not p.seat_withheld and p.id != src.id)
+        results = []
+        for i, seat in enumerate(seats):
+            if i >= MAX_PANES:
+                r = self._refused("broadcast-cap",
+                                  f"a broadcast reaches at most {MAX_PANES} "
+                                  f"seats; @{seat} was not tried")
+            else:
+                r = self.deliver_peer(src.id, seat, text, now=now)
+            results.append({**r, "to_seat": seat})
+        out = {"results": results}
+        for k in ("delivered", "refused", "failed"):
+            out[k] = sum(1 for r in results if r["result"] == k)
+        if not results:
+            out["why"] = "no other pane has a seat — nothing was sent"
+        return out
+
     # ── the seat tools' hub side (DESIGN-5 S8) ────────────────────────────
 
     def mint_pane_token(self, pane):
@@ -1493,7 +1527,7 @@ class ManagerBase:
         return out
 
     def peer_http(self, method, path, token, body=None):
-        """The two routes the seat tools call, as (status, json).
+        """The routes the seat tools call, as (status, json).
 
         The TOKEN decides who is sending -- the pane it was minted for -- and
         nothing in the body can say otherwise: only `seat` and `text` are
@@ -1509,7 +1543,58 @@ class ManagerBase:
         if method == "POST" and path == "/api/peer/send":
             b = body if isinstance(body, dict) else {}
             return 200, self.deliver_peer(pane.id, b.get("seat"), b.get("text"))
+        if method == "POST" and path == "/api/peer/broadcast":
+            b = body if isinstance(body, dict) else {}
+            return 200, self.broadcast_peer(pane.id, b.get("text"))
+        if method == "GET" and path == "/api/peer/turn":
+            b = body if isinstance(body, dict) else {}   # the query string
+            return 200, self.peer_turn(pane.id, b.get("seat"), b.get("turn"))
         return 404, {"error": "no such peer route"}
+
+    def peer_turn(self, from_pane_id, to_seat, turn):
+        """Has a turn this pane SENT ended? (DESIGN-5 S11, what `seat_wait`
+        polls.) Read-only and immediate: the waiting happens in the caller's
+        MCP child, never here.
+
+        -> {"result": "turn", "seat", "turn", "ended", "not_run",
+            "stop_reason", "display"} -- no text, ever: whether the other
+        agent answers is for it to decide, through its own seat_send.
+
+        Only a turn whose `peer` event names this caller as `from_pane` is
+        known; anyone else's turn id, a human's, or one that has left the
+        in-memory ring is refused `unknown-turn` -- the same answer, so the
+        route cannot be used to learn another pane's turn ids."""
+        src = self.get(from_pane_id)
+        dst = self.seat(to_seat) if isinstance(to_seat, str) else None
+        if dst is None:
+            return self._refused("unknown-seat",
+                                 f"no open pane answers to @{str(to_seat)[:40]} "
+                                 f"— call seat_list to see who does")
+        if dst.id == src.id:
+            return self._refused("self", "a pane cannot wait on itself")
+        tid = turn if isinstance(turn, str) else None
+        with dst._lock:
+            events = list(dst.events)
+        known, ended, not_run, stop = False, False, None, None
+        for ev in events:
+            d = ev.get("data") or {}
+            if not known:
+                known = (tid is not None and ev.get("kind") == "peer"
+                         and d.get("turn") == tid and d.get("from_pane") == src.id)
+            elif d.get("turn") == tid and ev.get("kind") == "turn_end":
+                ended, stop = True, d.get("stopReason")
+                break
+            elif d.get("turn") == tid and ev.get("kind") == "peer_result" \
+                    and d.get("delivered") is False:
+                not_run = str(d.get("reason") or "not run")[:200]
+                break
+        if not known:
+            return self._refused("unknown-turn",
+                                 f"no message this pane sent to @{to_seat} has "
+                                 f"turn id {str(turn)[:40]!r} in the hub's memory")
+        return {"result": "turn", "seat": to_seat, "turn": tid,
+                "ended": ended, "not_run": not_run, "stop_reason": stop,
+                "display": display_state(dst)["state"]}
 
     # ── seats (DESIGN-5 S6) ──────────────────────────────────────────────
 

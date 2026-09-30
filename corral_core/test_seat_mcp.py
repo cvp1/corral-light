@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The seat tools' MCP server and the descriptor that offers it (DESIGN-5 S8).
 
-  T8.1  the server answers initialize and tools/list with exactly the two
+  T8.1  the server answers initialize and tools/list with exactly the seat
         tools and their schemas; tools/call seat_send posts to the hub with
         the token FROM ITS ENVIRONMENT, and only `seat` and `text` leave it.
   T8.3  the descriptor carries the three env entries, a fresh token per spawn
@@ -9,6 +9,16 @@
         and registry descriptors are passed through unchanged.
   T8.6  it is named `corral-seats` -- never `acp`, and a registry entry that
         takes the name is dropped rather than left beside the real one.
+  S10   seat_broadcast posts only `text`; the per-seat loop is the hub's.
+  T11.1 seat_wait returns `timed_out` at its bound (a fake clock), and a
+        bound outside 1..PEER_WAIT_MAX_S is refused, not clamped.
+  T11.2 a second wait while one is in flight is refused `wait-in-flight` --
+        in-process, and over real stdio, where the second call's answer
+        arrives BEFORE the first's.
+  T11.3 the hub's turn route: a `turn_end` with the matching id ends the
+        wait, a different id does not; a turn another pane sent is unknown.
+  S11   a poll that fails after the first ends the wait `interrupted`; a
+        paused/dead seat ends it `blocked`; no answer carries text.
   and   the server is a real subprocess speaking line-delimited JSON-RPC.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
@@ -35,7 +45,9 @@ class StubHub:
 
     def __init__(self):
         self.calls = []
+        self.get_answer = None        # path -> (obj, code); None = the seats
         rec = self.calls
+        stub = self
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):
@@ -51,6 +63,8 @@ class StubHub:
 
             def do_GET(self):
                 rec.append(("GET", self.path, dict(self.headers), None))
+                if stub.get_answer is not None:
+                    return self._reply(*stub.get_answer(self.path))
                 self._reply({"you": "author", "seats": [
                     {"seat": "reviewer", "display": "your-turn", "lane": "claude",
                      "tool": True}]})
@@ -68,6 +82,7 @@ class StubHub:
 
     def close(self):
         self.srv.shutdown()
+        self.srv.server_close()
 
 
 class TheServer(unittest.TestCase):
@@ -77,14 +92,15 @@ class TheServer(unittest.TestCase):
         self.env = {"CORRAL_HUB_URL": self.hub.url, "CORRAL_PANE_TOKEN": "tok-123",
                     "CC_RUNBOOK_SESSION": "pane1"}
 
-    def test_initialize_and_exactly_two_tools(self):
+    def test_initialize_and_exactly_the_seat_tools(self):
         init = seat_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                                 "params": {}})
         self.assertEqual(init["result"]["serverInfo"]["name"], "corral-seats")
         self.assertIn("tools", init["result"]["capabilities"])
         tools = seat_mcp.handle({"jsonrpc": "2.0", "id": 2,
                                  "method": "tools/list"})["result"]["tools"]
-        self.assertEqual([t["name"] for t in tools], ["seat_list", "seat_send"])
+        self.assertEqual([t["name"] for t in tools],
+                         ["seat_list", "seat_send", "seat_broadcast", "seat_wait"])
         send = tools[1]
         self.assertEqual(send["inputSchema"]["required"], ["seat", "text"])
         self.assertFalse(send["inputSchema"]["additionalProperties"])
@@ -109,6 +125,28 @@ class TheServer(unittest.TestCase):
         self.assertEqual((method, path), ("POST", "/api/peer/send"))
         self.assertEqual(headers.get("X-Corral-Pane-Token"), "tok-123")
         self.assertEqual(body, {"seat": "reviewer", "text": "hi"})
+
+    def test_seat_broadcast_posts_only_the_text(self):
+        """S10: one POST; the hub does the per-seat loop. Nothing but `text`
+        leaves -- a caller cannot hand the hub a list of seats, a source, or
+        a pane to leave out."""
+        tools = {t["name"]: t for t in seat_mcp.TOOLS}
+        b = tools["seat_broadcast"]
+        self.assertEqual(b["inputSchema"]["required"], ["text"])
+        self.assertFalse(b["inputSchema"]["additionalProperties"])
+        self.assertIn(seat_mcp.REFUSAL_GUIDANCE, b["description"])
+        self.assertIn("does not stop or undo", b["description"])
+        out, is_error = seat_mcp.call_tool(
+            "seat_broadcast", {"text": "all hands", "seats": ["x"], "from": "op"},
+            env=self.env)
+        self.assertFalse(is_error)
+        method, path, headers, body = self.hub.calls[-1]
+        self.assertEqual((method, path), ("POST", "/api/peer/broadcast"))
+        self.assertEqual(headers.get("X-Corral-Pane-Token"), "tok-123")
+        self.assertEqual(body, {"text": "all hands"})
+        out, is_error = seat_mcp.call_tool("seat_broadcast", {}, env=self.env)
+        self.assertEqual((out["result"], out["reason"], is_error),
+                         ("refused", "arguments", False))
 
     def test_seat_list_is_a_get_with_the_token(self):
         out, is_error = seat_mcp.call_tool("seat_list", {}, env=self.env)
@@ -151,6 +189,277 @@ class TheServer(unittest.TestCase):
         replies = [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
         self.assertEqual([x["id"] for x in replies], [1, 2], r.stderr)
         self.assertEqual(self.hub.calls[-1][3], {"seat": "reviewer", "text": "over stdio"})
+
+
+class FakeClock:
+    """time.monotonic + time.sleep that only move when slept."""
+
+    def __init__(self):
+        self.t = 1000.0
+        self.slept = []
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.slept.append(s)
+        self.t += s
+
+
+class TheWait(unittest.TestCase):
+    def setUp(self):
+        self.hub = StubHub()
+        self.addCleanup(self.hub.close)
+        self.env = {"CORRAL_HUB_URL": self.hub.url, "CORRAL_PANE_TOKEN": "tok-123",
+                    "CC_RUNBOOK_SESSION": "pane1"}
+        self.clock = FakeClock()
+
+    def seats(self, display):
+        self.hub.get_answer = lambda path: ({"you": "author", "seats": [
+            {"seat": "reviewer", "display": display, "lane": "claude",
+             "tool": True}]}, 200)
+
+    def wait(self, **args):
+        return seat_mcp.seat_wait(args, env=self.env, clock=self.clock,
+                                  sleep=self.clock.sleep)
+
+    def test_the_tool_is_offered_with_its_bounds(self):
+        w = {t["name"]: t for t in seat_mcp.TOOLS}["seat_wait"]
+        self.assertEqual(w["inputSchema"]["required"], ["seat"])
+        self.assertFalse(w["inputSchema"]["additionalProperties"])
+        self.assertEqual(w["inputSchema"]["properties"]["timeout_s"]["maximum"],
+                         seat_mcp.PEER_WAIT_MAX_S)
+        self.assertEqual(w["inputSchema"]["properties"]["until"]["enum"],
+                         list(seat_mcp.WAIT_UNTIL))
+        self.assertIn("NEVER what the other agent wrote", w["description"])
+        self.assertEqual((seat_mcp.PEER_WAIT_S, seat_mcp.PEER_WAIT_MAX_S), (120, 600))
+
+    def test_T11_1_a_wait_times_out_at_its_bound(self):
+        self.seats("working")
+        out, is_error = self.wait(seat="reviewer", until="your-turn", timeout_s=5)
+        self.assertFalse(is_error)
+        self.assertEqual((out["result"], out["state"], out["turn_ended"],
+                          out["waited_s"]), ("timed_out", "working", False, 5.0))
+        self.assertAlmostEqual(sum(self.clock.slept), 5.0)
+        self.assertTrue(all(s <= seat_mcp.PEER_WAIT_POLL_S for s in self.clock.slept))
+        # The default bound is PEER_WAIT_S, not forever.
+        self.clock = FakeClock()
+        out, _ = self.wait(seat="reviewer", until="your-turn")
+        self.assertEqual((out["result"], out["waited_s"]),
+                         ("timed_out", float(seat_mcp.PEER_WAIT_S)))
+
+    def test_T11_1_a_bound_out_of_range_is_refused_not_clamped(self):
+        for t in (0, seat_mcp.PEER_WAIT_MAX_S + 1, "60", True, None):
+            out, is_error = self.wait(seat="reviewer", until="idle", timeout_s=t)
+            self.assertEqual((out["result"], out["reason"], is_error),
+                             ("refused", "arguments", False), t)
+        for args in ({"seat": "reviewer"},                       # neither
+                     {"seat": "reviewer", "turn": "t", "until": "idle"},  # both
+                     {"seat": "reviewer", "until": "working"},   # not a wait state
+                     {"until": "idle"}):                          # no seat
+            out, _ = self.wait(**args)
+            self.assertEqual(out["reason"], "arguments", args)
+        self.assertEqual(self.hub.calls, [], "a refused wait asked the hub")
+
+    def test_T11_2_a_second_wait_in_flight_is_refused(self):
+        self.seats("working")
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_sleep(s):
+            entered.set()
+            release.wait(10)
+            self.clock.t += 100
+        first = {}
+        t = threading.Thread(target=lambda: first.update(out=seat_mcp.seat_wait(
+            {"seat": "reviewer", "until": "idle", "timeout_s": 50}, env=self.env,
+            clock=self.clock, sleep=slow_sleep)[0]))
+        t.start()
+        self.assertTrue(entered.wait(10))
+        out, is_error = seat_mcp.call_tool("seat_wait", {"seat": "reviewer",
+                                                         "until": "idle"}, env=self.env)
+        self.assertEqual((out["result"], out["reason"], is_error),
+                         ("refused", "wait-in-flight", False))
+        release.set()
+        t.join(10)
+        self.assertEqual(first["out"]["result"], "timed_out")
+        # ... and once it is over, the next wait is allowed.
+        self.seats("your-turn")
+        self.assertEqual(self.wait(seat="reviewer", until="your-turn")[0]["result"],
+                         "reached")
+
+    def test_T11_2_over_real_stdio_the_second_answer_comes_first(self):
+        self.seats("working")
+        env = dict(os.environ, **self.env)
+        call = lambda i, a: {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                             "params": {"name": "seat_wait", "arguments": a}}
+        p = subprocess.Popen([sys.executable, str(SERVER)], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, text=True, env=env)
+        self.addCleanup(p.kill)
+        p.stdin.write(json.dumps(call(1, {"seat": "reviewer", "until": "your-turn",
+                                          "timeout_s": 2})) + "\n")
+        p.stdin.flush()
+        # Only send the second once the first has reached the hub.
+        for _ in range(100):
+            if self.hub.calls:
+                break
+            threading.Event().wait(0.05)
+        p.stdin.write(json.dumps(call(2, {"seat": "reviewer", "until": "idle"})) + "\n")
+        p.stdin.close()
+        replies = [json.loads(p.stdout.readline()) for _ in range(2)]
+        p.wait(10)
+        p.stdout.close()
+        self.assertEqual([r["id"] for r in replies], [2, 1])
+        second = json.loads(replies[0]["result"]["content"][0]["text"])
+        first = json.loads(replies[1]["result"]["content"][0]["text"])
+        self.assertEqual(second["reason"], "wait-in-flight")
+        self.assertEqual(first["result"], "timed_out")
+
+    def test_T11_3_only_the_matching_turn_end_ends_the_wait(self):
+        """The child's half: it keeps polling while the hub says the turn has
+        not ended, and stops the poll after it says it has."""
+        answers = iter([False, False, True])
+        self.hub.get_answer = lambda path: ({
+            "result": "turn", "seat": "reviewer", "turn": "t1",
+            "ended": next(answers), "not_run": None, "stop_reason": "end_turn",
+            "display": "your-turn"}, 200)
+        out, _ = self.wait(seat="@reviewer", turn="t1", timeout_s=60)
+        self.assertEqual((out["result"], out["turn_ended"], out["turn"],
+                          out["stop_reason"]), ("reached", True, "t1", "end_turn"))
+        self.assertEqual(len(self.hub.calls), 3)
+        from urllib.parse import parse_qs, urlparse
+        u = urlparse(self.hub.calls[0][1])
+        self.assertEqual(u.path, "/api/peer/turn")
+        self.assertEqual(parse_qs(u.query), {"seat": ["reviewer"], "turn": ["t1"]})
+        self.assertEqual(self.hub.calls[0][2].get("X-Corral-Pane-Token"), "tok-123")
+        self.assertNotIn("text", out)
+
+    def test_a_withdrawn_turn_is_not_run(self):
+        self.hub.get_answer = lambda path: ({
+            "result": "turn", "ended": False, "not_run": "card-pending",
+            "display": "needs-you"}, 200)
+        out, _ = self.wait(seat="reviewer", turn="t1")
+        self.assertEqual((out["result"], out["why"], out["turn_ended"]),
+                         ("not-run", "card-pending", False))
+
+    def test_until_your_turn_is_met_by_idle_and_paused_is_blocked(self):
+        self.seats("idle")
+        self.assertEqual(self.wait(seat="reviewer", until="your-turn")[0]["result"],
+                         "reached")
+        self.seats("paused")
+        out, _ = self.wait(seat="reviewer", until="your-turn")
+        self.assertEqual((out["result"], out["state"]), ("blocked", "paused"))
+        self.seats("dead")
+        self.assertEqual(self.wait(seat="reviewer", until="dead")[0]["result"],
+                         "reached")
+
+    def test_self_and_an_unknown_seat_are_refused(self):
+        self.seats("working")
+        out, _ = self.wait(seat="author", until="idle")
+        self.assertEqual((out["result"], out["reason"]), ("refused", "self"))
+        out, _ = self.wait(seat="nobody", until="idle")
+        self.assertEqual((out["result"], out["reason"]), ("refused", "unknown-seat"))
+
+    def test_the_hub_going_away_mid_wait_is_interrupted(self):
+        """A restarted hub revokes every token (401) and is briefly not
+        listening at all; both end the wait `interrupted`, never a retry
+        loop and never `timed_out`."""
+        import socket
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            dead_url = f"http://127.0.0.1:{sk.getsockname()[1]}"
+        live_url = self.env["CORRAL_HUB_URL"]
+        for code in (401, None):
+            n = {"polls": 0}
+            self.env["CORRAL_HUB_URL"] = live_url
+
+            def answer(path, code=code):
+                n["polls"] += 1
+                if n["polls"] == 1:
+                    if code is None:          # next poll: nothing listening
+                        self.env["CORRAL_HUB_URL"] = dead_url
+                    return ({"you": "author", "seats": [
+                        {"seat": "reviewer", "display": "working"}]}, 200)
+                return ({"error": "unknown or expired pane token"}, 401)
+            self.hub.get_answer = answer
+            self.clock = FakeClock()
+            out, is_error = self.wait(seat="reviewer", until="idle", timeout_s=30)
+            self.assertEqual((out["result"], out["state"], is_error),
+                             ("interrupted", "working", False), code)
+            if code is None:
+                self.assertIn("unreachable", out["why"])
+            else:
+                self.assertIn("401", out["why"])
+        # The FIRST poll failing is a failure to start, not an interruption.
+        out, is_error = self.wait(seat="reviewer", until="idle")
+        self.assertEqual((out["result"], is_error), ("failed", True))
+
+
+class ThePeerTurnRoute(unittest.TestCase):
+    """T11.3, the hub's half: ManagerBase.peer_turn over real event rings."""
+
+    def setUp(self):
+        self.m = _Mgr()
+        self.a = _RingPane("aaa", "author")
+        self.b = _RingPane("bbb", "reviewer")
+        self.c = _RingPane("ccc", "critic")
+        self.m.panes = {p.id: p for p in (self.a, self.b, self.c)}
+
+    def ask(self, src, turn, seat="reviewer"):
+        return self.m.peer_turn(src.id, seat, turn)
+
+    def test_T11_3_a_matching_turn_end_ends_it_a_different_one_does_not(self):
+        self.b.ev("peer", from_pane="aaa", turn="t1")
+        r = self.ask(self.a, "t1")
+        self.assertEqual((r["result"], r["ended"], r["display"]),
+                         ("turn", False, "working"))
+        self.b.ev("turn_end", turn="t0", stopReason="end_turn")   # someone else's
+        self.b.ev("turn_end", turn=None, stopReason="end_turn")   # a human's
+        self.assertFalse(self.ask(self.a, "t1")["ended"])
+        self.b.ev("turn_end", turn="t1", stopReason="cancelled")
+        self.b.state = "ready"
+        r = self.ask(self.a, "t1")
+        self.assertEqual((r["ended"], r["stop_reason"], r["display"]),
+                         (True, "cancelled", "your-turn"))
+        self.assertNotIn("text", r)
+
+    def test_a_turn_another_pane_sent_is_unknown(self):
+        self.b.ev("peer", from_pane="ccc", turn="t2")
+        self.b.ev("turn_end", turn="t2")
+        for src, turn in ((self.a, "t2"), (self.a, "nope"), (self.a, None)):
+            r = self.ask(src, turn)
+            self.assertEqual((r["result"], r["reason"]), ("refused", "unknown-turn"))
+        self.assertTrue(self.ask(self.c, "t2")["ended"])
+
+    def test_withdrawn_unknown_seat_and_self(self):
+        self.b.ev("peer", from_pane="aaa", turn="t3")
+        self.b.ev("peer_result", turn="t3", delivered=False, reason="card-pending")
+        r = self.ask(self.a, "t3")
+        self.assertEqual((r["ended"], r["not_run"]), (False, "card-pending"))
+        self.assertEqual(self.ask(self.a, "t3", seat="nobody")["reason"], "unknown-seat")
+        self.assertEqual(self.ask(self.a, "t3", seat="author")["reason"], "self")
+
+    def test_the_route_reads_the_query_and_wants_the_token(self):
+        self.b.ev("peer", from_pane="aaa", turn="t4")
+        tok = self.m.mint_pane_token(self.a)
+        st, r = self.m.peer_http("GET", "/api/peer/turn", tok,
+                                 {"seat": "reviewer", "turn": "t4"})
+        self.assertEqual((st, r["result"], r["ended"]), (200, "turn", False))
+        st, _ = self.m.peer_http("GET", "/api/peer/turn", "forged",
+                                 {"seat": "reviewer", "turn": "t4"})
+        self.assertEqual(st, 401)
+
+
+class _RingPane:
+    """What peer_turn reads off a pane: a seat, an event ring, a state."""
+
+    def __init__(self, pid, seat):
+        self.id, self.seat, self.seat_withheld = pid, seat, False
+        self.agent, self.state, self.pending = "claude", "busy", {}
+        self.events, self._lock = [], threading.Lock()
+        self.last_activity = __import__("time").time()
+
+    def ev(self, kind, **data):
+        self.events.append({"seq": len(self.events) + 1, "kind": kind, "data": data})
 
 
 class _Mgr(S.ManagerBase):

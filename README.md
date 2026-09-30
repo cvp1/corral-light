@@ -100,13 +100,31 @@ second bill.
 
 A **seat** is a name you give a pane — `@reviewer`, `@author` — with the ＠ in
 its header (or `corral-light seat <pane> <name>`; `-` removes it). One open pane per name; a closed pane holds nothing. Once a pane
-has a seat, the agent in another pane can reach it through two tools Corral
+has a seat, the agent in another pane can reach it through tools Corral
 offers every eligible pane (an MCP server named `corral-seats`):
 
 - `seat_list()` — who can be addressed and what state each is in (`your-turn`,
   `working`, `needs-you`, `paused`, …). No titles, no transcripts.
 - `seat_send(seat, text)` — one message, answered `delivered` (with a turn id),
   `refused` (with the reason), or `failed`.
+- `seat_broadcast(text)` — the same message to every other seated pane, one
+  `seat_send` per seat: a list of answers, one per seat. A refusal for one seat
+  does not stop or undo the others; each seat counts as one send against the
+  hourly limit; at most 12 seats are tried and any beyond are reported, not
+  skipped.
+- `seat_wait(seat, turn | until, timeout_s)` — wait until another seat is done,
+  instead of polling `seat_list`: with the `turn` a `seat_send` returned, until
+  that message's turn ends; with `until`, until the seat shows `your-turn`
+  (also met by `idle`), `idle`, `needs-you` or `dead`. Bounded — 120 s by
+  default, 600 s at most — and one wait at a time per pane. It answers with the
+  seat's state and whether the turn ended, **never with what the other agent
+  wrote**: a reply comes back only as a message that agent chooses to send. A
+  paused or dead seat ends the wait `blocked`; a hub restart ends it
+  `interrupted`. The waiting happens in the pane's own tool process, never in
+  the hub. **A waiting pane is working**, so a message sent to it while it
+  waits is refused `busy` — waiting is for sequencing ("go when @reviewer is
+  done"), not for hearing back; to hear back, send and end the turn, and the
+  reply arrives as a turn of its own.
 
 A message arrives in the other pane as its own block, marked **from @author**
 and **untrusted** — never as that pane's human, never lifting a runbook park.
