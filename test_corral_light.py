@@ -3787,6 +3787,24 @@ class LightDeliversPeers(_FakeLaneCase):
                          "unknown-turn")
 
 
+# DESIGN-5 S11b: the bounded reply queue, through Light's own drain and ledger.
+# The cases are shared with full Corral's test_peer.py (one set of assertions,
+# two skins).
+sys.path.append(str(Path(__file__).resolve().parent / "testkit"))
+from reply_queue_cases import ReplyQueueCases     # noqa: E402
+
+
+class LightReplyQueue(ReplyQueueCases, _FakeLaneCase):
+    def test_the_delivered_reply_is_ledgered_as_a_peer_turn(self):
+        a, b, ta, tb = self.waiting_pair()
+        self.assertEqual(self.mgr.deliver_peer(b.id, "author", "ledger me")["result"],
+                         "queued")
+        self.assertTrue(_wait_for(lambda: len(self._ends(a)) == 2))
+        tid = [e for e in a.events if e["kind"] == "peer"][0]["data"]["turn"]
+        rec = a._turns().turns()[tid]
+        self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
+
+
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
 # processes through kill, resume, shutdown and restore. Collected here so the
 # one documented command runs it.

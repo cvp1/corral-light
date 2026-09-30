@@ -12,6 +12,8 @@ Prompt verbs (the text of the prompt):
     what word ...     -> answers with the remembered word (context continuity
                          across a process restart: the file is the "memory")
     sleep <s>         -> streams a chunk, then sleeps; session/cancel ends it
+                         (also a line that is exactly `sleep <s>`, so a peer
+                         message inside the hub's envelope can hold a turn)
     die               -> exits the process mid-turn (rc 3)
     perm, or any text with "touch " in it
                       -> asks session/request_permission and reports the
@@ -61,6 +63,21 @@ def save(sid, m):
     (DIR / f"session-{sid}.json").write_text(json.dumps(m))
 
 
+def _sleep_line(text):
+    """A line that is exactly `sleep <s>` anywhere in the prompt: a peer
+    message arrives wrapped in the hub's envelope, so the verb is on its own
+    line, not first. -> the seconds as a string, or None."""
+    for line in text.splitlines():
+        w = line.split()
+        if len(w) == 2 and w[0] == "sleep":
+            try:
+                float(w[1])
+                return w[1]
+            except ValueError:
+                pass
+    return None
+
+
 def prompt(rid, params):
     sid = params.get("sessionId")
     text = "".join(p.get("text", "") for p in params.get("prompt") or [])
@@ -75,10 +92,11 @@ def prompt(rid, params):
         chunk(sid, "ok")
     elif text.lower().startswith("what word"):
         chunk(sid, m.get("word") or "I do not remember any word")
-    elif words[:1] == ["sleep"]:
+    elif words[:1] == ["sleep"] or _sleep_line(text):
         chunk(sid, "sleeping")
         _cancel.clear()
-        _cancel.wait(float(words[1]) if len(words) > 1 else 30)
+        n = _sleep_line(text) or (words[1] if len(words) > 1 else "30")
+        _cancel.wait(float(n))
         if _cancel.is_set():
             send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
             return
