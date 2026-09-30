@@ -97,7 +97,12 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
         scrubbed by machine."""
         import re
         bad = re.compile(r"ranch-server|dogma-2|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
-        for f in sorted((ROOT / "corral_core").glob("*.py")):
+        # *.toml too (DESIGN-5 S12, T12.4): the rig template ships in the core
+        # and is the file a user copies, cwd paths and all.
+        files = sorted((ROOT / "corral_core").glob("*.py")) + \
+            sorted((ROOT / "corral_core").glob("*.toml"))
+        self.assertIn("rig.example.toml", [f.name for f in files])
+        for f in files:
             for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
                 m = bad.search(line)
                 self.assertIsNone(
@@ -3803,6 +3808,17 @@ class LightReplyQueue(ReplyQueueCases, _FakeLaneCase):
         tid = [e for e in a.events if e["kind"] == "peer"][0]["data"]["turn"]
         rec = a._turns().turns()[tid]
         self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
+
+
+# DESIGN-5 S12: rigs, the same cases full Corral runs (testkit/rig_cases.py).
+from rig_cases import RigCases                   # noqa: E402
+
+
+class LightRigs(RigCases, _FakeLaneCase):
+    def test_this_skin_injects_its_roles_and_its_roster_cap(self):
+        import sessions
+        self.assertIs(sessions._core.ROLE_RESOLVER, sessions._rig_role)
+        self.assertEqual(sessions._core.ROSTER_CAP, sessions.MAX_ROSTER)
 
 
 # The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent

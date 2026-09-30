@@ -793,8 +793,16 @@ AGENT_GROUPS = {
 # AGENT_GROUPS and STATE from the core's namespace, which is the one place the
 # two products legitimately differ. Doing it at import, loudly, is the point —
 # a missing roster must not surface as a confusing AttributeError on a click.
+def _rig_role(role_id, agent, posture):
+    """A rig seat's `role` (DESIGN-5 S12), resolved by this product's roles.py."""
+    import roles                                        # noqa: WPS433
+    from corral_core import rigs as _rigs
+    return _rigs.resolve_with(roles, role_id, agent, posture)
+
+
 _core.configure(AGENTS=AGENTS, AGENT_GROUPS=AGENT_GROUPS, STATE=STATE,
-                ALLOW_VENDOR_ENV_VAR="CORRAL_LIGHT_ALLOW_VENDOR_ENV")
+                ALLOW_VENDOR_ENV_VAR="CORRAL_LIGHT_ALLOW_VENDOR_ENV",
+                ROLE_RESOLVER=_rig_role, ROSTER_CAP=MAX_ROSTER)
 
 # Derived from STATE, so it is only correct after configure().
 CATALOG = _core.CATALOG

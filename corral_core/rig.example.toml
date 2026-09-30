@@ -1,0 +1,28 @@
+# A Corral rig: the seats you work with, brought back with one verb.
+#
+#   rig save <name>   writes rigs/<name>.toml from the seated panes on the roster
+#   rig up <name>     checks this whole file, then resumes or starts each seat
+#
+# `rig up` refuses the file — and starts nothing — on any error: a parse error,
+# a wrong version, a bad seat name, an unknown agent or key, a cwd that is not
+# a directory, more seats than the live pane cap, a seat named twice, a role
+# that does not resolve, or a seat that is already live.
+#
+# `prompt` is optional and only ever hand-written: it is sent as the pane's
+# first turn, as you, when the rig starts that seat fresh. A resumed
+# conversation is never re-prompted. With a `role`, the role's instructions
+# are sent ahead of the prompt; a role with no prompt sends nothing.
+
+version = 1
+
+[[seat]]
+id      = "author"
+agent   = "claude"
+cwd     = "~/src/example"
+posture = "edits"
+prompt  = "Read the open issue list and propose the smallest next change."
+
+[[seat]]
+id      = "reviewer"
+agent   = "codex"
+cwd     = "~/src/example"

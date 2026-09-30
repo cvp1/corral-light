@@ -20,6 +20,7 @@
 #   corral-light panes | open | say | pending | ok | no | cancel | pause |
 #                resume | close | forget | reopen | rename | seat | config |
 #                attach | quote     the whole pane surface from a terminal
+#   corral-light rig save|up|list|rm <name>   saved seats (DESIGN-5 S12)
 #                               (cli.py --help; `say` answers permissions in
 #                               the same terminal and never cancels on a timer)
 #
@@ -41,8 +42,8 @@ case "${1:-}" in
     # bare, or with --flags, it is the outside hub watcher (watch.py).
     if [ $# -ge 2 ] && [[ "$2" != -* ]]; then exec "$PY" "$D/cli.py" "$@"; fi
     shift; exec "$PY" "$D/watch.py" "$@" ;;
-  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|seat|config|attach|quote|later|search|digest|port)
+  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|seat|config|attach|quote|later|search|digest|port|rig)
     exec "$PY" "$D/cli.py" "$@" ;;
   cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote}"; exit 2 ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|rig <save|up|list|rm>}"; exit 2 ;;
 esac
