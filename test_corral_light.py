@@ -1617,11 +1617,11 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
         finally:
             Path.home = real
 
-    def test_an_unrotated_source_is_left_alone(self):
-        """Re-copying on every call, unconditionally, would be simpler and
-        wrong: a running pane may have refreshed ITS OWN copy more recently
-        than the source, and clobbering that with an older global file would
-        actively break a working pane."""
+    def test_the_pane_shares_the_one_login_file(self):
+        """2026-09-30: a COPY went stale inside a running pane the moment any
+        other holder refreshed (rotation kills every other refresh token).
+        The pane's credential is a link to the source, so there is nothing
+        per-pane to go stale — and re-seeding keeps it a link."""
         import sessions
         _pin_sessions_platform(self, "linux")
         home, cred = self._home_with_cred("a")
@@ -1629,10 +1629,32 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
         try:
             Path.home = staticmethod(lambda: home)
             d = sessions.seed_config_dir(home / "cfg", "auto")
-            before = (d / ".credentials.json").stat().st_mtime
+            dst = d / ".credentials.json"
+            self.assertTrue(dst.is_symlink(), "the pane got a copy, not a link")
+            self.assertEqual(os.readlink(dst), str(cred))
             sessions.seed_config_dir(home / "cfg", "auto")   # called again
-            after = (d / ".credentials.json").stat().st_mtime
-            self.assertEqual(before, after, "an unchanged source was re-copied")
+            self.assertTrue(dst.is_symlink())
+            # a refresh the PANE makes lands in the one file everyone reads
+            dst.write_text(json.dumps({"claudeAiOauth": {"accessToken": "c" * 108}}))
+            self.assertIn("c" * 20, cred.read_text())
+        finally:
+            Path.home = real
+
+    def test_a_legacy_copy_is_replaced_by_the_link(self):
+        """Pane dirs made before 2026-09-30 hold a stale COPY; the next seed
+        (spawn or resume) swaps it for the link."""
+        import sessions
+        _pin_sessions_platform(self, "linux")
+        home, cred = self._home_with_cred("b")
+        real = Path.home
+        try:
+            Path.home = staticmethod(lambda: home)
+            (home / "cfg").mkdir()
+            old = home / "cfg" / ".credentials.json"
+            old.write_text(json.dumps({"claudeAiOauth": {"refreshToken": "a" * 108}}))
+            d = sessions.seed_config_dir(home / "cfg", "auto")
+            self.assertTrue((d / ".credentials.json").is_symlink())
+            self.assertIn("b" * 20, (d / ".credentials.json").read_text())
         finally:
             Path.home = real
 
@@ -1653,7 +1675,8 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
             d2 = sessions.seed_config_dir(home / "cfg", "auto")
             self.assertIsNotNone(d2, "a transient bad source read bricked "
                                      "an already-working pane")
-            self.assertIn("a" * 20, (d2 / ".credentials.json").read_text())
+            self.assertTrue((d2 / ".credentials.json").is_symlink(),
+                            "a transient bad read dropped the link")
         finally:
             Path.home = real
 
