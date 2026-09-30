@@ -576,7 +576,45 @@ function renderLog(p) {
           c.append(el('span', 'pr', '❯'), ' ', d.text || '');
           log.appendChild(c);
         } else {
-          log.appendChild(el('div', 'msg user', d.text || ''));
+          const u = el('div', 'msg user', d.text || '');
+          // A turn a script sent (consult, the CLI) says so on its face
+          // (DESIGN-5 S5): it is still a human-path turn, but it was not typed
+          // in this box, and reading it as if it were is how an operator ends
+          // up answering a question they never asked. `via` is the CALLER's
+          // word -- a label on the supported path, not proof of origin.
+          if (d.via) {
+            u.classList.add('via');
+            u.prepend(el('span', 'viatag', 'via ' + d.via));
+            u.title = `sent by ${d.via}, not typed here`;
+          }
+          log.appendChild(u);
+        }
+        break;
+      // A message from another pane's agent (DESIGN-5 S7). Its OWN block,
+      // never the human bubble: it is untrusted content from another model
+      // (P20), and the hub -- not the sender -- wrote the `from` line.
+      // textContent only (el() never parses), so a body carrying markup
+      // renders as the characters it is.
+      case 'peer':
+        flush();
+        {
+          const b = el('div', 'msg peer');
+          b.appendChild(el('div', 'peerfrom',
+            `from @${d.from_seat || d.from_pane || '?'}` + (d.hop > 1 ? ` · hop ${d.hop}` : '')));
+          b.appendChild(el('div', 'peerbody', d.text || ''));
+          // The honest threat statement (section 7.9): the sender label is the
+          // SUPPORTED path, not proof. Any process of the same user can read a
+          // pane's token and send as that pane.
+          b.title = `Sent by the agent in @${d.from_seat || d.from_pane || '?'} through `
+                  + `Corral's seat tool. Not proof of origin: any process running `
+                  + `as this user could send as that pane.`;
+          log.appendChild(b);
+        }
+        break;
+      case 'peer_result':
+        if (d.delivered === false) {
+          flush();
+          log.appendChild(el('div', 'sys', `that message was not run — ${d.reason || 'unknown'}`));
         }
         break;
       case 'tool':
@@ -626,7 +664,7 @@ function renderLog(p) {
     // busy pane produces anyway \u2014 no timer of its own.
     let t0 = null;
     for (let i = visible.length - 1; i >= 0; i--) {
-      if (visible[i].kind === 'user') { t0 = visible[i].at; break; }
+      if (visible[i].kind === 'user' || visible[i].kind === 'peer') { t0 = visible[i].at; break; }
     }
     const secs = t0 ? Math.max(0, Math.round((Date.now() - new Date(t0)) / 1000)) : null;
     const w = el('div', 'sys working');
@@ -876,16 +914,122 @@ function updatePane(rec, p) {
   return rec.root;
 }
 
+/* ── seats (DESIGN-5 S6) ──────────────────────────────────────────────────
+ * A seat is a name the OPERATOR gives a pane so other panes can address it.
+ * A human verb: it is bound here, behind the pairing cookie, and nothing an
+ * agent can call reaches it. Edited in a dialog, not inline in the header,
+ * because the header is rebuilt on every event and would eat the name
+ * mid-word -- the hazard the roster's rename box already guards against. */
+function seatPill(p) {
+  let b;
+  if (p.seat) {
+    b = el('button', 'pill seat', '@' + p.seat);
+    b.title = `other panes can address this one as @${p.seat} — click to change or remove`;
+  } else if (p.seatWithheld) {
+    // Shown for what it is: the meta still says this name, but an open pane
+    // created earlier already answers to it, so this one is not reachable.
+    b = el('button', 'pill seat withheld', '@' + p.seatWithheld + ' withheld');
+    b.title = `another open pane already answers to @${p.seatWithheld} and was `
+            + `there first, so this one is not addressable by it — click to rebind`;
+  } else {
+    b = el('button', 'x seatadd', '＠');
+    b.title = 'give this pane a seat — a name other panes can address it by';
+  }
+  b.type = 'button';
+  b.onclick = () => openSeat(p);
+  return b;
+}
+
+function openSeat(p) {
+  const dlg = $('#seatdlg');
+  if (!dlg) return toast('this page has no seat dialog', true);
+  dlg._pane = p.id;
+  $('#seat-for').textContent = p.title || p.label;
+  $('#seat-name').value = p.seat || p.seatWithheld || '';
+  $('#seat-unbind').disabled = !(p.seat || p.seatWithheld);
+  dlg.showModal();
+}
+
+function wireSeat() {
+  const dlg = $('#seatdlg');
+  if (!dlg) return;
+  // Enter in the name box BINDS. Left to the browser, Enter submits the form
+  // through its FIRST submit button -- which is Cancel -- so typing a name and
+  // pressing Enter silently did nothing (found in a real browser, DESIGN-5 S6
+  // live step; a mini-DOM has no default button). reportValidity() shows the
+  // grammar's own message on a bad name instead of posting it.
+  $('#seat-name').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if ($('#seat-name').reportValidity()) dlg.close('ok');
+  });
+  dlg.addEventListener('close', async () => {
+    const how = dlg.returnValue;
+    if (how !== 'ok' && how !== 'unbind') return;
+    // Unbind posts "" -- the server's word for "no seat", not a name.
+    const seat = how === 'unbind' ? '' : $('#seat-name').value.trim();
+    try {
+      const r = await api('/api/session/seat', { pane: dlg._pane, seat });
+      toast(r.seat ? `this pane is now @${r.seat}` : 'seat removed');
+      await refresh();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+/* What the pill says on a lane whose posture Corral cannot set.
+ *
+ * `agent-set` was one word for three different promises, and the differences
+ * are the ones that matter: the vendor's own policy applies (Grok, Codex),
+ * OUR adapter asks before every write and fails closed (any lane the `rail`
+ * flag is set on), or the lane has no tools at all so there is nothing to ask
+ * about. Flattening those into one label meant the safest lane and the least
+ * constrained lane wore the same badge.
+ *
+ * The vendor name is the label's first word: "Claude Code" -> Claude,
+ * "Antigravity (Gemini)" -> Antigravity. Derived, never a second list to keep
+ * in step with AGENTS.
+ */
+function posturePill(p) {
+  const vendor = String(p.label || p.agent || 'the agent')
+    .split(/[\s(—-]/)[0] || p.label;
+  let text, why;
+  if (p.rail) {
+    text = 'harness rail';
+    why = `Corral cannot set a permission MODE on ${p.label}, but this lane `
+        + `runs Corral's own adapter: it asks before every write or command, `
+        + `with the exact bytes, and fails closed if nobody answers.`;
+  } else if (p.tools === false) {
+    text = 'chat only';
+    why = `${p.label} has no tools, so it raises no permission requests. `
+        + `An empty rail here is the lane's nature, not a rail that stopped `
+        + `working.`;
+  } else {
+    text = `${vendor} policy`;
+    why = `Corral cannot set the permission policy for ${p.label}. `
+        + `Whatever that agent does by default is what you get.`;
+  }
+  const q = el('span', 'pill unknown', text);
+  q.title = why;
+  return q;
+}
+
 function paneHead(p) {
   const h = el('div', 'ph');
   h.appendChild(el('span', 'nm', p.title || p.label));
+  // The same five words the roster and the tab title use, on the pane itself:
+  // a maximized pane used to be the ONE surface with no state on it, so the
+  // answer to "is this waiting on me or working?" required looking away from
+  // the thing you were looking at. Raw enum on the tooltip, as everywhere.
+  const dsp = displayState(p);
+  const st = el('span', 'pill st d-' + dsp, DISPLAY_LABEL[dsp] || dsp);
+  st.title = `${p.state}${p.idleS >= 30 ? ` · quiet ${fmtAge(p.idleS)}` : ''}`;
+  h.appendChild(st);
+  h.appendChild(seatPill(p));
   // Only claim a posture Corral actually imposed. `oc acp` runs under its own
   // policy, so a Grok pane wearing a `strict` pill was the UI asserting a
   // safety property nothing had established.
   if (p.postureEnforced === false) {
-    const q = el('span', 'pill unknown', 'agent-set');
-    q.title = `Corral cannot set the permission policy for ${p.label}. ` +
-              `Whatever that agent does by default is what you get.`;
+    const q = posturePill(p);
     h.appendChild(q);
   } else {
     h.appendChild(el('span', 'pill ' + p.posture, p.posture));
@@ -1406,8 +1550,92 @@ function fmtAge(s) {
 }
 
 /* ── rendering: shell ────────────────────────────────────────────────── */
+/* ── the display projection ───────────────────────────────────────────────
+ * Mirrors corral_core/sessions.py `display_state()` — the one opinion on what
+ * a pane's raw state MEANS to a human. Mirrored rather than read off the wire
+ * because the browser reduces events locally between polls: a `permission`
+ * event flips a pane to needs-you in the same tick it arrives, and a
+ * server-computed `display` would be stale exactly when it matters most. The
+ * two implementations are pinned to ONE case table,
+ * corral_core/display_cases.json, by selftest_display.mjs here and
+ * corral_core/test_display_state.py there — so this cannot drift quietly,
+ * which is the only way a mirror is honest.
+ *
+ * The raw `p.state` is still rendered beside it and still on the tooltip:
+ * this is triage, not a replacement for the record. `gateHold` is full
+ * Corral's runbook park and never arrives here; the branch stays so the two
+ * skins share one rule.
+ */
+const IDLE_DISPLAY_S = 1800;
+// How often the browser re-asks "has any pane aged into `idle`?". The roster
+// otherwise re-renders only when an event arrives, so a pane that went quiet
+// kept `your-turn` in the tab title until some OTHER pane spoke (DESIGN-5
+// section 7, T1.7). A minute is coarse against a 30-minute threshold on
+// purpose: the tick is cheap because it renders only when a state CHANGED.
+const DISPLAY_TICK_MS = 60000;
+
+/* Seconds since this pane last said anything, advanced by THIS browser's own
+ * clock: the hub's `idleS` at the moment the snapshot arrived, plus the time
+ * elapsed here since. Deliberately not `Date.now() - Date.parse(ev.at)`: that
+ * compares the hub's clock with the viewer's, and a phone ten minutes fast
+ * would age every pane ten minutes early. Differences on one clock cannot be
+ * skewed. The reducer resets the base whenever the pane emits. */
+function paneAge(p, nowMs) {
+  const base = p.idleS || 0;
+  if (!p._idleAt) return base;
+  return base + Math.max(0, (nowMs - p._idleAt) / 1000);
+}
+
+function displayState(p, nowMs) {
+  const now = nowMs === undefined ? Date.now() : nowMs;
+  const state = p.state || 'starting';
+  const pending = ((p.pending || []).length) > 0;
+  const held = !!p.gateHold;
+  if (pending || held || state === 'needs-you') return 'needs-you';
+  if (state === 'dead') return 'dead';
+  if (state === 'starting' || state === 'busy' || state === 'uncertain') return 'working';
+  // A detached pane never becomes ready on its own; a human must resume it.
+  if (state === 'detached') return 'paused';
+  if (state === 'ready') return paneAge(p, now) < IDLE_DISPLAY_S ? 'your-turn' : 'idle';
+  return 'idle';                       // anything unrecognised
+}
+
+const DISPLAY_LABEL = {
+  'needs-you': 'needs you', 'working': 'working',
+  'your-turn': 'your turn', 'idle': 'idle', 'paused': 'paused', 'dead': 'dead',
+};
+
+/* The projection of every pane as one string, so the tick can tell "nothing
+ * changed" from "a pane aged into idle" without touching the DOM. */
+let displaySig = '';
+function displaySignature(panes, nowMs) {
+  return panes.map(p => p.id + ':' + displayState(p, nowMs)).join('|');
+}
+
+function displayTick() {
+  const panes = [...S.panes.values()];
+  if (displaySignature(panes) !== displaySig) render();
+}
+
+/* The tab title: where the eye lands first when Corral is one tab among
+ * twenty. What needs you outranks what is merely waiting, and a quiet wall
+ * says nothing at all rather than inventing a reassuring number. */
+function setTitle(panes) {
+  let need = 0, turn = 0;
+  for (const p of panes) {
+    const d = displayState(p);
+    if (d === 'needs-you') need++;
+    else if (d === 'your-turn') turn++;
+  }
+  document.title = need ? `${need} need you · Corral`
+                 : turn ? `${turn} your turn · Corral`
+                 : 'Corral';
+}
+
 function render() {
   const panes = [...S.panes.values()];
+  setTitle(panes);
+  displaySig = displaySignature(panes);
   markSeen();                  // whatever this render shows, a human can see
 
   // roster
@@ -1423,7 +1651,11 @@ function render() {
   // Archive below, but open by default: unlike Archive's closed history,
   // these are live conversations, so the default is visible, not hidden.
   const paneRow = p => {
-    const it = el('div', 'rit ' + p.state + (p.minimized ? ' min' : '') +
+    const disp = displayState(p);
+    // Both classes: `rit needs-you` is what the eye reads, and the raw state
+    // class stays so every rule style.css already had keeps working.
+    const it = el('div', 'rit d-' + disp + ' ' + p.state +
+                        (p.minimized ? ' min' : '') +
                         (S.focus === p.id ? ' on' : ''));
     it.appendChild(el('span', 'dot'));
     const t = el('div', 'txt');
@@ -1458,8 +1690,14 @@ function render() {
     // pane opened there showed "· CC" here and looked like a Claude Code
     // conversation. Tag the agent explicitly for every lane but the default.
     const agentTag = p.agent !== 'claude' ? p.label + ' · ' : '';
-    t.appendChild(el('div', 's',
-      p.state + quiet + ' · ' + agentTag + p.cwd.split('/').pop()));
+    const sub = el('div', 's',
+      (DISPLAY_LABEL[disp] || disp) + quiet + ' · ' + agentTag +
+      p.cwd.split('/').pop());
+    // The raw enum is the record and stays one hover away: the projection
+    // collapses six values into five words, and "which of the two busy-ish
+    // states is this" is a real question when a pane looks wedged.
+    sub.title = p.state;
+    t.appendChild(sub);
     it.appendChild(t);
 
     // A minimized pane blocked on a permission must still SHOW that it is —
@@ -1634,14 +1872,18 @@ function render() {
     for (const p of mins) {
       // A semantic <button>: a click-only div never takes focus, so
       // keyboard and :focus-visible can't reach it (panel, 2026-08-24).
-      const c = el('button', 'minchip ' + p.state);
+      const cdisp = displayState(p);
+      const c = el('button', 'minchip d-' + cdisp + ' ' + p.state);
       c.type = 'button';
       c.appendChild(el('span', 'd'));
       c.appendChild(el('span', 'mt', p.title || p.label));
       if (p.pending.length) c.appendChild(el('span', 'badge', String(p.pending.length)));
       // Full identity in the name: the visible label ellipsizes, and the
-      // state must not live in the dot's color alone.
-      const full = `${p.title || p.label} — ${p.state}, click to restore`;
+      // state must not live in the dot's color alone. The projection leads
+      // (it is what the roster and the tab title say); the raw enum follows
+      // in parentheses so the chip and the record never disagree.
+      const full = `${p.title || p.label} — ${DISPLAY_LABEL[cdisp] || cdisp}`
+                 + ` (${p.state}), click to restore`;
       c.title = full;
       c.setAttribute('aria-label', full);
       c.onclick = () => setMin(p, false);
@@ -1688,8 +1930,34 @@ function render() {
   if (!shown.length) {
     const e = el('div', 'empty');
     if (!panes.length) {
+      // The FIRST screen a new install shows, and it used to be two
+      // sentences that describe the emptiness without saying what to do
+      // about it. Three lines now: the thing to press, the thing that gets
+      // you around, and where your conversations live on disk — the last
+      // because "is this in someone's cloud?" is the first question a
+      // self-hosted agent workspace has to answer, and silence answers it
+      // badly. createElement only: `dataDir` comes off the wire.
       e.appendChild(el('h2', null, 'Nothing running.'));
-      e.appendChild(el('div', null, 'Start a conversation and it appears here.'));
+      const start = el('button', 'btn go emptygo', '＋ New conversation');
+      start.type = 'button';
+      start.onclick = () => $('#new').click();
+      e.appendChild(start);
+      const l2 = el('div', 'emptyline');
+      l2.appendChild(el('kbd', null, '⌘K'));
+      l2.appendChild(el('span', null, ' search and jump to any conversation · '));
+      l2.appendChild(el('kbd', null, '?'));
+      l2.appendChild(el('span', null, ' every shortcut'));
+      e.appendChild(l2);
+      const where = S.dataDir;
+      const l3 = el('div', 'emptyline dim');
+      l3.appendChild(el('span', null, where
+        ? 'Transcripts stay on this machine, in '
+        : 'Transcripts stay on this machine. Nothing is uploaded.'));
+      if (where) {
+        l3.appendChild(el('code', null, where));
+        l3.appendChild(el('span', null, '. Nothing is uploaded.'));
+      }
+      e.appendChild(l3);
     } else {
       e.appendChild(el('h2', null, 'All minimized.'));
       e.appendChild(el('div', null, 'They are still running. Click one above to bring it back.'));
@@ -1921,12 +2189,15 @@ async function refresh() {
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
+  S.dataDir = d.dataDir || S.dataDir || '';
   S.cwdSuggestions = d.cwdSuggestions || S.cwdSuggestions || [];
   S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
   S.schedule = d.schedule || [];
   const next = new Map();
+  const rxAt = Date.now();
   for (const np of (d.panes || [])) {
+    np._idleAt = rxAt;                 // idleS is as of NOW (paneAge)
     const prev = S.panes.get(np.id);
     if (!prev) { next.set(np.id, np); continue; }
     const events = prev.events || [];
@@ -2006,6 +2277,8 @@ function connect() {
       return;
     }
     p.events.push(ev);
+    // It just spoke: its age restarts on this browser's clock (paneAge).
+    p.idleS = 0; p._idleAt = Date.now();
     // The cap is a ceiling on ONE turn's live growth, not on history "load
     // earlier" (below) just fetched from disk -- the old fixed 4000 deleted
     // exactly the events a click just loaded, the instant the next live
@@ -2030,6 +2303,11 @@ function connect() {
     }
     if (ev.kind === 'paused') { p.state = 'detached'; p.pending = []; }
     if (ev.kind === 'user') p.state = 'busy';
+    // A peer message starts a turn exactly as a human's does; without this
+    // the roster and title said `your turn` for the whole of a peer-driven
+    // turn while the server said busy (DESIGN-5 section 7, T7.18).
+    if (ev.kind === 'peer') p.state = 'busy';
+    if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';
     if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; }
     if (ev.kind === 'closed') { p.state = 'dead'; p.error = null; refresh(); }
@@ -2039,6 +2317,7 @@ function connect() {
     if (ev.kind === 'state' && d.state) p.state = d.state;
     if (ev.kind === 'resumed') { p.state = 'ready'; refresh(); }
     if (ev.kind === 'renamed') p.title = d.title;
+    if (ev.kind === 'seat') { p.seat = d.seat || null; p.seatWithheld = null; }
     if (ev.kind === 'config' || ev.kind === 'ready') {
       if (d.model) p.model = d.model;
       if (d.effort) p.effort = d.effort;
@@ -2230,6 +2509,13 @@ function wireDialog() {
       const sel = $('#f-posture'), hint = $('#posturehint');
       if (a.postureEnforced === false) {
         sel.disabled = true;
+        // Blank it, do not merely grey it. The close handler reads `.value`,
+        // so a leftover `strict` from the previously selected lane was posted
+        // for an agent nothing can make strict — the same imaginary result
+        // this control was disabled for, arriving through a different door.
+        // Empty means "the lane's own default", which is the truth; the close
+        // handler then omits the key entirely.
+        sel.value = '';
         hint.textContent = `${a.label} manages its own permissions — Corral ` +
                            `cannot set this, and will not pretend it did.`;
       } else {
@@ -2259,11 +2545,20 @@ function wireDialog() {
     if (dlg.returnValue !== 'ok') return;
     const cwd = $('#f-cwd').value.trim();
     S.lastCwd = cwd;
-    localStorage.setItem('corral.posture', $('#f-posture').value);
+    // Remember the posture only when it was a CHOICE. On a lane that cannot
+    // enforce one the control is blanked, and storing that emptiness would
+    // quietly forget a `strict` the operator had set on a lane where it means
+    // something.
+    const posture = $('#f-posture').disabled ? '' : $('#f-posture').value;
+    if (posture) localStorage.setItem('corral.posture', posture);
     const common = { agent: dlg._chosenAgent(), cwd,
-                     posture: $('#f-posture').value,
                      model: $('#f-model').value, effort: $('#f-effort').value,
                      role: $('#f-role').value };
+    // ABSENT, not empty. The hub reads `b.get("posture") or DEFAULT_POSTURE`
+    // either way, but a key that is not there cannot be misread later as "the
+    // operator chose nothing on purpose" — and the stored meta is the thing
+    // 244 of 446 panes were wrong about.
+    if (posture) common.posture = posture;
     const when = $('#f-when').value;
     if (when) {
       // Later: arm it, open nothing now. The prompt is stored as typed (a
@@ -2302,6 +2597,11 @@ async function openPort(src) {
   for (const a of S.agents.filter(a => a.available && !a.key.startsWith('host:'))) {
     const o = el('option', null, a.label); o.value = a.key; sel.appendChild(o);
   }
+  // A seat does not travel (DESIGN-5 S6 v1): the name stays with this pane,
+  // and the new one starts unaddressable until someone names it.
+  const seatNote = $('#p-seatnote');
+  if (seatNote) seatNote.textContent = src.seat
+    ? `@${src.seat} stays with this pane — the new one starts without a seat.` : '';
   let pack = null;
   const load = async () => {
     go.disabled = true; pack = null;
@@ -2396,9 +2696,14 @@ function paletteResults(query) {
 
   for (const [id, p] of S.panes || []) {
     const label = p.title || p.label;
+    // A seat is searchable with or without its @ (DESIGN-5 S6): "revi" and
+    // "@revi" both find @reviewer.
+    const seat = p.seat ? '@' + p.seat : '';
     if (!needle || label.toLowerCase().includes(needle)
-        || (p.cwd || '').toLowerCase().includes(needle)) {
-      rows.push({ kind: 'pane', label, paneId: id, ssh: p.agent.startsWith('host:'),
+        || (p.cwd || '').toLowerCase().includes(needle)
+        || (seat && seat.includes(needle.startsWith('@') ? needle : '@' + needle))) {
+      rows.push({ kind: 'pane', label: seat ? `${label} ${seat}` : label,
+                  paneId: id, ssh: p.agent.startsWith('host:'),
                   sub: p.state + ' · ' + ((p.cwd || '').split('/').pop() || '') });
     }
   }
@@ -2673,11 +2978,86 @@ function wirePalette() {
   // reach a note while writing the message that needs it, which is the whole
   // point of attach. Escape is the dialog's own.
   document.addEventListener('keydown', e => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-      e.preventDefault();
-      $('#palette').open ? $('#palette').close() : openPalette();
+    for (const k of KEYS) {
+      if (k.match && k.match(e)) { e.preventDefault(); k.run(); return; }
     }
   });
+}
+
+/* ── the keyboard, in one place ──────────────────────────────────────────
+ * ONE table. The global key handler dispatches from it and the `?` overlay
+ * lists it, so a binding cannot exist without being documented and the
+ * overlay cannot advertise a key that does nothing. That second direction is
+ * the one that matters: a help screen listing a shortcut the code dropped is
+ * worse than no help screen, because it is believed.
+ *
+ * Entries WITHOUT `match` are bindings owned by a control that already has
+ * focus (the composer, the find bar). They are documented here and
+ * implemented there — the table cannot dispatch them, because the composer
+ * has to see the event first. Each says where it applies, so nobody presses
+ * Enter on the roster and wonders why nothing sent.
+ */
+const KEYS = [
+  { combo: '⌘K', alt: 'Ctrl+K', what: 'Search conversations and jump to one',
+    match: e => (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k',
+    run: () => { $('#palette').open ? $('#palette').close() : openPalette(); } },
+  { combo: '?', what: 'Show this list',
+    match: e => e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey
+                && !isTypingTarget(e.target),
+    run: () => toggleKeys() },
+  { combo: 'Esc', what: 'Close this list, or the search',
+    match: e => e.key === 'Escape' && $('#keysdlg') && $('#keysdlg').open,
+    run: () => toggleKeys(false) },
+  { combo: 'Enter', where: 'in a message box', what: 'Send' },
+  { combo: 'Shift+Enter', where: 'in a message box', what: 'Newline, do not send' },
+  { combo: '⌘Enter', alt: 'Ctrl+Enter', where: 'in a message box',
+    what: 'Send to EVERY pane that can take a prompt' },
+  { combo: '1…9', where: 'on a pane with a permission card',
+    what: 'Answer the card with that option' },
+  { combo: 'Esc', where: 'on a pane with a permission card',
+    what: 'Refuse the card; on a busy pane, interrupt the turn' },
+  { combo: '↑ / ↓', where: 'in an empty terminal box',
+    what: 'Walk back through what you typed before' },
+  { combo: 'Ctrl+C', where: 'in an empty terminal box',
+    what: 'Interrupt the running command' },
+];
+
+/* A key that means "help" must not swallow a question mark someone is
+ * typing. Checked by what has focus, not by a flag somebody has to remember
+ * to set. */
+function isTypingTarget(t) {
+  if (!t) return false;
+  const tag = (t.tagName || '').toUpperCase();
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+      || t.isContentEditable === true;
+}
+
+function toggleKeys(want) {
+  const dlg = $('#keysdlg');
+  if (!dlg) return;
+  const open = want === undefined ? !dlg.open : want;
+  if (!open) return dlg.close();
+  const body = $('#keys-body');
+  body.replaceChildren();
+  for (const k of KEYS) {
+    const row = el('div', 'keysrow');
+    const combo = el('span', 'keyscombo', k.combo + (k.alt ? ` / ${k.alt}` : ''));
+    row.appendChild(combo);
+    const what = el('span', 'keyswhat', k.what);
+    row.appendChild(what);
+    // Where it applies, when that is not "anywhere". Silence here means
+    // global, which is the only claim this overlay makes implicitly.
+    if (k.where) row.appendChild(el('span', 'keyswhere', k.where));
+    body.appendChild(row);
+  }
+  dlg.showModal();
+}
+
+function wireKeysButton() {
+  const b = $('#keysbtn');
+  // A page served without the button wires nothing rather than throwing on
+  // boot — the same posture every other wire* function here takes.
+  if (b) b.onclick = () => toggleKeys();
 }
 
 function wireMobileActions() {
@@ -2723,12 +3103,17 @@ async function start() {
   wireRail();
   wireCopySelect();
   wirePalette();
+  wireSeat();
+  wireKeysButton();
   wireMobileActions();
   // Stream FIRST, then snapshot. The reverse order left a window between the
   // snapshot and the EventSource opening in which every event was dropped and
   // never recoverable — the actual cause of "reload loses running work".
   connect();
   await refresh();
+  // The roster's own clock: a pane that goes quiet must age into `idle`
+  // with no event to prompt a render (DESIGN-5 section 7, T1.7).
+  setInterval(displayTick, DISPLAY_TICK_MS);
   // A backgrounded tab has its timers throttled, and Light has no polling
   // loop left to be throttled — every update arrives on the SSE stream. But a
   // tab that was asleep long enough for the browser to drop the connection

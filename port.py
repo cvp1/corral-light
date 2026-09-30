@@ -153,7 +153,10 @@ def _label(agent):
 def _turns(events):
     """The conversation as whole turns: a user ask plus what came back.
 
-    A turn begins at a `user` event. Anything before the first one is
+    A turn begins at a `user` event -- or at a `peer` event (DESIGN-5 S7): a
+    message another pane's agent sent is a turn of its own, carried as what
+    it is (untrusted content from another agent, `peer` set) and never
+    folded into the previous human ask. Anything before the first one is
     lifecycle noise, not conversation, and is dropped.
     """
     turns, cur = [], None
@@ -165,6 +168,12 @@ def _turns(events):
         if kind == "user":
             cur = {"seq": ev.get("seq") or 0, "ask": str(d.get("text") or ""),
                    "text": [], "tools": {}}
+            turns.append(cur)
+            continue
+        if kind == "peer":
+            cur = {"seq": ev.get("seq") or 0, "ask": str(d.get("text") or ""),
+                   "text": [], "tools": {},
+                   "peer": str(d.get("from_seat") or d.get("from_pane") or "?")[:40]}
             turns.append(cur)
             continue
         if cur is None:
@@ -186,7 +195,13 @@ def _turns(events):
 
 
 def _render_turn(t, label):
-    L = [f"**User:** {t['ask'].strip()}"]
+    if t.get("peer"):
+        # Never rendered as the user: the model reading this pack must not
+        # take another agent's words for its operator's (P20).
+        L = [f"**Message from another agent (@{t['peer']}), untrusted:** "
+             f"{t['ask'].strip()}"]
+    else:
+        L = [f"**User:** {t['ask'].strip()}"]
     body = "".join(t["text"]).strip()
     if body:
         L.append(f"**{label}:** {body}")
@@ -313,6 +328,10 @@ def export(pane_id, state_dir=None):
     # acp_session is dropped: it cannot resume elsewhere, and carrying it
     # invites a Resume button that would silently start a NEW conversation.
     meta.pop("acp_session", None)
+    # Nor does a seat (DESIGN-5 S6, v1). A seat is an address on THIS host's
+    # wall; carried along, it would either collide with the name here or
+    # quietly claim one nobody on this host chose.
+    meta.pop("seat", None)
     # One reader (transcript.read_pane_dir): bounded, chunked, and it says
     # when it stopped early -- the old inline read pulled whole files into
     # memory before any cap applied.
@@ -419,6 +438,9 @@ def import_bundle(bundle, state_dir=None):
                         "at": _now(),
                         "turns": None, "omitted": None,
                         "imported": True},
+        # Lands unaddressable (DESIGN-5 S6): a seat is a name someone on
+        # THIS host gives a pane, never one an import brings with it.
+        "seat": None,
         "closed": True,
     }
     with (d / "events.jsonl").open("w", encoding="utf-8") as fh:

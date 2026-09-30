@@ -13,9 +13,17 @@ One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is
 1. Install Seed into `~/aios` (or `--into` a workspace you already have — that folder then *is* `~/aios` for this purpose). See the Seed README. Do not install Seed into this repo.
 2. Clone this repo, then:
    ```
+   cd spike && npm install && cd ..    # the Claude and ChatGPT adapters
    ./corral-light doctor
    ./corral-light serve
    ```
+   The adapters for Claude Code and ChatGPT (Codex) are an npm package, and
+   `spike/node_modules/` is gitignored — so no clone arrives with them. Skip
+   this step and those two lanes report `not installed: …/spike/node_modules/.bin/claude-agent-acp`,
+   which reads like a broken install rather than a step you have not run yet.
+   `doctor` names the step if the directory is missing. Needs Node.js.
+   The other three lanes (Grok, Antigravity, Ollama) resolve their programs
+   outside this tree and are unaffected.
    Open http://127.0.0.1:8098, then in another terminal `./corral-light pair <code>` with the code on screen.
 3. New Claude conversation. Working directory = `~/aios`.
 4. Done when `/status` answers.
@@ -28,8 +36,8 @@ Corral Light connects to software installed and signed in on your computer.
 
 | Assistant | What you need | Notes |
 | --- | --- | --- |
-| Claude Code | Claude Code and its Agent Client Protocol adapter | Supports model and effort selection. |
-| ChatGPT (Codex) | The Codex adapter and a Codex login | Uses a separate configuration directory. |
+| Claude Code | Claude Code, and the adapter from `cd spike && npm install` | Supports model and effort selection. |
+| ChatGPT (Codex) | The same npm install, plus a Codex login | Uses a separate configuration directory. |
 | Grok | The Grok command-line tool and `grok login` | The Grok tool manages its own sign-in. |
 | Antigravity (Gemini) | Run `python3 install_antigravity_acp.py --install` | The included installer currently supports Linux x86-64. It also selects your Google login (`oauth-personal`) in `~/.gemini/antigravity-acp/settings.json` when no sign-in method is set; a method you chose yourself is left alone. |
 | Ollama | Ollama and at least one downloaded model | Chat only; it cannot edit files or run commands. |
@@ -42,7 +50,7 @@ The availability check is intentionally honest: an assistant is marked unavailab
 
 ## Search and attach files
 
-Press `⌘K` to search open conversations, archived conversations, notes, and other configured text files.
+Press `⌘K` to search open conversations, archived conversations, notes, and other configured text files. Press `?` for every keyboard shortcut — that list is generated from the same table the key handler dispatches from, so it cannot advertise a key that does nothing.
 
 By default, Corral Light searches `~/notes` when that directory exists. Add other directories in `~/.config/corral-light/content.json`:
 
@@ -87,6 +95,40 @@ watch and answer. `consult lanes` lists what is live; `fanout` and
 it once in its instructions file ("to ask another model, use `corral-light
 consult`, never an API key by default") and second opinions stop costing a
 second bill.
+
+## Seats: panes that can message each other
+
+A **seat** is a name you give a pane — `@reviewer`, `@author` — with the ＠ in
+its header (or `corral-light seat <pane> <name>`; `-` removes it). One open pane per name; a closed pane holds nothing. Once a pane
+has a seat, the agent in another pane can reach it through two tools Corral
+offers every eligible pane (an MCP server named `corral-seats`):
+
+- `seat_list()` — who can be addressed and what state each is in (`your-turn`,
+  `working`, `needs-you`, `paused`, …). No titles, no transcripts.
+- `seat_send(seat, text)` — one message, answered `delivered` (with a turn id),
+  `refused` (with the reason), or `failed`.
+
+A message arrives in the other pane as its own block, marked **from @author**
+and **untrusted** — never as that pane's human, never lifting a runbook park.
+It is refused, not queued, when the target is busy, waiting on a permission
+card, paused (after a restart every pane is), or dead. After **four** messages
+pass between panes with no human turn on them, sending stops until a human
+speaks. Each pane may try **30** sends an hour; refusals count.
+
+**What the sender label is, and is not.** The hub decides who sent a message
+from a token it mints for each pane at every spawn and keeps only in memory.
+That token is a label for the supported path, **not a secret**. Some adapters
+put it on a process command line (the Claude adapter does), where any local
+user can read it — so on Linux the hub also checks, from `/proc/net/tcp`, that
+the calling process belongs to the hub's own UNIX user, and refuses anything
+else (including a caller it cannot identify). On other platforms that check is
+not made. Within that boundary, any process running **as the same user** can
+send as a pane, and an agent with a shell could already type into any pane
+through the local API. Seats add provenance and a gate to the path agents are
+meant to use; they do not create an identity a same-user process cannot forge.
+
+**Who can send.** Every lane whose adapter accepts MCP servers is offered the tools. The Ollama lane's adapter takes none, so a pane there can **receive** a message but not send one; SSH panes neither send nor receive. `seat_list` says which panes were offered the tools. `CORRAL_NATIVE_MCP=0` in the hub's environment turns the
+tools off for every pane.
 
 ## Security
 
@@ -133,12 +175,26 @@ The default address is local-only by design. If you change `CORRAL_LIGHT_BIND` t
 
 ## Run in the background
 
-The repository includes service definitions for running Corral Light as your signed-in user:
+```
+./corral-light install-service --print   # show the file, write nothing
+./corral-light install-service           # write it, and print how to start it
+```
 
-- **Linux:** `corral-light.service` for systemd user services
-- **macOS:** the included launchd plist
+This writes a systemd user unit (Linux) or a launchd agent (macOS) with every
+path resolved from the checkout that is running — the interpreter, the working
+directory, and the log path. It **does not enable and does not start
+anything**: writing a file is reversible, and starting a daemon that holds a
+port and spawns assistants with your filesystem access is your decision. The
+exact enable command is printed for you to run. An existing file is left alone
+unless you pass `--force`.
 
-Update executable paths, the working directory, and log paths for your installation. Do not run the service as root; assistants need the permissions and sign-ins of the user who starts them.
+The repository also ships the two files as templates (`corral-light.service`,
+`com.cvp1.corral-light.plist`) if you would rather edit them by hand.
+
+Do not run the service as root; assistants need the permissions and sign-ins
+of the user who starts them. Do not point a service at a worktree —
+`spike/node_modules/` is gitignored, so a worktree has neither vendor adapter
+and both those lanes go dark in a way that looks like a vendor outage.
 
 The systemd unit uses `KillMode=mixed`: on a stop or restart the hub is signalled first and writes one note in every pane that had a turn running, naming the interrupted message and anything queued behind it. Nothing is re-sent automatically. If an agent process outlives the hub anyway (launchd), the next start stops it before any conversation is resumed.
 
@@ -200,9 +256,9 @@ Everything the browser does with a pane, a terminal can do too, on every lane �
 | lane | opens | model | first turn | pause → resume | remembers after resume | permission round-trip | notes |
 |---|---|---|---|---|---|---|---|
 | claude | yes | opus | yes | yes | yes | asked, refused | |
-| grok | yes | grok-4.6 | yes | yes | yes | **no card — ran the command without asking** | posture shows `agent-set` (not enforceable on this lane); the probe file was created in the scratch dir and removed |
+| grok | yes | grok-4.6 | yes | yes | yes | **no card — ran the command without asking** | posture not enforceable on this lane — the pill read `agent-set` when measured and reads `Grok policy` since DESIGN-5 S2; the probe file was created in the scratch dir and removed |
 | gemini | yes | gemini-3.7-flash-high | yes | yes | yes | asked, refused | |
-| codex | yes | gpt-5.6-sol | yes | yes | yes | **no card — ran the command without asking** | measured 2026-09-29 07:05 MST with the launcher pointed at a fresh `codex login` (`CORRAL_CODEX_HOME=~/.codex`). Not a Light gap: the pane runs Codex's `agent` mode (workspace-write sandbox, `approval_policy = on-request`), where a command inside the working tree is auto-approved and only an escalation outside the sandbox raises a card. Its ACP `mode` option also offers `read-only`; Light does not map its posture onto it (`posture_via_acp_mode` is false for this lane), so the pill reads `agent-set`. The probe file was created in the scratch dir and removed |
+| codex | yes | gpt-5.6-sol | yes | yes | yes | **no card — ran the command without asking** | measured 2026-09-29 07:05 MST with the launcher pointed at a fresh `codex login` (`CORRAL_CODEX_HOME=~/.codex`). Not a Light gap: the pane runs Codex's `agent` mode (workspace-write sandbox, `approval_policy = on-request`), where a command inside the working tree is auto-approved and only an escalation outside the sandbox raises a card. Its ACP `mode` option also offers `read-only`; Light does not map its posture onto it (`posture_via_acp_mode` is false for this lane), so the pill read `agent-set` when measured and reads `ChatGPT policy` since DESIGN-5 S2 (the vendor's own policy applies — which the old label could not say). The probe file was created in the scratch dir and removed |
 
 Not measured: **ollama** (no local Ollama on that host; by design it keeps no context across a restart and now says so in the pane), SSH lanes (a shell has nothing to remember). Re-run the matrix after any adapter upgrade.
 
@@ -212,6 +268,7 @@ Use the command that matches the problem:
 
 ```
 ./corral-light doctor        # Check installation and sign-in requirements
+                             # (names the npm step if the adapters are absent)
 ./corral-light diagnose      # Test a complete assistant conversation
 python3 content.py status    # Check search configuration and index status
 ```

@@ -307,6 +307,45 @@ class Handler(BaseHTTPRequestHandler):
         m = c.get(COOKIE)
         return m.value if m else None
 
+    def _peer_route(self, p, method):
+        """DESIGN-5 S8: the seat tools' routes. Runs BEFORE the cookie check
+        and never reads the cookie: the pane token alone decides who is
+        sending (sessions.ManagerBase.peer_http), so a browser session can
+        never be used to send as a pane. Answers only a caller on THIS
+        machine -- the MCP child dials loopback by construction."""
+        import ipaddress
+        peer = self._peer()
+        try:
+            local = peer is not None and (ipaddress.ip_address(peer).is_loopback
+                                          or peer == BIND)
+        except ValueError:
+            local = False
+        if not local:
+            return self._json({"error": "peer routes answer only on this machine"}, 403)
+        # SAME UNIX USER, checked by the kernel, not assumed (measured
+        # 2026-09-29: the Claude adapter puts the pane token on a world-
+        # readable command line). On Linux the calling socket's owner is in
+        # /proc/net/tcp; unknown is refused, never waved through (P4). Other
+        # platforms have no such table here -- the README says so.
+        if sys.platform.startswith("linux"):
+            uid = edge.local_peer_uid(self.client_address,
+                                      self.connection.getsockname())
+            if uid != os.getuid():
+                return self._json({"error": "peer routes answer only the hub's own "
+                                            "UNIX user" + ("" if uid is not None else
+                                            " (the caller could not be identified)")},
+                                  403)
+        body = None
+        if method == "POST":
+            try:
+                body = self._body()
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+        status, obj = MGR.peer_http(method, p,
+                                    self.headers.get(sessions._core.PEER_TOKEN_HEADER),
+                                    body)
+        return self._json(obj, status)
+
     def _peer(self):
         return self.client_address[0] if self.client_address else None
 
@@ -371,6 +410,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if self._edge_refused():
             return
+
+        # DESIGN-5 S8: token-only routes, before any cookie is looked at.
+        if p.startswith("/api/peer/"):
+            return self._peer_route(p, "GET")
 
         if p == "/api/pair/new":
             try:
@@ -555,6 +598,9 @@ class Handler(BaseHTTPRequestHandler):
         self._body_read = False
         if self._edge_refused():
             return
+        # DESIGN-5 S8: token-only routes, before any cookie is looked at.
+        if p.startswith("/api/peer/"):
+            return self._peer_route(p, "POST")
         user = self._user()
         if not user:
             return self._json({"error": "not paired"}, 401)
@@ -638,7 +684,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": r["sent"] > 0, **r})
                 # `turn` is the ledger id, durable before this ack
                 # (P0-ledger): a client can ask later what became of it.
-                tid = MGR.get(b.get("pane", "")).send(b.get("text", ""))
+                # `via` is the CALLER's word for where this came from
+                # ("consult", "cli"); the browser sends none. A label on the
+                # supported path, not a control -- see TURN_VIAS.
+                tid = MGR.get(b.get("pane", "")).send(b.get("text", ""),
+                                                      via=b.get("via") or None)
                 return self._json({"ok": True, "turn": tid})
             if p == "/api/session/quote":
                 # Composer text only, like content attach: nothing is sent
@@ -677,6 +727,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "pinned":
                                    MGR.set_pinned(b.get("pane", ""),
                                                   b.get("pinned", True))})
+            if p == "/api/session/seat":
+                # A HUMAN verb (DESIGN-5 S6), behind the pairing cookie like
+                # every route below the auth check: naming a pane is how it
+                # becomes addressable by other panes, so no agent-facing path
+                # may reach this. "" unbinds.
+                pane = MGR.bind_seat(b.get("pane", ""), b.get("seat"))
+                return self._json({"ok": True, "seat": pane.seat})
             if p == "/api/session/rename":
                 t = MGR.get(b.get("pane", "")).rename(b.get("title", ""))
                 return self._json({"ok": True, "title": t})
@@ -831,6 +888,11 @@ def serve(bind=BIND, port=PORT):
     threading.Thread(target=_observe_loop, daemon=True).start()
     threading.Thread(target=_notify_loop, daemon=True).start()
     MGR.schedule.start()                    # schedule.py: scheduled prompts
+    # Where a pane's seat-tools child dials this hub (DESIGN-5 S8). Loopback
+    # when bound to every interface; the bound address otherwise, since a hub
+    # bound to one LAN address does not answer on 127.0.0.1.
+    sessions._core.PEER_HUB_URL = (
+        f"http://{'127.0.0.1' if bind in ('0.0.0.0', '', '::') else bind}:{port}")
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     install_shutdown_handler()

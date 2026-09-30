@@ -85,16 +85,23 @@ class TurnLedger:
             if self._lines > LEDGER_MAX_LINES:
                 self._fold_locked()
 
-    def accept(self, text):
+    def accept(self, text, kind=None):
         """Record an accepted turn DURABLY and return its id. Raises OSError
         when that is impossible — the caller must then refuse the send rather
-        than acknowledge a turn nothing recorded."""
+        than acknowledge a turn nothing recorded.
+
+        `kind` is "peer" for a message another pane's agent sent (DESIGN-5
+        S7) and absent for the human's, so a turn a restart cut off is named
+        for what it was when recover() reports it."""
         text = text or ""
         tid = uuid.uuid4().hex[:12]
-        self._append({"turn": tid, "state": "accepted", "at": _now(),
-                      "text": text[:LEDGER_TEXT_CHARS], "chars": len(text),
-                      "sha256": hashlib.sha256(text.encode("utf-8", "replace"))
-                      .hexdigest()}, sync=True)
+        rec = {"turn": tid, "state": "accepted", "at": _now(),
+               "text": text[:LEDGER_TEXT_CHARS], "chars": len(text),
+               "sha256": hashlib.sha256(text.encode("utf-8", "replace"))
+               .hexdigest()}
+        if kind:
+            rec["kind"] = kind
+        self._append(rec, sync=True)
         return tid
 
     def mark(self, tid, state, why=None, **extra):
@@ -173,7 +180,7 @@ class TurnLedger:
 class NullLedger:
     """For panes built without a directory (test stubs). Records nothing."""
 
-    def accept(self, text):
+    def accept(self, text, kind=None):
         return None
 
     def mark(self, *a, **k):
