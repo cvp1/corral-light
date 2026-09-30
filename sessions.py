@@ -1392,6 +1392,7 @@ class Pane(_core.PaneBase):
             if self._expect_exit:
                 return
             self.state = "dead"
+            self._drop_held_peers("dead")
             self._clear_pending("agent_exit")
             if data.get("closed"):
                 self.error = None                  # deliberate: not a fault
@@ -1740,6 +1741,9 @@ class Pane(_core.PaneBase):
                 # every message and ran none of them, silently, forever.
                 client = self.client
                 gen = self._generation
+                # The turn a reply was held behind has just ended (or none
+                # has run yet): re-admit it in THIS acquisition (S11b).
+                self._release_held_peers_locked()
                 if not self._queue or self.state == "dead" or client is None:
                     self._turn_running = False
                     return
@@ -1801,6 +1805,7 @@ class Pane(_core.PaneBase):
                 # the reaping is still right.)
                 client.close()
                 self.state, self.error = "dead", str(e)
+                self._drop_held_peers("dead")
                 self.emit("dead", {"reason": str(e) + (
                     f" ({dropped} queued message(s) were not sent)" if dropped else "")})
                 return
@@ -2471,6 +2476,9 @@ class Manager(_core.ManagerBase):
         # Two open metas naming one seat (DESIGN-5 S6): the earlier-created
         # keeps it, the later is withheld and says so. No file is rewritten.
         self._withhold_colliding_seats(metas)
+        # A reply the previous hub was holding for a waiter (S11b) lived in
+        # its memory only: record it dropped on both sides, never re-send it.
+        self._peer_queue_orphans()
         self.not_restored = skipped + unreadable   # said out loud, not dropped
 
     def _reserve_live(self, pane):
