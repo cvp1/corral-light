@@ -11,12 +11,12 @@ Two properties are tested here, and they are different:
 
   1. THE TABLE (`display_cases.json`) is the contract, shared with the two
      JavaScript mirrors (`selftest_display.mjs` in each skin). Both languages
-     answer the same cases, so the mirrors cannot drift quietly.
+     answer the same cases, so the mirrors cannot drift quietly. Every value
+     in DISPLAY_STATES must be reachable from it.
   2. IT NEVER RAISES. It is handed a core Pane (`pending` dict, `_gate_hold`,
-     `last_activity`), a Light pane (no `_gate_hold` at all) and the TUI's own
-     client-side Pane (`pending` list, `gate_held` property, `idle_s`). A
-     projection that throws takes the whole roster down with it, so an object
-     missing everything must still classify.
+     `last_activity`), a Light pane (no `_gate_hold` at all) and test doubles.
+     A projection that throws takes the whole roster down with it, so an
+     object missing everything must still classify.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
 """
@@ -48,15 +48,21 @@ class TheSharedTable(unittest.TestCase):
         self.assertGreaterEqual(len(CASES["cases"]), 15,
                                 "the table is the contract; do not shrink it")
         for c in CASES["cases"]:
-            got = S.display_state(_Pane(c["pane"]), unread=c["unread"])
+            got = S.display_state(_Pane(c["pane"]))
             self.assertEqual(got["state"], c["want"],
-                             f'{c["why"]}: {c["pane"]} unread={c["unread"]} '
+                             f'{c["why"]}: {c["pane"]} '
                              f'-> {got["state"]}, wanted {c["want"]}')
 
     def test_every_answer_is_in_the_declared_enum(self):
         for c in CASES["cases"]:
-            got = S.display_state(_Pane(c["pane"]), unread=c["unread"])
+            got = S.display_state(_Pane(c["pane"]))
             self.assertIn(got["state"], S.DISPLAY_STATES)
+
+    def test_every_declared_state_is_reachable_from_the_table(self):
+        """A value in the enum that no case produces is a value no consumer
+        has ever been shown -- the mirrors could omit it and still pass."""
+        seen = {S.display_state(_Pane(c["pane"]))["state"] for c in CASES["cases"]}
+        self.assertEqual(seen, set(S.DISPLAY_STATES))
 
     def test_the_threshold_is_a_named_constant(self):
         self.assertEqual(S.IDLE_DISPLAY_S, 1800)
@@ -70,7 +76,6 @@ class ItNeverRaises(unittest.TestCase):
         self.assertEqual(got["state"], "working",
                          "no state at all reads as `starting`, which is working")
         self.assertEqual(got["since_s"], 0)
-        self.assertIs(got["unread"], False)
 
     def test_a_light_pane_has_no_gate_hold_and_that_is_not_an_error(self):
         class LightPane:
@@ -115,13 +120,29 @@ class WhatItReports(unittest.TestCase):
             last_activity = 0.0
         self.assertEqual(S.display_state(P(), now=9e9)["since_s"], 7)
 
-    def test_unread_is_echoed_because_the_caller_owns_it(self):
+    def test_there_is_no_read_receipt_in_the_core(self):
+        """DESIGN-5 section 7. No core source for "has a human read this reply"
+        exists, so the projection must not take one or report one: a core
+        `unread` would be a guess rendered with the face of a measurement.
+        Each surface overlays its own."""
+        import inspect
+        self.assertNotIn("unread", inspect.signature(S.display_state).parameters)
+
         class P:
             state = "ready"
             pending = ()
             idle_s = 0
-        self.assertIs(S.display_state(P(), unread=True)["unread"], True)
-        self.assertIs(S.display_state(P())["unread"], False)
+        self.assertEqual(set(S.display_state(P())), {"state", "since_s"})
+
+    def test_a_detached_pane_is_paused_not_idle(self):
+        """A detached pane never becomes ready without a human resuming it.
+        Filing it under `idle` told anything waiting on it that waiting would
+        work -- and after every hub restart, every pane is detached."""
+        class P:
+            state = "detached"
+            pending = ()
+            idle_s = 5
+        self.assertEqual(S.display_state(P())["state"], "paused")
 
     def test_a_state_override_wins_over_the_panes_own_field(self):
         """`snapshot()` corrects a pane whose process has exited to `dead`

@@ -11,12 +11,7 @@
  *   The pin is ONE case table, ./corral_core/display_cases.json,
  *   asserted here against the JavaScript and in corral_core/
  *   test_display_state.py against the Python. Add a case there and both
- *   languages have to answer it. Full Corral runs its own copy of this file
- *   against its own app.js, reading the same table across the sibling.
- *
- *   `gateHold` never arrives on this product -- there is no runbook gate here
- *   -- and the table exercises it anyway: one rule, two skins, no branch that
- *   only one of them has ever run.
+ *   languages have to answer it.
  *
  *   The title is the other half. `document.title` was never set, so Corral as
  *   one tab among twenty said nothing about whether an agent was blocked on a
@@ -59,13 +54,30 @@ const titles = [];
 globalThis.document = { get title() { return titles[titles.length - 1]; },
                         set title(v) { titles.push(v); } };
 
-const { displayState, setTitle, DISPLAY_LABEL, IDLE_DISPLAY_S } = new Function(`
+/* `S` and `render` are what displayTick reaches for; a counting stub stands in
+ * for render so the tick's "only when something changed" is observable. */
+const S = { panes: new Map() };
+let renders = 0;
+const D = new Function('S', 'renderHook', `
   ${constant('IDLE_DISPLAY_S')}
+  ${constant('DISPLAY_TICK_MS')}
+  ${fn('paneAge')}
   ${fn('displayState')}
   ${constant('DISPLAY_LABEL')}
+  let displaySig = '';
+  ${fn('displaySignature')}
   ${fn('setTitle')}
-  return { displayState, setTitle, DISPLAY_LABEL, IDLE_DISPLAY_S };
-`)();
+  function render() {
+    const panes = [...S.panes.values()];
+    setTitle(panes);
+    displaySig = displaySignature(panes);
+    renderHook();
+  }
+  ${fn('displayTick')}
+  return { displayState, setTitle, DISPLAY_LABEL, IDLE_DISPLAY_S,
+           DISPLAY_TICK_MS, paneAge, displayTick, render };
+`)(S, () => { renders++; });
+const { displayState, setTitle, DISPLAY_LABEL, IDLE_DISPLAY_S } = D;
 
 check(IDLE_DISPLAY_S === 1800,
       `app.js IDLE_DISPLAY_S is ${IDLE_DISPLAY_S}, the core says 1800 — the `
@@ -82,17 +94,29 @@ const onWire = (pane) => ({
   idleS: pane.idle_s || 0,
 });
 
+/* T1.6 — projection parity. Every case in the table the python answers, the
+ * browser answers identically; including a raw `needs-you` with empty pending
+ * and no gate hold, and `detached` distinct from a quiet `ready`. */
+const reached = new Set();
 for (const c of CASES.cases) {
-  const got = displayState(onWire(c.pane), c.unread);
+  const got = displayState(onWire(c.pane));
+  reached.add(got);
   check(got === c.want,
-        `${c.why}: ${JSON.stringify(c.pane)} unread=${c.unread} -> ${got}, `
+        `${c.why}: ${JSON.stringify(c.pane)} -> ${got}, `
       + `wanted ${c.want} (the python mirror of this case passes; app.js does not)`);
 }
 check(CASES.cases.length >= 15, 'the shared case table shrank');
+check(displayState({ state: 'detached', idleS: 99999 })
+        !== displayState({ state: 'ready', idleS: 99999 }),
+      'a detached pane and a quiet ready pane read the same — a human must '
+    + 'resume one of them, and nothing about the other needs anybody');
 
 /* Every state the projection can return must have a word for it — a missing
  * label renders the raw slug and looks like a bug. */
-for (const s of ['needs-you', 'working', 'your-turn', 'idle', 'dead'])
+const ALL = ['needs-you', 'working', 'your-turn', 'idle', 'paused', 'dead'];
+for (const st of ALL)
+  check(reached.has(st), `no case in the shared table produces "${st}" in JS`);
+for (const s of ALL)
   check(typeof DISPLAY_LABEL[s] === 'string' && DISPLAY_LABEL[s].length > 0,
         `DISPLAY_LABEL has no word for the display state "${s}"`);
 
@@ -165,6 +189,52 @@ check(/sub\.title = p\.state;/.test(src),
       'the roster row dropped the raw-state tooltip — the projection collapses '
     + 'six enum values into five words, and the record has to stay reachable');
 
+/* ── T1.7 the idle clock ───────────────────────────────────────────────── */
+/* A pane goes quiet and NOTHING else happens: no SSE event, no refresh. The
+ * title must still stop claiming it is your turn, on the browser's own tick. */
+check(D.DISPLAY_TICK_MS === 60000,
+      `the display tick is ${D.DISPLAY_TICK_MS} ms — the design says a minute`);
+const t0 = 1_000_000_000_000;
+const quiet = { id: 'q', state: 'ready', pending: [], idleS: 1741, _idleAt: t0 };
+check(displayState(quiet, t0) === 'your-turn', 'a 29-minute-quiet pane is not your-turn');
+check(D.paneAge(quiet, t0 + 60_000) === 1801,
+      `paneAge did not advance on the browser clock: ${D.paneAge(quiet, t0 + 60_000)}`);
+check(displayState(quiet, t0 + 60_000) === 'idle',
+      'one tick later (1801 s, nothing unread) the pane is still your-turn');
+
+/* The tick renders when — and only when — a state changed. */
+const realNow = Date.now;
+try {
+  S.panes = new Map([['q', { ...quiet }]]);
+  Date.now = () => t0;
+  D.render(); renders = 0;
+  D.displayTick();
+  check(renders === 0, 'the tick re-rendered with nothing changed — a full '
+      + 'roster rebuild every minute for no reason');
+  Date.now = () => t0 + 60_000;
+  D.displayTick();
+  check(renders === 1, 'the tick did not render when a pane aged into idle — '
+      + 'the title keeps saying "your turn" until some other pane speaks');
+  check(document.title === 'Corral',
+        `after the tick the title still reads "${document.title}"`);
+} finally { Date.now = realNow; }
+
+/* The two stamps that make the clock right: a snapshot records WHEN its idleS
+ * was true, and a live event restarts the pane's age. Without the first, age
+ * never advances; without the second, a pane that just answered is aged from
+ * a snapshot taken before it answered. */
+check(/np\._idleAt = rxAt;/.test(fn('refresh')),
+      'refresh() no longer stamps when each pane\'s idleS arrived');
+check(/p\.idleS = 0; p\._idleAt = Date\.now\(\);/.test(src),
+      'the event reducer no longer restarts a pane\'s age when it emits');
+check(/setInterval\(displayTick, DISPLAY_TICK_MS\)/.test(src),
+      'nothing schedules displayTick — the clock exists and never runs');
+
+/* No read receipt in the projection: the hub has no source for one (DESIGN-5
+ * section 7), and this browser keeps none either. */
+check(!/displayState\(p, unread\)|function displayState\(p, unread/.test(src),
+      'displayState takes an `unread` again — a guess with the face of a fact');
+
 if (bad) { console.error(`\n${bad} check(s) failed`); process.exit(1); }
 console.log(`OK — display projection: ${CASES.cases.length} shared cases, `
-          + `title, and the same-tick repaint`);
+          + `title, the same-tick repaint, and the idle clock`);

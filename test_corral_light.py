@@ -3356,6 +3356,11 @@ class TheWireCarriesTheDisplayProjection(unittest.TestCase):
         self.assertEqual(snap["state"], "dead")
         self.assertEqual(snap["display"], "dead")
 
+    def test_a_detached_pane_is_paused_on_the_wire(self):
+        """DESIGN-5 section 7: a human must resume it, which `idle` did not say."""
+        snap = self._pane("detached").snapshot()
+        self.assertEqual((snap["state"], snap["display"]), ("detached", "paused"))
+
     def test_an_old_read_ready_pane_is_idle_not_your_turn(self):
         import sessions
         p = self._pane("ready")
