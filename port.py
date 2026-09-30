@@ -313,6 +313,10 @@ def export(pane_id, state_dir=None):
     # acp_session is dropped: it cannot resume elsewhere, and carrying it
     # invites a Resume button that would silently start a NEW conversation.
     meta.pop("acp_session", None)
+    # Nor does a seat (DESIGN-5 S6, v1). A seat is an address on THIS host's
+    # wall; carried along, it would either collide with the name here or
+    # quietly claim one nobody on this host chose.
+    meta.pop("seat", None)
     # One reader (transcript.read_pane_dir): bounded, chunked, and it says
     # when it stopped early -- the old inline read pulled whole files into
     # memory before any cap applied.
@@ -419,6 +423,9 @@ def import_bundle(bundle, state_dir=None):
                         "at": _now(),
                         "turns": None, "omitted": None,
                         "imported": True},
+        # Lands unaddressable (DESIGN-5 S6): a seat is a name someone on
+        # THIS host gives a pane, never one an import brings with it.
+        "seat": None,
         "closed": True,
     }
     with (d / "events.jsonl").open("w", encoding="utf-8") as fh:

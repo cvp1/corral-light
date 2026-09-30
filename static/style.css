@@ -1100,3 +1100,10 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 /* A turn a script sent (DESIGN-5 S5): same bubble, a small mark saying so. */
 .msg.user .viatag{font-family:var(--mono);font-size:10px;letter-spacing:.6px;
   text-transform:uppercase;color:var(--faint);margin-right:8px}
+
+/* seats (DESIGN-5 S6) */
+.ph .pill.seat{cursor:pointer;color:var(--ink);border-color:var(--line2);text-transform:none;letter-spacing:0}
+.ph .pill.seat:hover{border-color:var(--ember)}
+.ph .pill.seat.withheld{color:var(--faint);border-style:dashed}
+.ph .x.seatadd{opacity:.55}
+.ph .x.seatadd:hover{opacity:1}

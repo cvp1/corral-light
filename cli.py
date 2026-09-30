@@ -376,15 +376,22 @@ def v_panes(c, a):
     if a.json:
         c.say(json.dumps([{k: p.get(k) for k in ("id", "state", "agent", "model",
                                                  "effort", "title", "cwd", "pending",
-                                                 "resumable")} for p in rows],
+                                                 "resumable", "seat", "seatWithheld")}
+                          for p in rows],
                          indent=2))
         return 0
     if not rows:
         c.say("no panes")
     for p in rows:
         pend = len(p.get("pending") or [])
+        # The seat column: `@name`, or `(@name withheld)` when another open
+        # pane holds it -- shown, so the operator can see why a peer cannot
+        # reach this one (DESIGN-5 S6).
+        seat = (f"@{p['seat']}" if p.get("seat") else
+                f"(@{p['seatWithheld']} withheld)" if p.get("seatWithheld") else "-")
         c.say(f"{p['id']}  {p.get('state', ''):<10} {p.get('agent', ''):<10} "
-              f"{(p.get('model') or '-'):<18} {('!' + str(pend)) if pend else '  '}  "
+              f"{(p.get('model') or '-'):<18} {seat:<16} "
+              f"{('!' + str(pend)) if pend else '  '}  "
               f"{p.get('title') or ''}")
     if st.get("notRestored"):
         c.say(f"({st['notRestored']} pane(s) were not restored — see the hub log)")
@@ -516,6 +523,16 @@ def _simple(route, key="pane"):
 def v_rename(c, a):
     p = c.pane(a.pane)
     c.say(c.post("/api/session/rename", {"pane": p["id"], "title": " ".join(a.title)})["title"])
+    return 0
+
+
+def v_seat(c, a):
+    """Bind a seat (DESIGN-5 S6), or unbind it with `-`. A human verb: this is
+    the operator at a terminal, holding the same pairing the browser does."""
+    p = c.pane(a.pane)
+    name = "" if a.name == "-" else a.name
+    r = c.post("/api/session/seat", {"pane": p["id"], "seat": name})
+    c.say(f"@{r['seat']}" if r.get("seat") else "unbound")
     return 0
 
 
@@ -685,6 +702,12 @@ def main(argv=None):
     s.add_argument("pane")
     s.add_argument("title", nargs="+")
     s.set_defaults(fn=v_rename)
+
+    s = sub.add_parser("seat", help="name a pane so other panes can address it "
+                                     "(`-` unbinds)")
+    s.add_argument("pane")
+    s.add_argument("name")
+    s.set_defaults(fn=v_seat)
 
     s = sub.add_parser("config", help="set model / effort / fast")
     s.add_argument("pane")

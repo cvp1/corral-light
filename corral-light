@@ -18,7 +18,7 @@
 #                               corral-light-watch timer (README).
 #   corral-light watch <pane>   ...with a pane id: follow that pane live (cli.py)
 #   corral-light panes | open | say | pending | ok | no | cancel | pause |
-#                resume | close | forget | reopen | rename | config |
+#                resume | close | forget | reopen | rename | seat | config |
 #                attach | quote     the whole pane surface from a terminal
 #                               (cli.py --help; `say` answers permissions in
 #                               the same terminal and never cancels on a timer)
@@ -41,7 +41,7 @@ case "${1:-}" in
     # bare, or with --flags, it is the outside hub watcher (watch.py).
     if [ $# -ge 2 ] && [[ "$2" != -* ]]; then exec "$PY" "$D/cli.py" "$@"; fi
     shift; exec "$PY" "$D/watch.py" "$@" ;;
-  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|later|search|digest|port)
+  panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|seat|config|attach|quote|later|search|digest|port)
     exec "$PY" "$D/cli.py" "$@" ;;
   cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
   *)     echo "usage: corral-light {pair <code>|serve|doctor|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote}"; exit 2 ;;

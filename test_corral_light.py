@@ -3648,6 +3648,14 @@ class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
                            "the empty state and the ? overlay")
 
 
+class TheSeatIsOnThePane(unittest.TestCase):
+    """DESIGN-5 S6, T6.6: the header pill, a withheld seat shown as withheld,
+    ⌘K by seat, and the dialog in the shipped page."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_seats.mjs", "the seat pill and ⌘K")
+
+
 from test_resilience import FakeLaneCase as _FakeLaneCase, wait_for as _wait_for  # noqa: E402
 
 
@@ -3694,6 +3702,8 @@ class LightTurnsHaveIds(_FakeLaneCase):
 from test_resilience import *                    # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402
+# DESIGN-5 S6: seats, the forked half (restore/reopen/from_meta/snapshot).
+from test_seats import *                         # noqa: F401,F403,E402
 
 
 if __name__ == "__main__":

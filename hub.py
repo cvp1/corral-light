@@ -681,6 +681,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "pinned":
                                    MGR.set_pinned(b.get("pane", ""),
                                                   b.get("pinned", True))})
+            if p == "/api/session/seat":
+                # A HUMAN verb (DESIGN-5 S6), behind the pairing cookie like
+                # every route below the auth check: naming a pane is how it
+                # becomes addressable by other panes, so no agent-facing path
+                # may reach this. "" unbinds.
+                pane = MGR.bind_seat(b.get("pane", ""), b.get("seat"))
+                return self._json({"ok": True, "seat": pane.seat})
             if p == "/api/session/rename":
                 t = MGR.get(b.get("pane", "")).rename(b.get("title", ""))
                 return self._json({"ok": True, "title": t})
