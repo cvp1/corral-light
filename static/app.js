@@ -1466,23 +1466,55 @@ function fmtAge(s) {
  * skins share one rule.
  */
 const IDLE_DISPLAY_S = 1800;
+// How often the browser re-asks "has any pane aged into `idle`?". The roster
+// otherwise re-renders only when an event arrives, so a pane that went quiet
+// kept `your-turn` in the tab title until some OTHER pane spoke (DESIGN-5
+// section 7, T1.7). A minute is coarse against a 30-minute threshold on
+// purpose: the tick is cheap because it renders only when a state CHANGED.
+const DISPLAY_TICK_MS = 60000;
 
-function displayState(p, unread) {
+/* Seconds since this pane last said anything, advanced by THIS browser's own
+ * clock: the hub's `idleS` at the moment the snapshot arrived, plus the time
+ * elapsed here since. Deliberately not `Date.now() - Date.parse(ev.at)`: that
+ * compares the hub's clock with the viewer's, and a phone ten minutes fast
+ * would age every pane ten minutes early. Differences on one clock cannot be
+ * skewed. The reducer resets the base whenever the pane emits. */
+function paneAge(p, nowMs) {
+  const base = p.idleS || 0;
+  if (!p._idleAt) return base;
+  return base + Math.max(0, (nowMs - p._idleAt) / 1000);
+}
+
+function displayState(p, nowMs) {
+  const now = nowMs === undefined ? Date.now() : nowMs;
   const state = p.state || 'starting';
   const pending = ((p.pending || []).length) > 0;
   const held = !!p.gateHold;
-  const since = p.idleS || 0;
   if (pending || held || state === 'needs-you') return 'needs-you';
   if (state === 'dead') return 'dead';
   if (state === 'starting' || state === 'busy' || state === 'uncertain') return 'working';
-  if (state === 'ready') return (unread || since < IDLE_DISPLAY_S) ? 'your-turn' : 'idle';
-  return 'idle';                       // detached, and anything unrecognised
+  // A detached pane never becomes ready on its own; a human must resume it.
+  if (state === 'detached') return 'paused';
+  if (state === 'ready') return paneAge(p, now) < IDLE_DISPLAY_S ? 'your-turn' : 'idle';
+  return 'idle';                       // anything unrecognised
 }
 
 const DISPLAY_LABEL = {
   'needs-you': 'needs you', 'working': 'working',
-  'your-turn': 'your turn', 'idle': 'idle', 'dead': 'dead',
+  'your-turn': 'your turn', 'idle': 'idle', 'paused': 'paused', 'dead': 'dead',
 };
+
+/* The projection of every pane as one string, so the tick can tell "nothing
+ * changed" from "a pane aged into idle" without touching the DOM. */
+let displaySig = '';
+function displaySignature(panes, nowMs) {
+  return panes.map(p => p.id + ':' + displayState(p, nowMs)).join('|');
+}
+
+function displayTick() {
+  const panes = [...S.panes.values()];
+  if (displaySignature(panes) !== displaySig) render();
+}
 
 /* The tab title: where the eye lands first when Corral is one tab among
  * twenty. What needs you outranks what is merely waiting, and a quiet wall
@@ -1502,6 +1534,7 @@ function setTitle(panes) {
 function render() {
   const panes = [...S.panes.values()];
   setTitle(panes);
+  displaySig = displaySignature(panes);
   markSeen();                  // whatever this render shows, a human can see
 
   // roster
@@ -2061,7 +2094,9 @@ async function refresh() {
   S.notRestored = d.notRestored || 0;
   S.schedule = d.schedule || [];
   const next = new Map();
+  const rxAt = Date.now();
   for (const np of (d.panes || [])) {
+    np._idleAt = rxAt;                 // idleS is as of NOW (paneAge)
     const prev = S.panes.get(np.id);
     if (!prev) { next.set(np.id, np); continue; }
     const events = prev.events || [];
@@ -2141,6 +2176,8 @@ function connect() {
       return;
     }
     p.events.push(ev);
+    // It just spoke: its age restarts on this browser's clock (paneAge).
+    p.idleS = 0; p._idleAt = Date.now();
     // The cap is a ceiling on ONE turn's live growth, not on history "load
     // earlier" (below) just fetched from disk -- the old fixed 4000 deleted
     // exactly the events a click just loaded, the instant the next live
@@ -2956,6 +2993,9 @@ async function start() {
   // never recoverable — the actual cause of "reload loses running work".
   connect();
   await refresh();
+  // The roster's own clock: a pane that goes quiet must age into `idle`
+  // with no event to prompt a render (DESIGN-5 section 7, T1.7).
+  setInterval(displayTick, DISPLAY_TICK_MS);
   // A backgrounded tab has its timers throttled, and Light has no polling
   // loop left to be throttled — every update arrives on the SSE stream. But a
   // tab that was asleep long enough for the browser to drop the connection

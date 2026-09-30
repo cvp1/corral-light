@@ -202,19 +202,22 @@ def _now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# The five words a human reads off a pane. The raw enum
+# The words a human reads off a pane. The raw enum
 # (`starting|ready|busy|needs-you|dead|detached`, plus `uncertain`) stays the
 # record and stays visible as a tooltip; this is the triage projection over it.
-DISPLAY_STATES = ("needs-you", "working", "your-turn", "idle", "dead")
+# `paused` is its own word, not a kind of `idle` (DESIGN-5 section 7): a detached
+# pane never becomes ready without a human resuming it, so filing it with panes
+# that are merely quiet would invite anything waiting on it to wait forever.
+DISPLAY_STATES = ("needs-you", "working", "your-turn", "idle", "paused", "dead")
 
 
 def _idle_seconds(pane, now=None):
     """Seconds since anything came out of this pane.
 
     Two callers keep that clock two ways: the core Pane has `last_activity` (a
-    monotonic-ish wall time), the TUI's own client-side Pane has `idle_s`
-    already differenced by the hub. Read whichever is there rather than
-    demanding one shape — see display_state's note on duck typing.
+    wall time), the TUI's own client-side Pane has `idle_s` already
+    differenced by the hub. Read whichever is there rather than demanding one
+    shape — see display_state's note on duck typing.
     """
     idle = getattr(pane, "idle_s", None)
     if idle is None:
@@ -231,32 +234,35 @@ def _idle_seconds(pane, now=None):
         return 0.0
 
 
-def display_state(pane, now=None, unread=False, state=None):
+def display_state(pane, now=None, state=None):
     """One projection of a pane onto `needs-you | working | your-turn | idle |
-    dead`, with how long it has been there.
+    paused | dead`, with how long it has been quiet.
 
     The roster, the minimized chips, the tab title and the TUI's four sections
     all answer the same question -- "does this want me?" -- and answered it
-    three different ways off the raw enum, so a `ready` pane nobody had looked
-    at in an hour read the same as one that had just finished. This is the one
-    opinion; every surface renders it and none re-derives it.
+    three different ways off the raw enum, so a `ready` pane nobody had touched
+    in an hour read the same as one that had just finished.
+
+    Built from what the HUB knows and nothing else: state, pending cards, the
+    runbook gate hold, and age. Whether a reply has been READ is deliberately
+    absent. No core source for it exists -- the TUI keeps its own `seen`, Light
+    keeps a hub-side map outside the Manager, full Corral has none -- so a
+    core `unread` would be a guess rendered with the face of a measurement.
+    Each surface overlays its own read state on top of this, if it has one.
 
     Duck-typed deliberately. It is handed a core Pane (`pending` dict,
     `_gate_hold`, `last_activity`), a Light pane (no `_gate_hold` at all) and
-    the TUI's client-side Pane (`pending` list, `gate_held` property,
-    `idle_s`), and it must not raise on an object missing any of them: a
+    test doubles, and it must not raise on an object missing any of them: a
     projection that throws takes the whole roster down with it.
 
-    `unread` is the CALLER's knowledge, not the pane's. The hub cannot know
-    what one particular human has already read, so `snapshot()` passes False
-    and the TUI passes its own `seen` comparison. `state` overrides the pane's
-    own field for the one caller that has already corrected it -- `snapshot()`
-    reports a process that exited as `dead` without writing that back.
+    `state` overrides the pane's own field for the one caller that has already
+    corrected it -- `snapshot()` reports a process that exited as `dead`
+    without writing that back.
     """
     state = state or getattr(pane, "state", None) or "starting"
     pending = getattr(pane, "pending", None) or ()
-    # `_gate_hold` is full Corral's runbook park; the TUI derives the same fact
-    # from the wire as `gate_held`. Light has neither and reads False.
+    # `_gate_hold` is full Corral's runbook park; `gate_held` is the same fact
+    # on a client-side double. Light has neither and reads False.
     held = bool(getattr(pane, "_gate_hold", False)
                 or getattr(pane, "gate_held", False))
     since = _idle_seconds(pane, now)
@@ -269,16 +275,16 @@ def display_state(pane, now=None, unread=False, state=None):
         out = "dead"
     elif state in ("starting", "busy", "uncertain"):
         out = "working"
+    elif state == "detached":
+        out = "paused"
     elif state == "ready":
-        # An unread reply outranks the clock: a pane that answered three hours
-        # ago and has not been read still wants the human.
-        out = "your-turn" if (unread or since < IDLE_DISPLAY_S) else "idle"
+        out = "your-turn" if since < IDLE_DISPLAY_S else "idle"
     else:
-        # `detached`, and any enum value a future version adds. NOT `working`:
-        # claiming a pane we cannot classify is making progress is the
-        # flattering answer, and the raw state is still rendered beside this.
+        # An enum value a future version adds. NOT `working`: claiming a pane
+        # we cannot classify is making progress is the flattering answer, and
+        # the raw state is still rendered beside this.
         out = "idle"
-    return {"state": out, "since_s": int(since), "unread": bool(unread)}
+    return {"state": out, "since_s": int(since)}
 
 
 def _group_of(key):

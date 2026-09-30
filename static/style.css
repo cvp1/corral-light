@@ -195,6 +195,9 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .rit.d-idle .dot{background:var(--line2);animation:none}
 .rit.d-idle{opacity:.72}
 .rit.d-idle .s{color:var(--faint)}
+/* paused: restored, not running — only a human resume brings it back. Hollow
+   dot, full opacity: it is waiting on YOU, just not urgently. */
+.rit.d-paused .dot{background:transparent;border:1px solid var(--line2);animation:none}
 .pane.detached{opacity:.9}
 .minchip.detached .d{background:var(--line2)}
 .rit .txt{min-width:0;flex:1}
@@ -266,6 +269,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip.d-dead .d{background:var(--rust);animation:none}
 .minchip.d-idle .d{background:var(--line2);animation:none}
 .minchip.d-idle{opacity:.78}
+.minchip.d-paused .d{background:transparent;border:1px solid var(--line2);animation:none}
 .empty{grid-column:1/-1;display:grid;place-items:center;height:70vh;text-align:center;color:var(--dim)}
 .empty h2{font-family:var(--serif);font-size:24px;color:var(--ink);margin:0 0 8px;font-weight:400}
 /* The first-run empty state: one thing to press, one way to get around, and
@@ -325,6 +329,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .ph .pill.st.d-dead{color:var(--rust);
   border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
 .ph .pill.st.d-idle{color:var(--faint);border-style:dashed}
+.ph .pill.st.d-paused{color:var(--dim);border-style:dashed}
 .ph .pill.ctx{color:var(--dim)}
 .ph .pill.ctx.warn{color:var(--rust);border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
 .ph .x{color:var(--faint);font-size:15px;padding:0 3px}
