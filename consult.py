@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import argparse
 import http.client
-import ipaddress
 import json
 import os
 import sys
@@ -81,13 +80,14 @@ MAX_TEXT = 300_000              # chars of one answer kept; the pane log holds t
 MAX_LANES = 6                   # a fan-out wider than this is not a consultation
 PAIR_WAIT_S = 120               # how long to wait for a human `corral-light pair` elsewhere
 # auth.approve's answer when the code is not in the pairing store THIS
-# process reads. For a hub on loopback the hub's store is on this host and it
-# minted the code a moment ago, so "unknown" means this shell's CORRAL_LIGHT_STATE
-# is not the hub's -- a private hub driven from a shell without its scratch
-# state. It hung the DESIGN-5 S12 live run for the whole PAIR_WAIT_S
-# (2026-09-30), so that case fails fast. A hub on another address may be
-# another host, where "unknown" is the normal case and a human there can still
-# approve: that keeps the wait (reviewer, 2026-09-30).
+# process reads. When the hub says it runs on this host (auth.host_id), it
+# minted the code a moment ago into a store on this machine, so "unknown" means
+# this shell's CORRAL_LIGHT_STATE is not the hub's -- a private hub driven from a
+# shell without its scratch state. That hung the DESIGN-5 S12 live run for the
+# whole PAIR_WAIT_S (2026-09-30), so it fails fast. A hub on another host --
+# including one behind an ssh -L tunnel to 127.0.0.1, which a URL cannot tell
+# from a local hub -- or one too old to say, keeps the wait: a human there can
+# still approve (reviewer, 2026-09-30).
 NOT_IN_OUR_STORE = "unknown or expired code"
 HTTP_TIMEOUT_S = 30
 HANDSHAKE_S = 200               # /api/session/new blocks on the adapter's ACP
@@ -224,13 +224,13 @@ def _approve_locally(code):
         return False, f"{type(e).__name__}: {e}", None
 
 
-def _is_loopback(host):
-    if (host or "").lower() == "localhost":
-        return True
+def _local_host_id():
     try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+        sys.path.insert(0, str(HERE))
+        import auth                                     # noqa: WPS433 (in-repo)
+        return auth.host_id()
+    except Exception:                                   # noqa: BLE001
+        return None
 
 
 def pair(hub):
@@ -239,7 +239,8 @@ def pair(hub):
         raise ConsultError(f"could not mint a pairing code: {obj}")
     code = obj["code"]
     ok, msg, store = _approve_locally(code)
-    if not ok and msg == NOT_IN_OUR_STORE and _is_loopback(hub.host):
+    same_host = bool(obj.get("host")) and obj.get("host") == _local_host_id()
+    if not ok and msg == NOT_IN_OUR_STORE and same_host:
         raise ConsultError(
             f"pairing code {code} is not in this client's pairing store ({store}), "
             f"so this shell's CORRAL_LIGHT_STATE is most likely not the hub's. Re-run with "

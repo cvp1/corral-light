@@ -290,10 +290,11 @@ class CookieScope(unittest.TestCase):
 class PairHub:
     """/api/pair/new and /api/pair/claim only; counts every claim poll."""
 
-    def __init__(self, code, claim_ok_after=None, url="http://127.0.0.1:18231"):
+    def __init__(self, code, claim_ok_after=None, url="http://127.0.0.1:18231",
+                 host=None):
         self.code, self.claims, self.claim_ok_after = code, 0, claim_ok_after
+        self.host_tag = host
         self.url = url
-        self.host = urllib.parse.urlsplit(url).hostname
         self.token = None
 
     def _do(self, method, path, body=None, timeout=None):
@@ -301,7 +302,10 @@ class PairHub:
             def getheader(self, name):
                 return f"{consult.COOKIE_NAME}=tok-ok; Path=/"
         if path == "/api/pair/new":
-            return 200, R(), {"code": self.code}
+            obj = {"code": self.code}
+            if self.host_tag is not None:
+                obj["host"] = self.host_tag
+            return 200, R(), obj
         self.claims += 1
         if self.claim_ok_after is not None and self.claims >= self.claim_ok_after:
             return 200, R(), {"status": "ok"}
@@ -334,7 +338,8 @@ class PairingAgainstAnotherStore(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_a_code_our_store_never_saw_fails_fast_and_says_why(self):
-        hub = PairHub("ABC-DEF")               # minted by a hub whose store is not ours
+        # This host's hub, a store this shell does not read.
+        hub = PairHub("ABC-DEF", host=self.auth.host_id())
         t = time.monotonic()
         with self.assertRaises(consult.ConsultError) as cm:
             consult.pair(hub)
@@ -352,21 +357,29 @@ class PairingAgainstAnotherStore(unittest.TestCase):
         consult.pair(hub)
         self.assertEqual(hub.token, "tok-ok")
 
-    def test_a_remote_hub_still_waits_for_its_human(self):
-        # Another host: this client's own store never saw the code -- the
-        # normal case there -- and a human on the hub host approves it. Real
-        # local approval, separate stores: it must poll, not exit.
-        hub = PairHub("ABC-DEF", claim_ok_after=2, url="http://192.0.2.77:8099")
+    def test_a_tunnelled_hub_on_another_host_still_waits(self):
+        # ssh -L to another host: the URL is 127.0.0.1, the store is over
+        # there, this client's own store never saw the code, and a human
+        # there approves it. Real local approval, separate stores: it polls.
+        hub = PairHub("ABC-DEF", claim_ok_after=2, url="http://127.0.0.1:8098",
+                      host="0123456789abcdef")
         consult.pair(hub)
         self.assertEqual(hub.claims, 2)
         self.assertEqual(hub.token, "tok-ok")
         self.assertEqual(consult._load_token(hub.url), "tok-ok")
 
-    def test_loopback_is_decided_by_address(self):
-        for h in ("127.0.0.1", "127.9.9.9", "::1", "localhost", "LOCALHOST"):
-            self.assertTrue(consult._is_loopback(h), h)
-        for h in ("192.0.2.77", "100.64.0.1", "linux-host", "", None):
-            self.assertFalse(consult._is_loopback(h), h)
+    def test_a_hub_too_old_to_name_its_host_still_waits(self):
+        hub = PairHub("ABC-DEF", claim_ok_after=2)          # no "host" field
+        consult.pair(hub)
+        self.assertEqual(hub.claims, 2)
+        self.assertEqual(hub.token, "tok-ok")
+
+    def test_the_host_tag_is_stable_and_names_nothing(self):
+        import socket
+        tag = self.auth.host_id()
+        self.assertEqual(tag, self.auth.host_id())
+        self.assertRegex(tag, r"^[0-9a-f]{16}$")
+        self.assertNotIn(socket.gethostname().lower(), tag)
 
     def test_a_genuine_wait_for_a_human_still_waits(self):
         # Not this account (or auth would not import): a human elsewhere can
