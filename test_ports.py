@@ -74,6 +74,24 @@ class Roles(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 p(bad)
 
+    def test_tomlmini_parity_on_the_rig_template_and_role_files(self):
+        """DESIGN-5 S12, T12.5: the strict reader and tomllib agree, byte for
+        byte, on every file Corral writes -- the rig template, a role file
+        from create(), and a rig from rigs.compose with hostile values."""
+        import tomllib
+        from corral_core import rigs, tomlmini
+        texts = [(ROOT / "corral_core" / "rig.example.toml").read_text()]
+        self.roles.create(dict(self.fields, id="parity",
+                               description='a "quoted" role, tab\there'),
+                          rdir=self.dir)
+        texts.append((self.dir / "parity.toml").read_text())
+        texts.append(rigs.compose([{"id": "a", "agent": "claude", "cwd": "/tmp",
+                                    "prompt": 'x"\n[[seat]]\nid = "evil"\u0007\u00e9\\'}]))
+        for t in texts:
+            self.assertEqual(tomlmini.loads_strict(t), tomllib.loads(t), t[:80])
+        # a newline in a value stays in the value; it never starts a table
+        self.assertEqual(len(tomlmini.loads_strict(texts[-1])["seat"]), 1)
+
     def test_a_newline_cannot_inject_a_key(self):
         f = dict(self.fields, id="inject", lane="", posture="",
                  description='quoted" schedule = "0 6 * * *')
