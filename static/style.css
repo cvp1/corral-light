@@ -270,7 +270,10 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip.d-idle .d{background:var(--line2);animation:none}
 .minchip.d-idle{opacity:.78}
 .minchip.d-paused .d{background:transparent;border:1px solid var(--line2);animation:none}
-.empty{grid-column:1/-1;display:grid;place-items:center;height:70vh;text-align:center;color:var(--dim)}
+.empty{grid-column:1/-1;display:grid;place-items:center;height:70vh;text-align:center;color:var(--dim);
+  /* Rows packed in the middle, not spread over 70vh: with three lines the
+     first-run state read as three unrelated fragments (S3 live pass). */
+  align-content:center;row-gap:6px}
 .empty h2{font-family:var(--serif);font-size:24px;color:var(--ink);margin:0 0 8px;font-weight:400}
 /* The first-run empty state: one thing to press, one way to get around, and
    where the transcripts live. Generous spacing because this is the whole
