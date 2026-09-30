@@ -632,6 +632,23 @@ function renderLog(p) {
           log.appendChild(el('div', 'sys', `message ${who}: ${what}`));
         }
         break;
+      // ask_human: the agent's question for its human. Its own block, labelled
+      // as the agent asking -- never the human bubble, never a system line.
+      case 'question':
+        flush();
+        {
+          const b = el('div', 'msg question');
+          b.appendChild(el('div', 'qwho', d.replaces ? 'the agent asks you, replacing its earlier question'
+                                                     : 'the agent asks you'));
+          b.appendChild(el('div', 'qtext', d.text || ''));
+          log.appendChild(b);
+        }
+        break;
+      case 'question_cleared':
+        flush();
+        log.appendChild(el('div', 'sys', d.reason === 'answered'
+          ? 'question answered' : `question closed — ${d.reason || 'unknown'}`));
+        break;
       case 'tool':
         flushText();
         if (d.id) xseen.add(d.id);
@@ -831,9 +848,10 @@ function buildPane(p) {
   const root = el('div', 'pane');
   root.dataset.pane = p.id;
   const head = el('div', 'ph');
+  const ask = el('div', 'askslot');       // ask_human's banner, when open
   const log = el('div', 'log');
   const comp = el('div', 'compslot');
-  root.append(head, log, comp);
+  root.append(head, ask, log, comp);
   log.onscroll = () => {
     // "Am I pinned to the bottom?" is the only scroll fact worth keeping, and
     // with a persistent log element the browser preserves the rest for free.
@@ -852,7 +870,7 @@ function buildPane(p) {
       updatePane(rec, p);
     }
   };
-  return { root, head, log, comp, kind: null, pinned: true };
+  return { root, head, ask, log, comp, kind: null, pinned: true };
 }
 
 function composerKind(p) {
@@ -878,11 +896,13 @@ function updatePane(rec, p) {
   // offset can silently re-anchor onto different text — a copy that lies.
   const live = liveLogSelection();
   const hold = SEL.down === p.id || (live && live.log === rec.log);
-  rec.root.className = 'pane' + (p.pending.length ? ' attn' : '') +
+  rec.root.className = 'pane' + ((p.pending.length || p.question) ? ' attn' : '') +
                        (p.state === 'dead' ? ' dead' : '') +
                        (hold ? ' selhold' : '') +
                        (isTerm(p) ? ' term' : '');
   rec.head.replaceChildren(...paneHead(p).childNodes);
+  const qb = questionBanner(p);
+  if (rec.ask) rec.ask.replaceChildren(...(qb ? [qb] : []));
 
   if (!hold) {
     const wasPinned = rec.pinned;
@@ -1606,11 +1626,16 @@ function displayState(p, nowMs) {
   const state = p.state || 'starting';
   const pending = ((p.pending || []).length) > 0;
   const held = !!p.gateHold;
-  if (pending || held || state === 'needs-you') return 'needs-you';
+  // An agent's open ask_human question: needs-you whatever else is true,
+  // including a pane paused by a hub restart (the question is still open).
+  const asked = !!p.question;
+  if (pending || held || asked || state === 'needs-you') return 'needs-you';
   if (state === 'dead') return 'dead';
   if (state === 'starting' || state === 'busy' || state === 'uncertain') return 'working';
   // A detached pane never becomes ready on its own; a human must resume it.
   if (state === 'detached') return 'paused';
+  // A turn another pane's agent or a rig started is not the human's turn.
+  if (state === 'ready' && AGENT_ORIGIN_VIAS.includes(p.turnVia)) return 'idle';
   if (state === 'ready') return paneAge(p, now) < IDLE_DISPLAY_S ? 'your-turn' : 'idle';
   return 'idle';                       // anything unrecognised
 }
@@ -1619,6 +1644,39 @@ const DISPLAY_LABEL = {
   'needs-you': 'needs you', 'working': 'working',
   'your-turn': 'your turn', 'idle': 'idle', 'paused': 'paused', 'dead': 'dead',
 };
+
+/* Where a turn came from when the human did not start it at the glass: the
+ * core's AGENT_ORIGIN_VIAS (corral_core/sessions.py), pinned by the shared
+ * display_cases.json. A `ready` pane whose last turn came this way is `idle`. */
+const AGENT_ORIGIN_VIAS = ['peer', 'rig'];
+const ASK_PREVIEW_CHARS = 80;           // the roster line; the banner shows it all
+
+/* ask_human: the agent's open question, as the pane's banner. The AGENT's
+ * words, labelled as the agent's -- never styled as the human's bubble and
+ * never as a system line (P20). textContent only. null when none is open. */
+function questionBanner(p) {
+  const q = p.question;
+  if (!q || !q.text) return null;
+  const b = el('div', 'qbanner');
+  const who = p.seat ? '@' + p.seat : 'the agent';
+  b.appendChild(el('div', 'qwho', `${who} asks you — answer by sending a message`));
+  b.appendChild(el('div', 'qtext', q.text));
+  b.title = 'Raised by this pane\'s agent with ask_human. It stays until you '
+          + 'send this pane a message, or the pane closes or stops.';
+  return b;
+}
+
+/* The roster's one-line preview of the same question. */
+function askLine(p) {
+  const q = p.question;
+  if (!q || !q.text) return null;
+  const flat = String(q.text).replace(/\s+/g, ' ').trim();
+  const short = flat.length > ASK_PREVIEW_CHARS
+    ? flat.slice(0, ASK_PREVIEW_CHARS - 1) + '…' : flat;
+  const line = el('div', 'ask', 'asks: ' + short);
+  line.title = q.text;
+  return line;
+}
 
 /* The projection of every pane as one string, so the tick can tell "nothing
  * changed" from "a pane aged into idle" without touching the DOM. */
@@ -1713,6 +1771,8 @@ function render() {
     // states is this" is a real question when a pane looks wedged.
     sub.title = p.state;
     t.appendChild(sub);
+    const ask = askLine(p);            // ask_human: the question, on the row
+    if (ask) t.appendChild(ask);
     it.appendChild(t);
 
     // A minimized pane blocked on a permission must still SHOW that it is —
@@ -2317,11 +2377,15 @@ function connect() {
       refresh().catch(() => {});          // server owns what the state is now
     }
     if (ev.kind === 'paused') { p.state = 'detached'; p.pending = []; }
-    if (ev.kind === 'user') p.state = 'busy';
+    if (ev.kind === 'user') { p.state = 'busy'; p.turnVia = d.via || null; }
     // A peer message starts a turn exactly as a human's does; without this
     // the roster and title said `your turn` for the whole of a peer-driven
     // turn while the server said busy (DESIGN-5 section 7, T7.18).
-    if (ev.kind === 'peer') p.state = 'busy';
+    if (ev.kind === 'peer') { p.state = 'busy'; p.turnVia = 'peer'; }
+    // ask_human: the agent raised (or replaced) its question; a human turn,
+    // a close or the agent's death closed it. The server owns both.
+    if (ev.kind === 'question') p.question = { text: d.text, at: d.at, turn: d.turn };
+    if (ev.kind === 'question_cleared') p.question = null;
     if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';
     if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; }
