@@ -3767,6 +3767,8 @@ from test_ports import *                         # noqa: F401,F403,E402
 from test_seats import *                         # noqa: F401,F403,E402
 # DESIGN-5 S7: every consumer of the `peer` kind (port pack, index, digest).
 from test_peer_consumers import ThePortPack, TheIndex   # noqa: F401,E402
+# DESIGN-5 S8: the seat tools' routes on THIS hub, over a real socket.
+from test_seat_routes import Routes as SeatRoutes      # noqa: F401,E402
 
 
 if __name__ == "__main__":

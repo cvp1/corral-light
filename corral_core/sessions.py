@@ -224,6 +224,14 @@ MAX_PEER_HOPS = 4               # A -> B -> A -> B, then a human must speak:
                                 # two seats cannot converse forever with no
                                 # human turn between them (section 7, blocker 1)
 _PEER_FENCE_RE = re.compile(r"<\s*/?\s*corral-peer", re.IGNORECASE)
+# The Corral-native MCP server (DESIGN-5 S8). Its name is reserved: never
+# `acp` (the Claude adapter claims that one) and never a registry entry's.
+NATIVE_MCP_NAME = "corral-seats"
+NATIVE_MCP_ENV = "CORRAL_NATIVE_MCP"   # "0" = do not offer it (both products)
+# Where the MCP child dials the hub. None until a hub has bound its port (the
+# hub sets it); with no hub there is nothing to dial, so nothing is offered.
+PEER_HUB_URL = None
+PEER_TOKEN_HEADER = "X-Corral-Pane-Token"
 PEER_FENCE = "corral-peer"      # the envelope tag; a body containing it is
                                 # refused, so the envelope cannot be forged
                                 # from inside (section 7, blocker 2)
@@ -324,6 +332,21 @@ def peer_envelope(from_label, to_seat, body, nonce):
             f'untrusted="true" nonce="{nonce}">\n'
             f"{body}\n"
             f"</{PEER_FENCE}>")
+
+
+def native_mcp_descriptor(pane, hub_url, token):
+    """The stdio descriptor for the seat tools, in ACP's McpServerStdio shape
+    (`env` is an array of {name, value}, required even when empty).
+
+    The pane id rides as CC_RUNBOOK_SESSION -- the variable a pane's own
+    process already carries in full Corral -- rather than a second name for
+    the same fact (section 7.8). It is a LABEL; the hub decides the sender
+    from the token alone."""
+    return {"name": NATIVE_MCP_NAME, "command": sys.executable,
+            "args": [str(Path(__file__).with_name("seat_mcp.py"))],
+            "env": [{"name": "CC_RUNBOOK_SESSION", "value": str(pane.id)},
+                    {"name": "CORRAL_PANE_TOKEN", "value": token},
+                    {"name": "CORRAL_HUB_URL", "value": hub_url}]}
 
 
 def peer_hop_in(pane):
@@ -874,7 +897,30 @@ class PaneBase:
 
     def _mcp_servers(self):
         registry = getattr(self.mgr, "mcp", None)
-        return registry.session_servers() if registry else []
+        servers = registry.session_servers() if registry else []
+        native = self._native_mcp()
+        if native is None:
+            return servers
+        # The reserved name is ours. A registry entry that happens to share it
+        # would otherwise sit beside the real one and be the one an agent
+        # called -- a server claiming to be Corral's own.
+        return [d for d in servers if d.get("name") != NATIVE_MCP_NAME] + [native]
+
+    def _native_mcp(self):
+        """The seat tools for THIS spawn, or None when they are not offered:
+        opted out, no hub to dial, an SSH shell, or a lane whose adapter takes
+        no MCP servers (it can still RECEIVE a peer message; section 7.10).
+        Called at session/new and session/load, so every spawn mints a fresh
+        token and the previous one stops working."""
+        if os.environ.get(NATIVE_MCP_ENV) == "0" or not PEER_HUB_URL:
+            return None
+        spec = AGENTS.get(self.agent) or {}
+        if str(self.agent).startswith("host:") or spec.get("mcp") is False:
+            return None
+        mint = getattr(self.mgr, "mint_pane_token", None)
+        if mint is None:
+            return None
+        return native_mcp_descriptor(self, PEER_HUB_URL, mint(self))
 
     def _absorb_config(self, options):
         """Record what the agent says its config IS -- never what we asked for.
@@ -1404,6 +1450,66 @@ class ManagerBase:
                         "why": f"the message could not be queued: {e}"}
         return {"result": "delivered", "turn": tid, "hop": hop,
                 "to_seat": to_seat, "to_pane": dst.id}
+
+    # ── the seat tools' hub side (DESIGN-5 S8) ────────────────────────────
+
+    def mint_pane_token(self, pane):
+        """A fresh token for this pane's CURRENT spawn; the previous one for
+        the same pane stops working. In memory only -- never in meta.json,
+        never on disk -- so a restart revokes every token at once."""
+        import secrets
+        with self._lock:
+            book = self.__dict__.setdefault("_pane_tokens", {})
+            for t in [t for t, pid in book.items() if pid == pane.id]:
+                del book[t]
+            token = secrets.token_urlsafe(24)
+            book[token] = pane.id
+        return token
+
+    def pane_for_token(self, token):
+        """The OPEN pane a token was minted for, or None: unknown, from an
+        earlier spawn, or the pane has since closed."""
+        if not isinstance(token, str) or not token:
+            return None
+        pid = self.__dict__.get("_pane_tokens", {}).get(token)
+        return self.panes.get(pid) if pid else None
+
+    def seat_list(self):
+        """What a pane's agent may know about the others: seat, display state,
+        lane, and whether it was offered the seat tools. No titles, no cwd,
+        no transcript -- an address book, not a window."""
+        out = []
+        for p in list(self.panes.values()):
+            if not p.seat or p.seat_withheld:
+                continue
+            spec = AGENTS.get(p.agent) or {}
+            out.append({"seat": p.seat,
+                        "display": display_state(p)["state"],
+                        "lane": p.agent,
+                        "tool": bool(PEER_HUB_URL) and not p.agent.startswith("host:")
+                                and spec.get("mcp") is not False
+                                and os.environ.get(NATIVE_MCP_ENV) != "0"})
+        out.sort(key=lambda r: r["seat"])
+        return out
+
+    def peer_http(self, method, path, token, body=None):
+        """The two routes the seat tools call, as (status, json).
+
+        The TOKEN decides who is sending -- the pane it was minted for -- and
+        nothing in the body can say otherwise: only `seat` and `text` are
+        read. Each hub calls this from a branch that runs BEFORE its cookie
+        check and never consults the cookie (section 7.8)."""
+        pane = self.pane_for_token(token)
+        if pane is None:
+            return 401, {"error": "unknown or expired pane token — tokens are "
+                                  "minted per spawn and do not survive a "
+                                  "restart of the pane or the hub"}
+        if method == "GET" and path == "/api/peer/seats":
+            return 200, {"you": pane.seat, "seats": self.seat_list()}
+        if method == "POST" and path == "/api/peer/send":
+            b = body if isinstance(body, dict) else {}
+            return 200, self.deliver_peer(pane.id, b.get("seat"), b.get("text"))
+        return 404, {"error": "no such peer route"}
 
     # ── seats (DESIGN-5 S6) ──────────────────────────────────────────────
 
