@@ -99,19 +99,10 @@ _now = _core._now
 _CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
 
 
-class _QueuedText(str):
-    """A queued prompt that remembers its ledger turn id.
-
-    A str subclass so every existing reader of `_queue` — the core's pause()
-    counting it, notes quoting it, tests seeding it with plain strings —
-    keeps working unchanged; `turn` rides along for the ledger (P0-ledger).
-    """
-    turn = None
-
-    def __new__(cls, text, turn):
-        s = super().__new__(cls, text)
-        s.turn = turn
-        return s
+# The queued-prompt type is the core's since DESIGN-5 S5; the old name stays
+# so nothing that imported it from here breaks.
+_QueuedText = _core.QueuedText
+TURN_VIAS = _core.TURN_VIAS
 
 MAX_ROSTER = MAX_PANES * 5      # ALL panes tracked, live or detached. MAX_PANES
                                  # only counts live ones, so repeated
@@ -1639,7 +1630,10 @@ class Pane(_core.PaneBase):
     def _config_dir(self):
         return seed_config_dir(self.dir / "config", self.posture)
 
-    def send(self, text):
+    def send(self, text, via=None):
+        # `via` first: a script that declared an origin nobody allows is
+        # refused before anything is resumed, titled or queued.
+        via = _core.check_via(via)
         # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
         # stopped means "bring it back", exactly as it does for a paused one.
         # resume() parks — never sends — whatever was queued when it died.
@@ -1700,8 +1694,14 @@ class Pane(_core.PaneBase):
             except OSError as e:
                 raise ValueError(f"could not record this turn durably, so it "
                                  f"was not accepted: {e}")
+            # The null ledger (a pane with no durable record) returns no id;
+            # a turn still needs one for its `turn_end` to be matched to it.
+            tid = tid or _core.new_turn_id()
             self._queue.append(_QueuedText(text, tid))
-            self.emit("user", {"text": text, "turn": tid})
+            user = {"text": text, "turn": tid}
+            if via:
+                user["via"] = via
+            self.emit("user", user)
             if text == "/clear":
                 # The SDK special-cases this literal text: it resets ITS OWN
                 # context and emits a `conversation_reset` notification that
