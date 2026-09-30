@@ -79,6 +79,12 @@ POLL_S = 2.0
 MAX_TEXT = 300_000              # chars of one answer kept; the pane log holds the rest
 MAX_LANES = 6                   # a fan-out wider than this is not a consultation
 PAIR_WAIT_S = 120               # how long to wait for a human `corral-light pair` elsewhere
+# auth.approve's answer when the code is not in the pairing store THIS
+# process reads. The hub minted the code a moment ago, so "unknown" here means
+# this client and the hub keep different stores -- a private hub driven from
+# a shell without its scratch CORRAL_LIGHT_STATE. No wait fixes that: it hung the
+# DESIGN-5 S12 live run for the whole PAIR_WAIT_S (2026-09-30), so fail fast.
+NOT_IN_OUR_STORE = "unknown or expired code"
 HTTP_TIMEOUT_S = 30
 HANDSHAKE_S = 200               # /api/session/new blocks on the adapter's ACP
                                 # handshake (acp.HANDSHAKE_TIMEOUT = 180); a
@@ -203,14 +209,15 @@ def _save_token(token, url):
 def _approve_locally(code):
     """The `corral-light pair` step, done by this process. Works only when
     this process IS the operator's account on the hub host — auth.py's whole
-    gate."""
+    gate.
+    Returns (ok, msg, the pairing store it read — None if it read none)."""
     try:
         sys.path.insert(0, str(HERE))
         import auth                                     # noqa: WPS433 (in-repo)
         ok, msg = auth.approve(code)
-        return bool(ok), msg
+        return bool(ok), msg, str(auth.STATE)
     except Exception as e:                              # noqa: BLE001
-        return False, f"{type(e).__name__}: {e}"
+        return False, f"{type(e).__name__}: {e}", None
 
 
 def pair(hub):
@@ -218,7 +225,13 @@ def pair(hub):
     if status != 200 or not obj.get("code"):
         raise ConsultError(f"could not mint a pairing code: {obj}")
     code = obj["code"]
-    ok, msg = _approve_locally(code)
+    ok, msg, store = _approve_locally(code)
+    if not ok and msg == NOT_IN_OUR_STORE:
+        raise ConsultError(
+            f"pairing code {code} is not in this client's pairing store ({store}), "
+            f"so this shell's CORRAL_LIGHT_STATE is most likely not the hub's. Re-run with "
+            f"the hub's CORRAL_LIGHT_STATE; the step this replaces, on the hub host:  "
+            f"corral-light pair {code}")
     if not ok:
         print(f"consult: pairing needs you — on the hub host run:  corral-light pair {code}"
               f"  ({msg})", file=sys.stderr, flush=True)
