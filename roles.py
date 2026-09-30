@@ -33,9 +33,9 @@ WHAT CHANGED IN THE PORT
       enforced.
     * Roles live in the operator's config dir (CORRAL_LIGHT_ROLES_DIR,
       default ~/.config/corral-light/roles), not in this public repository.
-    * TOML: `tomllib` where it exists (3.11+); on 3.9/3.10 a strict reader for
-      the only shape a role file has — flat `key = "string"` / integer lines
-      and comments — that REFUSES anything else rather than guessing.
+    * TOML: `tomllib` where it exists (3.11+); on 3.9/3.10 the strict reader
+      in corral_core/tomlmini.py (shared with rigs since DESIGN-5 S12), which
+      REFUSES anything outside the shapes Corral writes rather than guessing.
 
 BOUNDS (P8): MAX_ROLES files, MAX_ROLE_BYTES per TOML, MAX_PREAMBLE_BYTES per
 preamble, and MIN_ASK_ROOM characters left under the tightest prompt cap.
@@ -117,44 +117,13 @@ class RoleError(ValueError):
 
 
 # ── TOML, 3.9-safe ───────────────────────────────────────────────────────
-_LINE = re.compile(r'^([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(.+?)\s*$')
+# One reader for every Corral file (DESIGN-5 S12): tomllib where it exists, the
+# strict reader in corral_core/tomlmini.py otherwise. The names below are kept
+# so nothing that called them changes.
+from corral_core import tomlmini as _tomlmini              # noqa: E402
 
-
-def _parse_toml(text):
-    try:
-        import tomllib                                  # 3.11+
-    except ImportError:
-        return _parse_flat(text)
-    return tomllib.loads(text)
-
-
-def _parse_flat(text):
-    """The 3.9/3.10 reader: flat `key = "string" | integer` lines only."""
-    out = {}
-    for n, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = _LINE.match(line)
-        if not m:
-            raise ValueError(f"line {n}: only `key = value` lines are allowed "
-                             f"in a role file on this Python")
-        key, val = m.group(1), m.group(2)
-        if key in out:
-            raise ValueError(f"line {n}: duplicate key {key!r}")
-        if val.startswith('"'):
-            try:
-                s = json.loads(val)             # TOML basic strings ⊂ JSON strings
-            except ValueError:
-                raise ValueError(f"line {n}: not a plain quoted string") from None
-            if not isinstance(s, str):
-                raise ValueError(f"line {n}: not a string")
-            out[key] = s
-        elif re.fullmatch(r"-?\d+", val):
-            out[key] = int(val)
-        else:
-            raise ValueError(f"line {n}: value must be a quoted string or an integer")
-    return out
+_parse_toml = _tomlmini.loads
+_parse_flat = _tomlmini.loads_strict
 
 
 # ── the role object ──────────────────────────────────────────────────────
@@ -396,21 +365,7 @@ def resolvable_on(role_id, agents=None, rdir=None):
 
 
 # ── creating a role from fields ──────────────────────────────────────────
-def _toml_basic(value):
-    """One TOML basic string; the whole injection defence (a newline must never
-    be able to introduce a refused key such as `schedule`)."""
-    simple = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
-              "\n": "\\n", "\f": "\\f", "\r": "\\r"}
-    out = ['"']
-    for ch in value:
-        if ch in simple:
-            out.append(simple[ch])
-        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
-            out.append("\\u%04X" % ord(ch))
-        else:
-            out.append(ch)
-    out.append('"')
-    return "".join(out)
+_toml_basic = _tomlmini.basic
 
 
 def _clean_field(name, value, allow_newlines=False):

@@ -104,6 +104,26 @@ class Routes(unittest.TestCase):
         c.close()
         return r.status, out
 
+    def test_rig_routes_are_behind_the_pairing_cookie(self):
+        """DESIGN-5 S12: 401 before routing -- no cookie, or only a pane's
+        token, reaches no rig verb. Paired, a refused rig starts nothing and
+        says why, and `save` writes the seated panes."""
+        tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])
+        for token in (None, tok):
+            self.assertEqual(self.req("GET", "/api/session/rigs", token=token)[0], 401)
+            for verb in ("save", "up", "rm"):
+                st, _ = self.req("POST", f"/api/session/rigs/{verb}", {"name": "x"}, token=token)
+                self.assertEqual(st, 401, (verb, token))
+        st, out = self.req("POST", "/api/session/rigs/up", {"name": "nosuch"}, cookie=True)
+        self.assertEqual(st, 400, out)
+        self.assertIn("no rig 'nosuch'", out["refused"][0])
+        st, out = self.req("POST", "/api/session/rigs/save", {"name": "wall"}, cookie=True)
+        self.assertEqual((st, out.get("seats")), (200, ["author", "reviewer"]), out)
+        st, out = self.req("GET", "/api/session/rigs", cookie=True)
+        self.assertEqual(out["rigs"], [{"name": "wall", "seats": ["author", "reviewer"]}])
+        st, out = self.req("POST", "/api/session/rigs/rm", {"name": "wall"}, cookie=True)
+        self.assertEqual((st, out.get("removed")), (200, "wall"), out)
+
     def test_no_token_unknown_token_and_a_cookie_is_not_a_token(self):
         for tok, cookie in ((None, False), ("nope", False), (None, True)):
             st, _ = self.req("POST", "/api/peer/send", {"seat": "reviewer", "text": "x"},

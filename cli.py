@@ -13,6 +13,7 @@
     corral-light config <pane> <id> <value>    model / effort / fast
     corral-light attach <pane> <note-id>       composer text for a note (printed, not sent)
     corral-light quote <from> [<to>]           composer text quoting a pane's last answer
+    corral-light rig save|up|list|rm [name]    saved seats, brought back per seat
 
 A CLIENT of the running hub, exactly like the browser: every verb is the same
 route a click uses, so a pane opened here is an ordinary pane on the wall and
@@ -656,6 +657,36 @@ def v_later(c, a):
     return 0
 
 
+RIG_UP_TIMEOUT_S = consult.HANDSHAKE_S * 12   # a rig starts up to MAX_PANES
+                                               # panes, one handshake each
+RIG_PROBLEMS = ("failed", "withheld", "not-restored")
+
+
+def v_rig(c, a):
+    """Rigs (DESIGN-5 S12): save the seated panes, bring them back, list, rm.
+    The hub does the work (corral_core/rigs.py); this prints its one line per
+    seat. Exit 1 when any seat did not come up, 2 when the rig was refused."""
+    if a.rig_cmd == "list":
+        rows = c.get("/api/session/rigs")["rigs"]
+        if not rows:
+            c.say("no rigs saved")
+        for r in rows:
+            c.say(f"{r['name']:<24} " + (f"UNREADABLE: {r['error']}" if r.get("error")
+                                          else " ".join("@" + s for s in r["seats"])))
+        return 0
+    if a.rig_cmd == "rm":
+        c.say("removed " + c.post("/api/session/rigs/rm", {"name": a.name})["removed"])
+        return 0
+    if a.rig_cmd == "save":
+        r = c.post("/api/session/rigs/save", {"name": a.name, "replace": a.replace})
+        c.say(f"saved {r['name']}: " + " ".join("@" + s for s in r["seats"]))
+        return 0
+    r = c.post("/api/session/rigs/up", {"name": a.name}, timeout=RIG_UP_TIMEOUT_S)
+    for line in r["lines"]:
+        c.say(line)
+    return 1 if any(o["outcome"] in RIG_PROBLEMS for o in r["outcomes"]) else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="corral-light",
                                  description="Corral Light from a terminal.")
@@ -776,6 +807,19 @@ def main(argv=None):
     x.add_argument("--role")
     x.add_argument("--title")
     s.set_defaults(fn=v_later)
+
+    s = sub.add_parser("rig", help="saved seats: save | up | list | rm")
+    rsub = s.add_subparsers(dest="rig_cmd", required=True)
+    rsub.add_parser("list")
+    x = rsub.add_parser("save", help="write every seated pane to rigs/<name>.toml")
+    x.add_argument("name")
+    x.add_argument("--replace", action="store_true", help="overwrite a saved rig")
+    x = rsub.add_parser("up", help="check the whole rig, then resume or start "
+                                   "each seat; one line per seat")
+    x.add_argument("name")
+    x = rsub.add_parser("rm")
+    x.add_argument("name")
+    s.set_defaults(fn=v_rig)
 
     a = ap.parse_args(argv)
     c = Cli(a.url, interactive=True if (a.interactive or getattr(

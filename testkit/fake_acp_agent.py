@@ -5,7 +5,8 @@ Speaks just enough of the protocol over stdio for the lifecycle tests to use
 a REAL process (spawned, killed, resumed) instead of a hand-built stub:
 
     initialize, session/new, session/load (replays one chunk, which the
-    hub must suppress), session/prompt, session/cancel, session/list
+    hub must suppress; refused when FAKE_ACP_NO_LOAD is set), session/prompt,
+    session/cancel, session/list
 
 Prompt verbs (the text of the prompt):
     remember <word>   -> stores <word> in the session file and says "ok"
@@ -141,6 +142,10 @@ def main():
             save(sid, {})
             send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": sid,
                                                           "configOptions": []}})
+        elif method == "session/load" and os.environ.get("FAKE_ACP_NO_LOAD"):
+            # A lane that cannot reload a conversation (rigs: `rebuilt`).
+            send({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32002, "message": "session not found"}})
         elif method == "session/load":
             sid = params.get("sessionId")
             chunk(sid, "REPLAYED HISTORY")          # the hub must suppress this

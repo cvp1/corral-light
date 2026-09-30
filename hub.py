@@ -451,6 +451,13 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             return self._json({"error": "not paired"}, 401)
 
+        # Rigs (DESIGN-5 S12): one surface for both products, in the core,
+        # and only past the pairing check above.
+        if p == "/api/session/rigs":
+            from corral_core import rigs
+            st, out = rigs.route(MGR, "GET", p)
+            return self._json(out, st)
+
         if p == "/api/search":
             # Content search for the palette. Additive: a broken or missing
             # index degrades to an error string IN the payload and an empty
@@ -610,6 +617,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "cross-origin request refused"}, 403)
         try:
             b = self._body()
+            if p in ("/api/session/rigs/save", "/api/session/rigs/up",
+                     "/api/session/rigs/rm"):
+                from corral_core import rigs
+                r = rigs.route(MGR, "POST", p, b, by=user)
+                if r is not None:
+                    return self._json(r[1], r[0])
             if p == "/api/session/new":
                 agent = b.get("agent", "")
                 posture = b.get("posture") or sessions.DEFAULT_POSTURE

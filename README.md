@@ -170,6 +170,48 @@ meant to use; they do not create an identity a same-user process cannot forge.
 **Who can send.** Every lane whose adapter accepts MCP servers is offered the tools. The Ollama lane's adapter takes none, so a pane there can **receive** a message but not send one; SSH panes neither send nor receive. `seat_list` says which panes were offered the tools. `CORRAL_NATIVE_MCP=0` in the hub's environment turns the
 tools off for every pane.
 
+## Rigs: bring your seats back with one verb
+
+A **rig** is your seated panes, saved by name: `rigs/<name>.toml` in the state
+directory, one `[[seat]]` per pane — seat name, lane, directory, and the
+pane's permission mode and role if it has them. A template with every key
+explained ships at `corral_core/rig.example.toml`.
+
+```
+./corral-light rig save <name> [--replace]   # every seated pane on the roster
+./corral-light rig up <name>                 # one line per seat; exit 1 if any seat did not come up
+./corral-light rig list
+./corral-light rig rm <name>
+```
+
+**`up` checks the whole rig first, and starts nothing if any seat is wrong**:
+a file that does not parse, the wrong `version`, a bad seat name, an unknown
+lane or key, a directory that does not exist, more seats than the live pane
+cap, a seat named twice, a role that does not resolve, or a seat that is
+already live. Every reason is listed. Then each seat, in file order, gets
+exactly one outcome:
+
+| Outcome | What is now true |
+|---|---|
+| `resumed` | an open pane held the seat, and its lane reloaded the conversation |
+| `rebuilt` | an open pane held the seat; its transcript is back, but the lane could not reload the conversation (or says the model starts fresh) |
+| `started-fresh` | nothing held the seat: a new pane, seated |
+| `fresh-primed` | …and the rig's opening prompt was sent to it |
+| `withheld` | another pane took the seat after the check |
+| `not-restored` | the pane cap would be exceeded, or the pane holding the seat is on disk but not on the roster |
+| `failed` | the pane could not be started or resumed — the reason is on the line |
+
+Nothing rolls back: a seat that fails does not undo the ones before it. Each
+pane a rig touched also gets a note in its transcript saying what the rig did.
+
+**An opening prompt is yours.** `save` never writes one. If you add
+`prompt = "..."` to a seat by hand, `up` sends it as that pane's first turn —
+through the same path as typing it, marked `via rig` — and only to a pane it
+started; a resumed conversation is never re-prompted. With a `role`, the
+role's instructions go ahead of the prompt, as a role's first turn always
+does; a role with no prompt sends nothing. Prompts are capped at 8,000
+characters, a rig at 12 seats.
+
 ## Security
 
 The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
@@ -285,6 +327,7 @@ Everything the browser does with a pane, a terminal can do too, on every lane �
 ./corral-light cancel|pause|resume|close|forget|reopen <pane>
 ./corral-light rename <pane> <title> · config <pane> <id> <value>
 ./corral-light attach <pane> <note-id> · quote <from> [<to>]
+./corral-light rig save|up|list|rm <name>           # saved seats (see Rigs)
 ```
 
 `say` waits for as long as the turn takes. When the pane needs you it prints the whole request — the same bytes the approval's digest covers — and takes `ok`, `no` or `cancel` in the same terminal. It never cancels a turn on a timer; Ctrl-C detaches and the turn keeps running. From a script without a terminal, `ok` requires `--digest <first 12 characters>` of the digest it prints; `no` never does. A pane id can be shortened to any unique prefix.

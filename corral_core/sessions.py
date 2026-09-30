@@ -67,11 +67,20 @@ CATALOG = None           # derived from STATE, not a constant — see configure(
 # `_refuse_transfer` below for why the composition verbs ask this and why the
 # default of None is not a hole.
 TRANSFER_GATE = None
+# (role_id, agent, posture) -> dict, or raises ValueError. How a product turns
+# a rig seat's `role` into create() arguments (rigs.py). None = this product
+# has no roles, and a rig that names one is refused at preflight.
+ROLE_RESOLVER = None
+# How many panes this product keeps on its roster, live or detached (rigs.py
+# reports `not-restored` rather than letting create() refuse past it). None =
+# only the live cap, MAX_PANES, applies.
+ROSTER_CAP = None
 
 
 def configure(*, AGENTS, AGENT_GROUPS, STATE,                    # noqa: N803
               ALLOW_VENDOR_ENV_VAR="CORRAL_ALLOW_VENDOR_ENV",       # noqa: N803
-              TRANSFER_GATE=None):                                  # noqa: N803
+              TRANSFER_GATE=None, ROLE_RESOLVER=None,              # noqa: N803
+              ROSTER_CAP=None):                                     # noqa: N803
     """Bind the globals that legitimately differ between products.
 
     `ALLOW_VENDOR_ENV_VAR` names the escape hatch that lets ambient vendor
@@ -88,6 +97,8 @@ def configure(*, AGENTS, AGENT_GROUPS, STATE,                    # noqa: N803
     g["STATE"] = Path(STATE)
     g["ALLOW_VENDOR_ENV_VAR"] = str(ALLOW_VENDOR_ENV_VAR)
     g["TRANSFER_GATE"] = TRANSFER_GATE
+    g["ROLE_RESOLVER"] = ROLE_RESOLVER
+    g["ROSTER_CAP"] = ROSTER_CAP
     # `CATALOG = STATE / "catalog.json"` is spelled identically in both
     # products and is therefore easy to mistake for a shared constant. It is
     # not: it is derived from the one path that differs, so it has to be
@@ -202,8 +213,9 @@ QUOTE_CHARS = 12_000           # of one pane's last answer carried into another
 # What it buys is that a turn a script sent is visible as one in the
 # transcript instead of reading as the human. A value outside this set is
 # refused, loudly -- a free-text origin would be a second, unbounded channel
-# into every renderer.
-TURN_VIAS = ("consult", "cli")
+# into every renderer. `rig` (DESIGN-5 S12) is a rig's opening prompt: the
+# human's words, written into the rig file by hand and sent by `rig up`.
+TURN_VIAS = ("consult", "cli", "rig")
 
 # A seat is a human-chosen name for a pane (DESIGN-5 S6): the address another
 # pane's agent uses to reach it. One grammar, one rule string, so the refusal
