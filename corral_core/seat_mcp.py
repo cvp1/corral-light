@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """corral-seats — the MCP server a pane's agent uses to reach other panes.
 
-DESIGN-5 S8. Two tools, nothing else:
+DESIGN-5 S8 (and S10). Three tools, nothing else:
 
     seat_list()              -> who can be addressed: [{seat, display, lane,
                                 tool}] -- no titles, no transcripts
     seat_send(seat, text)    -> the hub's answer, verbatim: delivered (with a
                                 turn id) | refused (with the reason) | failed
+    seat_broadcast(text)     -> one seat_send per OTHER seated pane, each with
+                                its own answer; one refusal unsends nothing
 
 Stdlib JSON-RPC over stdio, one message per line -- the same three methods
 Corral's registry proxy speaks (initialize, tools/list, tools/call). The hub
@@ -94,6 +96,20 @@ TOOLS = [
                                   "description": "the message"}},
                      "required": ["seat", "text"],
                      "additionalProperties": False}},
+    {"name": "seat_broadcast",
+     "description": (
+         "Send one message to EVERY other seated pane at once. Each seat is "
+         "its own `seat_send`: the result is a list with one entry per seat "
+         "-- `delivered`, `refused` or `failed` -- and a refusal for one seat "
+         "does not stop or undo the others (a delivered message cannot be "
+         "taken back). Each seat counts as one send against this pane's "
+         "hourly limit. " + REFUSAL_GUIDANCE),
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "text": {"type": "string",
+                                  "description": "the message"}},
+                     "required": ["text"],
+                     "additionalProperties": False}},
 ]
 
 
@@ -150,6 +166,13 @@ def call_tool(name, args, env=None):
             # passed -- a `from`, a pane id -- never reaches the hub.
             return _hub("POST", "/api/peer/send",
                         {"seat": seat.lstrip("@"), "text": text}, env=env), False
+        if name == "seat_broadcast":
+            text = args.get("text")
+            if not isinstance(text, str):
+                return {"result": "refused", "reason": "arguments",
+                        "why": "seat_broadcast needs a `text` string"}, False
+            return _hub("POST", "/api/peer/broadcast", {"text": text},
+                        env=env), False
     except HubError as e:
         return {"result": "failed", "reason": "hub", "why": str(e)}, True
     return {"result": "failed", "reason": "unknown-tool",
