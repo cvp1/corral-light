@@ -290,9 +290,10 @@ class CookieScope(unittest.TestCase):
 class PairHub:
     """/api/pair/new and /api/pair/claim only; counts every claim poll."""
 
-    def __init__(self, code, claim_ok_after=None):
+    def __init__(self, code, claim_ok_after=None, url="http://127.0.0.1:18231"):
         self.code, self.claims, self.claim_ok_after = code, 0, claim_ok_after
-        self.url = "http://127.0.0.1:18231"
+        self.url = url
+        self.host = urllib.parse.urlsplit(url).hostname
         self.token = None
 
     def _do(self, method, path, body=None, timeout=None):
@@ -350,6 +351,22 @@ class PairingAgainstAnotherStore(unittest.TestCase):
         hub = PairHub(code, claim_ok_after=1)
         consult.pair(hub)
         self.assertEqual(hub.token, "tok-ok")
+
+    def test_a_remote_hub_still_waits_for_its_human(self):
+        # Another host: this client's own store never saw the code -- the
+        # normal case there -- and a human on the hub host approves it. Real
+        # local approval, separate stores: it must poll, not exit.
+        hub = PairHub("ABC-DEF", claim_ok_after=2, url="http://192.168.86.77:8099")
+        consult.pair(hub)
+        self.assertEqual(hub.claims, 2)
+        self.assertEqual(hub.token, "tok-ok")
+        self.assertEqual(consult._load_token(hub.url), "tok-ok")
+
+    def test_loopback_is_decided_by_address(self):
+        for h in ("127.0.0.1", "127.9.9.9", "::1", "localhost", "LOCALHOST"):
+            self.assertTrue(consult._is_loopback(h), h)
+        for h in ("192.168.86.77", "100.64.0.1", "ranch-server", "", None):
+            self.assertFalse(consult._is_loopback(h), h)
 
     def test_a_genuine_wait_for_a_human_still_waits(self):
         # Not this account (or auth would not import): a human elsewhere can

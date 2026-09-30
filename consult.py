@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ipaddress
 import json
 import os
 import sys
@@ -80,10 +81,13 @@ MAX_TEXT = 300_000              # chars of one answer kept; the pane log holds t
 MAX_LANES = 6                   # a fan-out wider than this is not a consultation
 PAIR_WAIT_S = 120               # how long to wait for a human `corral-light pair` elsewhere
 # auth.approve's answer when the code is not in the pairing store THIS
-# process reads. The hub minted the code a moment ago, so "unknown" here means
-# this client and the hub keep different stores -- a private hub driven from
-# a shell without its scratch CORRAL_LIGHT_STATE. No wait fixes that: it hung the
-# DESIGN-5 S12 live run for the whole PAIR_WAIT_S (2026-09-30), so fail fast.
+# process reads. For a hub on loopback the hub's store is on this host and it
+# minted the code a moment ago, so "unknown" means this shell's CORRAL_LIGHT_STATE
+# is not the hub's -- a private hub driven from a shell without its scratch
+# state. It hung the DESIGN-5 S12 live run for the whole PAIR_WAIT_S
+# (2026-09-30), so that case fails fast. A hub on another address may be
+# another host, where "unknown" is the normal case and a human there can still
+# approve: that keeps the wait (reviewer, 2026-09-30).
 NOT_IN_OUR_STORE = "unknown or expired code"
 HTTP_TIMEOUT_S = 30
 HANDSHAKE_S = 200               # /api/session/new blocks on the adapter's ACP
@@ -220,13 +224,22 @@ def _approve_locally(code):
         return False, f"{type(e).__name__}: {e}", None
 
 
+def _is_loopback(host):
+    if (host or "").lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def pair(hub):
     status, _r, obj = hub._do("GET", "/api/pair/new")
     if status != 200 or not obj.get("code"):
         raise ConsultError(f"could not mint a pairing code: {obj}")
     code = obj["code"]
     ok, msg, store = _approve_locally(code)
-    if not ok and msg == NOT_IN_OUR_STORE:
+    if not ok and msg == NOT_IN_OUR_STORE and _is_loopback(hub.host):
         raise ConsultError(
             f"pairing code {code} is not in this client's pairing store ({store}), "
             f"so this shell's CORRAL_LIGHT_STATE is most likely not the hub's. Re-run with "
