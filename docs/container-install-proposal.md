@@ -1,6 +1,9 @@
 # Corral Light runs in a container, on every host
 
 Status: **v3 — panel-converged design, ready to build Phase 0**, 2026-10-01.
+Implementation and test plan: `docs/container-implementation-plan.md`.
+
+**Decisions (Craig, 2026-10-01):** image is **linux/amd64 only** for now (dogma-2 runs it under Docker Desktop's Rosetta emulation); image is **public** on GHCR; test hosts are **dogma-2**, an **Intel Mac laptop running Omarchy**, and **Camano** (ThinkPad, Omarchy).
 Author: Claude (dogma-2 session) for Craig, who owns the system and decides.
 
 ## History
@@ -180,9 +183,9 @@ pinned, Docker Desktop's SSH-agent forwarding and VirtioFS file sharing on.
 
 - One manifest pins Python, adapters, the four CLIs per OS/arch, Seed, and
   each lane's default model and effort.
-- **A tag fails** if any lane lacks a Linux build for a supported arch (Grok
-  linux/arm64 is unverified today). A Mach-O cannot be emulated; an amd64
-  build under emulation is a doctor-labelled degraded fallback only.
+- **A tag fails** if any lane lacks a Linux x86_64 build. Only linux/amd64 is
+  built for now; on Apple Silicon it runs under Rosetta, and any lane that
+  fails there is reported degraded until an arm64 build is added.
 - CI proposes bumps (`lanes check` → candidate image → selftests and the Phase 0
   parity suite); a human merges default-model changes.
 
@@ -240,7 +243,8 @@ workflows on every lane, not a prompt round-trip.
 
 ## Unverified
 
-- Grok CLI Linux arm64 build, and Grok's login flow.
+- Grok CLI Linux x86_64 artifact, and Grok's login flow.
+- Every lane binary working under Rosetta on dogma-2.
 - Antigravity's exact Google login flow in a container.
 - Docker on ranch-server (its ssh accepts only mesh commands); CVPTP was
   unreachable 2026-10-01.
