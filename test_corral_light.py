@@ -234,7 +234,10 @@ class StructuralIndependence(unittest.TestCase):
         allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/")
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
                          "/manifest.json", "/api/state", "/api/stream",
-                         "/api/search"}
+                         "/api/search",
+                         # DESIGN-6 S4: starts the vendor's login for the Live
+                         # tab's own Claude lane. One exact path, no prefix.
+                         "/api/claude/login"}
         for r in routes:
             if r in allowed_exact or r.startswith(allowed_prefixes):
                 continue
@@ -2054,8 +2057,11 @@ class EveryUiCallHasADefinition(unittest.TestCase):
     # have ZERO bare (non-dot) occurrences anywhere in the file, proven by
     # `grep -n '[^.]close(' | grep -v '\.close('` before either was added
     # here; `earlier` and `minimize` only ever appear as "...earlier (" and
-    # "minimize (keeps running)" inside strings.
-    KNOWN_LOCAL_FALSE_POSITIVES = {"close", "earlier", "match", "minimize"}
+    # "minimize (keeps running)" inside strings. `approval` has exactly one
+    # bare occurrence, `claims your approval ("${d.approval_claim}")` in the
+    # peer-message template literal — text, not a call (checked by grep).
+    KNOWN_LOCAL_FALSE_POSITIVES = {"approval", "close", "earlier", "match",
+                                   "minimize"}
 
     def test_every_bare_call_has_a_matching_definition(self):
         import re
@@ -2486,6 +2492,10 @@ class TheServiceRunsThisTree(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin",
                          "launchd plist is a macOS artifact; the shipped absolute "
                          "paths are the mac tree, not this checkout")
+    @unittest.skipIf((ROOT / ".git").is_file(),
+                     "a linked git worktree is never the tree the shipped plist "
+                     "names; diagnose says so at run time, and this check runs "
+                     "in the main checkout")
     def test_the_repo_plist_passes_its_own_check(self):
         """The file we ship must be the file that satisfies this. Otherwise
         the documented fix (`cp` it into LaunchAgents) reinstalls a fault."""
@@ -3843,6 +3853,15 @@ class TheSeatIsOnThePane(unittest.TestCase):
 
     def test_the_browser_side(self):
         _run_node_selftest(self, "selftest_seats.mjs", "the seat pill and ⌘K")
+
+
+class ARigRendersPerSeat(unittest.TestCase):
+    """DESIGN-6 S1, T1.1-T1.6: the Rigs… dialog shows one row per seat as
+    text, every reason for a refusal, a two-click Remove, and both doors
+    (New and ⌘K) in the shipped page."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_rigs.mjs", "the Rigs… dialog")
 
 
 class APeerMessageRendersAsWhatItIs(unittest.TestCase):

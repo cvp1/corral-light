@@ -166,6 +166,9 @@ async function api(path, body) {
   if (!r.ok) {
     const err = new Error(d.error || `${r.status} ${r.statusText}`);
     err.status = r.status;
+    // The whole answer rides along: a refused rig names every reason in
+    // `refused`, and the message alone would drop all but the first.
+    err.body = d;
     throw err;
   }
   return d;
@@ -706,8 +709,15 @@ function renderLog(p) {
                                  permOpen.get(d.requestId) === e.seq &&
                                  p.pending.includes(d.requestId)));
         break;
-      case 'dead': flush();
-        log.appendChild(el('div', 'sys err', `agent stopped — ${d.reason || 'unknown'}`)); break;
+      case 'dead': {
+        flush();
+        const line = log.appendChild(el('div', 'sys err', `agent stopped — ${d.reason || 'unknown'}`));
+        // Only on the death the pane is still in: an old one in the history
+        // must not offer a button for a login that already came back.
+        if (d.cause === 'auth' && p.agent === 'claude' && p.state === 'dead' &&
+            p.deadCause === 'auth') line.appendChild(signInButton('banner', p.id));
+        break;
+      }
       // Quiet unless you asked for detail.
       case 'permission_answered':
         if (detailed) { flush(); log.appendChild(el('div', 'sys', `you chose \u201c${d.optionId}\u201d`)); }
@@ -1478,6 +1488,12 @@ function composer(p, kind) {
   const send = async () => {
     if (sending) return;
     const t = ta.value.trim(); if (!t) return;
+    // Fresh state: the composer outlives the snapshot it was built from.
+    if (isLoginCommand(S.panes.get(p.id) || p, t)) {   // DESIGN-6 S4: a sign-in, not a message
+      ta.value = '';
+      await startLogin('composer', p.id);
+      return;
+    }
     hide();
     sending = true;
     try {
@@ -1752,6 +1768,7 @@ function render() {
   setTitle(panes);
   displaySig = displaySignature(panes);
   markSeen();                  // whatever this render shows, a human can see
+  rigRefreshHints();           // an open Rigs dialog tracks seats and states
 
   // roster
   const r = $('#roster');
@@ -2101,11 +2118,18 @@ function render() {
   // had been announcing for days). Expired reads as a dead card; expiring
   // reads as a plain one. Both carry the exact remedy. Gone when it is fine.
   const ca = S.claudeAuth;
-  if (ca && (ca.ok === false || ca.warn)) {
+  const claudeLane = (S.agents || []).some(a => a.key === 'claude');
+  if (ca && (ca.ok === false || ca.warn || (ca.ok === null && claudeLane))) {
     const c = el('div', 'ncard' + (ca.ok === false ? ' dead' : ''));
     c.appendChild(el('div', 't', ca.ok === false ? 'Claude login expired'
-                                                  : 'Claude login expiring'));
+                                 : ca.ok === null ? 'Claude login unknown'
+                                 : 'Claude login expiring'));
     c.appendChild(el('div', 'm', ca.why || ''));
+    const said = loginLine(S.claudeLogin);
+    if (said) c.appendChild(el('div', 'fnote', said));
+    const acts = el('div', 'facts');
+    acts.appendChild(signInButton('rail'));
+    c.appendChild(acts);
     n.appendChild(c); items++;
   }
   for (const p of panes) {
@@ -2148,11 +2172,15 @@ function render() {
       try { await api('/api/session/forget', { pane: p.id }); await refresh(); }
       catch (e) { toast(e.message, true); }
     };
-    if (p.resumable) {
+    if (p.resumable || p.deadCause === 'auth') {
       const acts = el('div', 'facts');
-      const rb = el('button', 'fbtn', 'Resume');
-      rb.onclick = async e => { e.stopPropagation(); await resumePane(p); };
-      acts.appendChild(rb);
+      // A login death: Sign in first; the pane resumes by itself after it.
+      if (p.deadCause === 'auth' && p.agent === 'claude') acts.appendChild(signInButton('banner', p.id));
+      if (p.resumable) {
+        const rb = el('button', 'fbtn', 'Resume');
+        rb.onclick = async e => { e.stopPropagation(); await resumePane(p); };
+        acts.appendChild(rb);
+      }
       c.appendChild(acts);
     }
     n.appendChild(c); items++;
@@ -2316,6 +2344,7 @@ async function refresh() {
   if (seq !== refreshSeq) return;      // a newer refresh() has since been issued
   S.agents = d.agents || [];
   S.claudeAuth = d.claudeAuth || null;
+  S.claudeLogin = d.claudeLogin || null;
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
@@ -2444,7 +2473,7 @@ function connect() {
     if (ev.kind === 'question_cleared') p.question = null;
     if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';
-    if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; }
+    if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; p.deadCause = d.cause || null; }
     if (ev.kind === 'closed') { p.state = 'dead'; p.error = null; refresh(); }
     if (ev.kind === 'ready') p.state = 'ready';
     // snapshot()'s observed edges (busy→uncertain, poll()-detected dead):
@@ -2465,6 +2494,194 @@ function connect() {
     if (ev.kind === 'note') toast(d.text, true);
     render();
   };
+}
+
+/* ── Rigs… (DESIGN-5 S12, ported in DESIGN-6 S1) ──────────────────────────
+ * The server does everything: preflight, the per-seat work, and the ONE
+ * rendering of each outcome (corral_core/rigs.render). This dialog lists,
+ * saves, removes and brings a rig up, and shows the server's lines verbatim
+ * -- as text, never markup -- one row per seat. A refused rig shows every
+ * reason and started nothing. */
+const RIG_PROBLEM = new Set(['failed', 'withheld', 'not-restored']);
+
+function rigOutcomeRows(r) {
+  const rows = [];
+  (r.outcomes || []).forEach((o, i) => {
+    const row = el('div', 'rigrow o-' + o.outcome + (RIG_PROBLEM.has(o.outcome) ? ' bad' : ''));
+    row.appendChild(el('span', 'pill', o.outcome));
+    row.appendChild(el('span', 't', (r.lines || [])[i] || ''));
+    rows.push(row);
+  });
+  return rows;
+}
+
+function rigRefusedRows(e) {
+  const reasons = (e && e.body && e.body.refused) || [];
+  const rows = [el('div', 'rigrow bad', reasons.length
+    ? 'Refused — nothing was started:' : ((e && e.message) || 'failed'))];
+  for (const why of reasons) rows.push(el('div', 'rigrow bad', '· ' + why));
+  return rows;
+}
+
+/* DESIGN-6 S4: Sign in starts the VENDOR's own login (`claude auth login`) in a
+ * window on the hub's screen. The hub never sees a URL, code or token; these
+ * functions only ask it to open the window and say what became of it.
+ *
+ * `/login` typed into the composer is a sign-in only where it cannot mean
+ * anything else: a Claude pane that died of its login. Anywhere else it is
+ * sent as typed, exactly as before. */
+function isLoginCommand(p, text) {
+  return String(text || '').trim().toLowerCase() === '/login' && !!p &&
+         p.agent === 'claude' && p.state === 'dead' && p.deadCause === 'auth';
+}
+
+async function startLogin(from, paneId) {
+  try {
+    const r = await api('/api/claude/login', paneId ? { from, pane: paneId } : { from });
+    toast(r.ok ? 'sign-in window opened on the hub machine — sign in there' : r.why, !r.ok);
+    await refresh();
+    return r;
+  } catch (e) {
+    toast((e.body && e.body.why) || e.message, true);
+    return null;
+  }
+}
+
+function signInButton(from, paneId) {
+  const running = (S.claudeLogin || {}).state === 'running';
+  const b = el('button', 'fbtn', running ? 'Signing in…' : 'Sign in');
+  b.type = 'button';
+  b.disabled = running;
+  b.title = 'opens the Claude login in a window on the hub machine; you sign in there';
+  b.onclick = async e => { e.stopPropagation(); await startLogin(from, paneId); };
+  return b;
+}
+
+/* One line about the last sign-in, or '' when there is nothing to say. */
+function loginLine(cl) {
+  if (!cl || !cl.state || cl.state === 'idle') return '';
+  const what = { 'running': 'sign-in window open', 'signed-in': 'signed in',
+                 'check-status': 'sign-in unclear', 'closed': 'sign-in window closed',
+                 'gave-up': 'stopped watching the sign-in' }[cl.state] || cl.state;
+  return cl.why ? `${what}: ${cl.why}` : what;
+}
+
+/* What Save would write and what Up would refuse, from the panes on screen
+ * (DESIGN-6 S2). Both mirror the server (rigs.save, rigs.preflight) so the
+ * dialog can say it BEFORE the click: a pane counts as seated when it holds
+ * its seat (a withheld seat is not saved), and a seat is live when its holder
+ * is neither dead nor detached. The client never blocks Up on this -- the
+ * server's preflight is the authority; the marker is only a forecast. */
+function rigSaveHint(panes) {
+  const seated = panes.filter(p => p.seat).map(p => '@' + p.seat);
+  const unseated = panes.length - seated.length;
+  if (!seated.length) return { disabled: true,
+    text: 'Nothing to save: no pane has a seat. Give a pane a seat first: click its @ pill.' };
+  const n = seated.length;
+  return { disabled: false,
+    text: `Saves ${n} seated pane${n === 1 ? '' : 's'} (${seated.join(' ')})`
+      + (unseated ? `; ${unseated} unseated ${unseated === 1 ? 'is' : 'are'} not saved` : '') };
+}
+
+function rigLiveSeats(seats, panes) {
+  return (seats || []).filter(seat => panes.some(p =>
+    p.seat === seat && p.state !== 'dead' && p.state !== 'detached'));
+}
+
+function rigLiveText(live) {
+  if (!live.length) return '';
+  return `Up will refuse: ${live.map(s => '@' + s).join(' ')} ${live.length === 1 ? 'is' : 'are'} live`;
+}
+
+// The list's rows, so a pane changing state re-marks them without a rebuild
+// (a rebuild would reset a half-armed Remove or an Up in flight).
+let RIG_ROWS = [];
+
+function rigRefreshHints() {
+  const dlg = $('#rigdlg');
+  if (!dlg || !dlg.open) return;
+  const panes = [...S.panes.values()];
+  const h = rigSaveHint(panes);
+  $('#rig-savehint').textContent = h.text;
+  $('#rig-save').disabled = h.disabled;
+  for (const { seats, warn } of RIG_ROWS) warn.textContent = rigLiveText(rigLiveSeats(seats, panes));
+}
+
+async function renderRigList() {
+  const list = $('#rig-list');
+  let d;
+  try { d = await api('/api/session/rigs'); }
+  catch (e) { list.replaceChildren(el('div', 'hint err', e.message)); return; }
+  const panes = [...S.panes.values()];
+  RIG_ROWS = [];
+  const rows = (d.rigs || []).map(r => {
+    const row = el('div', 'rigrow');
+    row.appendChild(el('span', 't', r.name));
+    row.appendChild(el('span', 'hint', r.error ? 'unreadable: ' + r.error
+      : (r.seats || []).map(s => '@' + s).join(' ')));
+    const warn = el('span', 'rigwarn', r.error ? '' : rigLiveText(rigLiveSeats(r.seats, panes)));
+    row.appendChild(warn);
+    if (!r.error) RIG_ROWS.push({ seats: r.seats || [], warn });
+    // Up stays enabled with a live seat: the server says no, with every reason.
+    const up = el('button', 'btn go', 'Up');
+    up.type = 'button'; up.disabled = !!r.error;
+    up.onclick = () => rigUp(r.name, up);
+    const rm = el('button', 'btn', 'Remove');
+    rm.type = 'button';
+    // Two clicks: a removed rig is a file gone, and there is no undo.
+    rm.onclick = async () => {
+      if (!rm.dataset.armed) { rm.dataset.armed = '1'; rm.textContent = 'Remove — sure?'; return; }
+      try { await api('/api/session/rigs/rm', { name: r.name }); }
+      catch (e) { $('#rig-error').textContent = e.message; }
+      renderRigList();
+    };
+    row.appendChild(up); row.appendChild(rm);
+    return row;
+  });
+  list.replaceChildren(...(rows.length ? rows
+    : [el('div', 'hint', 'No rigs saved yet. Seat some panes, then save them here.')]));
+}
+
+async function rigUp(name, btn) {
+  const out = $('#rig-out');
+  if (btn) btn.disabled = true;
+  out.replaceChildren(el('div', 'hint', `Bringing up ${name}… each seat may take a handshake.`));
+  try {
+    const r = await api('/api/session/rigs/up', { name });
+    out.replaceChildren(el('div', 'hint', `rig ${name}:`), ...rigOutcomeRows(r));
+    refresh();
+  } catch (e) {
+    out.replaceChildren(...rigRefusedRows(e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function openRigs() {
+  $('#rig-error').textContent = '';
+  $('#rig-out').replaceChildren();
+  $('#rig-name').value = '';
+  $('#rig-replace').checked = false;
+  RIG_ROWS = [];
+  renderRigList();
+  $('#rigdlg').showModal();
+  rigRefreshHints();
+}
+
+function wireRigDialog() {
+  if (!$('#rigdlg')) return;
+  $('#rig-save').onclick = async () => {
+    const name = ($('#rig-name').value || '').trim();
+    try {
+      const r = await api('/api/session/rigs/save', { name, replace: $('#rig-replace').checked });
+      $('#rig-error').textContent = '';
+      $('#rig-out').replaceChildren(el('div', 'hint',
+        `saved ${r.name}: ` + r.seats.map(s => '@' + s).join(' ')));
+      renderRigList();
+    } catch (e) { $('#rig-error').textContent = e.message; }
+  };
+  const b = $('#rigsbtn');
+  if (b) b.onclick = () => { const n = $('#newdlg'); if (n && n.open) n.close(); openRigs(); };
 }
 
 /* ── new-conversation dialog ─────────────────────────────────────────── */
@@ -2562,6 +2779,15 @@ function wireDialog() {
       return v.startsWith('group:') ? $('#f-host').value : v;
     };
     dlg._chosenAgent = chosenAgent;   // the close handler submits this, not #f-agent
+    const si = $('#signinrow');
+    if (si) {
+      si.replaceChildren();
+      const lapsed = S.agents.find(a => a.signIn);
+      if (lapsed) {
+        si.appendChild(el('span', null, `${lapsed.label}: ${lapsed.why} `));
+        si.appendChild(signInButton('picker'));
+      }
+    }
     // Land on the FIRST group's first live member (today: Agents → Claude), so
     // reorganising the menu costs nothing on the overwhelmingly common path —
     // open the dialog, press Start. A grouping that adds a click to the default
@@ -2904,6 +3130,20 @@ function paletteResults(query) {
   const rows = [];
   const focused = attachTarget();
 
+  // Action rows first, as in full Corral (rooms, actions, then panes): a
+  // verb's own name must reach it -- "rig" + Enter used to focus a pane
+  // titled rig-b, because panes ranked above the Rigs row (DESIGN-6 S2b).
+  if (!needle || 'new conversation'.includes(needle)) {
+    rows.push({ kind: 'action', label: 'New conversation', sub: 'action' });
+  }
+  if (!needle || 'what the agents did digest'.includes(needle)) {
+    rows.push({ kind: 'digest', label: 'What the agents did — last 24h', sub: 'digest' });
+  }
+  // Light has no PAL_ACTIONS table; the one verb full Corral keeps there is
+  // pushed inline, matched the same way (by its label).
+  const rigsRow = { kind: 'rigs', label: 'Rigs · save or bring up your seats', sub: 'rigs' };
+  if (!needle || rigsRow.label.toLowerCase().includes(needle)) rows.push(rigsRow);
+
   for (const [id, p] of S.panes || []) {
     const label = p.title || p.label;
     // A seat is searchable with or without its @ (DESIGN-5 S6): "revi" and
@@ -2921,12 +3161,6 @@ function paletteResults(query) {
     const label = a.title || a.id;
     if (needle && !label.toLowerCase().includes(needle)) continue;
     rows.push({ kind: 'archived', label, paneId: a.id, sub: 'archived' });
-  }
-  if (!needle || 'new conversation'.includes(needle)) {
-    rows.push({ kind: 'action', label: 'New conversation', sub: 'action' });
-  }
-  if (!needle || 'what the agents did digest'.includes(needle)) {
-    rows.push({ kind: 'digest', label: 'What the agents did — last 24h', sub: 'digest' });
   }
 
   renderPalette(rows.slice(0, 30), needle);
@@ -3013,6 +3247,7 @@ function renderPalette(rows, needle, contentError) {
 async function activatePalette(row, newPane) {
   $('#palette').close();
   if (row.kind === 'action') return $('#new').click();
+  if (row.kind === 'rigs') return openRigs();
   if (row.kind === 'said') {
     // A hit in a closed conversation reopens it (detached, as Archive does).
     if (!S.panes.has(row.paneId)) {
@@ -3310,6 +3545,7 @@ async function start() {
   $('#app').classList.remove('hide');
   wireThemes();
   wireDialog();
+  wireRigDialog();
   wireRail();
   wireCopySelect();
   wirePalette();
