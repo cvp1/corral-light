@@ -1,3 +1,27 @@
+You are one of three independent reviewers on a design panel. The other two are different models from different vendors; you will see their reviews in a second round. The author is a Claude agent working for the operator, who owns this system and makes the final call.
+
+WHAT YOU ARE REVIEWING
+The plan below "=== PLAN ===" moves Corral Light — a browser "wall" of AI coding-agent panes, one stdlib-Python hub per machine driving four agent CLIs (Claude Code, Codex, Grok, Antigravity/Gemini) over ACP, plus native Ollama — into one container image on every host, including the operator's daily Mac.
+
+An earlier version was reviewed and the panel recommended keeping the Mac native. The owner rejected that. These are FIXED CONSTRAINTS. Do not argue against them; solve within them:
+  C1. Containers on every host, including the daily Mac. Solve host reach; do not route around it.
+  C2. No lane-specific constraints. Corral runs four CLIs. A rule or gate that only binds one vendor (for example Claude Code's PreToolUse hooks) cannot gate the build.
+  C3. No assumptions about the user's folders. Whether a mounted folder is synced, backed up or versioned is the user's choice, not a design input.
+  C4. The design rule is PARITY: inside the container each lane must be able to do what it does natively, and the container must not make any lane worse. Isolation is incidental, not promised.
+
+Everything you need is in the paste. Do not open files or run commands. If a claim looks wrong but you cannot check it from the text, say "unverifiable from the text" — but you MAY draw on your own platform knowledge (Docker Desktop, macOS, Linux, each CLI) and should say when you do.
+
+YOUR JOB — solve, then attack
+1. VERDICT per section, BUILD / RESHAPE / KILL, one line each with the strongest reason: S1 mounts, S2 identity and paths, S3 host reach, S4 logins, S5 networking and pairing, S6 Seed and the in-container scheduler, S7 release manifest, and the PHASES.
+2. PARITY GAPS, ranked most severe first, at most 10: something a pane on some lane can do natively that it cannot do in this design (or does worse). For each: which lane(s), the concrete failure, and a FIX that satisfies C1–C4. A gap without a fix is half an answer.
+3. ANSWER THE PLAN'S OPEN QUESTIONS 1–5 directly, using platform knowledge where needed.
+4. corral-hostd: is the verb set right (secret, notify; general commands over SSH)? What does its threat model need to state, and what is the smallest secure design?
+5. TESTS: up to 6 acceptance tests for Phases 0–1 that would fail if parity is broken on any lane.
+6. WHAT WOULD MAKE THIS FAIL in practice on the daily Mac, in one sentence.
+
+FORMAT: Markdown, under 1,300 words. Start with the eight verdict lines. No preamble.
+
+=== PLAN ===
 # Proposal — Corral Light runs in a container, on every host
 
 Status: **v2 FOR PANEL REVIEW**, 2026-10-01. Nothing built.
