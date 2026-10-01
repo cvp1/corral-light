@@ -160,11 +160,11 @@ check(html.includes('<dialog id="rigdlg">'), 'no rig dialog in index.html');
 for (const id of ['rig-list', 'rig-name', 'rig-replace', 'rig-save', 'rig-error', 'rig-out'])
   check(html.includes(`id="${id}"`), `index.html lacks #${id}`);
 
-function palette(query) {
+function palette(query, panes = [], archived = []) {
   let shown = null;
   const run = new Function('PAL', 'attachTarget', 'S', 'renderPalette', 'setTimeout',
     'clearTimeout', 'api', `${fn('paletteResults')} return paletteResults;`)(
-    { seq: 0 }, () => null, { panes: new Map(), archived: [] },
+    { seq: 0 }, () => null, { panes: new Map(panes.map(p => [p.id, p])), archived },
     rows => { shown = rows; }, () => 0, () => {}, async () => ({ hits: [] }));
   run(query);
   return shown || [];
@@ -173,6 +173,19 @@ for (const q of ['', 'rig', 'rigs', 'RIGS'])
   check(palette(q).some(x => x.kind === 'rigs'), `⌘K "${q}" has no Rigs row`);
 // The control: a needle that matches nothing must not conjure the row.
 check(!palette('zzqx').some(x => x.kind === 'rigs'), '⌘K shows Rigs for a needle it does not match');
+
+// S2b: action rows rank above panes, as in full Corral. The live failure:
+// "rig" + Enter focused a pane titled rig-b instead of opening Rigs.
+const RIGB = [{ id: 'p1', title: 'rig-b', state: 'idle', cwd: '/x/rig-b', agent: 'claude', seat: null }];
+const ARCH = [{ id: 'a1', title: 'rig-old' }];
+const firstForRig = palette('rig', RIGB, ARCH);
+check(firstForRig[0] && firstForRig[0].kind === 'rigs',
+      `⌘K "rig" ranks ${firstForRig[0] && firstForRig[0].kind} first, not the Rigs row`);
+check(firstForRig.some(x => x.kind === 'pane') && firstForRig.some(x => x.kind === 'archived'),
+      '⌘K "rig" lost the matching pane or archived row');
+const order = palette('', RIGB, ARCH).map(x => x.kind);
+check(JSON.stringify(order) === JSON.stringify(['action', 'digest', 'rigs', 'pane', 'archived']),
+      `⌘K empty-needle order is ${order.join(',')}`);
 
 let opened = 0, closed = 0, newClicked = 0;
 const activate = new Function('$', 'openRigs', 'api', 'refresh', 'toast',
