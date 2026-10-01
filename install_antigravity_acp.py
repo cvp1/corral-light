@@ -222,32 +222,44 @@ def install(destination=RUNTIME, settings=None):
     # passed. Same directory also keeps a 1.5 GB archive out of RAM.
     with tempfile.TemporaryDirectory(prefix=".corral-antigravity-acp-",
                                      dir=destination.parent) as td:
-        archive = Path(td) / "release.zip"
-        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
-            try:
-                download(row["url"], archive)
-                break
-            except ShortDownload:
-                if attempt == DOWNLOAD_ATTEMPTS:
-                    raise
-        got = sha256(archive)
-        if got != row["sha256"]:
-            raise RuntimeError(f"archive SHA-256 mismatch: got {got}, expected {row['sha256']}")
-        extract = Path(td) / "extract"
-        with zipfile.ZipFile(archive) as zf:
-            missing = set(FILES) - set(zf.namelist())
-            if missing:
-                raise RuntimeError(f"archive missing expected files: {sorted(missing)}")
-            # Extract only the expected root files, never arbitrary zip paths.
-            extract.mkdir(mode=0o700)
-            for name in FILES:
-                target = extract / name
-                with zf.open(name) as source, target.open("wb") as out:
-                    shutil.copyfileobj(source, out, 1024 * 1024)
-                target.chmod(0o555)
-        extract.chmod(0o700)
+        extract, _ = fetch(row, td, row["sha256"])
         os.replace(extract, destination)
     return f"installed {row['release']}: {destination}\n{select_auth(settings)}"
+
+
+def fetch(row, workdir, expect_sha):
+    """Download row's archive into workdir and extract the expected files.
+    Returns (extract_dir, sha256). With expect_sha None the digest is only
+    measured — trust-on-first-download, for `lanes update` staging a release
+    nobody has pinned yet; the caller writes it into RELEASES on green."""
+    archive = Path(workdir) / "release.zip"
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            download(row["url"], archive)
+            break
+        except ShortDownload:
+            if attempt == DOWNLOAD_ATTEMPTS:
+                raise
+    got = sha256(archive)
+    if expect_sha is not None and got != expect_sha:
+        raise RuntimeError(f"archive SHA-256 mismatch: got {got}, expected {expect_sha}")
+    extract = Path(workdir) / "extract"
+    with zipfile.ZipFile(archive) as zf:
+        if expect_sha is None and zf.testzip() is not None:
+            raise RuntimeError("archive failed its zip integrity test")
+        missing = set(FILES) - set(zf.namelist())
+        if missing:
+            raise RuntimeError(f"archive missing expected files: {sorted(missing)}")
+        # Extract only the expected root files, never arbitrary zip paths.
+        extract.mkdir(mode=0o700)
+        for name in FILES:
+            target = extract / name
+            with zf.open(name) as source, target.open("wb") as out:
+                shutil.copyfileobj(source, out, 1024 * 1024)
+            target.chmod(0o555)
+    extract.chmod(0o700)
+    archive.unlink()
+    return extract, got
 
 
 def main(argv=None):

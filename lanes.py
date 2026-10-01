@@ -1,0 +1,483 @@
+#!/usr/bin/python3
+"""lanes — keep the vendor lanes current without breaking the wall.
+
+    corral-light lanes update <lane> [--version V | --release NAME] [--json]
+
+WHY (DESIGN-6 Stage F, 2026-10-01)
+    Codex, Claude, Antigravity and Grok are first-party modules here, and
+    The operator's ruling is that they "must be kept up to date". Bumping a pin by
+    hand has gone wrong in the same way more than once: the adapter installed,
+    `doctor` said ok, and the first pane died (the macOS Antigravity build
+    rejected a Linux-only flag; doctor's line for that lane was a static
+    label, not a check). So an update is earned the way a pane earns trust:
+    the NEW adapter runs a real session on a private hub before any pin moves.
+
+WHAT ONE UPDATE DOES
+    1. Stage. npm lanes (codex, claude): the current package.json and lock are
+       copied to a scratch dir beside spike/node_modules, and
+       `npm install --prefix <scratch> <pkg>@<version> --save-exact` builds the
+       whole tree the pin change would produce. Antigravity: the named release
+       is fetched beside the runtime and its digest measured
+       (trust-on-first-download, as every row so far was pinned). Grok: none —
+       its own updater owns the install; this only checks and probes.
+    2. Probe, on a private hub (scratch state, a free loopback port, desktop
+       notifications muted) with the lane's override variable pointed at the
+       staged adapter: lane_probe's handshake must pass, one real prompt must
+       come back, and the model list must be read back from the pane.
+    3. Green: change exactly one pin (spike/package.json + lock, or the
+       installer's row), and swap the staged tree into place. Red: change
+       nothing, say why, and notify.
+
+WILL NOT
+    * Touch the live hub process or its panes. New panes pick up a new adapter
+      at spawn. (Already-running adapters keep their loaded code; one that
+      lazily loads a file after the swap reads the new tree — not observed.)
+    * Run `grok update`, or install anything for Grok.
+    * Commit. It prints the probe record for the commit body; the suites run
+      before that commit, by whoever makes it.
+    * Delete. The replaced tree goes to the Trash with a dated name.
+    * Guess an Antigravity release. Google publishes no index of them, so a
+      release is named with --release, or the answer is `unknown`.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+TRASH = Path.home() / ".Trash"
+
+NPM = {
+    "codex": {"pkg": "@agentclientprotocol/codex-acp", "bin": "codex-acp",
+              "env": "CORRAL_CODEX_ACP"},
+    "claude": {"pkg": "@agentclientprotocol/claude-agent-acp", "bin": "claude-agent-acp",
+               "env": "CORRAL_CLAUDE_ADAPTER"},
+}
+ALIASES = {"chatgpt": "codex", "antigravity": "gemini", "agy": "gemini"}
+LANES = ("codex", "claude", "gemini", "grok")
+
+RELEASE_RE = re.compile(r"agy_acp_server_\d{8}_\d{2}_RC\d{2}")
+PROBE_PROMPT = "Reply with exactly the one word: pong"
+NPM_TIMEOUT_S = 600
+CHECK_TIMEOUT_S = 60
+HUB_UP_S = 30
+ASK_TIMEOUT_S = 180
+PROBE_TIMEOUT_S = 300           # the whole probe client, handshake included
+MAX_REPLY = 200                 # chars of the reply kept in the record
+
+
+class Red(RuntimeError):
+    """The update cannot go green; nothing has been changed."""
+
+
+def lane_key(name):
+    key = ALIASES.get((name or "").strip().lower(), (name or "").strip().lower())
+    if key not in LANES:
+        raise Red(f"no such lane {name!r}; lanes are {', '.join(LANES)}")
+    return key
+
+
+def _run(argv, timeout, cwd=None, env=None):
+    """A fixed argv, never a shell string. Returns (rc, stdout, stderr)."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                           cwd=cwd, env=env)
+        return p.returncode, p.stdout, p.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, "", f"{type(e).__name__}: {e}"
+
+
+def stamp():
+    return datetime.now().strftime("%Y-%m-%d-%H%M%S")
+
+
+# ── versions ──────────────────────────────────────────────────────────────
+def npm_installed(root, lane):
+    pkg = NPM[lane]["pkg"]
+    try:
+        return json.loads((root / "spike" / "node_modules" / pkg / "package.json")
+                          .read_text())["version"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def npm_latest(lane, run=_run):
+    rc, out, err = run(["npm", "view", NPM[lane]["pkg"], "version"], CHECK_TIMEOUT_S)
+    v = out.strip()
+    if rc != 0 or not re.fullmatch(r"\d+\.\d+\.\d+(-[\w.]+)?", v):
+        raise Red(f"npm view failed: {(err or out).strip()[:200] or f'rc {rc}'}")
+    return v
+
+
+def grok_check(run=_run):
+    import grok_launcher
+    grok = grok_launcher.resolve_grok()
+    if not grok:
+        raise Red("grok CLI not found")
+    rc, out, err = run([grok, "update", "--check", "--json"], CHECK_TIMEOUT_S)
+    try:
+        d = json.loads(out)
+        return d["currentVersion"], d["latestVersion"]
+    except (ValueError, KeyError, TypeError):
+        raise Red(f"grok update --check gave no version: {(err or out).strip()[:200]}")
+
+
+# ── staging ───────────────────────────────────────────────────────────────
+def stage_npm(root, lane, version, run=_run):
+    """The whole tree the pin change would produce, in a scratch dir beside
+    the live one (same filesystem, so the swap is a rename)."""
+    spike = root / "spike"
+    scratch = Path(tempfile.mkdtemp(prefix=".lanes-stage-", dir=spike))
+    try:
+        for name in ("package.json", "package-lock.json"):
+            shutil.copy2(spike / name, scratch / name)
+        pkg = NPM[lane]["pkg"]
+        rc, out, err = run(["npm", "install", "--prefix", str(scratch), f"{pkg}@{version}",
+                            "--save-exact", "--no-audit", "--no-fund"], NPM_TIMEOUT_S)
+        if rc != 0:
+            raise Red(f"npm install failed (rc {rc}): {(err or out).strip()[-300:]}")
+        check_one_pin(spike / "package.json", scratch / "package.json", pkg, version)
+        adapter = scratch / "node_modules" / ".bin" / NPM[lane]["bin"]
+        if not adapter.exists():
+            raise Red(f"staged tree has no {adapter.name}")
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
+    return scratch, {NPM[lane]["env"]: str(adapter)}
+
+
+def check_one_pin(old_path, new_path, pkg, version):
+    """Exactly one dependency changed, and it is now exactly `version`."""
+    old = json.loads(Path(old_path).read_text())
+    new = json.loads(Path(new_path).read_text())
+    od, nd = old.get("dependencies", {}), new.get("dependencies", {})
+    changed = sorted(k for k in set(od) | set(nd) if od.get(k) != nd.get(k))
+    rest_same = ({k: v for k, v in old.items() if k != "dependencies"}
+                 == {k: v for k, v in new.items() if k != "dependencies"})
+    if changed != [pkg] or nd.get(pkg) != version or not rest_same:
+        raise Red(f"staged package.json changes {changed or 'nothing'} "
+                  f"(want exactly {pkg} -> {version})")
+
+
+def stage_release(release, fetch=None):
+    """Fetch a named Antigravity release beside the runtime; TOFU digest."""
+    import install_antigravity_acp as inst
+    row = inst.release_for()
+    if row is None:
+        raise Red(inst.platform_problem())
+    if not RELEASE_RE.fullmatch(release):
+        raise Red(f"not a release name: {release!r} (want agy_acp_server_YYYYMMDD_NN_RCNN)")
+    suffix = row["release"][len(RELEASE_RE.match(row["release"]).group(0)):]
+    new = dict(row, release=release + suffix)
+    new["url"] = f"{inst.BASE_URL}{row['dir']}/agy-acp-server-{new['release']}.zip"
+    inst.RUNTIME.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=".lanes-stage-", dir=inst.RUNTIME.parent))
+    try:
+        extract, digest = (fetch or inst.fetch)(new, scratch, None)
+    except Exception as e:                       # noqa: BLE001 — reported as red
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise Red(f"fetch {new['release']} failed: {e}")
+    new["sha256"] = digest
+    return scratch, extract, row, new, {
+        "CORRAL_ANTIGRAVITY_ACP_BINARY": str(extract / inst.FILES[0])}
+
+
+# ── the probe ─────────────────────────────────────────────────────────────
+_HUB_WRAPPER = (
+    "import runpy, sys; sys.path.insert(0, sys.argv[1]); import notify\n"
+    "notify.desktop = lambda *a, **k: (False, 'muted: lanes probe hub')\n"
+    "sys.argv = [sys.argv[1] + '/hub.py']\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def probe(root, lane, overrides):
+    """Handshake + one real prompt + model list, on a private hub that is
+    started here and stopped here (by the process group WE created, never by
+    a pattern that could also match the live hub). Returns the record dict;
+    record["ok"] says green."""
+    state = Path(tempfile.mkdtemp(prefix="corral-lanes-probe-"))
+    cwd = state / "cwd"
+    cwd.mkdir()
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    env = dict(os.environ, **overrides, CORRAL_LIGHT_STATE=str(state),
+               CORRAL_LIGHT_BIND="127.0.0.1", CORRAL_LIGHT_PORT=str(port),
+               CORRAL_LIGHT_URL=url,
+               CORRAL_LIGHT_CONSULT_CFG=str(state / "consult-session.json"))
+    t0 = time.time()
+    rec = {"lane": lane, "overrides": overrides, "ok": False}
+    log = (state / "hub.log").open("wb")
+    hub = subprocess.Popen([sys.executable, "-c", _HUB_WRAPPER, str(root)], env=env,
+                           cwd=str(root), stdout=log, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        if not _wait_up(url, hub):
+            rec["why"] = "private hub did not come up: " + _tail(state / "hub.log")
+            return rec
+        rc, out, err = _run([sys.executable, str(root / "lanes.py"), "_probe-client",
+                             lane, url, str(cwd)], PROBE_TIMEOUT_S, cwd=str(root), env=env)
+        try:
+            rec.update(json.loads(out.strip().splitlines()[-1]))
+        except (ValueError, IndexError):
+            rec["why"] = f"probe client gave no record (rc {rc}): {(err or out).strip()[-300:]}"
+    finally:
+        _stop(hub)
+        log.close()
+        rec["seconds"] = round(time.time() - t0, 1)
+        shutil.rmtree(state, ignore_errors=True)
+    return rec
+
+
+def _wait_up(url, hub):
+    deadline = time.time() + HUB_UP_S
+    while time.time() < deadline:
+        if hub.poll() is not None:
+            return False
+        try:
+            with urllib.request.urlopen(url + "/health", timeout=2):
+                return True
+        except Exception:                                # noqa: BLE001
+            time.sleep(0.5)
+    return False
+
+
+def _stop(hub):
+    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+        if hub.poll() is not None:
+            break
+        try:
+            os.killpg(hub.pid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            hub.wait(wait)
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _tail(path, n=300):
+    try:
+        return Path(path).read_text(errors="replace")[-n:].strip()
+    except OSError:
+        return "(no log)"
+
+
+def probe_client(lane, url, cwd):
+    """Runs INSIDE the probe's environment (a subprocess), so sessions,
+    lane_probe and consult all read the private hub's state, never the live
+    one. Prints one JSON record."""
+    import lane_probe
+    import consult
+    rec = {"handshake": False, "reply": "", "models": [], "model": None, "ok": False}
+    hs = lane_probe.probe(lane, force=True)
+    rec["handshake"] = bool(hs.get("ok"))
+    if not hs.get("ok"):
+        rec["why"] = f"handshake: {hs.get('error') or 'failed'}"
+        return rec
+    hub = consult.connect(url)
+    pane = consult.open_pane(hub, lane, cwd, title="lanes update probe")
+    pid = pane["id"]
+    try:
+        r = consult.send_and_wait(hub, pid, PROBE_PROMPT, ASK_TIMEOUT_S)
+        rec["reply"] = (r.get("text") or "")[:MAX_REPLY]
+        p = consult._pane_in(consult._state(hub, {pid: 1 << 40}), pid) or {}
+        model = (p.get("config") or {}).get("model") or {}
+        rec["model"] = model.get("value") or p.get("model")
+        rec["models"] = [o.get("value") for o in model.get("options") or [] if o.get("value")]
+        if not (r.get("complete") and rec["reply"].strip()):
+            rec["why"] = f"prompt did not round-trip: {r.get('why') or 'no complete reply'}"
+        elif not rec["models"]:
+            rec["why"] = "no model list read back from the pane"
+        else:
+            rec["ok"] = True
+    finally:
+        try:
+            hub.post("/api/session/close", {"pane": pid})
+        except Exception:                                # noqa: BLE001
+            pass
+    return rec
+
+
+# ── the swap ──────────────────────────────────────────────────────────────
+def swap_npm(root, scratch, label, trash=TRASH):
+    """The staged tree becomes spike/node_modules; package.json and the lock
+    follow. The replaced tree (or worktree symlink) goes to the Trash."""
+    spike = root / "spike"
+    live = spike / "node_modules"
+    trash.mkdir(parents=True, exist_ok=True)
+    prev = trash / f"node_modules-{label}-{stamp()}"
+    os.rename(live, prev)
+    try:
+        os.rename(scratch / "node_modules", live)
+    except OSError:
+        os.rename(prev, live)
+        raise
+    for name in ("package.json", "package-lock.json"):
+        os.replace(scratch / name, spike / name)
+    shutil.rmtree(scratch, ignore_errors=True)
+    return prev
+
+
+def swap_release(installer_path, old, new, extract, trash=TRASH):
+    """Rewrite this host's row in the installer, then the runtime."""
+    import install_antigravity_acp as inst
+    text = Path(installer_path).read_text()
+    for key in ("release", "sha256"):
+        if text.count(f'"{old[key]}"') != 1:
+            raise Red(f"installer row {key} {old[key]!r} is not unique; not editing")
+    text = text.replace(f'"release": "{old["release"]}"', f'"release": "{new["release"]}"')
+    text = text.replace(f'"sha256": "{old["sha256"]}",',
+                        f'"sha256": "{new["sha256"]}",  # TOFU {stamp()[:10]}, lanes update')
+    trash.mkdir(parents=True, exist_ok=True)
+    prev = None
+    if inst.RUNTIME.exists():
+        prev = trash / f"antigravity-acp-{old['release']}-{stamp()}"
+        os.rename(inst.RUNTIME, prev)
+    try:
+        os.replace(extract, inst.RUNTIME)
+    except OSError:
+        if prev is not None:
+            os.rename(prev, inst.RUNTIME)
+        raise
+    tmp = Path(installer_path).with_name(Path(installer_path).name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, installer_path)
+    return prev
+
+
+# ── update ────────────────────────────────────────────────────────────────
+def update(lane, root=ROOT, version=None, release=None, run=_run, probe_fn=probe,
+           notify_fn=None, trash=TRASH, fetch=None):
+    """Returns a record: {"lane", "outcome": current|updated|red|unknown|
+    checked, "installed", "latest", "probe", "why"}. Never raises Red."""
+    rec = {"lane": lane, "outcome": "red", "installed": None, "latest": None}
+    scratch = None
+    try:
+        lane = rec["lane"] = lane_key(lane)
+        if lane == "grok":
+            rec["installed"], rec["latest"] = grok_check(run)
+            rec["probe"] = probe_fn(root, lane, {})
+            if not rec["probe"].get("ok"):
+                raise Red(f"probe: {rec['probe'].get('why')}")
+            rec["outcome"] = "checked"
+            rec["why"] = ("current" if rec["installed"] == rec["latest"] else
+                          f"behind: the Grok CLI updates itself; run `grok update` "
+                          f"to move {rec['installed']} -> {rec['latest']}")
+            return rec
+
+        if lane == "gemini":
+            import install_antigravity_acp as inst
+            row = inst.release_for()
+            rec["installed"] = row["release"] if row else None
+            if not release:
+                rec["outcome"] = "unknown"
+                rec["why"] = ("Google publishes no index of Antigravity releases; "
+                              "name one with --release")
+                return rec
+            rec["latest"] = release
+            if row and row["release"].startswith(release + "-"):
+                rec["outcome"], rec["why"] = "current", "already pinned"
+                return rec
+            scratch, extract, old, new, overrides = stage_release(release, fetch)
+            rec["latest"] = new["release"]
+            rec["probe"] = probe_fn(root, lane, overrides)
+            if not rec["probe"].get("ok"):
+                raise Red(f"probe: {rec['probe'].get('why')}")
+            rec["replaced"] = str(swap_release(root / "install_antigravity_acp.py",
+                                               old, new, extract, trash) or "")
+            rec["sha256"] = new["sha256"]
+            rec["outcome"] = "updated"
+            return rec
+
+        rec["installed"] = npm_installed(root, lane)
+        rec["latest"] = version or npm_latest(lane, run)
+        if rec["installed"] == rec["latest"]:
+            rec["outcome"], rec["why"] = "current", "installed is latest"
+            return rec
+        scratch, overrides = stage_npm(root, lane, rec["latest"], run)
+        rec["probe"] = probe_fn(root, lane, overrides)
+        if not rec["probe"].get("ok"):
+            raise Red(f"probe: {rec['probe'].get('why')}")
+        rec["replaced"] = str(swap_npm(root, scratch, f"{lane}-{rec['installed']}", trash))
+        scratch = None
+        rec["outcome"] = "updated"
+        return rec
+    except Red as e:
+        rec["outcome"], rec["why"] = "red", str(e)
+        (notify_fn or _notify)(f"lanes update {rec['lane']}: not updated", str(e))
+        return rec
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _notify(title, body):
+    try:
+        import notify
+        notify.desktop(f"Corral Light — {title}", body)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def render(rec):
+    p = rec.get("probe") or {}
+    lines = [f"{rec['lane']}: {rec['outcome']}  installed {rec.get('installed')}  "
+             f"latest {rec.get('latest')}"]
+    if rec.get("why"):
+        lines.append(f"  why: {rec['why']}")
+    if p:
+        lines.append(f"  probe: handshake {'ok' if p.get('handshake') else 'FAILED'}, "
+                     f"reply {p.get('reply', '')!r}, model {p.get('model')}, "
+                     f"{len(p.get('models') or [])} models, {p.get('seconds')} s")
+        if p.get("models"):
+            lines.append("  models: " + ", ".join(p["models"]))
+    if rec.get("replaced"):
+        lines.append(f"  replaced tree moved to {rec['replaced']}")
+    return "\n".join(lines)
+
+
+def _lane_arg(name):
+    try:
+        return lane_key(name)
+    except Red as e:                 # a typo is a usage error, not a red to notify
+        raise argparse.ArgumentTypeError(str(e))
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["_probe-client"]:
+        print(json.dumps(probe_client(*argv[1:4])), flush=True)
+        return 0
+    ap = argparse.ArgumentParser(prog="corral-light lanes",
+                                 description="keep the vendor lanes current")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("update", help="stage, probe on a private hub, then move one pin")
+    s.add_argument("lane", type=_lane_arg, help="codex | claude | gemini | grok")
+    s.add_argument("--version", help="npm lanes: this version instead of latest")
+    s.add_argument("--release", help="gemini: the release to stage, e.g. "
+                                     "agy_acp_server_20260818_01_RC01")
+    s.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    rec = update(a.lane, version=a.version, release=a.release)
+    print(json.dumps(rec, indent=2) if a.json else render(rec), flush=True)
+    return 1 if rec["outcome"] == "red" else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

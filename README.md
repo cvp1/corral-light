@@ -48,6 +48,14 @@ The availability check is intentionally honest: an assistant is marked unavailab
 ./corral-light diagnose [assistant]
 ```
 
+### Keeping the assistants current
+
+```
+./corral-light lanes update codex      # or claude; gemini --release <name>; grok
+```
+
+An update is proven before anything moves. The newer adapter is installed into a scratch directory and started on a private hub with its own state and port. It has to complete a handshake, answer one real prompt, and report its model list. Only then does it replace `spike/node_modules`, and only one pin in `spike/package.json` and its lock changes (or, for Antigravity, this platform's row in the installer). If any step fails, nothing changes and you get a notification. The running hub and its panes are never touched: new panes start on the new adapter. The replaced tree goes to the Trash. Grok's own tool installs Grok updates, so for Grok this only reports and probes. Google publishes no list of Antigravity releases, so you name the release.
+
 ## Search and attach files
 
 Press `⌘K` to search open conversations, archived conversations, notes, and other configured text files. Press `?` for every keyboard shortcut — that list is generated from the same table the key handler dispatches from, so it cannot advertise a key that does nothing.
