@@ -39,7 +39,7 @@ Corral Light connects to software installed and signed in on your computer.
 | Claude Code | Claude Code, and the adapter from `cd spike && npm install` | Supports model and effort selection. |
 | ChatGPT (Codex) | The same npm install, plus a Codex login | Uses a separate configuration directory. |
 | Grok | The Grok command-line tool and `grok login` | The Grok tool manages its own sign-in. |
-| Antigravity (Gemini) | Run `python3 install_antigravity_acp.py --install` | The included installer currently supports Linux x86-64. It also selects your Google login (`oauth-personal`) in `~/.gemini/antigravity-acp/settings.json` when no sign-in method is set; a method you chose yourself is left alone. |
+| Antigravity (Gemini) | Run `python3 install_antigravity_acp.py --install` | The included installer supports Linux x86-64, Linux arm64, and macOS on Apple Silicon (Google publishes no Intel-Mac build). It also selects your Google login (`oauth-personal`) in `~/.gemini/antigravity-acp/settings.json` when no sign-in method is set; a method you chose yourself is left alone. |
 | Ollama | Ollama and at least one downloaded model | Chat only; it cannot edit files or run commands. |
 
 The availability check is intentionally honest: an assistant is marked unavailable when a required program, login, or platform is missing. If an assistant passes that check but fails to answer, run:

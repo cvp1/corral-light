@@ -1,9 +1,9 @@
 #!/usr/bin/python3
 """Install the exact Google native Antigravity ACP release used by Corral.
 
-This intentionally pins one archive plus SHA-256. A changed upstream release
-is an operator decision, not a silent in-place update to an agent that can act
-in a working tree.
+This intentionally pins one archive plus SHA-256 per platform. A changed
+upstream release is an operator decision, not a silent in-place update to an
+agent that can act in a working tree.
 """
 import argparse
 import hashlib
@@ -17,28 +17,59 @@ import urllib.request
 import zipfile
 
 
-# THE PINNED RELEASE IS LINUX x86-64. THERE IS NO OTHER ONE HERE.
+# ONE PINNED ARCHIVE PER PLATFORM, AND NO ROW MEANS NO INSTALL.
 #
-# Google publishes this server under .../releases/linux/; the analogous
-# darwin/arm64, darwin/x86_64 and mac/ paths all 404 (probed 2026-08-31).
-# Before this guard existed, running --install on a Mac downloaded the Linux
-# archive, verified its SHA correctly, installed it — and `corral-light doctor`
-# then reported the Antigravity lane as **ok**, because availability is
-# "the files exist on disk". The pane would die at exec.
+# Before a platform guard existed, running --install on a Mac downloaded the
+# Linux archive, verified its SHA correctly, installed it — and
+# `corral-light doctor` then reported the Antigravity lane as **ok**, because
+# availability is "the files exist on disk". The pane would die at exec.
 #
 # That is the exact failure this whole codebase argues against: a picker
 # listing a binary that cannot run is a button that lies, and it is WORSE than
 # the honest "not installed" it replaced, because the operator has stopped
 # looking. Refuse at install, where the platform is knowable and the message
 # can say why (P4: degrade toward safety, loudly).
-PLATFORM = ("Linux", "x86_64")
-RELEASE = "agy_acp_server_20260818_01_RC01-linux-x86_64"
-URL = ("https://dl.google.com/agy-extensions/releases/linux/"
-       f"agy-acp-server-{RELEASE}.zip")
-ARCHIVE_SHA256 = "ce3f09628575b25497cf5a3c19d073b49acb80f1dab1ff8592919e9c9b8799e1"
+#
+# Google publishes under .../releases/linux/ and .../releases/macos/ (the
+# darwin/ and mac/ paths 404). There is no darwin-x86_64 build (404,
+# 2026-10-01), so an Intel Mac — or an x86-64 Python under Rosetta — is refused.
+#
+# The linux-x86_64 digest was pinned from its first download. The two rows
+# added 2026-10-01 are pinned the same way, trust-on-first-download: the
+# archive was fetched whole (length matched Content-Length, zip test clean)
+# and its SHA-256 written here. darwin-arm64 was then run live; linux-arm64
+# has not been executed on any host.
+#
+# `args` is per build, because the builds disagree: Google registered the
+# Linux server as `agy_acp_server.par --uid=`, and the macOS build has no
+# such flag — it dies "Unknown command line flag 'uid'" before initialize
+# (2026-10-01), while a bare start handshakes. linux-arm64 is assumed to
+# match linux-x86_64 (same registration); not yet run.
+BASE_URL = "https://dl.google.com/agy-extensions/releases/"
+RELEASES = {
+    ("Linux", "x86_64"): {
+        "release": "agy_acp_server_20260818_01_RC01-linux-x86_64",
+        "args": ["--uid="],
+        "dir": "linux",
+        "sha256": "ce3f09628575b25497cf5a3c19d073b49acb80f1dab1ff8592919e9c9b8799e1",
+    },
+    ("Linux", "arm64"): {
+        "release": "agy_acp_server_20260818_01_RC01-linux-arm64",
+        "args": ["--uid="],
+        "dir": "linux",
+        "sha256": "70fcdac70684de60f7a0eb16ea497d6cc4498728420f060e0850cfc9a9329b40",
+    },
+    ("Darwin", "arm64"): {
+        "release": "agy_acp_server_20260818_01_RC01-darwin-arm64",
+        "args": [],
+        "dir": "macos",
+        "sha256": "f122ca7e7030a27f9649da4cf1a7d80e12c48c5f6118ff35affc34d56cbf83dd",
+    },
+}
 FILES = ("agy_acp_server.par", "localharness_external")
 RUNTIME = Path.home() / ".local/lib/corral/antigravity-acp"
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+DOWNLOAD_ATTEMPTS = 3      # short reads only; every attempt is still SHA-checked
 
 # The server refuses session/new — "Authentication required … No
 # authentication method selected" — until settings.json names one. Installed
@@ -65,35 +96,64 @@ def installed_ok(destination=RUNTIME):
             and os.access(destination / FILES[0], os.X_OK))
 
 
+class ShortDownload(RuntimeError):
+    """The connection closed before Content-Length bytes arrived."""
+
+
 def download(url, destination):
     size = 0
     with urllib.request.urlopen(url, timeout=30) as source, Path(destination).open("wb") as out:
+        # A connection that closes early ends the read loop exactly like a
+        # finished one (seen 2026-10-01: 92 MB of a 315 MB archive, no error).
+        # The SHA check would still refuse it, but say what actually happened.
+        expected = source.headers.get("Content-Length")
         while True:
             chunk = source.read(1024 * 1024)
             if not chunk:
-                return
+                break
             size += len(chunk)
             if size > MAX_ARCHIVE_BYTES:
                 raise RuntimeError(f"archive exceeds {MAX_ARCHIVE_BYTES} byte bound")
             out.write(chunk)
+    if expected and expected.isdigit() and size != int(expected):
+        raise ShortDownload(f"download ended short: {size} of {expected} bytes")
+
+
+def host_platform(system=None, machine=None):
+    """(system, machine) normalized to the RELEASES keys."""
+    system = system or platform.system()
+    machine = machine or platform.machine()
+    # Same CPU, different reporting conventions: Windows/WSL and some BSDs
+    # say AMD64; Linux says aarch64 where macOS says arm64.
+    if machine in ("x86_64", "amd64", "AMD64"):
+        machine = "x86_64"
+    elif machine in ("arm64", "aarch64", "ARM64"):
+        machine = "arm64"
+    return system, machine
+
+
+def release_for(system=None, machine=None):
+    """The pinned row for this host, with its URL filled in, or None."""
+    row = RELEASES.get(host_platform(system, machine))
+    if row is None:
+        return None
+    return dict(row, url=f"{BASE_URL}{row['dir']}/agy-acp-server-{row['release']}.zip")
 
 
 def platform_problem():
-    """Why this host cannot run the pinned release, or None. See PLATFORM."""
-    system, machine = platform.system(), platform.machine()
-    # x86_64/AMD64 are the same thing under different reporting conventions.
-    normalized = "x86_64" if machine in ("x86_64", "amd64", "AMD64") else machine
-    if (system, normalized) == PLATFORM:
+    """Why this host cannot run any pinned release, or None. See RELEASES."""
+    if release_for() is not None:
         return None
-    return (f"the pinned Antigravity ACP release is {PLATFORM[0]} "
-            f"{PLATFORM[1]}, and this host is {system} {machine}. Google "
-            f"publishes this server under .../releases/linux/ only — the "
-            f"darwin and mac paths 404 (probed 2026-08-31). Installing it "
-            f"here would put a binary on disk that cannot execute, and the "
-            f"lane would then report as available. Refusing.\n"
+    system, machine = platform.system(), platform.machine()
+    pinned = ", ".join(f"{s} {m}" for s, m in sorted(RELEASES))
+    return (f"there is no pinned Antigravity ACP release for {system} "
+            f"{machine}; the pinned platforms are {pinned}. Installing "
+            f"another platform's build here would put a binary on disk that "
+            f"cannot execute, and the lane would then report as available. "
+            f"Refusing.\n"
             f"  If a build for this platform now exists, pinning it is an "
-            f"operator decision: set RELEASE, URL and ARCHIVE_SHA256 in this "
-            f"file to the real archive and its verified digest.")
+            f"operator decision: add a row to RELEASES in this file with the "
+            f"real archive and its verified digest.")
 
 
 def auth_type(settings=None):
@@ -149,9 +209,9 @@ def install(destination=RUNTIME, settings=None):
     destination = Path(destination)
     if installed_ok(destination):
         return f"already installed: {destination}\n{select_auth(settings)}"
-    problem = platform_problem()
-    if problem:
-        raise RuntimeError(problem)
+    row = release_for()
+    if row is None:
+        raise RuntimeError(platform_problem())
     if destination.exists():
         raise RuntimeError(f"refusing to replace incomplete runtime: {destination}")
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -163,10 +223,16 @@ def install(destination=RUNTIME, settings=None):
     with tempfile.TemporaryDirectory(prefix=".corral-antigravity-acp-",
                                      dir=destination.parent) as td:
         archive = Path(td) / "release.zip"
-        download(URL, archive)
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            try:
+                download(row["url"], archive)
+                break
+            except ShortDownload:
+                if attempt == DOWNLOAD_ATTEMPTS:
+                    raise
         got = sha256(archive)
-        if got != ARCHIVE_SHA256:
-            raise RuntimeError(f"archive SHA-256 mismatch: got {got}, expected {ARCHIVE_SHA256}")
+        if got != row["sha256"]:
+            raise RuntimeError(f"archive SHA-256 mismatch: got {got}, expected {row['sha256']}")
         extract = Path(td) / "extract"
         with zipfile.ZipFile(archive) as zf:
             missing = set(FILES) - set(zf.namelist())
@@ -181,7 +247,7 @@ def install(destination=RUNTIME, settings=None):
                 target.chmod(0o555)
         extract.chmod(0o700)
         os.replace(extract, destination)
-    return f"installed {RELEASE}: {destination}\n{select_auth(settings)}"
+    return f"installed {row['release']}: {destination}\n{select_auth(settings)}"
 
 
 def main(argv=None):

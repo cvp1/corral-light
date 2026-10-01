@@ -794,22 +794,178 @@ class PlatformHonesty(unittest.TestCase):
     the honest failure it replaced, because the operator stops looking.
     """
 
-    def test_the_pinned_release_names_its_platform(self):
+    def test_each_pinned_row_names_its_own_platform(self):
+        """DESIGN-6 T-F3.1. A row is only honest if its archive is the build
+        for the key it sits under: the URL directory and the release suffix
+        both have to agree with (system, machine)."""
         import install_antigravity_acp as m
-        self.assertEqual(m.PLATFORM, ("Linux", "x86_64"))
-        self.assertIn("linux", m.URL)
+        self.assertEqual(set(m.RELEASES), {("Linux", "x86_64"),
+                                           ("Linux", "arm64"),
+                                           ("Darwin", "arm64")})
+        suffix = {("Linux", "x86_64"): ("linux", "-linux-x86_64"),
+                  ("Linux", "arm64"): ("linux", "-linux-arm64"),
+                  ("Darwin", "arm64"): ("macos", "-darwin-arm64")}
+        for (system, machine), (folder, tail) in suffix.items():
+            row = m.release_for(system, machine)
+            self.assertIsNotNone(row, (system, machine))
+            self.assertTrue(row["url"].startswith(f"{m.BASE_URL}{folder}/"), row)
+            self.assertTrue(row["release"].endswith(tail), row)
+            self.assertTrue(row["url"].endswith(f"{row['release']}.zip"), row)
+            self.assertRegex(row["sha256"], r"^[0-9a-f]{64}$", (system, machine))
 
-    def test_install_refuses_on_the_wrong_platform(self):
+    def test_each_build_is_started_with_its_own_flags(self):
+        """2026-10-01: the macOS build died "Unknown command line flag 'uid'"
+        before initialize, because the launcher passed the Linux
+        registration to every build. doctor said ok; the pane was dead."""
         import install_antigravity_acp as m
-        real_system, real_machine = m.platform.system, m.platform.machine
+        import antigravity_acp_launcher as la
+        mac = m.release_for("Darwin", "arm64")
+        linux = m.release_for("Linux", "x86_64")
+        self.assertEqual(la.server_argv("/b", row=mac), ["/b"])
+        self.assertEqual(la.server_argv("/b", row=linux), ["/b", "--uid="])
+        self.assertEqual(m.release_for("Linux", "aarch64")["args"], ["--uid="])
+        real = m.platform.system, m.platform.machine
         try:
             m.platform.system, m.platform.machine = (lambda: "Darwin"), (lambda: "arm64")
-            self.assertIsNotNone(m.platform_problem())
-            with self.assertRaises(RuntimeError) as cm:
-                m.install(Path(tempfile.gettempdir()) / "corral-light-never")
-            self.assertIn("Darwin", str(cm.exception))
+            self.assertEqual(la.server_argv("/b"), ["/b"])
+            m.platform.system, m.platform.machine = (lambda: "Linux"), (lambda: "x86_64")
+            self.assertEqual(la.server_argv("/b"), ["/b", "--uid="])
         finally:
-            m.platform.system, m.platform.machine = real_system, real_machine
+            m.platform.system, m.platform.machine = real
+
+    def test_aarch64_and_arm64_are_the_same_platform(self):
+        import install_antigravity_acp as m
+        for name in ("arm64", "aarch64"):
+            self.assertEqual(m.release_for("Linux", name)["release"],
+                             m.RELEASES[("Linux", "arm64")]["release"], name)
+
+    def test_install_refuses_on_a_platform_with_no_row(self):
+        """DESIGN-6 T-F3.1/T-F3.3. Google publishes no darwin-x86_64 build
+        (404, 2026-10-01): an Intel Mac, or an x86-64 Python under Rosetta, is
+        refused with the reason, and the download is never attempted."""
+        import install_antigravity_acp as m
+        real = m.platform.system, m.platform.machine, m.download
+        calls = []
+        try:
+            m.platform.system, m.platform.machine = (lambda: "Darwin"), (lambda: "x86_64")
+            m.download = lambda url, out: calls.append(url)
+            self.assertIsNone(m.release_for())
+            self.assertIsNotNone(m.platform_problem())
+            with tempfile.TemporaryDirectory() as root:
+                destination = Path(root) / "lib" / "antigravity-acp"
+                with self.assertRaises(RuntimeError) as cm:
+                    m.install(destination, settings=Path(root) / "settings.json")
+                self.assertFalse(destination.parent.exists())
+            self.assertIn("Darwin x86_64", str(cm.exception))
+            self.assertIn("Darwin arm64", str(cm.exception))   # what IS pinned
+            self.assertEqual(calls, [])
+        finally:
+            m.platform.system, m.platform.machine, m.download = real
+
+    def test_a_mac_on_apple_silicon_resolves(self):
+        """DESIGN-6 T-F3.3: this test used to assert the opposite."""
+        import install_antigravity_acp as m
+        real = m.platform.system, m.platform.machine
+        try:
+            m.platform.system, m.platform.machine = (lambda: "Darwin"), (lambda: "arm64")
+            self.assertIsNone(m.platform_problem())
+            self.assertIn("/macos/", m.release_for()["url"])
+        finally:
+            m.platform.system, m.platform.machine = real
+
+    def test_a_digest_mismatch_installs_nothing(self):
+        """DESIGN-6 T-F3.2. The archive downloads, its digest is wrong, and
+        the install directory and its parent are left exactly as they were."""
+        import zipfile
+        import install_antigravity_acp as m
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            payload = root / "release.src.zip"
+            with zipfile.ZipFile(payload, "w") as zf:
+                for name in m.FILES:
+                    zf.writestr(name, b"#!/bin/sh\n")
+            lib = root / "lib"
+            lib.mkdir()
+            destination = lib / "antigravity-acp"
+            real = m.download, m.release_for
+            try:
+                m.download = lambda url, out: Path(out).write_bytes(payload.read_bytes())
+                m.release_for = lambda *a: {"release": "r", "url": "u", "sha256": "0" * 64}
+                with self.assertRaises(RuntimeError) as cm:
+                    m.install(destination, settings=root / "settings.json")
+            finally:
+                m.download, m.release_for = real
+            self.assertIn("SHA-256 mismatch", str(cm.exception))
+            self.assertEqual(list(lib.iterdir()), [])
+            self.assertFalse((root / "settings.json").exists())
+
+    def test_a_short_download_is_named_not_hashed(self):
+        """2026-10-01: a 315 MB archive arrived as 92 MB with no error. The
+        reader must say the download ended short."""
+        import io
+        import install_antigravity_acp as m
+
+        class Short(io.BytesIO):
+            headers = {"Content-Length": "100"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        real = m.urllib.request.urlopen
+        try:
+            m.urllib.request.urlopen = lambda url, timeout: Short(b"x" * 40)
+            with tempfile.TemporaryDirectory() as root:
+                with self.assertRaises(RuntimeError) as cm:
+                    m.download("u", Path(root) / "a.zip")
+            self.assertIn("40 of 100", str(cm.exception))
+            m.urllib.request.urlopen = lambda url, timeout: Short(b"x" * 100)
+            with tempfile.TemporaryDirectory() as root:
+                m.download("u", Path(root) / "a.zip")
+                self.assertEqual((Path(root) / "a.zip").stat().st_size, 100)
+        finally:
+            m.urllib.request.urlopen = real
+
+    def test_short_reads_retry_a_bounded_number_of_times(self):
+        """Two short reads then a whole archive installs; DOWNLOAD_ATTEMPTS
+        short reads in a row refuse and leave nothing behind."""
+        import hashlib
+        import zipfile
+        import install_antigravity_acp as m
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            payload = root / "release.src.zip"
+            with zipfile.ZipFile(payload, "w") as zf:
+                for name in m.FILES:
+                    zf.writestr(name, b"#!/bin/sh\n")
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            for shorts, ok in ((2, True), (m.DOWNLOAD_ATTEMPTS, False)):
+                lib = root / f"lib{shorts}"
+                destination = lib / "antigravity-acp"
+                calls = []
+
+                def fake(url, out, shorts=shorts, calls=calls):
+                    calls.append(url)
+                    if len(calls) <= shorts:
+                        Path(out).write_bytes(b"part")
+                        raise m.ShortDownload("download ended short: 4 of 9 bytes")
+                    Path(out).write_bytes(payload.read_bytes())
+                real = m.download, m.release_for
+                try:
+                    m.download = fake
+                    m.release_for = lambda *a: {"release": "r", "url": "u", "sha256": digest}
+                    if ok:
+                        m.install(destination, settings=root / "s.json")
+                    else:
+                        with self.assertRaises(m.ShortDownload):
+                            m.install(destination, settings=root / "s.json")
+                finally:
+                    m.download, m.release_for = real
+                self.assertEqual(m.installed_ok(destination), ok, shorts)
+                self.assertEqual(len(calls), min(shorts + 1, m.DOWNLOAD_ATTEMPTS))
+                if not ok:
+                    self.assertEqual(list(lib.iterdir()), [])
 
     def test_amd64_and_x86_64_are_the_same_platform(self):
         """Windows/WSL and some BSDs report AMD64; refusing there would be a
@@ -850,19 +1006,18 @@ class AntigravityInstallsBesideItsDestination(unittest.TestCase):
             digest = hashlib.sha256(payload.read_bytes()).hexdigest()
             destination = root / "lib" / "antigravity-acp"
             renames = []
-            real = (m.download, m.ARCHIVE_SHA256, m.platform_problem, m.os.replace)
+            real = (m.download, m.release_for, m.os.replace)
             try:
                 m.download = lambda url, out: Path(out).write_bytes(payload.read_bytes())
-                m.ARCHIVE_SHA256 = digest
-                m.platform_problem = lambda: None
+                m.release_for = lambda *a: {"release": "r", "url": "u", "sha256": digest}
 
                 def replace(src, dst):
                     renames.append((Path(src), Path(dst)))
-                    return real[3](src, dst)
+                    return real[2](src, dst)
                 m.os.replace = replace
                 m.install(destination, settings=root / "settings.json")
             finally:
-                m.download, m.ARCHIVE_SHA256, m.platform_problem, m.os.replace = real
+                m.download, m.release_for, m.os.replace = real
             self.assertTrue(m.installed_ok(destination))
             src, dst = next(r for r in renames if r[1] == destination)
             self.assertEqual(src.parent.parent, destination.parent)
@@ -2361,18 +2516,22 @@ class UnavailableReasonsNameWhatWasChecked(unittest.TestCase):
 
 
 class TheGeminiLaneAnswersPlatformFirst(unittest.TestCase):
-    """mac-host is a Mac; the pinned Antigravity server is a Linux x86-64
-    binary. "not installed: …/agy_acp_server.par" is true and misleading — it
-    invites an install that install_antigravity_acp itself refuses to perform.
-    The files are missing BECAUSE the platform cannot run them, so the
-    platform is the answer."""
+    """On a host with no pinned build, "not installed: …/agy_acp_server.par"
+    is true and misleading — it invites an install that install_antigravity_acp
+    itself refuses to perform. The files are missing BECAUSE the platform
+    cannot run them, so the platform is the answer. (Until 2026-10-01 every
+    Mac was such a host; now an Intel Mac is.) Driven with no row for this
+    host so it is checked everywhere, not only where it fires."""
 
-    def test_a_mac_is_told_the_platform_not_the_missing_file(self):
+    def test_an_unpinned_host_is_told_the_platform_not_the_missing_file(self):
         import sessions
-        from install_antigravity_acp import platform_problem
-        if platform_problem() is None:
-            self.skipTest("this host can actually run the pinned release")
-        gemini = [a for a in sessions.available_agents() if a["key"] == "gemini"]
+        import install_antigravity_acp as ia
+        real = ia.release_for
+        try:
+            ia.release_for = lambda *a: None
+            gemini = [a for a in sessions.available_agents() if a["key"] == "gemini"]
+        finally:
+            ia.release_for = real
         self.assertEqual(len(gemini), 1)
         self.assertFalse(gemini[0]["available"])
         self.assertNotIn("not installed:", gemini[0]["why"])
@@ -3643,13 +3802,14 @@ class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
         import platform as _p
         problem = platform_problem()
         if problem is None:
-            self.assertEqual((_p.system(), "x86_64"),
-                             ("Linux", "x86_64"),
-                             "no platform problem reported on a host that is "
-                             "not the pinned platform")
+            import install_antigravity_acp as ia
+            self.assertIsNotNone(ia.release_for(),
+                                 "no platform problem reported on a host "
+                                 "with no pinned row")
             raise unittest.SkipTest(
-                "this host IS Linux x86-64, so the refusal cannot be observed "
-                "here; the message's shape is asserted on a fake below")
+                f"this host ({_p.system()} {_p.machine()}) has a pinned row, "
+                f"so the refusal cannot be observed here; the message's shape "
+                f"is asserted on a fake below")
         self.assertIn(_p.system(), problem)
         self.assertIn(_p.machine(), problem)
 
@@ -3660,12 +3820,13 @@ class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
         real = ia.platform.system, ia.platform.machine
         try:
             ia.platform.system = lambda: "Darwin"
-            ia.platform.machine = lambda: "arm64"
+            ia.platform.machine = lambda: "x86_64"
             problem = ia.platform_problem()
         finally:
             ia.platform.system, ia.platform.machine = real
         self.assertIsNotNone(problem)
-        for needle in ("Linux", "x86_64", "Darwin", "arm64"):
+        # This host (Darwin x86_64) and what is pinned (Linux, arm64 among it).
+        for needle in ("Darwin x86_64", "Linux", "arm64"):
             self.assertIn(needle, problem,
                           f"the refusal does not name {needle} — 'unavailable' "
                           f"without the platform invites an install that "
