@@ -123,17 +123,28 @@ const listApi = async (path, body) => {
   return { rigs: [{ name: '<b>x</b>', seats: ['author', 'reviewer'] },
                   { name: 'broken', error: 'bad toml' }] };
 };
-const renderRigList = new Function('$', 'el', 'api', 'rigUp',
-  `async ${fn('renderRigList')} return renderRigList;`)(
-  s => listNodes[s], mk, listApi, () => {});
+// S2 helpers, real, shared by T1.4 and T2.2.
+const hintFns = new Function(`${fn('rigSaveHint')} ${fn('rigLiveSeats')} ${fn('rigLiveText')}
+  return { rigSaveHint, rigLiveSeats, rigLiveText };`)();
+function listHarness(nodes, apiImpl, panes, rigUpImpl) {
+  const ctx = { RIG_ROWS: [] };
+  const f = new Function('$', 'el', 'api', 'rigUp', 'S', 'rigLiveSeats', 'rigLiveText', 'ctx',
+    `let RIG_ROWS; const out = async function () {
+       await (async ${fn('renderRigList')})(); ctx.RIG_ROWS = RIG_ROWS; };
+     return out;`)(
+    s => nodes[s], mk, apiImpl, rigUpImpl || (() => {}), { panes: new Map(panes.map(p => [p.id, p])) },
+    hintFns.rigLiveSeats, hintFns.rigLiveText, ctx);
+  return { run: f, ctx };
+}
+const renderRigList = listHarness(listNodes, listApi, []).run;
 await renderRigList();
 const listed = listNodes['#rig-list'].kids;
 check(listed.length === 2, `${listed.length} list rows for 2 rigs`);
 check(listed[0].kids[0].textContent === '<b>x</b>', 'a rig name was not rendered as text');
 check(listed[0].kids[1].textContent === '@author @reviewer', `seats read ${listed[0].kids[1].textContent}`);
-check(listed[1].kids[2].disabled === true, 'an unreadable rig can still be brought up');
+check(listed[1].kids[3].disabled === true, 'an unreadable rig can still be brought up');
 check(listed[1].kids[1].textContent === 'unreadable: bad toml', 'an unreadable rig hides why');
-const rm = listed[0].kids[3];
+const rm = listed[0].kids[4];
 await rm.onclick();
 check(listPosts.length === 0, 'the first Remove click POSTed');
 check(rm.textContent === 'Remove — sure?', 'the first Remove click did not ask');
@@ -171,6 +182,81 @@ const activate = new Function('$', 'openRigs', 'api', 'refresh', 'toast',
 await activate({ kind: 'rigs' });
 check(opened === 1 && closed === 1, `the palette row opened ${opened}, closed ${closed}`);
 check(newClicked === 0, 'the Rigs row fell through to New conversation');
+
+/* ── T2.1 the Save hint counts what Save would write ─────────────────────── */
+// A fixture snapshot: the same pane fields the server sends (sessions.snapshot).
+const SNAP = [
+  { id: 'p1', seat: 'author', seatWithheld: null, state: 'idle' },
+  { id: 'p2', seat: 'reviewer', seatWithheld: null, state: 'dead' },   // saved: on the roster
+  { id: 'p3', seat: null, seatWithheld: null, state: 'busy' },
+  { id: 'p4', seat: null, seatWithheld: 'author', state: 'idle' },     // withheld: not saved
+];
+const h1 = hintFns.rigSaveHint(SNAP);
+check(h1.text === 'Saves 2 seated panes (@author @reviewer); 2 unseated are not saved',
+      `hint reads ${JSON.stringify(h1.text)}`);
+check(h1.disabled === false, 'Save disabled with two seated panes');
+const h0 = hintFns.rigSaveHint(SNAP.filter(p => !p.seat));
+check(h0.disabled === true, 'zero seated panes leaves Save enabled');
+check(/no pane has a seat/.test(h0.text), `zero-seated reason reads ${JSON.stringify(h0.text)}`);
+check(hintFns.rigSaveHint([SNAP[0]]).text === 'Saves 1 seated pane (@author)',
+      `one seated pane reads ${JSON.stringify(hintFns.rigSaveHint([SNAP[0]]).text)}`);
+
+// Wired: an open dialog shows the hint and the Save button follows it.
+function hintNodes(open) {
+  return { '#rigdlg': { open }, '#rig-savehint': mk('p'), '#rig-save': mk('button') };
+}
+function refreshHints(nodes, panes, rowsIn) {
+  new Function('$', 'S', 'RIG_ROWS', 'rigSaveHint', 'rigLiveSeats', 'rigLiveText',
+    `${fn('rigRefreshHints')} return rigRefreshHints;`)(
+    s => nodes[s], { panes: new Map(panes.map(p => [p.id, p])) }, rowsIn || [],
+    hintFns.rigSaveHint, hintFns.rigLiveSeats, hintFns.rigLiveText)();
+}
+const hn = hintNodes(true);
+refreshHints(hn, SNAP.filter(p => !p.seat));
+check(hn['#rig-save'].disabled === true, 'the dialog left Save enabled with nothing seated');
+check(/no pane has a seat/.test(hn['#rig-savehint'].textContent), 'the dialog hides why Save is off');
+refreshHints(hn, SNAP);
+check(hn['#rig-save'].disabled === false, 'Save stayed off after a pane was seated');
+check(hn['#rig-savehint'].textContent === h1.text, 'the dialog hint is not the computed hint');
+const closedDlg = hintNodes(false);
+refreshHints(closedDlg, []);
+check(closedDlg['#rig-save'].disabled === false && closedDlg['#rig-savehint'].textContent === '',
+      'a closed dialog was repainted');
+
+/* ── T2.2 a live seat is marked; Up still POSTs ──────────────────────────── */
+const t2Nodes = { '#rig-list': mk('div'), '#rig-error': mk('p'), '#rig-out': mk('div') };
+const t2Posts = [];
+const t2Api = async (path, body) => {
+  if (body) { t2Posts.push([path, body]); return { outcomes: [], lines: [] }; }
+  return { rigs: [{ name: 'pair', seats: ['author', 'reviewer'] },
+                  { name: 'solo', seats: ['reviewer'] },
+                  { name: 'paused', seats: ['coder'] }] };
+};
+const t2Up = upHarness(t2Api);
+const t2 = listHarness(t2Nodes, t2Api,
+  [...SNAP, { id: 'p5', seat: 'coder', seatWithheld: null, state: 'detached' }],
+  (name, b) => t2Up.rigUp(name, b));
+await t2.run();
+const [pairRow, soloRow, pausedRow] = t2Nodes['#rig-list'].kids;
+check(pairRow.kids[2].textContent === 'Up will refuse: @author is live',
+      `live marker reads ${JSON.stringify(pairRow.kids[2].textContent)}`);
+check(soloRow.kids[2].textContent === '', 'a dead holder was marked live');
+check(pausedRow.kids[2].textContent === '', 'a detached (paused) holder was marked live');
+check(!pairRow.kids[3].disabled, 'the client blocked Up on a live seat');
+await pairRow.kids[3].onclick();
+check(t2Posts.length === 1 && t2Posts[0][0] === '/api/session/rigs/up' && t2Posts[0][1].name === 'pair',
+      `Up with a live seat posted ${JSON.stringify(t2Posts)}`);
+// A pane state change re-marks the open dialog without rebuilding the list.
+const before = t2Nodes['#rig-list'].kids;
+const awake = SNAP.map(p => p.id === 'p2' ? { ...p, state: 'busy' } : p);
+refreshHints(hintNodes(true), awake, t2.ctx.RIG_ROWS);
+check(soloRow.kids[2].textContent === 'Up will refuse: @reviewer is live',
+      `re-mark reads ${JSON.stringify(soloRow.kids[2].textContent)}`);
+check(pairRow.kids[2].textContent === 'Up will refuse: @author @reviewer are live',
+      `two live seats read ${JSON.stringify(pairRow.kids[2].textContent)}`);
+check(t2Nodes['#rig-list'].kids === before, 'a state change rebuilt the rig list');
+check(html.includes('id="rig-savehint"'), 'index.html lacks #rig-savehint');
+check(/rigRefreshHints\(\)/.test(fn('render')), 'render() does not keep an open Rigs dialog current');
 
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
 console.log('selftest_rigs: ok');
