@@ -2670,6 +2670,8 @@ function wireDialog() {
     fillCfg();
     fillPosture();
     fillRoles();
+    $('#f-quick').checked = !!dlg._quickSet; dlg._quickSet = false;
+    $('#quickhint').textContent = 'now: ' + quickLabel();
     dlg.showModal();
   };
   $('#f-posture').onchange = e => { $('#posturehint').textContent = HINTS[e.target.value]; };
@@ -2694,6 +2696,17 @@ function wireDialog() {
     // operator chose nothing on purpose" — and the stored meta is the thing
     // 244 of 446 panes were wrong about.
     if (posture) common.posture = posture;
+    if ($('#f-quick').checked) {
+      const a = S.agents.find(x => x.key === common.agent) || {};
+      const m = $('#f-model'), ef = $('#f-effort');
+      localStorage.setItem('corral.quick', JSON.stringify({
+        agent: common.agent, cwd, model: common.model, effort: common.effort,
+        posture, label: a.memberLabel || a.label || common.agent,
+        modelName: m.value ? m.options[m.selectedIndex]?.text : '',
+        effortName: ef.value ? ef.options[ef.selectedIndex]?.text : '' }));
+      $('#f-quick').checked = false;
+      toast('⚡ now starts ' + quickLabel());
+    }
     const when = $('#f-when').value;
     if (when) {
       // Later: arm it, open nothing now. The prompt is stored as typed (a
@@ -2713,10 +2726,12 @@ function wireDialog() {
   $('#new-quick').onclick = quickStart;
   // Say exactly what ⚡ will start, read at hover time so it never goes stale.
   $('#new-quick').onmouseenter = e => {
-    const a = defaultAgent();
-    e.currentTarget.title = a
-      ? `Start ${a.memberLabel || a.label} in ${S.lastCwd || S.defaultCwd || '~'} now`
-      : 'No agent is available to start';
+    e.currentTarget.title = `Start ${quickLabel()} now · right-click to change`;
+  };
+  $('#new-quick').oncontextmenu = e => {
+    e.preventDefault();
+    dlg._quickSet = true;
+    $('#new').click();
   };
 }
 
@@ -2745,7 +2760,34 @@ function defaultAgent() {
 
 // ⚡ — the dialog's defaults, without the dialog. Model and effort are left to
 // the agent (the dialog's own default), no role, posture as last chosen.
+// The saved ⚡ preset, if its lane still exists and can start. A preset whose
+// lane is down does NOT silently become a different agent: it says so.
+function quickPreset() {
+  try { return JSON.parse(localStorage.getItem('corral.quick') || 'null'); }
+  catch (e) { return null; }
+}
+function quickLabel() {
+  const q = quickPreset();
+  if (q) return [q.label, q.modelName, q.effortName && q.effortName + ' effort']
+    .filter(Boolean).join(' · ') + ` in ${q.cwd || '~'}`;
+  const a = defaultAgent();
+  return a ? `${a.memberLabel || a.label} · agent's default model in ` +
+             `${S.lastCwd || S.defaultCwd || '~'}` : 'no agent available';
+}
 async function quickStart() {
+  const q = quickPreset();
+  if (q) {
+    const a = (S.agents || []).find(x => x.key === q.agent);
+    if (!a || !a.available) {
+      toast(`⚡ preset lane ${q.label} is not available` +
+            (a && a.why ? ` — ${a.why}` : '') + '. Right-click ⚡ to change it.', true);
+      return;
+    }
+    const common = { agent: q.agent, cwd: q.cwd || S.defaultCwd || '~',
+                     model: q.model || '', effort: q.effort || '', role: '' };
+    if (q.posture && a.postureEnforced !== false) common.posture = q.posture;
+    return startConversation(common);
+  }
   const a = defaultAgent();
   if (!a) { toast('no agent is available to start', true); return; }
   const common = { agent: a.key, cwd: S.lastCwd || S.defaultCwd || '~',

@@ -33,7 +33,7 @@
     <div class="newrow">
       <button class="new" id="new">＋ New conversation</button>
       <button class="newquick" id="new-quick" type="button"
-              title="Start the default agent now" aria-label="Start the default agent now">⚡</button>
+              title="Start the default agent now (right-click to set it)" aria-label="Start the default agent now">⚡</button>
     </div>
     <button class="search-trigger" id="search-trigger" type="button"
             aria-label="Search panes and notes">
@@ -121,6 +121,12 @@
         <option value="daily">daily</option><option value="weekly">weekly</option></select></label>
       <label>Ask<textarea id="f-prompt" rows="3" placeholder="what it will be asked"></textarea></label>
     </details>
+    <!-- ⚡ preset: Start with this ticked saves agent / directory / model /
+         effort / posture as what the ⚡ quick button starts. Right-click ⚡
+         opens this dialog with it already ticked. -->
+    <label class="checkrow"><input type="checkbox" id="f-quick">
+      Make these the ⚡ defaults</label>
+    <p class="hint" id="quickhint"></p>
     <menu>
       <button value="cancel" class="btn">Cancel</button>
       <button value="ok" class="btn go" id="f-go">Start</button>
