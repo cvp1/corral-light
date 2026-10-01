@@ -280,7 +280,7 @@ JSON report per run to `reviews/parity-runs/<host>-<date>.json`.
 
 **Rollback (every phase).** Native install stays untouched until P3. P3
 rollback: `corral down`, reload the saved launchd plists
-(`com.cvande.corral-light`, watch, Seed jobs), start the native hub. Rehearse
+(`com.cvp1.corral-light`, watch, Seed jobs), start the native hub. Rehearse
 once before cutover.
 
 **Never during P0–P2 on dogma-2:** bind the container to :8098, point it at

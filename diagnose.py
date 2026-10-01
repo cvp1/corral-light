@@ -2,7 +2,7 @@
 """diagnose — run one lane exactly as a pane does, and report every difference.
 
 WHY THIS EXISTS
-    Craig's Claude panes on dogma-2 died at `session/prompt` with
+    The operator's Claude panes on the Mac host died at `session/prompt` with
     `Authentication required` while `claude` worked fine in his terminal. I
     proposed three mechanisms in a row — a credential-file check, a private
     CLAUDE_CONFIG_DIR with no credential in it, an ambient ANTHROPIC_API_KEY —
@@ -45,7 +45,7 @@ import sessions
 SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
 
 # --- WHICH TREE IS ACTUALLY RUNNING ------------------------------------------
-# Craig, 2026-09-01: "we just finished a bug bash on corral light and now claude
+# The operator, 2026-09-01: "we just finished a bug bash on corral light and now claude
 # and GPT don't show as available."
 #
 # Neither lane was broken. The installed LaunchAgent had been repointed at a
@@ -61,7 +61,28 @@ SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
 # in: an artifact copied out of the repo drifts from it silently and forever.
 # So this asks the two questions the bug bash could not answer in one line —
 # what will launchd run, and what is it running right now.
-LAUNCHD_LABEL = "com.cvande.corral-light"
+DEFAULT_LAUNCHD_LABEL = "com.cvp1.corral-light"   # what install_service writes
+
+
+def installed_label(agents=None, env=None):
+    """The label of the corral-light LaunchAgent actually installed here.
+
+    CORRAL_LAUNCHD_LABEL wins. Else the default label if its plist exists,
+    else any `*.corral-light.plist` in ~/Library/LaunchAgents (a host
+    installed before the 2026-10-01 rename keeps its old label until it is
+    reinstalled -- diagnosing it must not depend on the name it was given).
+    """
+    env = os.environ if env is None else env
+    if env.get("CORRAL_LAUNCHD_LABEL"):
+        return env["CORRAL_LAUNCHD_LABEL"]
+    agents = Path(agents or Path.home() / "Library" / "LaunchAgents")
+    if (agents / f"{DEFAULT_LAUNCHD_LABEL}.plist").exists():
+        return DEFAULT_LAUNCHD_LABEL
+    found = sorted(p.stem for p in agents.glob("*.corral-light.plist"))
+    return found[0] if found else DEFAULT_LAUNCHD_LABEL
+
+
+LAUNCHD_LABEL = installed_label()
 INSTALLED_PLIST = (Path.home() / "Library" / "LaunchAgents"
                    / f"{LAUNCHD_LABEL}.plist")
 
@@ -225,7 +246,7 @@ def _credential_shape(path):
     # The two that decide whether an isolated config dir can authenticate.
     # Absent AND empty both matter, and empty is the one that fools every
     # check that came before: the key is there, the file parses, the copy
-    # succeeds, and the token is "". Measured on ranch-server 2026-08-31 —
+    # succeeds, and the token is "". Measured on the Linux server 2026-08-31 —
     # accessToken="" , refreshToken="", expiresAt=0, in a file that looks
     # complete by every structural test.
     flat = " ".join(rows)

@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """ssh_acp.py -- a remote host as a Corral Light SHELL pane (ACP over stdio).
 
-Ported from ranch-server's `corral/ssh_acp.py` (cvp1/corral @ 2026-08-31) on
+Ported from the Linux server's `corral/ssh_acp.py` (cvp1/corral @ 2026-08-31) on
 2026-09-01. The heavy build generates one of these per lightsail box from the
 estate inventory; Light has no estate, so its hosts come from a hand-written
 `ssh-hosts.json` instead (sessions._live_ssh_hosts). The adapter itself is
@@ -9,7 +9,7 @@ unchanged in every part that carries a guarantee -- it is the same wire
 contract, the same bounds, and the same consent model, because those were
 earned by running and not by design.
 
-One persistent `ssh ... bash` per pane. Every line Craig types runs on the host
+One persistent `ssh ... bash` per pane. Every line the operator types runs on the host
 as his own ssh identity; stdout+stderr stream back. No LLM anywhere in the
 chain.
 
@@ -21,10 +21,10 @@ exactly like a terminal window.
 
 The chain, and where each guarantee lives:
 
-    corral pane -> this adapter (dogma-2) -> ssh -T user@host bash
+    corral pane -> this adapter (the Mac host) -> ssh -T user@host bash
                 -> the host's own account permissions
 
-  * AUTH: Craig's ssh key + the host's own account -- nothing new. Corral
+  * AUTH: The operator's ssh key + the host's own account -- nothing new. Corral
     Light's own auth is already "possession of his UNIX login" (auth.py), so
     this lane grants a paired browser exactly the reach the pairing already
     proved, and no more.
@@ -127,7 +127,7 @@ class Shell:
         # them eventually with a ResourceWarning, but "eventually" in a daemon
         # that restarts this shell on every overflow, timeout and typed `exit`
         # is a descriptor leak the operator never sees. Surfaced by the suite's
-        # own warnings, 2026-09-01 — worth fixing here and upstream on ranch.
+        # own warnings, 2026-09-01 — worth fixing here and upstream on the Linux server.
         proc, self.proc = self.proc, None
         if proc is None:
             return
@@ -384,7 +384,7 @@ def connect_argv(args):
         return shlex.split(override), override
     # Light's hosts are hand-written, and the common case on a personal fleet is
     # a `~/.ssh/config` alias carrying the user, port and key already. So --key
-    # is OPTIONAL here (ranch's estate always had one to pass): with no key we
+    # is OPTIONAL here (the full Corral's estate always had one to pass): with no key we
     # hand ssh the bare target and let its own config answer, and we do NOT set
     # IdentitiesOnly, which would suppress exactly the config-supplied identity
     # we are deferring to.

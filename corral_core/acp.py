@@ -14,12 +14,12 @@ TWO THINGS THIS OWNS THAT THE UI MUST NOT
    answered exactly once.
 2. **Permission posture is ours, not the host's.** Measured in the spike: this
    host's ambient `defaultMode: auto` silently suppressed EVERY prompt and the
-   agent just acted. A pane inheriting that would show Craig no approvals at
+   agent just acted. A pane inheriting that would show the operator no approvals at
    all — the UI faithfully rendering a config set for a different purpose, and
    deleting the feature the rail exists for. So every agent is launched under a
    CLAUDE_CONFIG_DIR Corral owns.
 
-3. **No clock ends a session.** Craig's panes are his working space; only he
+3. **No clock ends a session.** The operator's panes are his working space; only he
    clears or quits one. A prompt waits as long as the agent takes, and a
    permission card stays answerable until he answers it. Silence is reported,
    never acted on. See the block comment above the constants.
@@ -74,7 +74,7 @@ import threading
 import time
 from pathlib import Path
 
-# A TURN IS NEVER ENDED BY A CLOCK. Craig, 2026-08-31: "I don't want to have a
+# A TURN IS NEVER ENDED BY A CLOCK. The operator, 2026-08-31: "I don't want to have a
 # session end without me saying so. It needs to be something I either clear or
 # I quit. Otherwise we persist a session. It's my working space."
 #
@@ -90,7 +90,7 @@ from pathlib import Path
 #     900s of silence", pane dead, work lost.
 #
 # There is no third fix, because the premise was wrong. A clock cannot tell a
-# wedged agent from a slow one, from one waiting on Craig; only Craig can. The
+# wedged agent from a slow one, from one waiting on the operator; only the operator can. The
 # ONE thing that legitimately ends a turn is the process actually dying, and
 # that is observed directly — _read_stdout's exit path releases every waiter
 # the moment stdout EOFs. So a prompt waits for as long as it takes. Silence
@@ -110,7 +110,7 @@ POLL_S = 5                      # how often request() re-checks; a knob so
 HANDSHAKE_TIMEOUT = 180
 PERMISSION_TIMEOUT = None       # never auto-answered. Letting it lapse into a
                                  # reject after an hour was still a machine
-                                 # ending Craig's turn for him. Fail-closed is
+                                 # ending the operator's turn for him. Fail-closed is
                                  # unharmed: an unanswered card is never an
                                  # allow — it stays a card until he clicks it
                                  # or stops the pane, which is strictly safer
@@ -326,7 +326,7 @@ class AcpClient:
         # and reported without being acted on.
         noticed = False
         sent_at = time.monotonic()
-        blocked_on_human = 0.0          # time this call spent waiting on Craig
+        blocked_on_human = 0.0          # time this call spent waiting on the operator
         while not slot["ev"].wait(POLL_S):
             if not self.alive:
                 # The process is gone. _read_stdout's exit path sets every
@@ -337,7 +337,7 @@ class AcpClient:
                 # both flip `alive` BEFORE any error is written onto pending
                 # slots, so breaking here and returning `slot["result"]` (None,
                 # untouched) reported a live prompt as a successful empty turn
-                # — a second way for something other than Craig to end his
+                # — a second way for something other than the operator to end his
                 # turn, and the exact "pane says the turn ended" class of loss
                 # the 2026-08-23 incident is. Panel 2026-08-31, grok finding 1,
                 # concurred by gpt r2; reproduced before this fix.
@@ -348,7 +348,7 @@ class AcpClient:
             if self._perm_answers:
                 # Not silence at all: the agent asked a question and is
                 # blocked on the answer. Don't count it as quiet — and don't
-                # count it against the handshake bound either. Craig being
+                # count it against the handshake bound either. The operator being
                 # away is never a fault. The bound is SUSPENDED, not disabled:
                 # the time is banked and the clock resumes the moment he
                 # answers.
@@ -366,7 +366,7 @@ class AcpClient:
                 # the adapter chatters could wait forever behind a nominal 120s
                 # (panel 2026-08-31, grok finding 4 / gpt finding 11).
                 # Nothing here bounds a PROMPT — prompts pass timeout=None,
-                # and that stays true (constraint: no clock ends Craig's turn).
+                # and that stays true (constraint: no clock ends the operator's turn).
                 self._pending.pop(rid, None)
                 raise AgentError(
                     f"{method} timed out after {timeout}s "
@@ -380,7 +380,7 @@ class AcpClient:
                 noticed = False
             if quiet >= STALL_NOTICE_S and not noticed:
                 # SAY it, once, and keep waiting. The pane turns `uncertain`
-                # in the rail; Craig decides whether that means stop.
+                # in the rail; the operator decides whether that means stop.
                 noticed = True
                 self.on_event("stall_notice", {
                     "method": method, "quietFor": int(quiet),
@@ -481,7 +481,7 @@ class AcpClient:
                     pass
             if self._closed:
                 # You asked it to stop. rc=-15 is OUR OWN SIGTERM, and
-                # reporting it as "agent exited rc=-15" told Craig his
+                # reporting it as "agent exited rc=-15" told the operator his
                 # deliberate close was an incident.
                 self.exit_reason = "closed by you"
             else:
@@ -547,7 +547,7 @@ class AcpClient:
             # predecessor's entry without growing the dict, so `len()` stayed
             # put while waiters accumulated: 60 requests all sent as id 1
             # produced 61 live threads against a bound of 32, and the
-            # overwritten Events became unreachable, so neither Craig's click
+            # overwritten Events became unreachable, so neither the operator's click
             # nor the exit path could ever release them. Refuse a duplicate
             # that is still live instead (panel 2026-08-31, gemini finding 3 /
             # gpt finding 4; reproduced).
@@ -568,7 +568,7 @@ class AcpClient:
             # `**params` LAST is deliberate. Built the other way round, an
             # agent-supplied `params.requestId` overwrote the wire id the
             # waiter is keyed on: the card reached the rail under an id that
-            # answer_permission() could not find, so Craig's click returned
+            # answer_permission() could not find, so the operator's click returned
             # False and the agent stayed blocked forever — and an id naming
             # some OTHER pending card is consent bound to bytes the human
             # never saw (P17). Corral's id wins (panel 2026-08-31, gpt finding
@@ -587,7 +587,7 @@ class AcpClient:
         """Wait out one permission request OFF the reader thread; reply.
 
         The wait has no clock (PERMISSION_TIMEOUT is None): a card stays
-        answerable until Craig answers it or ends the pane. It is released by
+        answerable until the operator answers it or ends the pane. It is released by
         exactly two things — his answer, and the agent process dying, which
         _read_stdout's exit path signals. Fail-closed is intact because we
         never synthesize an answer at all, in either direction.
@@ -614,7 +614,7 @@ class AcpClient:
         option = (slot or {}).get("option", _UNANSWERED)
         # `is _UNANSWERED`, not `not option`: a vendor is entitled to an option
         # id that is falsy ("" or 0), and treating that as "no selection" made
-        # Craig's click vanish — the card left the rail, nothing was ever
+        # the operator's click vanish — the card left the rail, nothing was ever
         # written back, and the agent blocked until the pane was killed
         # (panel 2026-08-31, grok finding 8).
         if not self.alive or option is _UNANSWERED:

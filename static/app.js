@@ -23,7 +23,7 @@ const saveDetail = () =>
   localStorage.setItem('corral.detail', JSON.stringify([...S.detail]));
 
 /* ── theme ───────────────────────────────────────────────────────────── */
-// Measured palettes; taste is Craig's call, not something to guess at again
+// Measured palettes; taste is the operator's call, not something to guess at again
 // (four passes went that way). Every one states its numbers in style.css and
 // is asserted by the selftest. Applied before first paint, so no flash of the
 // wrong one.
@@ -135,7 +135,7 @@ function wireThemes() {
   box.append(trigger, menu);
   applyTheme(cur);
 }
-// Shipped default is 'ink', not 'laundry' -- Craig asked 2026-08-22 for
+// Shipped default is 'ink', not 'laundry' -- the operator asked 2026-08-22 for
 // something closer to a dark Notion-style look; Ink was already one of the
 // four measured/contrast-checked palettes above, so this points the default
 // at it rather than inventing a new one. A saved localStorage preference
@@ -161,7 +161,7 @@ async function api(path, body) {
   // A 401 must NEVER trigger location.reload(). boot() begins by calling
   // /api/state, which 401s precisely when you are not paired yet — reloading
   // there reloads into the same 401 forever and the pairing screen never gets
-  // to render. Shipped that way 2026-08-01; Craig: "it appears to be looping."
+  // to render. Shipped that way 2026-08-01; the operator: "it appears to be looping."
   // Callers decide what a 401 means; this only reports it.
   if (!r.ok) {
     const err = new Error(d.error || `${r.status} ${r.statusText}`);
@@ -217,7 +217,7 @@ async function pair() {
 }
 
 /* ── rendering: a pane ───────────────────────────────────────────────── */
-// A host:<name> shell lane is a terminal, not a conversation (Craig,
+// A host:<name> shell lane is a terminal, not a conversation (the operator,
 // 2026-08-24: "more of a terminal design and less of a chat design") — its
 // transcript and composer render monospace, prompt-prefixed, bubble-free.
 //
@@ -337,7 +337,7 @@ function permOptions(d) {
 
 function renderLog(p) {
   // A transcript should read like a conversation. Tool calls, plans and
-  // lifecycle noise are collapsed into one quiet line per run -- Craig: "hide
+  // lifecycle noise are collapsed into one quiet line per run -- the operator: "hide
   // all the tool calls and info that I don't necessarily need to see."
   // Nothing is DISCARDED: the line expands, and the eye in the header reveals
   // everything permanently. Permissions and real errors are never collapsed;
@@ -557,7 +557,7 @@ function renderLog(p) {
   // pending?`) said yes to all of them, so a card from an hour ago re-armed
   // its buttons carrying an hour-old digest. Clicking it posted that stale
   // digest and the server refused it, correctly and unanswerably. That is the
-  // freeze Craig hit. Walk forward instead and bind each permission to the
+  // freeze the operator hit. Walk forward instead and bind each permission to the
   // first outcome that follows IT; whatever is still open at the end is the
   // one — and the only one — the agent is actually blocked on.
   const permOutcomes = new Map();   // permission event seq -> its outcome event
@@ -875,7 +875,7 @@ function permCard(p, d, outcome, live) {
 // then a fresh <textarea> per pane. With one idle agent that is invisible.
 // With several running, events arrive continuously, so the textarea you were
 // typing into was destroyed and replaced several times a second — losing the
-// caret, the text, and the focus. Craig, 2026-08-01: "active terminals keep
+// caret, the text, and the focus. The operator, 2026-08-01: "active terminals keep
 // stealing the focus from each other making it impossible to type."
 //
 // Nothing was stealing focus. Focus was being DELETED, and the browser fell
@@ -903,7 +903,7 @@ function buildPane(p) {
     if (rec) rec.pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     // Scrolling to the top of a capped transcript used to just... stop, with
     // nothing to reveal it but a small "N earlier events not shown" sys line
-    // easy to miss mid-scroll -- Craig read that as scrolling being broken,
+    // easy to miss mid-scroll -- the operator read that as scrolling being broken,
     // not as a control. Reveal automatically instead, same as any normal chat
     // UI's infinite-scroll-up. updatePane's existing height-delta re-anchor
     // (the df78d6f fix) keeps the view pinned to the same content once the
@@ -956,7 +956,7 @@ function updatePane(rec, p) {
     // spare has NOTHING to scroll -- the only sign more exists was a small
     // "N earlier events not shown" sys line, easy to miss, with no scrollbar
     // to hint at it either. That read as "scrolling is broken," not "there's
-    // a control here" (Craig, 2026-08-23: clicked it once he found it, and
+    // a control here" (the operator, 2026-08-23: clicked it once he found it, and
     // it worked fine -- the hiding itself was the confusion). Keep raising
     // the cap until either everything shows or there's real overflow to
     // scroll through. Bounded so a pathological pane (huge per-event render,
@@ -970,13 +970,13 @@ function updatePane(rec, p) {
     if (wasPinned) {
       rec.log.scrollTop = rec.log.scrollHeight;
     } else {
-      // Not pinned means Craig scrolled up to read something. Every tick
+      // Not pinned means the operator scrolled up to read something. Every tick
       // still rebuilds this subtree from scratch (a collapsed "N steps" line
       // re-collapses -- its `open` flag lives in renderLog()'s throwaway
       // closure, not on the pane), which shrinks scrollHeight and the browser
       // clamps scrollTop to the new max: the view got yanked to the bottom
       // out from under him mid-read, on EVERY tick, with no way to hold a
-      // position (Craig, 2026-08-23: "scrolling still does not work in
+      // position (the operator, 2026-08-23: "scrolling still does not work in
       // GPT"). Re-anchor by the height delta instead of trusting the
       // clamped value.
       rec.log.scrollTop = Math.max(0, oldTop + (rec.log.scrollHeight - oldHeight));
@@ -1183,7 +1183,7 @@ function paneHead(p) {
 }
 
 /* ── copy & find, the herdr manner ───────────────────────────────────────
- * Craig lives in herdr the rest of the day, and its clipboard habits are the
+ * The operator lives in herdr the rest of the day, and its clipboard habits are the
  * ones his hands know: releasing a drag copies it, a double-clicked word
  * copies itself, a selection survives live output, and / search highlights
  * every match. This section ports those to the pane transcripts. The
@@ -1479,7 +1479,7 @@ function composer(p, kind) {
   }
   const ta = el('textarea'); ta.placeholder = 'Message…  (/ for skills)'; ta.rows = 1;
   // Clearing eagerly, before the request even landed, meant a queue-full,
-  // expired-auth, or network error silently ATE what Craig typed -- the
+  // expired-auth, or network error silently ATE what the operator typed -- the
   // textarea read empty and the toast was the only trace anything had been
   // typed at all. Clear only once the server has actually accepted it; on
   // failure the text stays put for a retry. `sending` replaces the clear's
@@ -1508,8 +1508,8 @@ function composer(p, kind) {
 
   // Slash-command completion. The agent advertises its own commands over ACP
   // right after session/new (70 of them under Claude), so nothing here is a
-  // hardcoded list -- a skill Craig adds shows up in the next pane he opens.
-  // Craig: "they don't autocomplete... You have to know the skill."
+  // hardcoded list -- a skill the operator adds shows up in the next pane he opens.
+  // The operator: "they don't autocomplete... You have to know the skill."
   const ac = el('div', 'ac hide');
   let hits = [], sel = 0;
   const hide = () => { ac.className = 'ac hide'; hits = []; };
@@ -1779,7 +1779,7 @@ function render() {
   if (!(S.renaming && r.querySelector('.ren'))) {
   r.innerHTML = '';
   // Pinned and the pane you are looking at always show; everything else
-  // rolls up under "Other" (Craig, 2026-08-23) — same collapsible shape as
+  // rolls up under "Other" (the operator, 2026-08-23) — same collapsible shape as
   // Archive below, but open by default: unlike Archive's closed history,
   // these are live conversations, so the default is visible, not hidden.
   const paneRow = p => {
@@ -1818,7 +1818,7 @@ function render() {
     const quiet = (p.state === 'busy' || p.state === 'uncertain') && p.idleS >= 30
       ? ` · quiet ${fmtAge(p.idleS)}` : '';
     // The directory tail alone reads as an agent badge when it happens to BE
-    // one -- Craig's daily-driver repo is named "CC", so every non-Claude
+    // one -- the operator's daily-driver repo is named "CC", so every non-Claude
     // pane opened there showed "· CC" here and looked like a Claude Code
     // conversation. Tag the agent explicitly for every lane but the default.
     const agentTag = p.agent !== 'claude' ? p.label + ' · ' : '';
@@ -1884,7 +1884,7 @@ function render() {
     acts.append(pin, ren, mm);
     it.appendChild(acts);
 
-    // Drag to order. Craig's original complaint was that a terminal cannot
+    // Drag to order. The operator's original complaint was that a terminal cannot
     // arrange running work; creation order is not an arrangement.
     it.draggable = true;
     it.dataset.pid = p.id;
@@ -2052,7 +2052,7 @@ function render() {
     if (!rec) { PANES.set(p.id, rec = buildPane(p)); }
     updatePane(rec, p);
     // Full-size is a STATE the pane must wear, not something inferred from
-    // an empty grid (Craig, 2026-08-30: "show clearly when a pane is at its
+    // an empty grid (the operator, 2026-08-30: "show clearly when a pane is at its
     // full size"). Class on the persistent root — CSS renders the tag, so
     // reconciliation can never orphan it.
     rec.root.classList.toggle('solo', shown.length === 1);
@@ -2189,7 +2189,7 @@ function render() {
   // minutes. It is not blocked on anything, so it carries no action — but it
   // is exactly the state the operator would otherwise never notice, because
   // the roster's pulsing dot looks identical at three seconds and at forty
-  // minutes. It says so and offers the pane; deciding it is wedged is Craig's.
+  // minutes. It says so and offers the pane; deciding it is wedged is the operator's.
   for (const p of panes) {
     if (p.state !== 'uncertain') continue;
     const c = el('div', 'ncard');
@@ -2235,7 +2235,7 @@ function render() {
 // boundary took setMin with them); every CALLER survived the trim, so every
 // click threw a silent ReferenceError in the console instead of doing
 // anything — `node --check` catches a syntax error, not a missing runtime
-// reference, so this shipped unnoticed until Craig actually clicked minimize.
+// reference, so this shipped unnoticed until the operator actually clicked minimize.
 async function setMin(p, flag) {
   try {
     await api('/api/session/minimize', { pane: p.id, minimized: flag });
@@ -2244,7 +2244,7 @@ async function setMin(p, flag) {
 }
 
 /* ── the needs-you rail folds ─────────────────────────────────────────────
- * Craig, 2026-08-01: "needs to be collapsible and collapse when nothing is in
+ * The operator, 2026-08-01: "needs to be collapsible and collapse when nothing is in
  * it. More screenspace for reading is always appreciated."
  *
  * Two rules, and the second is the one that matters:
@@ -2266,7 +2266,7 @@ function railFold(items, blocked) {
   $('#app').classList.toggle('railshut', !open);
   $('#rrail').classList.toggle('shut', !open);
   $('#railhead').textContent = `Needs you${items ? ' · ' + items : ''} ▾`;
-  // Always a digit, including 0 (Craig, DESIGN-2: the rail IS the silence
+  // Always a digit, including 0 (the operator, DESIGN-2: the rail IS the silence
   // metric). An empty badge and a genuine zero were visually identical when
   // collapsed — measured 2026-08-22, rival-reviewed unanimously as hiding
   // the win condition behind a click.
@@ -2723,7 +2723,7 @@ function wireDialog() {
     }
   };
   $('#new').onclick = () => {
-    // Agents that belong to a GROUP collapse to one entry (Craig, 2026-08-31:
+    // Agents that belong to a GROUP collapse to one entry (the operator, 2026-08-31:
     // "consolidate the SSH connections under one main SSH tab and then break it
     // out into each individual session if we choose SSH"). One row per box meant
     // the handful of lanes that are genuinely different kinds of thing were
@@ -2819,7 +2819,7 @@ function wireDialog() {
         const opts = entry.options || [];
         if (!opts.length && entry.value) {
           // A disabled dropdown next to a working one reads as broken, not
-          // explained -- Craig's "issue with the Grok model picker" report,
+          // explained -- the operator's "issue with the Grok model picker" report,
           // root-caused by the 2026-08-23 bugbash panel (all 3 agreed):
           // Grok really does run one fixed model, Corral really does know
           // which one, and a picker offering nothing to pick was the wrong
@@ -2844,7 +2844,7 @@ function wireDialog() {
           // option -- and the dialog always sends `.value` on close, so
           // just opening the dialog and clicking Start (never touching this
           // control) silently submitted an explicit want_model/want_effort
-          // Craig never chose. Harmless when the adapter's own list already
+          // the operator never chose. Harmless when the adapter's own list already
           // self-describes a default choice (Claude's "Default
           // (recommended)" does, value "default" round-trips correctly);
           // real for any adapter that only lists concrete choices (Codex's

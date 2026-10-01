@@ -2,8 +2,8 @@
 """sessions — Corral Light's session manager: spawn agents, hold state, persist
 events.
 
-This is the Live-tab half of ranch-server's `corral/sessions.py`, forked for
-dogma-2 on 2026-08-31. Everything the fleet made true on ranch — delegate
+This is the Live-tab half of the Linux server's `corral/sessions.py`, forked for
+the Mac host on 2026-08-31. Everything the fleet made true on the Linux server — delegate
 boxes, ssh-shell lanes, the scheduler, the AI-OS slash-command router, the
 vault-backed memory reader — is GONE, not disabled: a light build that carries
 dead branches is the heavy build with a smaller menu. What remains is the part
@@ -26,7 +26,7 @@ What Corral does own, because nothing else does:
   - pending permission requests, which are backpressure on a live process
 
 PERMISSION POSTURE IS OURS. Every Claude Code pane launches under a
-CLAUDE_CONFIG_DIR Corral writes. Measured on ranch: inheriting the host's
+CLAUDE_CONFIG_DIR Corral writes. Measured on the Linux server: inheriting the host's
 ambient `defaultMode: auto` made the agent act with zero prompts, which would
 render a pane with no approvals at all. Posture is a visible per-pane
 property, never an inherited global — and for a lane Corral cannot impose it
@@ -59,7 +59,7 @@ ROOT = Path(__file__).resolve().parent
 # product rather than a corrupting second writer.
 STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
                             Path.home() / ".local/share/corral-light"))
-# Optional: a node install that is not on PATH. On ranch this pointed at
+# Optional: a node install that is not on PATH. On the Linux server this pointed at
 # hermes' bundled node; on a Mac, node is normally on PATH already, so an
 # absent directory must cost nothing (an empty entry in PATH is harmless, but
 # a WRONG one shadows the real node).
@@ -150,7 +150,7 @@ SETTINGS_DROPPED = ("permissions", "hooks", "statusLine")
 #      already sets model and effort.
 #
 # (2) needs no config dir, so the Keychain never enters into it, and it is not
-# platform-conditional. Measured on dogma-2, 2026-09-01: the Claude adapter's
+# platform-conditional. Measured on the Mac host, 2026-09-01: the Claude adapter's
 # session/new advertises
 #     mode -> currentValue "default",
 #             options [auto, default, acceptEdits, plan, dontAsk,
@@ -221,7 +221,7 @@ AGENTS = {
         # The handshake above cannot see a LAPSED login: session/new succeeds
         # without a token and auth only surfaces at the first prompt. The
         # credential itself says when the refresh token expires, so the
-        # picker asks it too (claude_auth; dogma-2 2026-09-30, 05:41).
+        # picker asks it too (claude_auth; the Mac host 2026-09-30, 05:41).
         "auth_status": lambda: __import__("claude_auth").status(),
         # (Formerly a KNOWN GAP: every other lane refused at pick time on a
         # missing credential and this one could not check cheaply without
@@ -310,21 +310,21 @@ AGENTS = {
 
 
 # --- Host shell lanes: one SSH SHELL pane per configured host ---------------
-# Craig, 2026-09-01: "add the SSH tabs back so we can manage remote hosts via
-# the complete UI". Ported from ranch's corral/sessions.py, with ONE change
-# that matters: ranch generates these from the lightsail estate inventory, and
+# The operator, 2026-09-01: "add the SSH tabs back so we can manage remote hosts via
+# the complete UI". Ported from the full Corral's corral/sessions.py, with ONE change
+# that matters: the full Corral generates these from its estate inventory, and
 # Light has no estate (fleet.py, estate.py and lightsail are all banned from
 # this tree by test_no_heavy_corral_module_is_imported). So the inventory here
 # is a hand-written file and nothing else.
 #
 # ssh_acp.py holds one persistent `ssh ... bash` on the host and runs exactly
-# what Craig types — no LLM, no permission rail, because the typed command IS
+# what the operator types — no LLM, no permission rail, because the typed command IS
 # the approved artifact (PRINCIPLES 17). This lane is a human keyboard surface
 # only; it must never be handed to an agent as a tool.
 #
 # NOT auto-enumerated from ~/.ssh/config, deliberately. That file's Host
 # entries include things that are not shell hosts at all (`github.com` is in
-# Craig's today), and a picker offering a lane that cannot open a shell is the
+# the operator's today), and a picker offering a lane that cannot open a shell is the
 # same button-that-lies available_agents() exists to prevent. Naming the hosts
 # costs one file, once.
 SSH_ADAPTER = ROOT / "ssh_acp.py"
@@ -412,7 +412,7 @@ def default_cwd():
     must not become the default, or the first pane would refuse to start.
 
     CORRAL_WORKSPACE, when set and present, wins: the workspace is wherever
-    the user's Seed install put it (dogma-2's is ~/ai-os, not ~/aios), and
+    the user's Seed install put it (the Mac host's is ~/ai-os, not ~/aios), and
     the container is told it rather than guessing.
     """
     ws = workspace()
@@ -493,15 +493,15 @@ def seed_config_dir(d, posture):
     """A config dir Corral owns, carrying THIS pane's posture.
 
     ONLY the permission policy is meant to be ours. Everything else must
-    be the config Craig actually uses, and the first cut got that wrong:
+    be the config the operator actually uses, and the first cut got that wrong:
     an isolated dir holding nothing but credentials meant a pane had none
     of his 27 personal skills, none of his subagents or plugins, and not
     even ~/.claude/CLAUDE.md — so the whole prompt stack was absent from
-    every conversation. Craig: "skills don't work in corral."
+    every conversation. The operator: "skills don't work in corral."
 
     Measured 2026-08-01, `claude -p` under each config dir:
       bare dir              -> 11 built-in skills, "NO CONTEXT"
-      dir + skills/CLAUDE.md -> 38 skills, and it knows the ranch's name
+      dir + skills/CLAUDE.md -> 38 skills, and it knows the host's name
 
     Capability directories are SYMLINKED, not copied: 27 skills copied per
     pane go stale the moment he edits one, and this dir is created fresh
@@ -517,7 +517,7 @@ def seed_config_dir(d, posture):
     .claude.json is not optional. Measured 2026-08-01: a config dir holding
     only credentials offered ['default','opus[1m]','sonnet','haiku'] --
     Fable was MISSING -- while the same dir plus ~/.claude.json offered
-    claude-fable-5[1m] as well. Craig noticed before I did ("why is fable
+    claude-fable-5[1m] as well. The operator noticed before I did ("why is fable
     not in the list"). Whatever entitlement state the model list is derived
     from lives in that file, so an isolated config dir that omits it
     silently downgrades which models the account can reach.
@@ -545,7 +545,7 @@ def seed_config_dir(d, posture):
         pass
     # THE CREDENTIAL DECIDES WHETHER A PRIVATE DIR IS POSSIBLE AT ALL.
     #
-    # Measured on dogma-2, 2026-08-31: a pane died with `Authentication
+    # Measured on the Mac host, 2026-08-31: a pane died with `Authentication
     # required` on session/prompt while `claude` worked fine in a terminal on
     # the same machine. On macOS Claude Code can keep its OAuth in the
     # Keychain rather than in ~/.claude/.credentials.json — so there is no
@@ -562,7 +562,7 @@ def seed_config_dir(d, posture):
     cred_src = real / ".credentials.json"
     # A LINK, NOT A COPY (2026-09-30; why: `corral_core.sessions`, "one
     # login, shared"). The copy was re-synced by mtime on every seed after
-    # dogma-2, 2026-08-31, found a frozen copy failing `Authentication
+    # the Mac host, 2026-08-31, found a frozen copy failing `Authentication
     # required` — but a RUNNING pane is not re-seeded, so its copy still went
     # stale the moment any other holder refreshed. A link cannot go stale.
     #
@@ -620,8 +620,8 @@ def seed_config_dir(d, posture):
 # Ambient vendor credentials and parent-session variables never reach a pane.
 # The strip list, the picker note and the opt-in hatch live in the core
 # (`corral_core/sessions.py`, "ambient credentials never reach a pane") since
-# 2026-09-09 so full Corral cannot fork them again; the history — Craig on
-# dogma-2, 2026-08-31, verified login, /usage showing token statistics, then
+# 2026-09-09 so full Corral cannot fork them again; the history — the operator on
+# the Mac host, 2026-08-31, verified login, /usage showing token statistics, then
 # `Authentication required` — is told there. This product's hatch keeps the
 # name it shipped and documented with: CORRAL_LIGHT_ALLOW_VENDOR_ENV=1.
 STRIP_ENV_PREFIXES = _core.STRIP_ENV_PREFIXES
@@ -675,7 +675,7 @@ def darwin_keychain_blocks_isolation():
     permissioned copy of .credentials.json in the isolated directory does not
     rescue this: it was never a credential-CONTENT problem, which is exactly
     why the two content-focused fixes before this one (empty-token check,
-    stale-copy resync) measurably did nothing on dogma-2, 2026-08-31 — the
+    stale-copy resync) measurably did nothing on the Mac host, 2026-08-31 — the
     positive control that found this proved the token was real and identical
     on both sides, and it still failed only with CLAUDE_CONFIG_DIR set.
 
@@ -684,7 +684,7 @@ def darwin_keychain_blocks_isolation():
     matching Keychain entry per pane is possible in principle but means
     Corral writing OAuth tokens into the OS Keychain under synthetic
     identities — a materially bigger, riskier change than anything else here,
-    and a decision for Craig, not a silent code change.
+    and a decision for the operator, not a silent code change.
     """
     return sys.platform == "darwin"
 
@@ -772,7 +772,7 @@ def _skill_commands(agent):
 
 
 # --- Picker grouping --------------------------------------------------------
-# Craig, 2026-08-31: "consolidate the SSH connections under one main SSH tab and
+# The operator, 2026-08-31: "consolidate the SSH connections under one main SSH tab and
 # then break it out into each individual session if we choose SSH."
 #
 # Light shipped with one family and a note that a second "costs a dict entry,
@@ -849,7 +849,7 @@ def available_agents():
         # anyway: this asked only resolve_grok(), which documents itself as
         # returning a path "without probing auth", so a host with the CLI
         # present but never signed in reported the lane AVAILABLE and the pane
-        # died on its first prompt with `Authentication required` (dogma-2,
+        # died on its first prompt with `Authentication required` (the Mac host,
         # 2026-08-31). Ask the launcher for the whole answer, as codex and
         # ollama already do.
         if key == "grok":
@@ -898,7 +898,7 @@ def available_agents():
         # "not installed: …/agy_acp_server.par". That is a true sentence that
         # tells a lie: it invites an install of a pinned Linux x86-64 binary
         # onto a machine that cannot execute it, and installing it is exactly
-        # what install_antigravity_acp refuses to do. On dogma-2 the honest
+        # what install_antigravity_acp refuses to do. On the Mac host the honest
         # answer is not "missing", it is "this host cannot run it".
         # Then, with the files present, the sign-in method: the server
         # handshakes fine without one and refuses session/new, so a lane
@@ -1058,7 +1058,7 @@ class Pane(_core.PaneBase):
         stored_title = meta.get("title")
         # A pre-fix pane's stored title IS the "CC" collision (see
         # _default_title) if it's un-renamed and literally the bare
-        # directory name on a non-Claude agent -- that's not a name Craig
+        # directory name on a non-Claude agent -- that's not a name the operator
         # chose, it's the old bug frozen to disk. Migrate it on restore
         # rather than leave every already-open Grok/Codex/SSH pane reading
         # "CC" until individually renamed by hand.
@@ -1378,7 +1378,7 @@ class Pane(_core.PaneBase):
         elif kind == "stall_notice":
             # The agent has been quiet a long time. This used to KILL the turn;
             # now it only says so, because a clock cannot tell a wedged agent
-            # from a slow one and killing took Craig's live work with it. The
+            # from a slow one and killing took the operator's live work with it. The
             # pane stays attached and keeps waiting; snapshot() will show it
             # `uncertain`, and pause/stop are his to press.
             self.emit("note", {"text": data.get("text") or "no output for a "
@@ -1398,7 +1398,7 @@ class Pane(_core.PaneBase):
         elif kind == "available_commands_update":
             # The agent tells us its own command list -- 70 of them, names and
             # descriptions, sent unprompted right after session/new. Corral
-            # dropped it, so the composer could not complete a skill and Craig
+            # dropped it, so the composer could not complete a skill and the operator
             # had to already know the name to use one. Never a hardcoded list:
             # this arrives again whenever the agent's skills change, and Grok
             # and Claude will not advertise the same set.
@@ -1477,7 +1477,7 @@ class Pane(_core.PaneBase):
                 # real offer, so _absorb_config left self.config empty and
                 # remember_catalog (inside it) correctly persisted nothing.
                 # Sets display state directly, with zero options, so it can
-                # never render as a PICKER Craig or the new-pane dialog could
+                # never render as a PICKER the operator or the new-pane dialog could
                 # choose from. It still has to reach remember_catalog below,
                 # though: the dialog's fillCfg reads entry.value (not just
                 # entry.options) to show Grok's real model as a plain
@@ -1601,7 +1601,7 @@ class Pane(_core.PaneBase):
     # vendor's skip-everything mode; auto-mode parity does not mean that, and a
     # default is exactly where it would go unnoticed.
     # Held {"mode": {"yolo"}} for part of 2026-09-19; out the same day because
-    # Craig chose it by name ("choose yolo") after auto_edit was measured to
+    # the operator chose it by name ("choose yolo") after auto_edit was measured to
     # still card every shell execute. A guard the operator has overruled by
     # name is theatre; the decision file is the honest record.
     # decisions/antigravity-yolo-default-2026-09-19.md
@@ -1639,7 +1639,7 @@ class Pane(_core.PaneBase):
                                            f"{cid}={value}: {e}"})
 
     def set_config(self, config_id, value):
-        # `mode` joined 2026-09-19 (Craig: "fix anti-gravity so that it
+        # `mode` joined 2026-09-19 (the operator: "fix anti-gravity so that it
         # follows the auto mode that Claude and Codex both follow. I'm tired
         # of all the permission prompts"). It is the lane's OWN approval-mode
         # option -- Antigravity's default / auto_edit / yolo -- validated
@@ -1653,7 +1653,7 @@ class Pane(_core.PaneBase):
         # configOptions: null -- is a REFUSAL, not an unfiltered value to
         # forward. Letting it through used to reach the live agent and come
         # back as a raw "Method not found" AgentError instead of this clean
-        # message (the failure Craig hit once the stale catalog offered
+        # message (the failure the operator hit once the stale catalog offered
         # effort levels the vendor CLI has never supported).
         cfg = self.config.get(config_id) or {}
         allowed = {o["value"] for o in cfg.get("options", [])}
@@ -1719,7 +1719,7 @@ class Pane(_core.PaneBase):
         # "has a user event ever appeared in self.events": that ring is
         # bounded (MAX_EVENTS), so on a long-running pane the original first
         # prompt eventually rotates out, and the old any(...) scan silently
-        # went blind and re-fired on Craig's NEXT message -- overwriting a
+        # went blind and re-fired on the operator's NEXT message -- overwriting a
         # meaningful title with whatever he happened to type at turn 4,001.
         if not self.title_locked and self.title == self._default_title(self.agent, self.cwd):
             first = " ".join(text.split())[:42]
@@ -1850,12 +1850,12 @@ class Pane(_core.PaneBase):
                             was="accepted")
                 # Since 2026-08-31 a prompt carries NO deadline, so the only
                 # way to reach here is the agent process actually dying or its
-                # stdin closing — never a clock deciding Craig's session is
+                # stdin closing — never a clock deciding the operator's session is
                 # over. close() is then a harmless no-op on an already-dead
                 # group, and it stays because it is the one thing that reaps a
                 # half-dead group's survivors. (It was added 2026-08-23, when a
                 # TIMED-OUT pane kept streaming tool/text events to its own log
-                # for minutes after Corral had told Craig the agent stopped —
+                # for minutes after Corral had told the operator the agent stopped —
                 # the orphan that bug left behind. That timeout is gone now;
                 # the reaping is still right.)
                 client.close()
@@ -1924,7 +1924,7 @@ class Pane(_core.PaneBase):
         #
         # It gates GRANTING only. Refusal is the fail-closed default and can
         # never be the harmful direction, so nothing is protected by making it
-        # hard — and a great deal is broken. Craig, 2026-08-31, on the pane
+        # hard — and a great deal is broken. The operator, 2026-08-31, on the pane
         # that was committing this very change: "It says the digest on this
         # approval does not match the bytes on the command." His browser was
         # holding an app.js from before the digest shipped, so it posted no
@@ -2107,7 +2107,7 @@ class Pane(_core.PaneBase):
 
 # --- Known aliases the live handshake does not enumerate --------------------
 # `session/new`'s configOptions lists Claude Code's model PRESETS, but the CLI
-# recognises at least one alias it does not advertise there: Craig, 2026-09-01,
+# recognises at least one alias it does not advertise there: The operator, 2026-09-01,
 # "add Opus Plan ... it's the same as /model opusplan". Verified live before
 # adding, the same way every other claim in this file is: `set_config(model,
 # "opusplan")` is accepted (configOptions echoes back cleanly), while
@@ -2128,7 +2128,7 @@ class Pane(_core.PaneBase):
 # in the pane, same as any other rejected value — never a silent wrong model.
 # WITHDRAWN 2026-09-01: "opusplan" was here, and it was never real.
 #
-# Craig: "we are still missing opus plan ... when started in that mode we
+# The operator: "we are still missing opus plan ... when started in that mode we
 # default to opus5". Measured against the live adapter, which is what the
 # entry above should have been:
 #
@@ -2156,7 +2156,7 @@ class Pane(_core.PaneBase):
 # What Corral CAN offer instead is the `plan` value of the `mode` config
 # option — real Plan Mode, advertised by the agent. It is not the same thing
 # (opusplan also swaps the model per phase, which nothing here exposes), so it
-# is Craig's call, not a silent substitution.
+# is the operator's call, not a silent substitution.
 #
 # Anything added here must survive the `opus!!!` control first.
 MODEL_EXTRAS = {}
@@ -2189,8 +2189,8 @@ class Manager(_core.ManagerBase):
     The catalog is remembered on disk because the new-conversation dialog needs
     the model/effort option lists BEFORE any pane exists -- it used to scrape
     them off a live pane, so with nothing running (i.e. every fresh start) the
-    pickers offered only "Default" and Craig could not choose a model for his
-    first conversation. Craig: "now model and effort does not work."
+    pickers offered only "Default" and the operator could not choose a model for his
+    first conversation. The operator: "now model and effort does not work."
 
     Still never hardcoded: this is the agent's own list, cached. Each new pane
     refreshes it, so a model appearing or disappearing upstream propagates on
@@ -2487,7 +2487,7 @@ class Manager(_core.ManagerBase):
     def restore(self):
         """Bring back up to MAX_ROSTER panes that were not deliberately closed.
 
-        Craig: "I would like to be able to close the local window and open it
+        The operator: "I would like to be able to close the local window and open it
         again and have all my tabs there the way I left them." Closing the
         BROWSER always worked -- the panes lived in server memory. Restarting
         the SERVER did not, and deploying is how that kept happening to him.
@@ -2661,7 +2661,7 @@ class Manager(_core.ManagerBase):
         """Set an explicit order from a list of pane ids.
 
         Panes rendered in creation order, which is not an ordering system —
-        Craig's whole complaint about terminals was that you cannot arrange
+        the operator's whole complaint about terminals was that you cannot arrange
         running work. Unknown ids are ignored rather than rejected: the client
         may be a moment stale, and a drag should not fail because a pane closed
         while the mouse was down.
@@ -2732,7 +2732,7 @@ class Manager(_core.ManagerBase):
                 # remembered. Prefer ~/aios when Seed is installed (that
                 # folder is the workspace); otherwise home, which always
                 # exists. The BROWSER used to carry this as a literal
-                # ('/home/cvande/Github/CC'), inherited from the full Corral —
+                # ('/home/<user>/Github/CC'), inherited from the full Corral —
                 # which on any other machine is a directory that does not
                 # exist, so the first thing a new install did was refuse to
                 # start a pane. The host knows its own home; the client should
@@ -2749,7 +2749,7 @@ class Manager(_core.ManagerBase):
                 # Somewhere to START from. The field was free text with one
                 # default, so choosing a directory meant knowing and typing an
                 # absolute path — on a new machine, the one thing you do not
-                # have to hand (Craig, dogma-2, 2026-08-31: "I can't seem to
+                # have to hand (the operator, the Mac host, 2026-08-31: "I can't seem to
                 # pick the directory I want to start in"). These are REAL
                 # directories on this host, offered as a datalist so the field
                 # stays typeable: nothing here is a restriction on where a

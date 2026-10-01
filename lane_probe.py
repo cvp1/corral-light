@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 """lane_probe — ask a lane, for real, whether it works here and what it offers.
 
-WHY (dogma-2, 2026-08-31)
-    Craig's Claude pane died with `Authentication required`, and the
+WHY (the Mac host, 2026-08-31)
+    The operator's Claude pane died with `Authentication required`, and the
     new-conversation dialog offered him no model and no effort to pick. Those
     look like two bugs. They are one:
 
@@ -120,7 +120,7 @@ def sessions_env(spec):
     The first version of this deliberately passed config_dir=None, reasoning
     that "the probe asks whether the lane works as the user has it, not under
     a pane's private posture directory". That reasoning produced a probe that
-    could not see the exact failure it was written to catch: on dogma-2 it
+    could not see the exact failure it was written to catch: on the Mac host it
     reported `ok Claude Code` while every pane died at its first prompt with
     `Authentication required`, because the probe ran under ~/.claude (which
     works) and the pane ran under a private CLAUDE_CONFIG_DIR holding no

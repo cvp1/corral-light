@@ -2,7 +2,7 @@
 """corral-light install-service — write the service file, and stop there.
 
 WHY THIS EXISTS
-    The repo ships `corral-light.service` and `com.cvande.corral-light.plist`
+    The repo ships `corral-light.service` and `com.cvp1.corral-light.plist`
     as TEMPLATES with install instructions in their comments, and the Linux
     one wants a `sed "s|%HERE%|$PWD|"` the reader has to notice and type in
     the right directory. The macOS one carries absolute paths from the machine
@@ -144,7 +144,7 @@ MACOS_PLIST = """\
 </plist>
 """
 
-LABEL = "com.cvande.corral-light"
+LABEL = "com.cvp1.corral-light"
 _MAC_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 

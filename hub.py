@@ -7,7 +7,7 @@ WHAT THIS SERVER DOES NOT HAVE, AND WHY THAT IS THE POINT
     The full Corral's hub carries fifteen more routes: the fleet mailbox, the
     attention queue, the run registry, the scheduler, the Library index, mail,
     FinOps, delegate boards, tmux adoption. Every one of them reads state that
-    only exists on ranch-server. They are not stubbed here — a route that
+    only exists on the Linux server. They are not stubbed here — a route that
     answers `{"error": "unavailable"}` is still a surface to maintain and still
     a failure for the browser to render. Light is the Live tab: conversations,
     and the permission rail that unblocks them.
@@ -75,8 +75,8 @@ def _safe_static_path(rel):
     return f if f.is_relative_to(base) else None
 
 
-# 127.0.0.1 by default, unlike ranch's Corral. Light runs on a personal machine
-# that moves between networks — a coffee-shop LAN is not the ranch LAN, and the
+# 127.0.0.1 by default, unlike the full Corral's Corral. Light runs on a personal machine
+# that moves between networks — a coffee-shop LAN is not a home LAN, and the
 # pairing gate should not be the only thing between an arbitrary wifi and an
 # agent holding tools in a working tree. Binding wider is a deliberate act:
 # CORRAL_LIGHT_BIND=0.0.0.0.
@@ -179,7 +179,7 @@ def _observe_once():
         _TICK["at"] = time.time()
     _TICK["at"] = time.time()               # an empty roster still ticks
     # The Claude login, on the same pulse: warn before it lapses, and bring
-    # back what it killed once Craig has signed in again (2026-09-30).
+    # back what it killed once the operator has signed in again (2026-09-30).
     try:
         MGR.auth_sweep()
     except Exception:                              # noqa: BLE001
@@ -719,7 +719,7 @@ class Handler(BaseHTTPRequestHandler):
                 #       is a dead end that looks like a working feature.
                 #
                 # Returning TEXT (not markup, not a command) keeps this a
-                # composer convenience: it lands in the box, Craig reads it,
+                # composer convenience: it lands in the box, the operator reads it,
                 # and nothing is sent until he presses send. The attach itself
                 # authorizes nothing (P17).
                 import content
@@ -857,7 +857,7 @@ class Server(ThreadingHTTPServer):
     """ThreadingHTTPServer that does not print a traceback when a client
     simply goes away.
 
-    WHY (dogma-2, 2026-08-31): the log filled with
+    WHY (the Mac host, 2026-08-31): the log filled with
 
         Exception occurred during processing of request from …
         ConnectionResetError: [Errno 54] Connection reset by peer

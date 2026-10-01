@@ -3,10 +3,10 @@
 
 WHY NOT THE EXISTING SSO
 ------------------------
-ranch-hub authenticates against a SHARED credential set (`ranch`/`dash`) — it
-proves "someone with the household password", not "Craig". That is a knowing
+the full Corral hub authenticates against a SHARED credential set (a shared login) — it
+proves "someone with the household password", not "The operator". That is a knowing
 compromise for viewing a dashboard, and it is documented as one
-(`06 Logs/Decisions/2026-08-01 fleet approval authority reaches the ranch dash`).
+(`06 Logs/Decisions/2026-08-01 fleet approval authority reaches the dashboard`).
 
 It is NOT acceptable for Corral, because a Corral session drives real agents
 with real tools in real directories. Anyone holding the shared password would
@@ -14,7 +14,7 @@ be able to start an agent and answer its permission prompts. So conversation
 features require a personal gate, and this is it.
 
 THE MECHANISM
-    Browser shows a one-time code. Craig runs, in a shell he already trusts:
+    Browser shows a one-time code. The operator runs, in a shell he already trusts:
         corral pair <code>
     That command can only run as his UNIX user (over ssh or locally), so
     possession of the account IS the proof. No password, no new identity
@@ -148,7 +148,7 @@ def new_code(now=None):
         d = _prune(_load(), now)
         # /api/pair/new is unauthenticated too — it has to be, that is how
         # pairing bootstraps identity in the first place — so the server can
-        # never tell Craig's own mint from an attacker's. A miss-counting
+        # never tell the operator's own mint from an attacker's. A miss-counting
         # limiter is wrong here (every call is a "hit"), so this one is a
         # plain ceiling on how fast codes may be minted at all.
         mints = [t for t in d.get("mints", []) if t > now - MINT_WINDOW]
@@ -161,7 +161,7 @@ def new_code(now=None):
         if len(d["pending"]) >= MAX_PENDING:
             # REFUSE, never evict. This used to push the OLDEST pending code
             # out to make room — which meant an attacker who stayed under the
-            # mint-rate ceiling above could still repeatedly evict Craig's
+            # mint-rate ceiling above could still repeatedly evict the operator's
             # own live, about-to-be-approved code and deny him pairing
             # indefinitely: the rate limit bounded the SPEED of the attack,
             # never stopped it. gpt-5.6-sol, third-pass review, finding 6.
@@ -192,7 +192,7 @@ def new_code(now=None):
 
 
 def approve(code, now=None):
-    """Called by the `corral pair` CLI, i.e. by Craig's own UNIX account."""
+    """Called by the `corral pair` CLI, i.e. by the operator's own UNIX account."""
     now = now or time.time()
     code = (code or "").strip().upper()
     with _locked():
@@ -217,7 +217,7 @@ def claim(code, now=None):
             # Only a MISS counts against the limit. The browser polls its own
             # live code roughly every 1.5s while it waits, so counting every
             # call would throttle the one flow this is meant to protect — the
-            # rate limiter would lock Craig out and leave a guesser unbothered.
+            # rate limiter would lock the operator out and leave a guesser unbothered.
             if not _rate_ok(d, now):
                 _save(d)
                 return None, "slow down"
@@ -234,9 +234,10 @@ def claim(code, now=None):
     return mint(now=now), "ok"
 
 
-def mint(now=None, ttl=SESSION_TTL, user="craig"):
-    # `user` is the token's audience: "craig" everywhere, or edge.SERVE_USER
-    # for a cookie minted through Tailscale Serve (corral_core/edge.py).
+def mint(now=None, ttl=SESSION_TTL, user="owner"):
+    # `user` is the token's audience: edge.LAN_USER ("owner") everywhere, or
+    # edge.SERVE_USER for a cookie minted through Tailscale Serve
+    # (corral_core/edge.py). The two literals must match edge.py's.
     if "." in user:
         raise ValueError("a token user may not contain '.'")
     now = int(now or time.time())

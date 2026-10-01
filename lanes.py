@@ -6,7 +6,7 @@
 
 WHY (DESIGN-6 Stage F, 2026-10-01)
     Codex, Claude, Antigravity and Grok are first-party modules here, and
-    Craig's ruling is that they "must be kept up to date". Bumping a pin by
+    the operator's ruling is that they "must be kept up to date". Bumping a pin by
     hand has gone wrong in the same way more than once: the adapter installed,
     `doctor` said ok, and the first pane died (the macOS Antigravity build
     rejected a Linux-only flag; doctor's line for that lane was a static

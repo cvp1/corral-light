@@ -1,5 +1,5 @@
 # Corral Light — systemd USER unit, for a Linux box.
-# (The macOS equivalent is com.cvande.corral-light.plist.)
+# (The macOS equivalent is com.cvp1.corral-light.plist.)
 #
 # Install:
 #   mkdir -p ~/.config/systemd/user

@@ -1,8 +1,8 @@
 #!/usr/bin/python3
 """claude_auth — is the Claude Code login good, and for how long?
 
-WHY (dogma-2, 2026-09-30, 05:41 local)
-    Craig opened a Claude pane, sent one real prompt, and the pane died:
+WHY (the Mac host, 2026-09-30, 05:41 local)
+    The operator opened a Claude pane, sent one real prompt, and the pane died:
 
         agent stopped — session/prompt: {'code': -32000,
                                          'message': 'Authentication required'}
@@ -34,7 +34,7 @@ WHAT IT WILL NOT DO
     - Return, log or bind a token. The Keychain item and the credentials file
       are read into one local parse and only two timestamps come out.
     - Complete the login. Corral starts the vendor's own login in a window
-      Craig sees, on his click; it never completes, reads, or relays it
+      the operator sees, on his click; it never completes, reads, or relays it
       (claude_login.py; decision note "corral-starts-vendor-login",
       2026-09-30, which replaced "never run the login"). This module says
       WHEN and WHAT; he does the signing in.
@@ -149,7 +149,7 @@ def expiry(platform=None):
     platform = platform or sys.platform
     if platform == "darwin":
         # The Keychain is THE store here. ~/.claude/.credentials.json can
-        # exist beside it as a months-old leftover (it does on dogma-2, dated
+        # exist beside it as a months-old leftover (it does on the Mac host, dated
         # May) — falling back to it would report a token nobody uses.
         raw, source = _read_keychain(), "keychain"
     else:

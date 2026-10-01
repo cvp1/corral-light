@@ -334,7 +334,7 @@ exact enable command is printed for you to run. An existing file is left alone
 unless you pass `--force`.
 
 The repository also ships the two files as templates (`corral-light.service`,
-`com.cvande.corral-light.plist`) if you would rather edit them by hand.
+`com.cvp1.corral-light.plist`) if you would rather edit them by hand.
 
 Do not run the service as root; assistants need the permissions and sign-ins
 of the user who starts them. Do not point a service at a worktree —
@@ -355,14 +355,14 @@ cp corral-light-watch.timer ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now corral-light-watch.timer
 ```
 
-macOS: save as `~/Library/LaunchAgents/com.cvande.corral-light-watch.plist` (fix the two paths), then `launchctl load` it:
+macOS: save as `~/Library/LaunchAgents/com.cvp1.corral-light-watch.plist` (fix the two paths), then `launchctl load` it:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.cvande.corral-light-watch</string>
+  <key>Label</key><string>com.cvp1.corral-light-watch</string>
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/python3</string>

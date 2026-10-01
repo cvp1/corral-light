@@ -29,12 +29,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_ADAPTER = HERE / "spike" / "node_modules" / ".bin" / "codex-acp"
-# The version-matched codex CLI the adapter bundles — the binary Craig logs
+# The version-matched codex CLI the adapter bundles — the binary the operator logs
 # in with, so auth state is written by the same codex the lane runs.
 BUNDLED_CODEX = HERE / "spike" / "node_modules" / ".bin" / "codex"
 CODEX_HOME = Path(os.environ.get(
     "CORRAL_CODEX_HOME", str(Path.home() / ".config/corral-light/codex-home")))
-# Optional: a node install off PATH (hermes' bundle on ranch). Absent on a
+# Optional: a node install off PATH (hermes' bundle on the Linux server). Absent on a
 # stock Mac, where node IS on PATH -- so a non-existent dir must not shadow it.
 _NODE_BIN = Path.home() / ".hermes" / "node" / "bin"
 NODE_BIN = _NODE_BIN if _NODE_BIN.is_dir() else None
@@ -81,7 +81,7 @@ def login_command() -> str:
     main() at pane-spawn time — which cannot have happened yet, because not
     being logged in is precisely why you are reading this. So the command
     this lane printed was one that could never work as pasted: it told the
-    operator to log in and then failed on the login. Measured on dogma-2,
+    operator to log in and then failed on the login. Measured on the Mac host,
     2026-08-31, from a clean install.
 
     A command shown to a human is a promise that running it does the thing.

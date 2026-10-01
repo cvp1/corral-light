@@ -3,9 +3,9 @@
   Corral Light — launchd user agent, for dogma-2 (macOS).
 
   Install:
-    cp com.cvande.corral-light.plist ~/Library/LaunchAgents/
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cvande.corral-light.plist
-    launchctl kickstart -k gui/$(id -u)/com.cvande.corral-light   # after an edit
+    cp com.cvp1.corral-light.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cvp1.corral-light.plist
+    launchctl kickstart -k gui/$(id -u)/com.cvp1.corral-light   # after an edit
 
   A USER agent, not a system daemon, on purpose: every lane authenticates as
   the logged-in user (Claude's credentials, the Grok CLI's own state,
@@ -43,7 +43,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.cvande.corral-light</string>
+  <string>com.cvp1.corral-light</string>
 
   <key>ProgramArguments</key>
   <array>

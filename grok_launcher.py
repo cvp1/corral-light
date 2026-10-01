@@ -68,11 +68,11 @@ def login_command(grok: str | None = None) -> str:
 def unavailable_reason() -> str | None:
     """Why this lane cannot open right now, or None if it can.
 
-    WHY THIS EXISTS (2026-08-31, dogma-2): `resolve_grok()` says in its own
+    WHY THIS EXISTS (2026-08-31, the Mac host): `resolve_grok()` says in its own
     docstring that it returns a path "without probing auth", and the picker
     was calling ONLY that — so a host with the Grok CLI installed but never
     signed in reported `ok Grok`, and the pane died on its first prompt with
-    `Authentication required`. Craig hit exactly that.
+    `Authentication required`. The operator hit exactly that.
 
     available_agents() exists to stop a picker listing a binary that isn't
     installed; a binary that is installed and cannot authenticate is the same
@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         print(unavailable_message(), file=sys.stderr, flush=True)
         return 127
     # Set by sessions.py's Pane.start()/resume() from self.want_model, only
-    # when Craig actually requested one in the new-pane dialog -- absent,
+    # when the operator actually requested one in the new-pane dialog -- absent,
     # this launches with no --model flag at all, same as before this
     # existed, and the CLI's own default (grok-4.6) applies.
     command = build_argv(grok, os.environ.get("CORRAL_GROK_MODEL") or None)

@@ -19,8 +19,8 @@ DESIGN-4 F2. Two halves, one store:
     digest()   what happened in the last N hours, computed FROM EVENTS.
                No model is in the loop, and that is deliberate: the 2026-08-23
                three-model panel killed LLM deltas for close records ("hiding
-               the exact bytes Craig needs"). `close.py digest` is arithmetic
-               over records and this is arithmetic over events. If Craig wants
+               the exact bytes the operator needs"). `close.py digest` is arithmetic
+               over records and this is arithmetic over events. If the operator wants
                prose from a digest, he quotes it into a pane -- composition,
                not dispatch.
 
@@ -31,14 +31,14 @@ THE INDEX IS DERIVED AND DISPOSABLE
     (P5) -- said once on stderr, not on every query.
 
     A SEPARATE database from the Library's on purpose: that one is read-only
-    by construction over DOCUMENTS Craig and the fleet wrote; this one is over
+    by construction over DOCUMENTS the operator and the fleet wrote; this one is over
     Corral's own logs, which rotate, get closed, and are appended to by live
     processes. One file, two lifecycles, is how a rebuild of one loses the
     other.
 
 WHAT IS INDEXED, AND THE ONE COLUMN DESIGN-4 DID NOT NAME
     Searchable bodies: `user`, `text`, `tool` (title + the head of its result),
-    `note`, `dead`. NOT searchable: `thought` (monologue, and Craig hides it by
+    `note`, `dead`. NOT searchable: `thought` (monologue, and the operator hides it by
     default) and `permission*` -- a consent payload is not search material.
 
     But the digest has to be able to SAY "3 asked · 2 answered · 1 expired",
@@ -318,7 +318,7 @@ def _trim(c, pane_id):
 
 #: A pane directory with no `meta.json` AT ALL. Not the same thing as a
 #: meta.json that cannot be trusted, and the difference decides whether the
-#: conversation is findable (2026-09-15, P2: 28 such dirs on ranch-server).
+#: conversation is findable (2026-09-15, P2: 28 such dirs on the Linux server).
 _META_MISSING = object()
 
 
@@ -330,7 +330,7 @@ def _meta_of(d):
       * a dict with an `id` — an ordinary pane.
       * `_META_MISSING` — no `meta.json` on disk. These predate `save_meta`
         or are crash leftovers, and their `events.jsonl` is still a real
-        conversation Craig had. Indexing them under their id is strictly
+        conversation the operator had. Indexing them under their id is strictly
         better than a search that answers "no matches" about words that are
         demonstrably on his disk (P1: a clean answer you cannot substantiate
         is worse than an ugly one).
@@ -369,7 +369,7 @@ def _scan(c, state_dir=None):
         cur = d / "events.jsonl"
         metaless = m is _META_MISSING
         if metaless:
-            # INDEXED, never dropped and never deleted (Craig, 2026-09-15).
+            # INDEXED, never dropped and never deleted (the operator, 2026-09-15).
             # A log with no meta still answers "what did I say about X"; the
             # only things lost are the title and the agent, so it gets its id
             # for a title and "?" for the agent, and every hit carries
@@ -460,7 +460,7 @@ def _scan(c, state_dir=None):
              1 if m.get("closed") else 0, gen_now, off,
              1 if partial else 0, tail_rowid, off, 1 if metaless else 0))
         panes += 1
-    # A pane directory Craig deleted must leave the index too (P23: eviction
+    # A pane directory the operator deleted must leave the index too (P23: eviction
     # is accretion's other half), or search keeps answering out of a
     # conversation that no longer exists.
     live = {d.name for d in root.iterdir() if d.is_dir()}

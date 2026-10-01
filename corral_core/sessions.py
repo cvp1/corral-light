@@ -218,7 +218,7 @@ def link_shared_credential(src, dst):
 
 # ── bounds, identical in both products ────────────────────────────────────
 
-# `auto` because that is what Craig actually uses (2026-08-01: "I use auto by
+# `auto` because that is what the operator actually uses (2026-08-01: "I use auto by
 # default"), and it matches his standing ~/.claude setting. Corral shipped
 # `strict` on the argument that a pane which never asks defeats the rail --
 # but `auto` is NOT "never asks": per the agent's own description it runs a
@@ -308,7 +308,7 @@ PEER_TOKEN_HEADER = "X-Corral-Pane-Token"
 PEER_FENCE = "corral-peer"      # the envelope tag; a body containing it is
                                 # refused, so the envelope cannot be forged
                                 # from inside (section 7, blocker 2)
-# The ONE exception to "not ready -> refused busy" (DESIGN-5 S11b; Craig on
+# The ONE exception to "not ready -> refused busy" (DESIGN-5 S11b; the operator on
 # Docket 83a33d7c5b63, 2026-09-30: "Do B but make sure the queue is bounded").
 # A pane blocked in `seat_wait` on a turn its SENDER is running is mid-turn,
 # so the reply it is waiting for used to be refused `busy` and lost. That one
@@ -411,11 +411,11 @@ def open_metas(root=None):
 
 
 # A peer body that claims the HUMAN approved or decided something (2026-09-30:
-# a seat told another "Craig accepted it" when Craig had said nothing). The
+# a seat told another "The operator accepted it" when the operator had said nothing). The
 # envelope already marks the body untrusted; this names the one sentence a
 # receiving model is most tempted to act on anyway. A FLAG, never a refusal:
 # a false positive costs one caveat line, and a refusal would teach seats to
-# paraphrase around the pattern. Past tense only, so "ask Craig to approve"
+# paraphrase around the pattern. Past tense only, so "ask the operator to approve"
 # is not a claim. The human's name comes from the account (Corral Light is
 # public, so none is baked in); the role words match on every install.
 def _account_names():
@@ -739,7 +739,7 @@ class PaneBase:
         self.role_delivery = None
         self._replaying = False
         self.title = self._default_title(agent, cwd)
-        self.title_locked = False      # True once Craig renames it by hand
+        self.title_locked = False      # True once the operator renames it by hand
         self.minimized = False
         self.order = None         # explicit position; None = by age
         self.pinned = False
@@ -755,7 +755,7 @@ class PaneBase:
     @staticmethod
     def _default_title(agent, cwd):
         # The bare directory name collides with an agent-identity reading when
-        # cwd happens to BE named that way -- Craig's own daily-driver repo is
+        # cwd happens to BE named that way -- the operator's own daily-driver repo is
         # `~/Github/CC`, so a fresh Grok or ChatGPT pane opened there defaulted
         # to the title "CC" and looked exactly like a Claude Code conversation
         # before it had said anything. Claude Code keeps the directory default
@@ -1086,7 +1086,7 @@ class PaneBase:
         """Record what the agent says its config IS -- never what we asked for.
 
         Asking for a model is a request; the agent decides. Rendering the
-        requested value would show Craig a model that may not be serving him.
+        requested value would show the operator a model that may not be serving him.
         """
         for co in options:
             real_id = co.get("id")
@@ -1170,7 +1170,7 @@ class PaneBase:
         # Mark it closed ON DISK. restore() skips panes carrying this flag, and
         # nothing was setting it -- so closing a pane stopped the process and
         # cleared the row, and the next server restart resurrected it from
-        # meta.json. Craig: "when I click the x on a pane to close it, it pops
+        # meta.json. The operator: "when I click the x on a pane to close it, it pops
         # right back up on restart." The transcript is deliberately left alone;
         # this hides the pane, it does not delete the conversation.
         self.save_meta(closed=True)
@@ -1567,7 +1567,7 @@ class ManagerBase:
             if not any(ev["kind"] == "user" for ev in p.events):
                 # A fresh pane on the wall is not an arm: it was never asked.
                 # Saying it "has not finished answering" here was a lie that
-                # sent Craig looking for a hung agent (2026-09-02).
+                # sent the operator looking for a hung agent (2026-09-02).
                 raise ValueError(f"{p.title} has not been asked anything yet "
                                  f"\u2014 send it the question first, or leave "
                                  f"it out of the cross-feed")
@@ -2253,7 +2253,7 @@ class ManagerBase:
     def close(self, pane_id, by=None):
         """Close AND remove. Closing used to leave a dead row in the roster and
         an "agent stopped" card in the needs-you rail until dismissed again --
-        Craig: "when I close a pane it shows agent stopped and leaves an
+        the operator: "when I close a pane it shows agent stopped and leaves an
         artifact." A close you asked for is finished business; only a pane that
         died on its own is news, and that one still stays for `forget`."""
         p = self.get(pane_id)

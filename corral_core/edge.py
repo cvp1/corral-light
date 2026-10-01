@@ -44,7 +44,15 @@ import ipaddress
 
 TS_LOGIN = "Tailscale-User-Login"
 FORWARDED_FOR = "X-Forwarded-For"
-SERVE_USER = "craig-ts"     # token audience for a cookie minted through Serve
+# Token audiences. Serve-only is a SUFFIX, not one name: any audience ending
+# in SERVE_SUFFIX is good only through Serve (audience_ok). The names were
+# renamed 2026-10-01 so the public image carries no personal name, and an
+# exact-name check would have read every still-valid cookie with the OLD
+# Serve audience as a LAN cookie. The suffix covers old and new names, and
+# full Corral (which shares this file) keeps working unchanged.
+SERVE_SUFFIX = "-ts"
+LAN_USER = "owner"                  # audience for a cookie paired on the LAN
+SERVE_USER = LAN_USER + SERVE_SUFFIX  # audience for a cookie minted through Serve
 # Tailscale's address space: CGNAT v4 range and the ULA v6 prefix it assigns.
 _TAILNET = (ipaddress.ip_network("100.64.0.0/10"),
             ipaddress.ip_network("fd7a:115c:a1e0::/48"))
@@ -120,7 +128,7 @@ def identity_ok(headers, required_login, peer=None):
 
 def audience_ok(user, headers, peer=None):
     """A Serve-minted cookie is only good on a request that came through Serve."""
-    if user == SERVE_USER:
+    if user and user.endswith(SERVE_SUFFIX):
         return via_serve(headers, peer)
     return bool(user)
 

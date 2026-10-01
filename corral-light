@@ -28,7 +28,7 @@
 #                               (cli.py --help; `say` answers permissions in
 #                               the same terminal and never cancels on a timer)
 #
-# /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (dogma-2), which
+# /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (the Mac host), which
 # has no /usr/bin/bash. The same shebang mistake shipped once in the full
 # Corral and only failed after a merge reached the Mac.
 set -euo pipefail

@@ -23,14 +23,14 @@ WHAT THIS IS NOT
     minted by one adapter's own store (`~/.claude/projects` for Claude,
     codex-acp's for Codex) and means nothing to another; across hosts the
     store is not there at all. So portability here is TRANSCRIPT-CARRYING,
-    and it says so on the pane header (`⇄ ported from Claude · dogma-2`)
+    and it says so on the pane header (`⇄ ported from Claude · my-mac`)
     rather than pretending the model remembers.
 
 CONSENT BINDS TO BYTES (P17)
     `compose()` is pure and returns a `sha` over the exact text. The dialog
     previews those bytes; `Manager.port()` recomposes and refuses unless the
     sha still matches. A transcript that grew since the preview fails with
-    "the preview is out of date" rather than sending something Craig never
+    "the preview is out of date" rather than sending something the operator never
     read -- the same bind `/api/roles/preview` -> `/api/roles/create` uses.
 
 DATA CLASS, STATED UP FRONT (FULL CORRAL ONLY — Light's gate is described at the top)
@@ -285,7 +285,7 @@ def compose(pane, target_agent, *, include_tools=True):
               f"{getattr(pane, 'id', '?')}" if omitted else "")
            + ")\n" + "\n\n".join(carried) + "\n")
     # STRIPPED, because `Pane.send` strips before it records and sends. The
-    # pack ended in a newline and the sha covered it, so the digest Craig
+    # pack ended in a newline and the sha covered it, so the digest the operator
     # approved was never the digest of the bytes that left -- a byte contract
     # off by one byte (bug bash 2026-09-14, Astra, low severity but P17 is
     # exactly a byte contract).

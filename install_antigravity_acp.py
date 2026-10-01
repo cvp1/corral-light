@@ -75,7 +75,7 @@ DOWNLOAD_ATTEMPTS = 3      # short reads only; every attempt is still SHA-checke
 # authentication method selected" — until settings.json names one. Installed
 # files and a clean initialize handshake do not reveal that, so the lane read
 # available and died on first use (Omarchy, 2026-09-27). The installer picks
-# oauth-personal: the operator's own Google login, the subscription path.
+# oauth-personal: The operator's own Google login, the subscription path.
 # NEVER gemini-api-key — a vendor key silently changes who pays and who sees
 # the data, and that is the operator's call, not an installer default.
 SETTINGS = Path.home() / ".gemini/antigravity-acp/settings.json"

@@ -327,14 +327,14 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
    transcript's. Found independently by both reviewers, 2026-08-23. */
 .grid.one{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr);align-content:stretch}
 .grid.one .pane{height:100%}
-/* One row, always: the "great big huge blobs" (Craig, 2026-08-24) were the
+/* One row, always: the "great big huge blobs" (the operator, 2026-08-24) were the
    wrap as much as the width — chips scroll horizontally like browser tabs
    instead of stacking rows above the working panes. Each chip is a small
    header (roster radius, roster-width ellipsis cap), not a sentence pill;
    full title + state live in the tooltip/aria-label. Panel-adjudicated:
    reviews/2026-08-24-ui-polish-panel/synthesis.md. */
 .minbar{grid-column:1/-1;display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;padding:2px 2px 6px}
-/* Uniform tabs (Craig, 2026-08-30): every chip is the same fixed size, like
+/* Uniform tabs (the operator, 2026-08-30): every chip is the same fixed size, like
    browser tabs — a chip's width must not leak the length of its title. */
 .minchip{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);
   border-radius:8px;padding:3px 10px;font-size:11.5px;cursor:pointer;color:var(--dim);
@@ -555,7 +555,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 
 /* ── terminal panes (host:<box> shell lanes) ──
    A shell is a transcript of commands and raw output, not a conversation
-   (Craig, 2026-08-24): monospace throughout, no bubbles, no message gap —
+   (the operator, 2026-08-24): monospace throughout, no bubbles, no message gap —
    the prompt glyph is what separates one command from the next. */
 .pane.term .log{font-family:var(--mono);font-size:12.5px;line-height:1.5;
   gap:0;background:var(--ground)}
@@ -771,7 +771,7 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .psec{margin:22px 0}
 .psec .lab{padding:0 0 8px}
 /* The banner rendered as one crammed prose line; it's really a set of
-   glances — chips make each one land on its own (Craig, 2026-08-30). */
+   glances — chips make each one land on its own (the operator, 2026-08-30). */
 .today-chips{display:flex;flex-wrap:wrap;gap:7px;margin:2px 0 8px}
 .chip{font-size:12.5px;color:var(--dim);background:var(--panel);
   border:1px solid var(--line);border-radius:20px;padding:4px 12px;line-height:1.5}
@@ -794,7 +794,7 @@ details.tsec>.abody{padding:0 2px 14px}
 .today-row .t{flex:1;font-size:12.5px}
 .today-row .s{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
 /* A real failure vs a plain "finished" line looked identical but for the
-   word "failed —" (Craig, 2026-08-24). */
+   word "failed —" (the operator, 2026-08-24). */
 .today-row.dead .t{color:var(--rust)}
 .today-row.calm{cursor:default;color:var(--faint)}
 .today-row.calm:hover{background:none}

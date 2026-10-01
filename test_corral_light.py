@@ -265,7 +265,7 @@ class StructuralIndependence(unittest.TestCase):
 
         This is the whole "does it work on a blank box" question in one test.
         It was NOT hypothetical: app.js shipped `S.lastCwd ||
-        '/home/cvande/Github/CC'` as the new-conversation default, inherited
+        '/home/<user>/Github/CC'` as the new-conversation default, inherited
         from the full Corral, so the first thing a fresh install did was refuse
         to start a pane in a directory that does not exist there. The host
         knows its own home; nothing here should be guessing at it.
@@ -2403,8 +2403,8 @@ class MacosPlistIsThisHost(unittest.TestCase):
                          "launchd plist is a macOS artifact; Path.home() is the "
                          "mac account only on the host that runs the agent")
     def test_the_plist_does_not_point_at_the_ranch_user(self):
-        text = (ROOT / "com.cvande.corral-light.plist").read_text(encoding="utf-8")
-        self.assertNotIn("/Users/cvande/", text)
+        text = (ROOT / "com.cvp1.corral-light.plist").read_text(encoding="utf-8")
+        self.assertNotIn("/Users/<user>/", text)
         home = str(Path.home())
         self.assertIn(f"{home}/corral-light", text)
         self.assertIn(f"{home}/Library/Logs/corral-light.log", text)
@@ -2433,7 +2433,7 @@ class TheServiceRunsThisTree(unittest.TestCase):
             d["ProgramArguments"] = ["/opt/homebrew/bin/python3", str(program)]
         if workdir:
             d["WorkingDirectory"] = str(workdir)
-        path = Path(tempfile.mkdtemp()) / "com.cvande.corral-light.plist"
+        path = Path(tempfile.mkdtemp()) / "com.cvp1.corral-light.plist"
         with open(path, "wb") as fh:
             plistlib.dump(d, fh)
         return path
@@ -2501,7 +2501,7 @@ class TheServiceRunsThisTree(unittest.TestCase):
         the documented fix (`cp` it into LaunchAgents) reinstalls a fault."""
         import diagnose
         self.assertIsNone(diagnose.service_tree_problem(
-            root=ROOT, path=ROOT / "com.cvande.corral-light.plist",
+            root=ROOT, path=ROOT / "com.cvp1.corral-light.plist",
             label="nope.not.loaded"))
 
 
@@ -3670,7 +3670,7 @@ class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
                           p["text"])
             self.assertEqual(
                 p["path"],
-                Path(home) / "Library/LaunchAgents/com.cvande.corral-light.plist")
+                Path(home) / "Library/LaunchAgents/com.cvp1.corral-light.plist")
 
     def test_an_unknown_platform_refuses_and_names_itself(self):
         """P4. A systemd unit written hopefully into a directory that means

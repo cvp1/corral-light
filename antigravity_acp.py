@@ -5,7 +5,7 @@ Antigravity does not yet expose native ACP.  Corral still needs an ACP peer,
 so this adapter translates each ACP prompt into AGY's documented headless
 ``stream-json`` mode and preserves the returned conversation id for later
 turns.  It deliberately runs in ``plan`` mode: this is the review/bug-bash
-lane Craig already uses, and it must not gain an invisible write bypass just
+lane the operator already uses, and it must not gain an invisible write bypass just
 because AGY cannot send interactive permission cards over ACP yet.
 
 No credential is read or copied.  The official ``agy`` binary owns auth.
@@ -168,7 +168,7 @@ def _emit_text(sid: str, text: str):
 def _prompt_argv(agy: str, prompt: str, session: dict) -> list[str]:
     model = session.get("model") or ""
     argv = [agy, "-p", prompt, "--mode", "plan",
-            # TEMPORARY, explicitly authorized by Craig on 2026-08-31 so the
+            # TEMPORARY, explicitly authorized by the operator on 2026-08-31 so the
             # AGY review lane can be exercised before it has an ACP permission
             # bridge. Plan mode remains enabled, but AGY tool confirmations are
             # auto-approved. Remove once approvals can reach Corral's rail.
