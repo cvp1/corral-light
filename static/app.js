@@ -2966,6 +2966,20 @@ function paletteResults(query) {
   const rows = [];
   const focused = attachTarget();
 
+  // Action rows first, as in full Corral (rooms, actions, then panes): a
+  // verb's own name must reach it -- "rig" + Enter used to focus a pane
+  // titled rig-b, because panes ranked above the Rigs row (DESIGN-6 S2b).
+  if (!needle || 'new conversation'.includes(needle)) {
+    rows.push({ kind: 'action', label: 'New conversation', sub: 'action' });
+  }
+  if (!needle || 'what the agents did digest'.includes(needle)) {
+    rows.push({ kind: 'digest', label: 'What the agents did — last 24h', sub: 'digest' });
+  }
+  // Light has no PAL_ACTIONS table; the one verb full Corral keeps there is
+  // pushed inline, matched the same way (by its label).
+  const rigsRow = { kind: 'rigs', label: 'Rigs · save or bring up your seats', sub: 'rigs' };
+  if (!needle || rigsRow.label.toLowerCase().includes(needle)) rows.push(rigsRow);
+
   for (const [id, p] of S.panes || []) {
     const label = p.title || p.label;
     // A seat is searchable with or without its @ (DESIGN-5 S6): "revi" and
@@ -2984,16 +2998,6 @@ function paletteResults(query) {
     if (needle && !label.toLowerCase().includes(needle)) continue;
     rows.push({ kind: 'archived', label, paneId: a.id, sub: 'archived' });
   }
-  if (!needle || 'new conversation'.includes(needle)) {
-    rows.push({ kind: 'action', label: 'New conversation', sub: 'action' });
-  }
-  if (!needle || 'what the agents did digest'.includes(needle)) {
-    rows.push({ kind: 'digest', label: 'What the agents did — last 24h', sub: 'digest' });
-  }
-  // Light has no PAL_ACTIONS table; the one verb full Corral keeps there is
-  // pushed inline, matched the same way (by its label).
-  const rigsRow = { kind: 'rigs', label: 'Rigs · save or bring up your seats', sub: 'rigs' };
-  if (!needle || rigsRow.label.toLowerCase().includes(needle)) rows.push(rigsRow);
 
   renderPalette(rows.slice(0, 30), needle);
   if (needle.length < 2) return;
