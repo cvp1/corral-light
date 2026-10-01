@@ -63,9 +63,12 @@ class Routes(unittest.TestCase):
                        for m in (sessions, sessions._core)]
         for p in cls.patches:
             p.start()
-        write_meta(cls.root, "aaa", seat="author")
-        write_meta(cls.root, "bbb", seat="reviewer")
-        write_meta(cls.root, "ccc")
+        # Distinct `created`: the roster orders by pinned, order, then age,
+        # and leaves an exact tie to restore order (the UI does the same).
+        # Identical stamps made the saved seat order depend on the disk.
+        write_meta(cls.root, "aaa", seat="author", created="2026-09-29T10:00:00Z")
+        write_meta(cls.root, "bbb", seat="reviewer", created="2026-09-29T10:00:01Z")
+        write_meta(cls.root, "ccc", created="2026-09-29T10:00:02Z")
         m = sessions.Manager.__new__(sessions.Manager)
         m.panes, m.subscribers, m.not_restored = {}, [], 0
         m._lock = threading.Lock()

@@ -176,6 +176,59 @@ class OneOpenPanePerName(SeatCase):
         self.assertIs(self.mgr.seat("x"), self.mgr.panes["live2"])
 
 
+
+class ACloseIsAnnouncedAfterTheRosterDropsIt(SeatCase):
+    """DESIGN-6 S2c. Stopping a pane's client is what emits `closed`, and
+    every browser answers it with /api/state. The pane must already be off
+    the roster when that goes out, or a CLI/peer close leaves a ghost row in
+    every open tab (found live, S2)."""
+
+    class Client:
+        """Emits `closed` from inside close(), as the adapter's exit path does."""
+        def __init__(self, pane, fail=False):
+            self.pane, self.fail, self.alive = pane, fail, True
+
+        def close(self):
+            if self.fail:
+                raise OSError("adapter would not stop")
+            self.alive = False
+            self.pane.emit("closed", {"reason": "closed by you"})
+
+    class Recorder:
+        """A broadcast subscriber that notes the roster at delivery time."""
+        def __init__(self, mgr):
+            self.mgr, self.seen = mgr, []
+
+        def put_nowait(self, ev):
+            self.seen.append((ev.get("kind"), ev.get("pane"),
+                              ev.get("pane") in self.mgr.panes))
+
+    def test_closed_goes_out_with_the_pane_already_gone(self):
+        write_meta(self.root, "p1")
+        self.restore()
+        pane = self.mgr.panes["p1"]
+        pane.client = self.Client(pane)
+        rec = self.Recorder(self.mgr)
+        self.mgr.subscribe(rec)
+        self.mgr.close("p1")
+        closed = [r for r in rec.seen if r[0] == "closed"]
+        self.assertEqual(closed, [("closed", "p1", False)],
+                         f"`closed` went out while the roster still held the pane: {rec.seen}")
+        self.assertNotIn("p1", self.mgr.panes)
+        self.assertTrue(disk_meta(self.root, "p1")["closed"])
+
+    def test_a_stop_that_fails_leaves_the_pane_visible(self):
+        """Refusal side: a pane whose client would not stop is still running,
+        so it must stay on the roster -- and was not marked closed on disk."""
+        write_meta(self.root, "p1")
+        self.restore()
+        pane = self.mgr.panes["p1"]
+        pane.client = self.Client(pane, fail=True)
+        with self.assertRaises(OSError):
+            self.mgr.close("p1")
+        self.assertIs(self.mgr.panes.get("p1"), pane)
+        self.assertFalse(disk_meta(self.root, "p1")["closed"])
+
 class TheWholeStateDirIsTheNamespace(SeatCase):
     def test_bind_sees_a_meta_that_was_not_restored(self):
         """T6.8. A meta that was not restored still holds its seat."""

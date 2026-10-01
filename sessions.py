@@ -905,14 +905,16 @@ def available_agents():
             # `Authentication required` (2026-09-30). The credential's own
             # expiry overrides — refuse with the remedy, or warn ahead of it.
             auth = spec.get("auth_status")
+            sign_in = False
             if ok and auth:
                 a = auth() or {}
                 if a.get("ok") is False:
                     ok, why = False, a.get("why") or why
+                    sign_in = True     # the picker offers Sign in (DESIGN-6 S4)
                 elif a.get("why"):
                     why = a["why"]
             out.append({"key": key, "label": spec["label"],
-                        "available": ok, "why": why,
+                        "available": ok, "why": why, "signIn": sign_in,
                         "postureEnforced": posture_enforceable(spec),
                         "tools": bool(spec.get("tools"))})
             continue
