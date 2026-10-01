@@ -661,6 +661,7 @@ class Routes(Base):
         st, new, _, _ = self.call("GET", "/api/pair/new", **headers)
         self.assertEqual(st, 200)
         self.assertTrue(new["keyAvailable"])
+        self.assertEqual(new["keyOrigin"], origin)      # S8: what the page compares
         st, opts, _, _ = self.call("POST", "/api/pair/key/begin", {"code": new["code"]}, **headers)
         self.assertEqual((st, opts["rpId"]), (200, rp_id), opts)
         return self.call("POST", "/api/pair/key/finish",
@@ -731,7 +732,21 @@ class Routes(Base):
         st, lst, _, raw = self.call("GET", "/api/pair/key/list",
                                     Cookie=f"{self.hub.COOKIE}={tok}")
         self.assertEqual((st, [k["id"] for k in lst["keys"]]), (200, [w.b64url(self.a.cred)]))
+        self.assertEqual(lst["origin"], self.origin)
         self.assertNotIn(b"spki", raw)
+
+    def test_s8_key_origin_is_configuration_not_the_host_header(self):
+        """S8: keyOrigin is what the page compares with its own address, so a
+        hostile Host or forwarded header must not move it either (T7.13's
+        rule, on the route that now reports it)."""
+        hostile = {"Host": "evil.example", "X-Forwarded-Host": "evil.example"}
+        st, new, _, _ = self.call("GET", "/api/pair/new", **hostile)
+        self.assertEqual((st, new["keyOrigin"]), (200, self.origin))
+        self.assertFalse(new["keyAvailable"])
+        with mock.patch.object(self.hub, "SERVE_HOST", None):
+            st, new, _, _ = self.call("GET", "/api/pair/new",
+                                      **{"Tailscale-User-Login": "someone@example.com"})
+        self.assertEqual((st, new["keyOrigin"], new["keyAvailable"]), (200, None, False))
 
     def test_serve_without_a_configured_host_refuses(self):
         with mock.patch.object(self.hub, "SERVE_HOST", None):

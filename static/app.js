@@ -187,10 +187,11 @@ let pairTimers = [];
 async function pair() {
   pairTimers.forEach(clearInterval); pairTimers = [];
   $('#pair').classList.remove('hide');
-  let code, ttl, how;
-  try { ({ code, ttl, how } = await api('/api/pair/new')); }
+  let code, ttl, how, d;
+  try { d = await api('/api/pair/new'); ({ code, ttl, how } = d); }
   catch (e) { $('#pairnote').textContent = 'Cannot reach Corral Light: ' + e.message; return; }
   $('#paircode').textContent = code;
+  showKeyOffer(code, d);
   // The command comes from the SERVER, not from a template here. Light and the
   // full Corral have different CLI names, and a pairing screen that prints the
   // other product's command is an instruction that cannot work — measured
@@ -214,6 +215,225 @@ async function pair() {
     if (d.status === 'expired') { pairTimers.forEach(clearInterval); pair(); }
   }, 1500);
   pairTimers.push(tick, poll);
+}
+
+/* ── pairing by key (DESIGN-6 S8) ────────────────────────────────────────
+ * "Touch your key" is a second way past the same screen; the code never
+ * goes away. It is offered only when all three hold: a key is enrolled for
+ * the origin this page is on (the hub says so, and names the origin it holds
+ * ceremonies to), the page is a secure context, and the browser has
+ * WebAuthn. A key is bound to its rpId, so on 127.0.0.1 -- same hub,
+ * different origin -- the page links to localhost at the same port instead
+ * of showing a button whose ceremony the hub would refuse.
+ *
+ * This is a convenience, not a boundary: anything running as the hub's own
+ * UNIX user can read session.key and forge a cookie without any key.
+ */
+const LOOPBACK = new Set(['127.0.0.1', '[::1]']);
+let keyDeclined = false;     // NotAllowedError once -> the code, for this page load
+
+function b64url(buf) {
+  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let s = '';
+  for (const b of u) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function unb64url(str) {
+  if (typeof str !== 'string' || !/^[A-Za-z0-9_-]*$/.test(str) || str.length % 4 === 1)
+    throw new Error('not base64url');
+  const s = atob(str.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((str.length + 3) % 4));
+  const u = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+  return u;
+}
+
+// Where a key ceremony can happen, from this page: 'here', 'link' (to the
+// hub's localhost origin, from loopback on the same port), or 'none'.
+function keyPlace(keyOrigin, loc, win) {
+  if (!keyOrigin) return { kind: 'none', why: 'this address has no key origin configured' };
+  if (keyOrigin !== loc.origin) {
+    const link = `http://localhost:${loc.port}`;
+    if (LOOPBACK.has(loc.hostname) && keyOrigin === link) return { kind: 'link', link };
+    return { kind: 'none', why: `keys work at ${keyOrigin}, not at this address` };
+  }
+  if (!win.isSecureContext) return { kind: 'none', why: 'this page is not a secure context' };
+  if (typeof win.PublicKeyCredential !== 'function')
+    return { kind: 'none', why: 'this browser has no WebAuthn' };
+  return { kind: 'here' };
+}
+
+// What the pairing screen offers besides the code (T8.1, T8.3).
+function keyOffer(d, loc, win) {
+  if (!d || !d.keyAvailable) return { kind: 'none' };
+  return keyPlace(d.keyOrigin, loc, win);
+}
+
+function requestOptions(o) {
+  return { challenge: unb64url(o.challenge), rpId: o.rpId, timeout: o.timeout,
+           userVerification: o.userVerification,
+           allowCredentials: (o.allowCredentials || []).map(
+             id => ({ type: 'public-key', id: unb64url(id) })) };
+}
+
+function creationOptions(o) {
+  return { challenge: unb64url(o.challenge), rp: o.rp,
+           user: { id: unb64url(o.user.id), name: o.user.name, displayName: o.user.displayName },
+           pubKeyCredParams: o.pubKeyCredParams, timeout: o.timeout,
+           excludeCredentials: (o.excludeCredentials || []).map(
+             id => ({ type: 'public-key', id: unb64url(id) })),
+           authenticatorSelection: o.authenticatorSelection, attestation: o.attestation };
+}
+
+function assertionBody(challenge, cred) {
+  const r = cred.response;
+  return { challenge, id: b64url(cred.rawId), clientDataJSON: b64url(r.clientDataJSON),
+           authenticatorData: b64url(r.authenticatorData), signature: b64url(r.signature) };
+}
+
+function showKeyOffer(code, d) {
+  const box = $('#pairkey');
+  const offer = keyDeclined ? { kind: 'none' } : keyOffer(d, location, window);
+  box.replaceChildren();
+  box.classList.toggle('hide', offer.kind === 'none');
+  $('#pairhow').textContent = offer.kind === 'here'
+    ? 'Or pair from a shell you trust:' : 'Run this in a shell you trust:';
+  if (offer.kind === 'here') {
+    const b = el('button', 'btn go keybtn', 'Touch your key');
+    b.type = 'button';
+    b.onclick = () => pairByKey(code, b);
+    box.appendChild(b);
+  } else if (offer.kind === 'link') {
+    const a = el('a', 'keylink', `Use your security key at ${offer.link}`);
+    a.href = offer.link;
+    box.appendChild(a);
+  }
+}
+
+// One ceremony per click. NotAllowedError (cancelled, timed out, wrong key)
+// falls back to the code ONCE: the button goes away for this page load and
+// nothing calls the authenticator again on its own (T8.4).
+async function pairByKey(code, btn) {
+  const note = $('#pairkeynote');
+  btn.disabled = true;
+  note.textContent = 'Touch your key…';
+  try {
+    const o = await api('/api/pair/key/begin', { code });
+    const cred = await navigator.credentials.get({ publicKey: requestOptions(o) });
+    await api('/api/pair/key/finish', assertionBody(o.challenge, cred));
+  } catch (e) {
+    if (e && e.name === 'NotAllowedError') {
+      keyDeclined = true;
+      $('#pairkey').replaceChildren();
+      $('#pairkey').classList.add('hide');
+      $('#pairhow').textContent = 'Run this in a shell you trust:';
+      note.textContent = 'The key was not used. Pair with the code instead.';
+      return;
+    }
+    btn.disabled = false;
+    note.textContent = `Key pairing failed: ${e.message}. The code still works.`;
+    return;
+  }
+  note.textContent = '';
+  pairTimers.forEach(clearInterval); pairTimers = [];
+  $('#pair').classList.add('hide');
+  return start();                             // straight in, as a claimed code does
+}
+
+/* ── Security keys (DESIGN-6 S8) ─────────────────────────────────────────
+ * The list and Enroll. No Remove: removal and policy are shell-only. The
+ * first key for an origin needs the one-time code from
+ * `corral-light key enroll`; a later key is approved by touching an enrolled
+ * one, which the hub asks for as a second ceremony.
+ */
+function secKeyState(d) {
+  const parts = [`Policy: ${d.policy}`];
+  if (d.policyError) parts.push(`policy file: ${d.policyError}`);
+  if (d.keysError) parts.push(`key store: ${d.keysError}`);
+  parts.push(d.verifier === 'ok' ? 'verifier: ok'
+             : `verifier: ${d.verifier}${d.verifierWhy ? ` (${d.verifierWhy})` : ''}`);
+  return parts.join(' · ');
+}
+
+function whenText(t) {
+  return t ? new Date(t * 1000).toLocaleString() : 'never';
+}
+
+function secKeyRows(d) {
+  if (!d.keys.length) return [el('p', 'hint', 'No keys enrolled.')];
+  return d.keys.map(k => {
+    const row = el('div', 'skrow');
+    row.append(el('span', 'sklabel', k.label || 'security key'),
+               el('span', 'skorigin', k.origin),
+               el('span', 'skused', `last used: ${whenText(k.lastUsed)}`));
+    row.title = k.id;
+    return row;
+  });
+}
+
+async function renderSecKeys() {
+  let d;
+  try { d = await api('/api/pair/key/list'); }
+  catch (e) {
+    $('#sk-state').textContent = '';
+    $('#sk-list').replaceChildren(el('p', 'hint err', `Cannot read the keys: ${e.message}`));
+    $('#sk-enroll').disabled = true;
+    return;
+  }
+  $('#sk-state').textContent = secKeyState(d);
+  $('#sk-list').replaceChildren(...secKeyRows(d));
+  const first = !d.keys.some(k => k.origin === d.origin);
+  $('#sk-coderow').classList.toggle('hide', !first);
+  const place = keyPlace(d.origin, location, window);
+  const btn = $('#sk-enroll');
+  btn.disabled = place.kind !== 'here';
+  if (place.kind === 'link') {
+    const a = el('a', 'keylink', `Enroll at ${place.link}`);
+    a.href = place.link;
+    $('#sk-msg').replaceChildren(a);
+  } else if (place.kind === 'none') {
+    $('#sk-msg').textContent = `Enroll is unavailable: ${place.why}.`;
+  }
+}
+
+async function enrollKey() {
+  const msg = $('#sk-msg'), btn = $('#sk-enroll');
+  btn.disabled = true;
+  try {
+    msg.textContent = 'Touch the new key…';
+    const o = await api('/api/pair/key/enroll/begin', { code: $('#sk-code').value.trim() });
+    const made = await navigator.credentials.create({ publicKey: creationOptions(o) });
+    const r = await api('/api/pair/key/enroll/finish', {
+      challenge: o.challenge, label: $('#sk-label').value,
+      clientDataJSON: b64url(made.response.clientDataJSON),
+      attestationObject: b64url(made.response.attestationObject) });
+    if (r.approve) {
+      msg.textContent = 'Now touch a key that is already enrolled, to approve the new one…';
+      const a = await navigator.credentials.get({ publicKey: requestOptions(r.approve) });
+      await api('/api/pair/key/enroll/approve', assertionBody(r.approve.challenge, a));
+    }
+    $('#sk-code').value = '';
+    $('#sk-label').value = '';
+    msg.textContent = 'Enrolled.';
+  } catch (e) {
+    msg.textContent = e && e.name === 'NotAllowedError'
+      ? 'The key was not used; nothing was enrolled.' : `Not enrolled: ${e.message}`;
+  }
+  btn.disabled = false;
+  await renderSecKeys();
+}
+
+async function openSecKeys() {
+  $('#sk-msg').textContent = '';
+  await renderSecKeys();
+  $('#seckeydlg').showModal();
+}
+
+function wireSecKeys() {
+  const b = $('#seckeysbtn');
+  if (b) b.onclick = () => openSecKeys();
+  const e = $('#sk-enroll');
+  if (e) e.onclick = () => enrollKey();
 }
 
 /* ── rendering: a pane ───────────────────────────────────────────────── */
@@ -3551,6 +3771,7 @@ async function start() {
   wirePalette();
   wireSeat();
   wireKeysButton();
+  wireSecKeys();
   wireMobileActions();
   // Stream FIRST, then snapshot. The reverse order left a window between the
   // snapshot and the EventSource opening in which every event was dropped and

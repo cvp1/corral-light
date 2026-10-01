@@ -507,11 +507,16 @@ class Handler(BaseHTTPRequestHandler):
             except auth.TooMany as e:
                 return self._json({"error": str(e)}, 429)
             origin, rp_id = self._key_origin()
+            # keyOrigin (S8): the one origin a key ceremony here is held to,
+            # from configuration. The page compares it with its own address,
+            # so 127.0.0.1 is offered a link to localhost rather than a button
+            # whose ceremony the hub would refuse.
             return self._json({"code": code, "ttl": ttl,
                                "how": f"corral-light pair {code}",
                                "host": auth.host_id(),
                                "keyAvailable": bool(origin) and
-                               auth.key_available(origin, rp_id)})
+                               auth.key_available(origin, rp_id),
+                               "keyOrigin": origin})
         if p == "/api/pair/claim":
             tok, status = auth.claim((q.get("code") or [""])[0])
             if not tok:
@@ -540,11 +545,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not paired"}, 401)
 
         if p == "/api/pair/key/list":
-            # What Settings -> Security keys shows. No spki, no counters.
+            # What Security keys shows. No spki, no counters. `origin` is
+            # where an enrollment from this request would be held (S8).
             keys, err = auth.load_keys()
             pol, perr = auth.policy()
             state, why = auth.verifier_state()
+            origin, _ = self._key_origin()
             return self._json({
+                "origin": origin,
                 "policy": pol, "policyError": perr, "keysError": err,
                 "verifier": state if state != "ok" else "ok",
                 "verifierWhy": None if state == "ok" else why,
