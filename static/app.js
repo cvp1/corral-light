@@ -154,6 +154,9 @@ async function api(path, body) {
   if (!r.ok) {
     const err = new Error(d.error || `${r.status} ${r.statusText}`);
     err.status = r.status;
+    // The whole answer rides along: a refused rig names every reason in
+    // `refused`, and the message alone would drop all but the first.
+    err.body = d;
     throw err;
   }
   return d;
@@ -2455,6 +2458,102 @@ function connect() {
   };
 }
 
+/* ── Rigs… (DESIGN-5 S12, ported in DESIGN-6 S1) ──────────────────────────
+ * The server does everything: preflight, the per-seat work, and the ONE
+ * rendering of each outcome (corral_core/rigs.render). This dialog lists,
+ * saves, removes and brings a rig up, and shows the server's lines verbatim
+ * -- as text, never markup -- one row per seat. A refused rig shows every
+ * reason and started nothing. */
+const RIG_PROBLEM = new Set(['failed', 'withheld', 'not-restored']);
+
+function rigOutcomeRows(r) {
+  const rows = [];
+  (r.outcomes || []).forEach((o, i) => {
+    const row = el('div', 'rigrow o-' + o.outcome + (RIG_PROBLEM.has(o.outcome) ? ' bad' : ''));
+    row.appendChild(el('span', 'pill', o.outcome));
+    row.appendChild(el('span', 't', (r.lines || [])[i] || ''));
+    rows.push(row);
+  });
+  return rows;
+}
+
+function rigRefusedRows(e) {
+  const reasons = (e && e.body && e.body.refused) || [];
+  const rows = [el('div', 'rigrow bad', reasons.length
+    ? 'Refused — nothing was started:' : ((e && e.message) || 'failed'))];
+  for (const why of reasons) rows.push(el('div', 'rigrow bad', '· ' + why));
+  return rows;
+}
+
+async function renderRigList() {
+  const list = $('#rig-list');
+  let d;
+  try { d = await api('/api/session/rigs'); }
+  catch (e) { list.replaceChildren(el('div', 'hint err', e.message)); return; }
+  const rows = (d.rigs || []).map(r => {
+    const row = el('div', 'rigrow');
+    row.appendChild(el('span', 't', r.name));
+    row.appendChild(el('span', 'hint', r.error ? 'unreadable: ' + r.error
+      : (r.seats || []).map(s => '@' + s).join(' ')));
+    const up = el('button', 'btn go', 'Up');
+    up.type = 'button'; up.disabled = !!r.error;
+    up.onclick = () => rigUp(r.name, up);
+    const rm = el('button', 'btn', 'Remove');
+    rm.type = 'button';
+    // Two clicks: a removed rig is a file gone, and there is no undo.
+    rm.onclick = async () => {
+      if (!rm.dataset.armed) { rm.dataset.armed = '1'; rm.textContent = 'Remove — sure?'; return; }
+      try { await api('/api/session/rigs/rm', { name: r.name }); }
+      catch (e) { $('#rig-error').textContent = e.message; }
+      renderRigList();
+    };
+    row.appendChild(up); row.appendChild(rm);
+    return row;
+  });
+  list.replaceChildren(...(rows.length ? rows
+    : [el('div', 'hint', 'No rigs saved yet. Seat some panes, then save them here.')]));
+}
+
+async function rigUp(name, btn) {
+  const out = $('#rig-out');
+  if (btn) btn.disabled = true;
+  out.replaceChildren(el('div', 'hint', `Bringing up ${name}… each seat may take a handshake.`));
+  try {
+    const r = await api('/api/session/rigs/up', { name });
+    out.replaceChildren(el('div', 'hint', `rig ${name}:`), ...rigOutcomeRows(r));
+    refresh();
+  } catch (e) {
+    out.replaceChildren(...rigRefusedRows(e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function openRigs() {
+  $('#rig-error').textContent = '';
+  $('#rig-out').replaceChildren();
+  $('#rig-name').value = '';
+  $('#rig-replace').checked = false;
+  renderRigList();
+  $('#rigdlg').showModal();
+}
+
+function wireRigDialog() {
+  if (!$('#rigdlg')) return;
+  $('#rig-save').onclick = async () => {
+    const name = ($('#rig-name').value || '').trim();
+    try {
+      const r = await api('/api/session/rigs/save', { name, replace: $('#rig-replace').checked });
+      $('#rig-error').textContent = '';
+      $('#rig-out').replaceChildren(el('div', 'hint',
+        `saved ${r.name}: ` + r.seats.map(s => '@' + s).join(' ')));
+      renderRigList();
+    } catch (e) { $('#rig-error').textContent = e.message; }
+  };
+  const b = $('#rigsbtn');
+  if (b) b.onclick = () => { const n = $('#newdlg'); if (n && n.open) n.close(); openRigs(); };
+}
+
 /* ── new-conversation dialog ─────────────────────────────────────────── */
 // Descriptions are the agent's own, from session/new's configOptions — not my
 // paraphrase. The first version claimed auto meant "nothing will ask", which
@@ -2841,6 +2940,10 @@ function paletteResults(query) {
   if (!needle || 'what the agents did digest'.includes(needle)) {
     rows.push({ kind: 'digest', label: 'What the agents did — last 24h', sub: 'digest' });
   }
+  // Light has no PAL_ACTIONS table; the one verb full Corral keeps there is
+  // pushed inline, matched the same way (by its label).
+  const rigsRow = { kind: 'rigs', label: 'Rigs · save or bring up your seats', sub: 'rigs' };
+  if (!needle || rigsRow.label.toLowerCase().includes(needle)) rows.push(rigsRow);
 
   renderPalette(rows.slice(0, 30), needle);
   if (needle.length < 2) return;
@@ -2926,6 +3029,7 @@ function renderPalette(rows, needle, contentError) {
 async function activatePalette(row, newPane) {
   $('#palette').close();
   if (row.kind === 'action') return $('#new').click();
+  if (row.kind === 'rigs') return openRigs();
   if (row.kind === 'said') {
     // A hit in a closed conversation reopens it (detached, as Archive does).
     if (!S.panes.has(row.paneId)) {
@@ -3223,6 +3327,7 @@ async function start() {
   $('#app').classList.remove('hide');
   wireThemes();
   wireDialog();
+  wireRigDialog();
   wireRail();
   wireCopySelect();
   wirePalette();

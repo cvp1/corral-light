@@ -1138,3 +1138,14 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 /* the hub's loop pause: the same gold (it needs you) with a dashed rule, so
    it never reads as the agent's own question */
 .qbanner.hub,.msg.question.hub{border-style:dashed}
+/* Rigs… (DESIGN-5 S12): one row per rig, one row per seat outcome. */
+.riglist,.rigout{display:flex;flex-direction:column;gap:6px;margin:8px 0}
+.rigrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.rigrow .t{font-family:var(--mono)}
+.rigrow .pill{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.7px;border:1px solid var(--line2);border-radius:999px;padding:1px 7px;color:var(--dim)}
+.rigrow.o-resumed .pill,.rigrow.o-fresh-primed .pill,.rigrow.o-started-fresh .pill{color:var(--sage)}
+.rigrow.o-rebuilt .pill{color:var(--gold)}
+.rigrow.bad{color:var(--rust)}
+.rigrow.bad .pill{color:var(--rust);border-color:var(--rust)}
+.dlg label.inline{flex-direction:row;align-items:center;gap:6px}

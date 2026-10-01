@@ -3852,6 +3852,15 @@ class TheSeatIsOnThePane(unittest.TestCase):
         _run_node_selftest(self, "selftest_seats.mjs", "the seat pill and ⌘K")
 
 
+class ARigRendersPerSeat(unittest.TestCase):
+    """DESIGN-6 S1, T1.1-T1.6: the Rigs… dialog shows one row per seat as
+    text, every reason for a refusal, a two-click Remove, and both doors
+    (New and ⌘K) in the shipped page."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_rigs.mjs", "the Rigs… dialog")
+
+
 class APeerMessageRendersAsWhatItIs(unittest.TestCase):
     """DESIGN-5 S7, T7.6/T7.18 in the browser."""
 
