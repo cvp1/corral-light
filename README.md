@@ -39,7 +39,7 @@ Corral Light connects to software installed and signed in on your computer.
 | Claude Code | Claude Code, and the adapter from `cd spike && npm install` | Supports model and effort selection. |
 | ChatGPT (Codex) | The same npm install, plus a Codex login | Uses a separate configuration directory. |
 | Grok | The Grok command-line tool and `grok login` | The Grok tool manages its own sign-in. |
-| Antigravity (Gemini) | Run `python3 install_antigravity_acp.py --install` | The included installer currently supports Linux x86-64. It also selects your Google login (`oauth-personal`) in `~/.gemini/antigravity-acp/settings.json` when no sign-in method is set; a method you chose yourself is left alone. |
+| Antigravity (Gemini) | Run `python3 install_antigravity_acp.py --install` | The included installer supports Linux x86-64, Linux arm64, and macOS on Apple Silicon (Google publishes no Intel-Mac build). It also selects your Google login (`oauth-personal`) in `~/.gemini/antigravity-acp/settings.json` when no sign-in method is set; a method you chose yourself is left alone. |
 | Ollama | Ollama and at least one downloaded model | Chat only; it cannot edit files or run commands. |
 
 The availability check is intentionally honest: an assistant is marked unavailable when a required program, login, or platform is missing. If an assistant passes that check but fails to answer, run:
@@ -47,6 +47,17 @@ The availability check is intentionally honest: an assistant is marked unavailab
 ```
 ./corral-light diagnose [assistant]
 ```
+
+### Keeping the assistants current
+
+```
+./corral-light lanes check             # installed against latest, every lane; changes nothing
+./corral-light lanes update codex      # or claude; gemini --release <name>; grok
+```
+
+`lanes check` reports each assistant as `current`, `behind`, or `unknown`. A check that cannot get an answer says `unknown`, never `current`. Antigravity has no release list, so the check asks for each day's first build after the pinned one; finding none is still `unknown`. Run on a schedule with `--job`, it notifies once when an assistant falls behind and once when it is current again, and says nothing while all are current.
+
+An update is proven before anything moves. The newer adapter is installed into a scratch directory and started on a private hub with its own state and port. It has to complete a handshake, answer one real prompt, and report its model list. Only then does it replace `spike/node_modules`, and only one pin in `spike/package.json` and its lock changes (or, for Antigravity, this platform's row in the installer). If any step fails, nothing changes and you get a notification. The running hub and its panes are never touched: new panes start on the new adapter. The replaced tree goes to the Trash. Grok's own tool installs Grok updates, so for Grok this only reports and probes. Google publishes no list of Antigravity releases, so you name the release.
 
 ## Search and attach files
 

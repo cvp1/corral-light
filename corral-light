@@ -21,6 +21,10 @@
 #                resume | close | forget | reopen | rename | seat | config |
 #                attach | quote     the whole pane surface from a terminal
 #   corral-light rig save|up|list|rm <name>   saved seats (DESIGN-5 S12)
+#   corral-light lanes check [--job]   installed against latest per lane (read only;
+#                               --job = edge-triggered notices for a scheduler)
+#   corral-light lanes update <lane>   stage a lane's newer adapter, prove it on a
+#                               private hub, and only then move its pin (lanes.py)
 #                               (cli.py --help; `say` answers permissions in
 #                               the same terminal and never cancels on a timer)
 #
@@ -44,6 +48,7 @@ case "${1:-}" in
     shift; exec "$PY" "$D/watch.py" "$@" ;;
   panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|seat|config|attach|quote|later|search|digest|port|rig)
     exec "$PY" "$D/cli.py" "$@" ;;
+  lanes) shift; exec "$PY" "$D/lanes.py" "$@" ;;
   cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|rig <save|up|list|rm>}"; exit 2 ;;
+  *)     echo "usage: corral-light {pair <code>|serve|doctor|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|rig <save|up|list|rm>|lanes check|lanes update <lane>}"; exit 2 ;;
 esac
