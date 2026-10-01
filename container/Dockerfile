@@ -43,6 +43,17 @@ RUN cd /opt/corral-light/spike \
  && test -x node_modules/.bin/codex \
  && rm -rf /root/.npm
 
+# ── src: the app source with every timestamp set to SOURCE_DATE_EPOCH.
+#    A plain `COPY .` carries host mtimes into the layer, and host directory
+#    mtimes change for incidental reasons (an editor temp file, a symlink),
+#    so two builds of one commit differed (T-IMG-1, measured 2026-10-01).
+#    BuildKit's rewrite-timestamp only clamps times NEWER than the epoch. ──
+FROM --platform=linux/amd64 ${BASE} AS src
+ARG SOURCE_DATE_EPOCH
+COPY . /src/
+RUN test -n "${SOURCE_DATE_EPOCH}" \
+ && find /src -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
+
 # ── final ────────────────────────────────────────────────────────────────
 FROM --platform=linux/amd64 ${BASE}
 ARG APT_SNAPSHOT
@@ -70,7 +81,7 @@ RUN python3 -m venv --without-pip /opt/aios-seed/.venv
 COPY --from=deps /opt/corral-light/spike/node_modules /opt/corral-light/spike/node_modules
 # App source last: it changes most often. .dockerignore keeps docs, reviews,
 # tests, host service files and .git out.
-COPY . /opt/corral-light/
+COPY --from=src /src/ /opt/corral-light/
 # No compileall: .pyc output differed between two cold builds (T-IMG-1), and
 # PYTHONDONTWRITEBYTECODE keeps runtime from writing any either.
 
