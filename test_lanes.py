@@ -305,6 +305,95 @@ class Antigravity(Checkout):
                           if p.name.startswith(".lanes-stage-")], [])
 
 
+class TheCheck(Checkout):
+    """`lanes check` (S-F1): read only, unknown on failure, edge-triggered."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = self.tmp / "state"
+        self.grok = mock.patch("grok_launcher.resolve_grok", return_value="/fake/grok")
+        self.grok.start()
+        self.heads = []
+
+    def tearDown(self):
+        self.grok.stop()
+        super().tearDown()
+
+    def head(self, codes):
+        def fn(url):
+            self.heads.append(url)
+            return codes(url)
+        return fn
+
+    def rows(self, head=None):
+        before = self.snapshot()
+        rows = lanes.check(root=self.root, run=self.run_stub,
+                           head=head or self.head(lambda u: 200 if "20260818" in u else 404),
+                           today=lanes.datetime(2026, 10, 1).date())
+        self.assertEqual(self.snapshot(), before, "a check changed the checkout")
+        self.assertFalse(any(c[:2] == ["npm", "install"] or c[1:2] == ["update"]
+                             and "--check" not in c for c in self.calls))
+        return {r["lane"]: r for r in rows}
+
+    def job(self, rows, hour):
+        notes = []
+        out = lanes.run_job(list(rows.values()), state_dir=self.state,
+                            notify_fn=lambda t, b: notes.append(b),
+                            now=lanes.datetime(2026, 10, 1, hour))
+        return out, notes
+
+    def test_a_failing_check_is_unknown_never_current(self):  # T-F1.1
+        self.latest = "garbage"
+        def broken(argv, timeout, cwd=None, env=None):
+            self.calls.append(list(argv))
+            return (1, "", "boom") if argv[0] != "npm" else self.run_stub(argv, timeout)
+        r = {x["lane"]: x for x in lanes.check(root=self.root, run=broken,
+                                                head=lambda u: None)}
+        self.assertEqual({k: v["status"] for k, v in r.items()},
+                         {"codex": "unknown", "claude": "unknown",
+                          "gemini": "unknown", "grok": "unknown"})
+
+    @unittest.skipIf(inst.release_for() is None, "no pinned row for this host")
+    def test_gemini_finds_a_newer_build_and_never_claims_current(self):
+        r = self.rows(self.head(lambda u: 200 if ("20260818" in u or "20260920" in u)
+                                else 404))
+        self.assertEqual(r["gemini"]["status"], "behind")
+        self.assertIn("--release agy_acp_server_20260920_01_RC01", r["gemini"]["why"])
+        self.heads.clear()
+        r = self.rows()
+        self.assertEqual(r["gemini"]["status"], "unknown")
+        self.assertLessEqual(len(self.heads), lanes.MAX_HEADS + 1, "unbounded scan")
+
+    def test_one_notice_per_edge(self):  # T-F1.2
+        self.latest = "2.0.1"                        # codex current, claude behind
+        rows = self.rows()
+        self.assertEqual((rows["codex"]["status"], rows["claude"]["status"]),
+                         ("current", "behind"))
+        out, notes = self.job(rows, 6)
+        self.assertEqual(len([n for n in notes if n.startswith("claude")]), 1)
+        self.assertTrue(any(n.startswith("grok is behind") for n in notes))
+        self.assertFalse(any(n.startswith("codex") for n in notes))
+        self.assertTrue(out.startswith("FINDINGS: "), out)
+        out, notes = self.job(self.rows(), 7)        # same facts, next day
+        self.assertEqual(notes, [], "a held state re-notified")
+        self.latest = "0.84.0"                       # claude current, codex behind
+        out, notes = self.job(self.rows(), 8)
+        self.assertIn("claude is current again at 0.84.0", notes)
+        self.assertEqual(len([n for n in notes if n.startswith("codex is behind")]), 1)
+
+    def test_steady_state_emits_nothing(self):  # T-F1.3
+        rows = {k: dict(v, status="current", why="") for k, v in self.rows().items()}
+        self.assertEqual(self.job(rows, 6), ("", []))
+        self.assertEqual(self.job(rows, 7), ("", []))
+        self.assertTrue((self.state / lanes.CHECK_STATE).is_file())
+
+    def test_unknown_is_findings_but_never_a_notice(self):
+        rows = self.rows()
+        out, notes = self.job({k: dict(v, status="unknown") for k, v in rows.items()}, 6)
+        self.assertEqual(notes, [])
+        self.assertTrue(out.startswith("FINDINGS: "))
+
+
 class TheCliVerb(unittest.TestCase):
     def test_an_unknown_lane_is_a_usage_error_and_notifies_nobody(self):
         with mock.patch.object(lanes, "_notify") as n, \

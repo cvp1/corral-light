@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """lanes — keep the vendor lanes current without breaking the wall.
 
+    corral-light lanes check [--job | --json]
     corral-light lanes update <lane> [--version V | --release NAME] [--json]
 
 WHY (DESIGN-6 Stage F, 2026-10-01)
@@ -50,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -87,8 +89,23 @@ def lane_key(name):
     return key
 
 
+def _npm():
+    """npm by absolute path. A launchd job gets PATH=/usr/bin:/bin:/usr/sbin:
+    /sbin, where npm is not, and every check would then read `unknown`."""
+    for c in (shutil.which("npm"), "/opt/homebrew/bin/npm", "/usr/local/bin/npm"):
+        if c and os.access(c, os.X_OK):
+            return c
+    return "npm"
+
+
 def _run(argv, timeout, cwd=None, env=None):
     """A fixed argv, never a shell string. Returns (rc, stdout, stderr)."""
+    if argv and argv[0] == "npm":
+        # npm is a node script: its own directory has to be on PATH too.
+        npm = _npm()
+        argv = [npm, *argv[1:]]
+        env = dict(env or os.environ)
+        env["PATH"] = os.path.dirname(npm) + os.pathsep + env.get("PATH", "")
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
                            cwd=cwd, env=env)
@@ -452,6 +469,140 @@ def render(rec):
     return "\n".join(lines)
 
 
+# ── check: installed against latest, read only ───────────────────────────
+STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
+                            Path.home() / ".local/share/corral-light"))
+CHECK_STATE = "lanes-check.json"
+MAX_HEADS = 45                  # Antigravity dates scanned per check
+HEAD_TIMEOUT_S = 10
+
+
+def _head(url):
+    """HTTP status of a HEAD, or None when the request itself failed."""
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=HEAD_TIMEOUT_S) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def check_gemini(head=_head, today=None):
+    """Google publishes no index, so the newest build is found by asking for
+    it: HEAD `<date>_01_RC01` for each day after the pin, newest first. A
+    found build is `behind`; finding none is `unknown`, never `current` —
+    another _NN or _RCNN of a later day would not have been asked about."""
+    import install_antigravity_acp as inst
+    row = inst.release_for()
+    if row is None:
+        return {"status": "unknown", "installed": None, "latest": None,
+                "why": "no pinned row for this platform"}
+    rec = {"installed": row["release"], "latest": None}
+    pinned = head(row["url"])
+    if pinned != 200:
+        return dict(rec, status="unknown",
+                    why=f"pinned archive HEAD gave {pinned or 'no answer'}")
+    m = re.match(r"agy_acp_server_(\d{8})_", row["release"])
+    pin_day = datetime.strptime(m.group(1), "%Y%m%d").date()
+    suffix = row["release"][len(RELEASE_RE.match(row["release"]).group(0)):]
+    day = today or datetime.now().date()
+    asked = 0
+    while day > pin_day and asked < MAX_HEADS:
+        name = f"agy_acp_server_{day:%Y%m%d}_01_RC01"
+        code = head(f"{inst.BASE_URL}{row['dir']}/agy-acp-server-{name}{suffix}.zip")
+        asked += 1
+        if code == 200:
+            return dict(rec, status="behind", latest=name + suffix,
+                        why=f"lanes update gemini --release {name}")
+        if code != 404:
+            return dict(rec, status="unknown", why=f"HEAD {name} gave {code or 'no answer'}")
+        day = datetime.fromordinal(day.toordinal() - 1).date()
+    return dict(rec, status="unknown",
+                why=f"no index; no newer _01_RC01 build in {asked} days asked")
+
+
+def check(root=ROOT, run=_run, head=_head, today=None):
+    """One row per lane; a check that fails is `unknown`, never `current`."""
+    rows = []
+    for lane in LANES:
+        try:
+            if lane in NPM:
+                installed, latest = npm_installed(root, lane), npm_latest(lane, run)
+            elif lane == "grok":
+                installed, latest = grok_check(run)
+            else:
+                rows.append(dict(check_gemini(head, today), lane=lane))
+                continue
+            if not installed:
+                rows.append({"lane": lane, "status": "unknown", "installed": None,
+                             "latest": latest, "why": "not installed"})
+                continue
+            behind = installed != latest
+            rows.append({"lane": lane, "status": "behind" if behind else "current",
+                         "installed": installed, "latest": latest,
+                         "why": ("run `grok update`" if lane == "grok" else
+                                 f"lanes update {lane}") if behind else ""})
+        except Red as e:
+            rows.append({"lane": lane, "status": "unknown", "installed": None,
+                         "latest": None, "why": str(e)})
+        except Exception as e:                           # noqa: BLE001
+            rows.append({"lane": lane, "status": "unknown", "installed": None,
+                         "latest": None, "why": f"{type(e).__name__}: {e}"[:200]})
+    return rows
+
+
+def edges(rows, prev):
+    """The notices one run owes: a lane that became behind (or whose latest
+    moved while behind), and a lane that went from behind to current.
+    Unknown is never a notice — it is in the FINDINGS line, and a flaky
+    network must not page anyone twice a day."""
+    out = []
+    for r in rows:
+        was = prev.get(r["lane"]) or {}
+        if r["status"] == "behind" and (was.get("status") != "behind"
+                                        or was.get("latest") != r["latest"]):
+            out.append(f"{r['lane']} is behind: {r['installed']} -> {r['latest']} "
+                       f"({r['why']})")
+        elif r["status"] == "current" and was.get("status") == "behind":
+            out.append(f"{r['lane']} is current again at {r['installed']}")
+    return out
+
+
+def run_job(rows, state_dir=None, notify_fn=None, now=None):
+    """Edge-triggered: notify once per edge, persist, and return the stdout
+    for runs.db — nothing at all when every lane is current and nothing
+    changed (CONVENTIONS: a FINDINGS line when there is something to say)."""
+    path = Path(state_dir or STATE) / CHECK_STATE
+    try:
+        prev = json.loads(path.read_text())
+    except (OSError, ValueError):
+        prev = {}
+    notices = edges(rows, prev)
+    for n in notices:
+        (notify_fn or _notify)("lanes", n)
+    at = (now or datetime.now()).isoformat(timespec="seconds")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({r["lane"]: {"status": r["status"], "latest": r["latest"],
+                                           "at": at} for r in rows}, indent=2))
+    os.replace(tmp, path)
+    off = [r for r in rows if r["status"] != "current"]
+    if not off and not notices:
+        return ""
+    summary = ", ".join(f"{r['lane']} {r['status']}" for r in off) or "all current"
+    lines = [f"FINDINGS: {summary}"] if off else [summary]
+    lines += [render_check_row(r) for r in rows]
+    return "\n".join(lines)
+
+
+def render_check_row(r):
+    tail = f"  ({r['why']})" if r.get("why") else ""
+    return (f"  {r['lane']:<7} {r['status']:<8} installed {r.get('installed')}  "
+            f"latest {r.get('latest')}{tail}")
+
+
 def _lane_arg(name):
     try:
         return lane_key(name)
@@ -467,6 +618,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="corral-light lanes",
                                  description="keep the vendor lanes current")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("check", help="installed against latest for every lane; read only")
+    s.add_argument("--job", action="store_true",
+                   help="scheduled mode: notify once per edge, print only FINDINGS")
+    s.add_argument("--json", action="store_true")
     s = sub.add_parser("update", help="stage, probe on a private hub, then move one pin")
     s.add_argument("lane", type=_lane_arg, help="codex | claude | gemini | grok")
     s.add_argument("--version", help="npm lanes: this version instead of latest")
@@ -474,6 +629,17 @@ def main(argv=None):
                                      "agy_acp_server_20260818_01_RC01")
     s.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
+    if a.cmd == "check":
+        rows = check()
+        if a.job:
+            out = run_job(rows)
+            if out:
+                print(out, flush=True)
+        elif a.json:
+            print(json.dumps(rows, indent=2), flush=True)
+        else:
+            print("\n".join(render_check_row(r) for r in rows), flush=True)
+        return 0
     rec = update(a.lane, version=a.version, release=a.release)
     print(json.dumps(rec, indent=2) if a.json else render(rec), flush=True)
     return 1 if rec["outcome"] == "red" else 0
