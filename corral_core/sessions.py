@@ -2273,8 +2273,18 @@ class ManagerBase:
               f"{p.title!r}",
               file=sys.stderr, flush=True)
         p._clear_question("closed")
-        p.stop()
+        # Off the roster BEFORE stop(): stopping the client is what emits
+        # `closed`, and every browser answers that with /api/state. Popped
+        # after, a browser that asked in that window got the pane back and
+        # kept it until something else refreshed -- a CLI or peer close left
+        # a ghost row in every open tab (DESIGN-6 S2c). A stop that fails
+        # puts it back: a pane still running must never be invisible.
         self.panes.pop(pane_id, None)
+        try:
+            p.stop()
+        except BaseException:
+            self.panes[pane_id] = p
+            raise
         return p
 
     def forget(self, pane_id):
