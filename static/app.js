@@ -1743,6 +1743,7 @@ function render() {
   setTitle(panes);
   displaySig = displaySignature(panes);
   markSeen();                  // whatever this render shows, a human can see
+  rigRefreshHints();           // an open Rigs dialog tracks seats and states
 
   // roster
   const r = $('#roster');
@@ -2485,16 +2486,63 @@ function rigRefusedRows(e) {
   return rows;
 }
 
+/* What Save would write and what Up would refuse, from the panes on screen
+ * (DESIGN-6 S2). Both mirror the server (rigs.save, rigs.preflight) so the
+ * dialog can say it BEFORE the click: a pane counts as seated when it holds
+ * its seat (a withheld seat is not saved), and a seat is live when its holder
+ * is neither dead nor detached. The client never blocks Up on this -- the
+ * server's preflight is the authority; the marker is only a forecast. */
+function rigSaveHint(panes) {
+  const seated = panes.filter(p => p.seat).map(p => '@' + p.seat);
+  const unseated = panes.length - seated.length;
+  if (!seated.length) return { disabled: true,
+    text: 'Nothing to save: no pane has a seat. Give a pane a seat first: click its @ pill.' };
+  const n = seated.length;
+  return { disabled: false,
+    text: `Saves ${n} seated pane${n === 1 ? '' : 's'} (${seated.join(' ')})`
+      + (unseated ? `; ${unseated} unseated ${unseated === 1 ? 'is' : 'are'} not saved` : '') };
+}
+
+function rigLiveSeats(seats, panes) {
+  return (seats || []).filter(seat => panes.some(p =>
+    p.seat === seat && p.state !== 'dead' && p.state !== 'detached'));
+}
+
+function rigLiveText(live) {
+  if (!live.length) return '';
+  return `Up will refuse: ${live.map(s => '@' + s).join(' ')} ${live.length === 1 ? 'is' : 'are'} live`;
+}
+
+// The list's rows, so a pane changing state re-marks them without a rebuild
+// (a rebuild would reset a half-armed Remove or an Up in flight).
+let RIG_ROWS = [];
+
+function rigRefreshHints() {
+  const dlg = $('#rigdlg');
+  if (!dlg || !dlg.open) return;
+  const panes = [...S.panes.values()];
+  const h = rigSaveHint(panes);
+  $('#rig-savehint').textContent = h.text;
+  $('#rig-save').disabled = h.disabled;
+  for (const { seats, warn } of RIG_ROWS) warn.textContent = rigLiveText(rigLiveSeats(seats, panes));
+}
+
 async function renderRigList() {
   const list = $('#rig-list');
   let d;
   try { d = await api('/api/session/rigs'); }
   catch (e) { list.replaceChildren(el('div', 'hint err', e.message)); return; }
+  const panes = [...S.panes.values()];
+  RIG_ROWS = [];
   const rows = (d.rigs || []).map(r => {
     const row = el('div', 'rigrow');
     row.appendChild(el('span', 't', r.name));
     row.appendChild(el('span', 'hint', r.error ? 'unreadable: ' + r.error
       : (r.seats || []).map(s => '@' + s).join(' ')));
+    const warn = el('span', 'rigwarn', r.error ? '' : rigLiveText(rigLiveSeats(r.seats, panes)));
+    row.appendChild(warn);
+    if (!r.error) RIG_ROWS.push({ seats: r.seats || [], warn });
+    // Up stays enabled with a live seat: the server says no, with every reason.
     const up = el('button', 'btn go', 'Up');
     up.type = 'button'; up.disabled = !!r.error;
     up.onclick = () => rigUp(r.name, up);
@@ -2534,8 +2582,10 @@ function openRigs() {
   $('#rig-out').replaceChildren();
   $('#rig-name').value = '';
   $('#rig-replace').checked = false;
+  RIG_ROWS = [];
   renderRigList();
   $('#rigdlg').showModal();
+  rigRefreshHints();
 }
 
 function wireRigDialog() {
