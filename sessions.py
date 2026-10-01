@@ -170,7 +170,11 @@ POSTURE_MODE = {
 GROK_LAUNCHER = ROOT / "grok_launcher.py"
 OLLAMA_ACP = ROOT / "ollama_acp.py"
 NATIVE_ANTIGRAVITY_LAUNCHER = ROOT / "antigravity_acp_launcher.py"
-NATIVE_ANTIGRAVITY_BIN = Path.home() / ".local/lib/corral/antigravity-acp/agy_acp_server.par"
+# Same override the launcher reads (antigravity_acp_launcher.BINARY): the
+# container image installs the server under /opt, not under home.
+NATIVE_ANTIGRAVITY_BIN = Path(os.environ.get(
+    "CORRAL_ANTIGRAVITY_ACP_BINARY",
+    str(Path.home() / ".local/lib/corral/antigravity-acp/agy_acp_server.par")))
 NATIVE_ANTIGRAVITY_HELPER = NATIVE_ANTIGRAVITY_BIN.with_name("localharness_external")
 
 
@@ -406,9 +410,25 @@ def default_cwd():
     window looks at. Home always exists, so it remains the fallback when
     Seed has not been installed yet. Existence-checked: a missing ~/aios
     must not become the default, or the first pane would refuse to start.
+
+    CORRAL_WORKSPACE, when set and present, wins: the workspace is wherever
+    the user's Seed install put it (mac-host's is ~/ai-os, not ~/aios), and
+    the container is told it rather than guessing.
     """
+    ws = workspace()
+    if ws is not None:
+        return ws
     aios = Path.home() / "aios"
     return aios if aios.is_dir() else Path.home()
+
+
+def workspace():
+    """CORRAL_WORKSPACE as an existing directory, else None."""
+    raw = os.environ.get("CORRAL_WORKSPACE")
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    return p if p.is_dir() else None
 
 
 def cwd_suggestions(recent=()):
@@ -436,6 +456,9 @@ def cwd_suggestions(recent=()):
     for c in recent:                       # panes already open here
         add(c)
     home = Path.home()
+    ws = workspace()
+    if ws is not None:
+        add(ws)                            # the declared workspace (CORRAL_WORKSPACE)
     add(home / "aios")                     # AIOS workspace, if Seed is installed
     add(home)
     containers = []

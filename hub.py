@@ -80,7 +80,14 @@ def _safe_static_path(rel):
 # pairing gate should not be the only thing between an arbitrary wifi and an
 # agent holding tools in a working tree. Binding wider is a deliberate act:
 # CORRAL_LIGHT_BIND=0.0.0.0.
-BIND = os.environ.get("CORRAL_LIGHT_BIND", "127.0.0.1")
+#
+# In the container (CORRAL_CONTAINER=1) the default is 0.0.0.0, because the
+# host's published port arrives on the container's bridge interface, not its
+# loopback. The exposure decision moves to the compose file, which publishes
+# on host 127.0.0.1/::1 only (T-NET-1). Serve trust is unaffected: edge.py
+# grants it to loopback peers only, and the bridge gateway is not loopback.
+CONTAINER = os.environ.get("CORRAL_CONTAINER") == "1"
+BIND = os.environ.get("CORRAL_LIGHT_BIND", "0.0.0.0" if CONTAINER else "127.0.0.1")
 PORT = int(os.environ.get("CORRAL_LIGHT_PORT", "8098"))
 COOKIE = "corral_light"          # its own cookie name, so a browser paired to
                                  # a full Corral on the same host cannot have

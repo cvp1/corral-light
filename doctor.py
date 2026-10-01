@@ -55,6 +55,90 @@ def npm_problem(root=None):
             f"nobody mentioned.")
 
 
+# ── container section (WS3 step 4) — reports only, never refuses to start ──
+RUN_REPORT = Path("/run/corral/entrypoint.json")
+ELF_MACHINE = {0x3E: "x86-64", 0xB7: "aarch64", 0x28: "arm", 0x03: "x86"}
+
+
+def elf_arch(path):
+    """The ELF machine of a file, 'script' for a #! file, else None."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return None
+    if head[:2] == b"#!":
+        return "script"
+    if head[:4] != b"\x7fELF" or len(head) < 20:
+        return "not-elf"
+    return ELF_MACHINE.get(int.from_bytes(head[18:20], "little"), "unknown")
+
+
+def lane_binaries(root=None):
+    """(label, path) for each lane's real executable in the image."""
+    import glob
+    import os
+    nm = Path(root or HERE) / NPM_DIR / NPM_MARKER
+    # The vendor dir is the Rust target triple (x86_64-unknown-linux-musl in
+    # 0.159.x); glob it so a triple change does not read as a missing binary.
+    codex = sorted(glob.glob(str(nm / "@openai/codex-linux-x64/vendor/*/bin/codex")))
+    return [
+        ("claude", nm / "@anthropic-ai/claude-agent-sdk-linux-x64/claude"),
+        ("codex", Path(codex[0]) if codex else nm / "@openai/codex-linux-x64"),
+        ("grok", Path(os.environ.get("CORRAL_GROK_BIN", "/opt/corral/bin/grok"))),
+        ("antigravity", Path(os.environ.get(
+            "CORRAL_ANTIGRAVITY_ACP_BINARY",
+            "/opt/corral/antigravity-acp/agy_acp_server.par"))),
+        ("node", Path("/opt/node/bin/node")),
+    ]
+
+
+def container_report(run_report=RUN_REPORT, root=None):
+    """Lines for `doctor` inside the container; [] outside it."""
+    import json
+    import os
+    if os.environ.get("CORRAL_CONTAINER") != "1":
+        return []
+    out = ["", "  container"]
+    try:
+        r = json.loads(Path(run_report).read_text())
+    except (OSError, ValueError) as e:
+        return out + [f"  !   entrypoint report unreadable ({e}); was the "
+                      f"container started through its entrypoint?"]
+    i, e = r.get("identity", {}), r.get("emulation", {})
+    out.append(f"  ok  identity {i.get('user')} uid={i.get('uid')} "
+               f"gid={i.get('gid')} home={i.get('home')}")
+    mode = e.get("mode", "?")
+    out.append(f"  {'ok' if mode == 'native' else '~~'}  cpu {e.get('machine')} "
+               f"emulation={mode}")
+    for label, path in lane_binaries(root):
+        arch = elf_arch(path)
+        mark = "  ok  " if arch in ("x86-64", "script") else "  --  "
+        out.append(f"{mark}{label}: {arch or 'missing'} {path}"
+                   + (" (under Rosetta)" if arch == "x86-64" and mode == "rosetta" else ""))
+    p = r.get("path", {})
+    out.append(("  ok  " if p.get("ok") else "  !   ") + "PATH has no host bin dirs"
+               + ("" if p.get("ok") else f": {p.get('host_dirs')}"))
+    h = r.get("hostname", {})
+    if not h.get("ok", True):
+        out.append(f"  !   hostname {h.get('actual')!r} != expected {h.get('expected')!r}")
+    for m in r.get("parity_map", []):
+        out.append(("  ok  " if m.get("ok") else "  !   ") + "parity map "
+                   + str(m.get("path") or m.get("map"))
+                   + (f": {m.get('version')}" if m.get("ok") else f": {m.get('why')}"))
+    for o in r.get("overlays", []):
+        out.append(("  ok  " if o.get("mounted") else "  !   ") + "overlay " + o["path"])
+    s = r.get("ssh", {})
+    out.append(f"  {'ok' if s.get('agent') else '--'}  ssh agent "
+               f"{s.get('agent') or 'none (Docker Desktop SSH agent forwarding off?)'}")
+    ws = r.get("workspace")
+    if ws:
+        out.append(f"  {'ok' if Path(ws).is_dir() else '!!'}  workspace {ws}")
+    for n in r.get("notes", []):
+        out.append("  !   " + n)
+    return out
+
+
 def report(root=None, agents=None):
     """The lines `doctor` prints. Returns a list of strings so a test can read
     them; main() is the only thing that writes to stdout."""
@@ -79,6 +163,7 @@ def report(root=None, agents=None):
     for n in notes:
         out.append("")
         out.append("  !   " + n)
+    out += container_report(root=root)
     return out
 
 
