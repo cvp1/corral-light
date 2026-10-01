@@ -3528,6 +3528,8 @@ class LightHopPause(HopPauseCases, _FakeLaneCase):
 # The resilience suite: real agent processes through kill, resume,
 # shutdown and restore.
 from test_resilience import *                    # noqa: F401,F403,E402
+from test_stop_and_clear import *                # noqa: F401,F403,E402
+# 2026-09-30: the Claude login foreseen (claude_auth) and survived (auth_sweep).
 from test_claude_auth import *                   # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402
