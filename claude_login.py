@@ -68,10 +68,23 @@ def clean_requester(raw):
     return s or "unknown"
 
 
-def claude_bin():
-    """The absolute path of the `claude` CLI, or None."""
-    p = os.environ.get("CORRAL_CLAUDE_BIN") or shutil.which("claude")
-    return str(Path(p).resolve()) if p and Path(p).is_file() else None
+def claude_bin(env=None, home=None):
+    """The absolute path of the `claude` CLI, or None.
+
+    CORRAL_CLAUDE_BIN when set (and nothing else: a bad override is None,
+    not a quiet fallback), else PATH, else ~/.local/bin/claude — where the
+    vendor's native installer puts it, and a directory launchd's PATH does
+    not include, so a hub run as a service found no CLI (DESIGN-6 F-LB3)."""
+    env = os.environ if env is None else env
+    home = Path.home() if home is None else Path(home)
+    explicit = env.get("CORRAL_CLAUDE_BIN")
+    found = ([explicit] if explicit else
+             [shutil.which("claude", path=env.get("PATH")),
+              home / ".local/bin/claude"])
+    for p in found:
+        if p and Path(p).is_file() and os.access(p, os.X_OK):
+            return str(Path(p).resolve())
+    return None
 
 
 def terminal(platform=None, env=None):

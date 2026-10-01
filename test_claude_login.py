@@ -368,6 +368,56 @@ class Tick(unittest.TestCase):
         self.assertLess(took, 0.5)
 
 
+class FindsTheCli(unittest.TestCase):
+    """F-LB3: a hub run as a service has launchd's PATH, which lacks
+    ~/.local/bin — where the vendor's native installer puts `claude`."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="login-bin-"))
+        self.home = self.tmp / "home"
+        (self.home / ".local/bin").mkdir(parents=True)
+        self.onpath = self.tmp / "path"
+        self.onpath.mkdir()
+
+    def exe(self, where, mode=0o755):
+        f = where / "claude"
+        f.write_text("#!/bin/sh\n", encoding="utf-8")
+        f.chmod(mode)
+        return str(f.resolve())
+
+    def find(self, **env):
+        env.setdefault("PATH", str(self.onpath))
+        return claude_login.claude_bin(env=env, home=self.home)
+
+    def test_service_path_falls_back_to_native_install_dir(self):
+        want = self.exe(self.home / ".local/bin")
+        self.assertEqual(self.find(PATH="/usr/bin:/bin"), want)
+
+    def test_path_wins_over_the_fallback(self):
+        self.exe(self.home / ".local/bin")
+        want = self.exe(self.onpath)
+        self.assertEqual(self.find(), want)
+
+    def test_nothing_anywhere_is_none(self):
+        self.assertIsNone(self.find())
+
+    def test_not_executable_is_not_found(self):
+        self.exe(self.home / ".local/bin", mode=0o644)
+        self.assertIsNone(self.find())
+
+    def test_a_bad_override_does_not_fall_back(self):
+        self.exe(self.onpath)
+        self.exe(self.home / ".local/bin")
+        self.assertIsNone(self.find(CORRAL_CLAUDE_BIN=str(self.tmp / "nope")))
+
+    def test_a_good_override_wins(self):
+        self.exe(self.onpath)
+        alt = self.tmp / "alt"
+        alt.mkdir()
+        want = self.exe(alt)
+        self.assertEqual(self.find(CORRAL_CLAUDE_BIN=want), want)
+
+
 class TheBrowserHalf(unittest.TestCase):
     def test_T4_9_and_the_four_doors(self):
         """Skipped LOUDLY when node is absent: a check that did not run must
