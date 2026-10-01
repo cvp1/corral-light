@@ -21,9 +21,15 @@ HELPER = BINARY.with_name("localharness_external")
 PRIVATE_UMASK = 0o077
 
 
-def server_argv(binary=None):
-    """Exact vendor command registered by Google for this ACP server."""
-    return [str(binary or BINARY), "--uid="]
+def server_argv(binary=None, row=None):
+    """Exact vendor command for the build pinned on this platform. The flags
+    differ by build (install_antigravity_acp.RELEASES, `args`); a host with no
+    row keeps the Linux registration, since nothing was installed there by us."""
+    if row is None:
+        from install_antigravity_acp import release_for
+        row = release_for()
+    args = row["args"] if row else ["--uid="]
+    return [str(binary or BINARY), *args]
 
 
 def unavailable_reason(binary=None):
