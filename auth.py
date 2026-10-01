@@ -37,6 +37,7 @@ import sys
 import uuid
 from pathlib import Path
 
+import notify
 from corral_core import webauthn
 
 # Its own state dir, NOT the full Corral's. The session key lives here, so
@@ -364,14 +365,55 @@ def _write_private(path, text):
         raise
 
 
+# DESIGN-6 S9: the events that change who can get in raise a SILENT desktop
+# banner at any hour (notify.security), after their ledger line is on disk.
+# An ordinary key pairing, and minting an enrollment code, are ledger-only.
+# `recover` is its parts -- break-glass, each rm, any policy change -- so its
+# summary line raises nothing of its own.
+NOTICE_EVENTS = ("break-glass", "enroll", "rm", "policy")
+NOTIFY = notify.security          # a seam: tests record instead of showing
+
+
+def _notice_text(rec):
+    e = rec["event"]
+    if e == "break-glass":
+        return ("Break-glass pairing",
+                f"A browser was paired with --break-glass ({rec.get('why')}) "
+                f"under policy {rec.get('policy')}.")
+    if e == "enroll":
+        how = ("approved by an enrolled key" if rec.get("approvedBy")
+               else "with the shell enrollment code")
+        return "Security key enrolled", f"A key was enrolled for {rec.get('origin')}, {how}."
+    if e == "rm":
+        return "Security key removed", f"Key {str(rec.get('key'))[:16]} was removed."
+    return ("Pairing policy changed",
+            f"Pairing policy {rec.get('before')} -> {rec.get('after')} ({rec.get('by')}).")
+
+
+def _notice(rec, now):
+    """Show the banner for one security event. Never raises: the event has
+    already happened and is already in the ledger, so a failing notifier must
+    not turn a committed enrollment or break-glass into an error."""
+    try:
+        title, body = _notice_text(rec)
+        shown, why = NOTIFY(f"Corral Light — {title}", body, now=now)
+        if not shown:
+            _loud(f"security notice not shown ({why}); it is in key-ledger.jsonl")
+    except Exception as e:                  # noqa: BLE001 -- see docstring
+        _loud(f"security notice failed ({e.__class__.__name__}); it is in key-ledger.jsonl")
+
+
 def _ledger(event, now=None, **fields):
     """One JSON line per security event, append-only, 0600. Raises on failure:
-    the callers that promise an audit (break-glass) record before they act."""
+    the callers that promise an audit (break-glass) record before they act.
+    A NOTICE_EVENTS event then raises its silent banner (S9)."""
     STATE.mkdir(parents=True, exist_ok=True)
     rec = {"at": int(now or time.time()), "event": event, **fields}
     fd = os.open(_ledger_path(), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, sort_keys=True) + "\n")
+    if event in NOTICE_EVENTS:
+        _notice(rec, now)
 
 
 def ledger_lines():
@@ -820,5 +862,5 @@ def recover(code, key_ids, now=None):
     enroll, ttl = mint_enroll_code(now=now)
     _ledger("recover", now, removed=list(key_ids))
     out.append(f"enrollment code {enroll} -- good for {ttl}s, once: "
-               f"Settings -> Security keys -> Enroll")
+               f"the Security keys button in the browser -> Enroll")
     return True, out

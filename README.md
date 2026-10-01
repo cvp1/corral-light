@@ -310,6 +310,7 @@ Once a key is enrolled, the pairing screen offers **Touch your key** next to the
 - **Removing a key and changing the policy are shell-only.** The browser has no Remove button.
 - **The first enrollment sets the policy to `key-or-code`.** Under `key-only`, `corral-light pair` refuses codes; `corral-light pair --break-glass <code>` still works and is recorded in `key-ledger.jsonl` in the state directory.
 - **The verifier needs `openssl`.** Without it, `key list` says why, and pairing falls back to the code.
+- **Security notices.** A break-glass pairing, an enrollment, a removal or a policy change shows a silent desktop banner at any hour, and every one is a line in `key-ledger.jsonl`. Nothing makes a sound, and nothing is sent over the network. An ordinary key pairing gets a ledger line only.
 
 **What this is, and is not.** Key pairing is a convenience, plus protection against actors who do not have a shell on the machine. `key-only` is a workflow guard against well-meaning assistants running the documented pairing command. It is not a security boundary.
 

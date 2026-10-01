@@ -16,6 +16,7 @@ import stat
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -87,6 +88,17 @@ class Base(unittest.TestCase):
         self.patches = [mock.patch.multiple(
             auth, STATE=d, LOCKFILE=d / "pair.lock", PAIRFILE=d / "pairing.json",
             KEYFILE=d / "session.key")]
+        # S9: record security banners instead of showing them on this desktop.
+        # Each banner also snapshots the ledger's last event at the moment it
+        # fires: a banner must follow its ledger line, never precede it.
+        self.notices, self.ledger_at_notice = [], []
+
+        def record(t, b, now=None):
+            self.notices.append((t, b, now))
+            lines = auth.ledger_lines()
+            self.ledger_at_notice.append(lines[-1]["event"] if lines else None)
+            return True, "shown"
+        self.patches.append(mock.patch.object(auth, "NOTIFY", record))
         for p in self.patches:
             p.start()
         self.a = Authn(b"\xaa" * 16)
@@ -628,6 +640,132 @@ class BindingsTheMutantsFound(Base):
         self.assertEqual((e.exception.reason, e.exception.status), (auth.TOO_MANY_KEYS, 409))
         self.assertNotIn(w.b64url(self.a.cred), [k["id"] for k in self.keys()])
         self.assertEqual(len(self.keys()), 4)
+
+
+# ── S9: security notices ────────────────────────────────────────────────────
+
+LATE = datetime(2026, 10, 1, 23, 0).timestamp()      # inside quiet hours
+
+
+@unittest.skipIf(OPENSSL is None, "no openssl on this machine")
+class T91_SecurityNotices(Base):
+    def titles(self):
+        return [t.split(" — ", 1)[1] for t, _, _ in self.notices]
+
+    def test_t91_one_banner_per_event_at_23h(self):
+        """Every event that changes who can get in raises exactly one banner
+        at a fake 23:00, each after its ledger line; pairing by key and
+        minting an enrollment code raise none."""
+        code, _ = auth.mint_enroll_code(now=LATE)
+        self.assertEqual(self.notices, [], "an enrollment code is ledger-only")
+        opts = auth.enroll_begin(COOKIE, code, ORIGIN, RP, now=LATE)
+        auth.enroll_finish(COOKIE, self.a.create(opts), ORIGIN, RP, now=LATE)
+        # the first enrollment is two events: the key, and code -> key-or-code
+        self.assertEqual(self.titles(), ["Security key enrolled", "Pairing policy changed"])
+        self.assertIn("shell enrollment code", self.notices[0][1])
+        self.assertIn("code -> key-or-code (first enrollment)", self.notices[1][1])
+
+        opts = auth.enroll_begin(COOKIE, None, ORIGIN, RP, now=LATE)
+        txn = auth.enroll_finish(COOKIE, self.b.create(opts), ORIGIN, RP, now=LATE)["approve"]
+        self.assertEqual(len(self.notices), 2, "a proposed key is not yet an enrollment")
+        auth.enroll_approve(COOKIE, self.a.get(txn["challenge"]), ORIGIN, RP, now=LATE)
+        self.assertEqual(self.titles()[2:], ["Security key enrolled"])
+        self.assertIn("approved by an enrolled key", self.notices[2][1])
+
+        self.pair_by_key(self.a, now=LATE)
+        self.assertEqual(len(self.notices), 3, "an ordinary key pairing is ledger-only")
+        self.assertEqual(len(self.events("key-pair")), 1)
+
+        auth.set_policy("key-only", now=LATE)
+        code, _ = auth.new_code(now=LATE)
+        self.assertTrue(auth.approve(code, now=LATE, break_glass=True)[0])
+        self.assertTrue(auth.remove_key(w.b64url(self.b.cred), now=LATE)[0])
+        self.assertEqual(self.titles()[3:], ["Pairing policy changed", "Break-glass pairing",
+                                             "Security key removed"])
+        self.assertEqual(len(self.notices), 6)
+        self.assertTrue(all(n == LATE for _, _, n in self.notices), "each notice gets the clock")
+        # and every banner has its ledger line
+        ev = [e["event"] for e in auth.ledger_lines()]
+        self.assertEqual([e for e in ev if e in auth.NOTICE_EVENTS],
+                         ["enroll", "policy", "enroll", "policy", "break-glass", "rm"])
+        self.assertEqual(self.ledger_at_notice,
+                         ["enroll", "policy", "enroll", "policy", "break-glass", "rm"],
+                         "each banner fires after its own ledger line is on disk")
+
+    def test_recover_banners_its_parts_not_itself(self):
+        self.enroll_first(self.a)
+        auth.set_policy("key-only")
+        self.notices.clear()
+        code, _ = auth.new_code()
+        ok, _ = auth.recover(code, [w.b64url(self.a.cred)])
+        self.assertTrue(ok)
+        self.assertEqual(self.titles(), ["Break-glass pairing", "Security key removed",
+                                         "Pairing policy changed"])
+        self.assertEqual(len(self.events("recover")), 1)
+
+    def test_a_failing_notifier_never_undoes_the_event(self):
+        def boom(*a, **k):
+            raise RuntimeError("notifier exploded")
+        self.enroll_first(self.a)
+        auth.set_policy("key-only")
+        code, _ = auth.new_code()
+        with mock.patch.object(auth, "NOTIFY", boom):
+            ok, _ = auth.approve(code, break_glass=True)
+        self.assertTrue(ok)
+        self.assertEqual(auth.claim(code)[1], "ok")
+        self.assertEqual(len(self.events("break-glass")), 1)
+        self.assertIn("security notice failed", self.stderr.getvalue())
+        with mock.patch.object(auth, "NOTIFY", lambda t, b, now=None: (False, "no notifier")):
+            self.assertTrue(auth.set_policy("code")[0])
+        self.assertIn("security notice not shown (no notifier)", self.stderr.getvalue())
+
+
+class T91_TheBannerIsSilentAndLocal(unittest.TestCase):
+    """notify.security at 23:00: shown (quiet hours do not hide it), one
+    notifier process, no sound, and no network at all -- nothing can page a
+    phone. notify.desktop keeps its quiet hours."""
+
+    def run_at_23(self, platform, which):
+        import notify
+        calls = []
+        def run(argv, **k):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stderr="")
+        def no_network(*a, **k):
+            raise AssertionError("security notice opened a socket")
+        with mock.patch.object(notify.subprocess, "run", run), \
+             mock.patch.object(notify.sys, "platform", platform), \
+             mock.patch.object(notify.shutil, "which", which), \
+             mock.patch("socket.socket", no_network), \
+             mock.patch("socket.create_connection", no_network):
+            shown = notify.security("Corral Light — Break-glass pairing", "body",
+                                    now=datetime(2026, 10, 1, 23, 0))
+        return shown, calls
+
+    def test_macos(self):
+        shown, calls = self.run_at_23("darwin", lambda n: "/usr/bin/" + n)
+        self.assertEqual(shown, (True, "shown"))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "osascript")
+        self.assertNotIn("sound", " ".join(calls[0]))
+
+    def test_linux(self):
+        shown, calls = self.run_at_23(
+            "linux", lambda n: "/usr/bin/notify-send" if n == "notify-send" else None)
+        self.assertEqual(shown, (True, "shown"))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--hint=boolean:suppress-sound:true", calls[0])
+
+    def test_desktop_keeps_quiet_hours(self):
+        import notify
+        with mock.patch.object(notify.subprocess, "run") as run:
+            self.assertEqual(notify.desktop("t", "b", now=datetime(2026, 10, 1, 23, 0)),
+                             (False, "quiet hours (21:00–05:00)"))
+        run.assert_not_called()
+
+    def test_auth_uses_the_silent_notifier(self):
+        import notify
+        self.assertIs(auth.NOTIFY, notify.security)
 
 
 # ── over a real socket, through hub.Handler ─────────────────────────────────
