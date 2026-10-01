@@ -55,7 +55,8 @@ def cmd_enroll(_a):
         return 2
     code, ttl = auth.mint_enroll_code()
     print(f"enrollment code {code} -- good for {ttl}s, once.\n"
-          f"In the browser: Settings -> Security keys -> Enroll, then enter it."
+          f"In the browser: the Security keys button at the foot of the "
+          f"left rail -> enter it -> Enroll."
           + ("" if not keys else "\n(Only a first key for an origin needs it; "
              "another key is approved by touching an enrolled one.)"), flush=True)
     return 0

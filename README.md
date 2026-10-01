@@ -290,7 +290,36 @@ tailscale serve --bg 8098                       # https://<machine>.<tailnet>.ts
 CORRAL_TAILSCALE_LOGIN=you@example.com ./corral-light serve
 ```
 
-With `CORRAL_TAILSCALE_LOGIN` set, a request that arrives through Serve must carry that tailnet identity (Serve stamps it and strips any forged copy); proxied traffic with no identity — Funnel, a tagged device — is refused; requests on the machine itself are unchanged. The session cookie is marked `Secure` when it is minted through Serve, and an open event stream re-checks its cookie every 30 seconds and closes itself when the cookie expires. Pairing still needs a shell on the machine — that is the point. What this does not do: separate the approval authority from the assistant's own UNIX user; anything running as you can still pair itself. (`corral_core/edge.py`, contract in `corral_core/test_edge.py`.)
+With `CORRAL_TAILSCALE_LOGIN` set, a request that arrives through Serve must carry that tailnet identity (Serve stamps it and strips any forged copy); proxied traffic with no identity — Funnel, a tagged device — is refused; requests on the machine itself are unchanged. The session cookie is marked `Secure` when it is minted through Serve, and an open event stream re-checks its cookie every 30 seconds and closes itself when the cookie expires. Pairing needs a shell on the machine, or a security key that was enrolled from one (below). What this does not do: separate the approval authority from the assistant's own UNIX user; anything running as you can still pair itself. (`corral_core/edge.py`, contract in `corral_core/test_edge.py`.)
+
+### Pairing with a security key
+
+Once a key is enrolled, the pairing screen offers **Touch your key** next to the code. Touching a FIDO2 security key (a YubiKey, for example) pairs the browser without walking to a shell. The code stays on the screen as "or pair from a shell", and it keeps working.
+
+```
+./corral-light key enroll        # a one-time code for the first key (300 s, single use)
+./corral-light key list          # keys, policy, and whether the verifier can run
+./corral-light key policy key-or-code|key-only|code
+./corral-light key rm <id>
+./corral-light key recover <pair-code> (<id>... | --all)   # lost the only key
+```
+
+- **Enroll** from the Security keys button at the foot of the left rail. The first key for an address needs the shell code. A later key is approved by touching one that is already enrolled, so adding a key takes two touches.
+- **A key belongs to one address.** WebAuthn binds a credential to its host name. A key enrolled at `http://localhost:8098` does not work at `http://127.0.0.1:8098`, so on `127.0.0.1` the page links to `localhost` instead of offering the button. Through Tailscale Serve, set `CORRAL_LIGHT_SERVE_HOST` to the Serve host name and enroll there separately.
+- **The address comes from configuration.** The hub never takes it from a request's `Host` or forwarded headers.
+- **Removing a key and changing the policy are shell-only.** The browser has no Remove button.
+- **The first enrollment sets the policy to `key-or-code`.** Under `key-only`, `corral-light pair` refuses codes; `corral-light pair --break-glass <code>` still works and is recorded in `key-ledger.jsonl` in the state directory.
+- **The verifier needs `openssl`.** Without it, `key list` says why, and pairing falls back to the code.
+
+**What this is, and is not.** Key pairing is a convenience, plus protection against actors who do not have a shell on the machine. `key-only` is a workflow guard against well-meaning assistants running the documented pairing command. It is not a security boundary.
+
+- A process running as your UNIX user can read `session.key` and forge a cookie, and it can edit `keys.json`. No key stops that.
+- Script running on the hub's own page, plus one touch, now mints a cookie. Before key pairing, a bug in the page could not pair a browser.
+- Attestation is `none`, so a software authenticator is accepted like a hardware one.
+- The hub learns that the authenticator reported presence and verification. It does not learn that a PIN, specifically, was entered.
+- The real fix is running assistants as a separate UNIX user from the hub, which this project does not do.
+
+The verifier is `corral_core/webauthn.py`; the store, ceremonies and policy are in `auth.py`.
 
 When an assistant asks to write a file or run a command, Corral Light pauses it and shows the exact request, byte count, and SHA-256 digest. Requests too large to display cannot be approved. The browser cannot bypass this check because the server enforces it.
 
@@ -314,6 +343,7 @@ Diagnostic output includes command names, configuration details, environment var
 | `CORRAL_CONTENT_CONFIG` | `~/.config/corral-light/content.json` | Directories searched by `⌘K`. |
 | `CORRAL_NODE_BIN` | An available Node.js installation | Optional Node.js path override. |
 | `CORRAL_LIGHT_URL` | `http://127.0.0.1:8098` | Where `corral-light consult` finds the hub. |
+| `CORRAL_LIGHT_SERVE_HOST` | Unset | The Tailscale Serve host name, so security keys can be enrolled and used through Serve. |
 | `CORRAL_LIGHT_CONSULT_CFG` | `~/.config/corral-light/consult-session.json` | The paired session `consult` keeps (0600). |
 
 The default address is local-only by design. If you change `CORRAL_LIGHT_BIND` to expose the server on a network, protect access with your network controls and pairing code.
