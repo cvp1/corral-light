@@ -33,9 +33,11 @@ WHY (mac-host, 2026-09-30, 05:41 local)
 WHAT IT WILL NOT DO
     - Return, log or bind a token. The Keychain item and the credentials file
       are read into one local parse and only two timestamps come out.
-    - Run the login. OAuth needs the operator's browser; a machine completing it
-      for him is exactly the kind of "auth on his behalf" the doctrine
-      forbids. This module says WHEN and WHAT; he does the signing in.
+    - Complete the login. Corral starts the vendor's own login in a window
+      The operator sees, on his click; it never completes, reads, or relays it
+      (claude_login.py; decision note "corral-starts-vendor-login",
+      2026-09-30, which replaced "never run the login"). This module says
+      WHEN and WHAT; he does the signing in.
     - Claim ok on no data. A read that fails is `ok: None` with a reason,
       never a green light (PRINCIPLES 1: distrust green; "no data must not
       render as positive data").
@@ -82,9 +84,9 @@ def is_auth_error(reason):
 
 
 def remedy():
-    return (f"Claude login expired — in a terminal run `{LOGIN_CMD}` "
-            f"(it opens your browser); this pane resumes by itself once "
-            f"you are signed in. Typing /login here cannot do it.")
+    return (f"Claude login expired — click Sign in to open the vendor's "
+            f"login on the hub machine (or run `{LOGIN_CMD}` there); a pane it "
+            f"killed resumes by itself once you are signed in.")
 
 
 def explain(reason):
@@ -92,7 +94,8 @@ def explain(reason):
     with the vendor's error kept in brackets; anything else passes through."""
     if not is_auth_error(reason):
         return reason
-    return f"{remedy()} [{str(reason)[:160]}]"
+    return (f"{remedy()} Typing /login in this pane does the same. "
+            f"[{str(reason)[:160]}]")
 
 
 # ── the read ────────────────────────────────────────────────────────────────
