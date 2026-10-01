@@ -241,6 +241,12 @@ explained ships at `corral_core/rig.example.toml`.
 ./corral-light rig rm <name>
 ```
 
+The same four verbs are in the browser: **Rigs…** in the New dialog, or ⌘K
+and type `rig`. The dialog lists your rigs with **Up** and **Remove** (two
+clicks; a removed rig has no undo), saves the seated panes under a name, and
+shows the server's outcome line for each seat — the same lines `rig up`
+prints.
+
 **`up` checks the whole rig first, and starts nothing if any seat is wrong**:
 a file that does not parse, the wrong `version`, a bad seat name, an unknown
 lane or key, a directory that does not exist, more seats than the live pane

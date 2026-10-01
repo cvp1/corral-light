@@ -80,6 +80,9 @@
     <!-- A role presets lane / effort / posture and puts its instructions in
          the composer (roles.py). Never authority; nothing is sent by it. -->
     <label>Role<select id="f-role"><option value="">None</option></select></label>
+    <!-- Rigs… (DESIGN-5 S12): the seated panes saved by name, brought back
+         with one click. It opens its own dialog; New is not needed for it. -->
+    <button type="button" class="btn" id="rigsbtn">Rigs…</button>
     <p class="hint" id="rolehint"></p>
     <label>Agent<select id="f-agent"></select></label>
     <!-- Shown only when the chosen agent is a GROUP. Light ships one group, so
@@ -117,6 +120,31 @@
     <menu>
       <button value="cancel" class="btn">Cancel</button>
       <button value="ok" class="btn go" id="f-go">Start</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- Rigs… (DESIGN-5 S12). A rig is $CORRAL_LIGHT_STATE/rigs/<name>.toml: seat,
+     lane, directory, posture, role -- never a prompt unless hand-written.
+     Up checks the WHOLE rig before it starts anything; then each seat gets
+     exactly one outcome line, rendered by the server (corral_core/rigs.py),
+     shown here as text. Nothing rolls back. -->
+<dialog id="rigdlg">
+  <form method="dialog" class="dlg">
+    <h2>Rigs</h2>
+    <p class="hint">A rig is your seated panes, saved by name. <b>Up</b> checks
+      every seat first and starts nothing if one is wrong; then it resumes or
+      starts each seat and says what happened to each.</p>
+    <div id="rig-list" class="riglist"></div>
+    <label>Save the seated panes as<input id="rig-name" spellcheck="false"
+      placeholder="a name: lowercase letters, digits, '-'"></label>
+    <label class="inline"><input type="checkbox" id="rig-replace"> replace a rig
+      with that name</label>
+    <button type="button" class="btn" id="rig-save">Save</button>
+    <p class="hint err" id="rig-error"></p>
+    <div id="rig-out" class="rigout"></div>
+    <menu>
+      <button value="cancel" class="btn">Close</button>
     </menu>
   </form>
 </dialog>
