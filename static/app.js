@@ -2708,19 +2708,52 @@ function wireDialog() {
       } catch (e) { toast(e.message, true); }
       return;
     }
-    try {
-      const d = await api('/api/session/new', common);
-      S.panes.set(d.pane.id, d.pane);
-      // Starting a conversation IS focusing it — otherwise the pane you just
-      // opened is not the one ⌘K would attach a note to.
-      S.focus = d.pane.id;
-      render();
-      if (d.pane.state === 'dead') toast('agent failed to start: ' + (d.pane.error || ''), true);
-      else if (d.preamble) insertIntoComposer(d.pane.id, d.preamble + '\n\n---\n\n',
-        `role ${common.role}: its instructions are in the box — add your ask and send`);
-      for (const n of (d.notes || [])) toast(n);
-    } catch (e) { toast(e.message, true); }
+    await startConversation(common);
   });
+  $('#new-quick').onclick = quickStart;
+  // Say exactly what ⚡ will start, read at hover time so it never goes stale.
+  $('#new-quick').onmouseenter = e => {
+    const a = defaultAgent();
+    e.currentTarget.title = a
+      ? `Start ${a.memberLabel || a.label} in ${S.lastCwd || S.defaultCwd || '~'} now`
+      : 'No agent is available to start';
+  };
+}
+
+// Open a pane now. Shared by the dialog's Start and the ⚡ quick button.
+async function startConversation(common) {
+  try {
+    const d = await api('/api/session/new', common);
+    S.panes.set(d.pane.id, d.pane);
+    // Starting a conversation IS focusing it — otherwise the pane you just
+    // opened is not the one ⌘K would attach a note to.
+    S.focus = d.pane.id;
+    render();
+    if (d.pane.state === 'dead') toast('agent failed to start: ' + (d.pane.error || ''), true);
+    else if (d.preamble) insertIntoComposer(d.pane.id, d.preamble + '\n\n---\n\n',
+      `role ${common.role}: its instructions are in the box — add your ask and send`);
+    for (const n of (d.notes || [])) toast(n);
+  } catch (e) { toast(e.message, true); }
+}
+
+// The lane the dialog would land on: walk agents in menu order and take the
+// first live one. A group's menu entry sits at its first member's position and
+// resolves to its first LIVE member, which this walk also yields.
+function defaultAgent() {
+  return (S.agents || []).find(a => a.available) || null;
+}
+
+// ⚡ — the dialog's defaults, without the dialog. Model and effort are left to
+// the agent (the dialog's own default), no role, posture as last chosen.
+async function quickStart() {
+  const a = defaultAgent();
+  if (!a) { toast('no agent is available to start', true); return; }
+  const common = { agent: a.key, cwd: S.lastCwd || S.defaultCwd || '~',
+                   model: '', effort: '', role: '' };
+  // Same rule as the dialog: send a posture only to a lane that obeys one.
+  if (a.postureEnforced !== false)
+    common.posture = localStorage.getItem('corral.posture') || 'auto';
+  await startConversation(common);
 }
 
 /* ── port: carry a conversation to another lane (port.py) ────────────────

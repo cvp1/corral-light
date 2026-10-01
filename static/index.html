@@ -27,7 +27,14 @@
 
   <aside class="rail left">
     <div class="brand">Corral <span class="lightmark">light</span></div>
-    <button class="new" id="new">＋ New conversation</button>
+    <!-- The quick button is the dialog's own defaults with the dialog skipped:
+         the first live agent, the last directory, the remembered posture,
+         model/effort left to the agent. Same as opening New and pressing Start. -->
+    <div class="newrow">
+      <button class="new" id="new">＋ New conversation</button>
+      <button class="newquick" id="new-quick" type="button"
+              title="Start the default agent now" aria-label="Start the default agent now">⚡</button>
+    </div>
     <button class="search-trigger" id="search-trigger" type="button"
             aria-label="Search panes and notes">
       <span>Search</span><kbd>⌘K</kbd>
