@@ -35,6 +35,18 @@ const THEMES = [
   ['slate', ['#11171d', '#4d86aa', '#82d99a'], 'Slate', 'Steel, ice & signal green', 'dark'],
   ['ink', ['#090b0f', '#587fc2', '#a78bfa'], 'Ink', 'Graphite & spectral light', 'dark'],
   ['parchment', ['#f0ece3', '#2f5892', '#c49455'], 'Parchment', 'Warm paper, navy & ochre', 'light'],
+  // Calm set (2026-10-01): low-chroma accents, nothing loud.
+  ['sagebrush', ['#e4e9e2', '#46664f', '#c9a98a'], 'Sagebrush', 'Pale sage, moss & clay', 'light'],
+  ['fog', ['#e5e7ec', '#3d4a6a', '#b8a6cc'], 'Fog', 'Morning mist & lavender', 'light'],
+  ['tidepool', ['#121c1e', '#5f9fa0', '#d9c58f'], 'Tidepool', 'Deep sea-glass & sand', 'dark'],
+  ['mesa', ['#1c1a1f', '#8a7aa8', '#d9a78a'], 'Mesa', 'Desert dusk, sandstone & sage', 'dark'],
+  // Calm set II (2026-10-01): after Omarchy's quieter themes.
+  ['everforest', ['#2d353b', '#a7c080', '#e69875'], 'Everforest', 'Forest floor, moss & ember', 'dark'],
+  ['kanagawa', ['#1f1f28', '#7e9cd8', '#e6c384'], 'Kanagawa', 'Sumi ink, wave blue & lantern', 'dark'],
+  ['nord', ['#2e3440', '#88c0d0', '#a3be8c'], 'Nord', 'Arctic slate & frost', 'dark'],
+  ['ethereal', ['#060b1e', '#7d82d9', '#ffcead'], 'Ethereal', 'Midnight navy & peach glow', 'dark'],
+  ['rosedawn', ['#faf4ed', '#286983', '#d7827e'], 'Rosé Dawn', 'Soft dawn, pine & rose', 'light'],
+  ['flexoki', ['#f2f0e5', '#24837b', '#ad8301'], 'Flexoki', 'Ink on paper, teal & ochre', 'light'],
 ];
 function applyTheme(name) {
   const meta = THEMES.find(t => t[0] === name) || THEMES.find(t => t[0] === 'ink');

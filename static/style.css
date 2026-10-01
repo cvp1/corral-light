@@ -1,5 +1,5 @@
-/* THEMES. These are seven distinct MATERIAL systems, not seven tints of the
-   same page. Each semantic text/accent variable is measured against its own
+/* THEMES. These are distinct MATERIAL systems, not tints of the same page
+   (the original seven are listed here; the calm set of four follows below). Each semantic text/accent variable is measured against its own
    panel by selftest_corral.py; the weakest ratios after the 2026-08-24
    rendered pass are laundry 5.10, dusk 5.11, nocturne 6.51, umber 5.99,
    slate 6.08, ink 6.32, parchment 5.86 (all above the 4.5:1 floor).
@@ -67,6 +67,99 @@
   --ember:#96501e; --sage:#49651f; --rust:#9d302f; --dusk:#2f5892; --gold:#805711;
   --wash-a:#c49455; --wash-b:#5f7da5;
   --brand-a:#243b61; --brand-b:#a4652d; --brand-c:#d2a85f; --shadow-rgb:62 48 30;
+}
+/* CALM SET (2026-10-01). Four soothing palettes: low-chroma accents, soft
+   grounds, no saturated alarms -- even --rust and --gold stay muted. Every
+   text/accent variable clears 4.5:1 against ground, panel AND raise; weakest
+   pairs: sagebrush 4.62, fog 4.64, tidepool 5.23, mesa 5.05.
+
+     sagebrush  pale sage linen, moss green, warm clay
+     fog        blue-grey morning mist with soft lavender
+     tidepool   deep sea-glass teal, seafoam and sand
+     mesa       desert dusk: plum-grey, sandstone, dusty lavender */
+[data-theme="sagebrush"]{
+  --ground:#e4e9e2; --panel:#f4f7f2; --raise:#d9e1d6; --line:#bcc8b9; --line2:#8a9887;
+  --ink:#2c3a33; --dim:#47554d; --faint:#535f58;
+  --ember:#7d5a3c; --sage:#46664f; --rust:#8f4a42; --dusk:#3f5a6e; --gold:#6f5c24;
+  --wash-a:#8fa98f; --wash-b:#b9a184;
+  --brand-a:#3d5a48; --brand-b:#8fa98f; --brand-c:#c9a98a; --shadow-rgb:44 58 48;
+}
+[data-theme="fog"]{
+  --ground:#e5e7ec; --panel:#f5f6f9; --raise:#dadde5; --line:#bfc4cf; --line2:#8c93a3;
+  --ink:#2e3442; --dim:#4a5163; --faint:#565d6f;
+  --ember:#635384; --sage:#4a6658; --rust:#8e4a55; --dusk:#3d5878; --gold:#6e5c2c;
+  --wash-a:#9aa6c2; --wash-b:#b3a5c4;
+  --brand-a:#3d4a6a; --brand-b:#9aa6c2; --brand-c:#b8a6cc; --shadow-rgb:46 52 66;
+}
+[data-theme="tidepool"]{
+  --ground:#121c1e; --panel:#1a2629; --raise:#243336; --line:#314346; --line2:#4b6265;
+  --ink:#e8f0ee; --dim:#bfcfcc; --faint:#93a8a5;
+  --ember:#8ccfc0; --sage:#9fcf9f; --rust:#e0a09a; --dusk:#93bcd6; --gold:#d9c58f;
+  --wash-a:#3f7f80; --wash-b:#5d7590;
+  --brand-a:#a7dccf; --brand-b:#5f9fa0; --brand-c:#d9c58f; --shadow-rgb:4 10 11;
+}
+[data-theme="mesa"]{
+  --ground:#1c1a1f; --panel:#26232a; --raise:#332f37; --line:#443f49; --line2:#625b69;
+  --ink:#f1ece6; --dim:#cfc6bd; --faint:#a99f97;
+  --ember:#d9a78a; --sage:#aebf98; --rust:#dd9a93; --dusk:#a9a6d2; --gold:#dcc08c;
+  --wash-a:#8a7aa8; --wash-b:#b88a6f;
+  --brand-a:#c9b8e0; --brand-b:#d9a78a; --brand-c:#aebf98; --shadow-rgb:10 8 12;
+}
+/* CALM SET II (2026-10-01). Adapted from Omarchy's quieter bundled themes
+   (basecamp/omarchy themes/), mapped onto Corral's variables. Source hues kept;
+   any text/accent under 4.5:1 on ground, panel OR raise was nudged in
+   lightness only (hue and saturation held). Weakest pairs: everforest 4.56,
+   kanagawa 4.68, nord 4.56, ethereal 6.33, rosedawn 4.55, flexoki 4.65.
+   Loud source reds (Kanagawa peach-red, Ethereal #ED5B5A) were swapped for
+   their softer siblings so these stay calm.
+
+     everforest  warm forest grey, moss, ember orange
+     kanagawa    sumi ink, wave blue, lantern yellow
+     nord        arctic slate with frost blues
+     ethereal    midnight navy, periwinkle, peach-cream text
+     rosedawn    Rose Pine Dawn: soft dawn paper, pine, rose
+     flexoki     Flexoki Light: ink on paper, teal, ochre */
+[data-theme="everforest"]{
+  --ground:#232a2e; --panel:#2d353b; --raise:#343f44; --line:#3d484d; --line2:#4f585e;
+  --ink:#d3c6aa; --dim:#bdb9a3; --faint:#a0aba3;
+  --ember:#e69875; --sage:#a7c080; --rust:#eb9294; --dusk:#7fbbb3; --gold:#dbbc7f;
+  --wash-a:#5f8c87; --wash-b:#7f9463;
+  --brand-a:#a7c080; --brand-b:#7fbbb3; --brand-c:#e69875; --shadow-rgb:12 15 17;
+}
+[data-theme="kanagawa"]{
+  --ground:#16161d; --panel:#1f1f28; --raise:#2a2a37; --line:#363646; --line2:#54546d;
+  --ink:#dcd7ba; --dim:#c8c093; --faint:#9990ad;
+  --ember:#a18bc0; --sage:#98bb6c; --rust:#d27e99; --dusk:#7e9cd8; --gold:#e6c384;
+  --wash-a:#2d4f67; --wash-b:#957fb8;
+  --brand-a:#7e9cd8; --brand-b:#957fb8; --brand-c:#e6c384; --shadow-rgb:8 8 12;
+}
+[data-theme="nord"]{
+  --ground:#2a303c; --panel:#2e3440; --raise:#3b4252; --line:#434c5e; --line2:#4c566a;
+  --ink:#eceff4; --dim:#d8dee9; --faint:#a7b1c2;
+  --ember:#88c0d0; --sage:#a3be8c; --rust:#dd9ea5; --dusk:#96b4cf; --gold:#ebcb8b;
+  --wash-a:#5e81ac; --wash-b:#b48ead;
+  --brand-a:#88c0d0; --brand-b:#81a1c1; --brand-c:#5e81ac; --shadow-rgb:20 24 31;
+}
+[data-theme="ethereal"]{
+  --ground:#060b1e; --panel:#0e1530; --raise:#172045; --line:#222c57; --line2:#3a4677;
+  --ink:#ffcead; --dim:#e3c9c4; --faint:#a3a3c8;
+  --ember:#9a9ee6; --sage:#9fcfb4; --rust:#ee8a8a; --dusk:#8fb4e8; --gold:#f2c38f;
+  --wash-a:#4a4fa8; --wash-b:#8e6a9a;
+  --brand-a:#7d82d9; --brand-b:#c89dc1; --brand-c:#ffcead; --shadow-rgb:1 3 10;
+}
+[data-theme="rosedawn"]{
+  --ground:#faf4ed; --panel:#fffaf3; --raise:#f2e9e1; --line:#dfdad9; --line2:#b8b2b9;
+  --ink:#575279; --dim:#625d84; --faint:#6a6684;
+  --ember:#766090; --sage:#286983; --rust:#9d5067; --dusk:#366f78; --gold:#925e16;
+  --wash-a:#d7827e; --wash-b:#907aa9;
+  --brand-a:#286983; --brand-b:#907aa9; --brand-c:#d7827e; --shadow-rgb:87 82 121;
+}
+[data-theme="flexoki"]{
+  --ground:#f2f0e5; --panel:#fffcf0; --raise:#e6e4d9; --line:#dad8ce; --line2:#b7b5ac;
+  --ink:#1c1b1a; --dim:#403e3c; --faint:#5f5e5a;
+  --ember:#1f6f67; --sage:#536907; --rust:#af3029; --dusk:#205ea6; --gold:#7f5f01;
+  --wash-a:#24837b; --wash-b:#ad8301;
+  --brand-a:#24837b; --brand-b:#bc5215; --brand-c:#ad8301; --shadow-rgb:64 62 60;
 }
 
 :root{
