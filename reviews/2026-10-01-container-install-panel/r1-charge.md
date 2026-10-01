@@ -1,3 +1,28 @@
+You are one of three independent reviewers on a design panel. The other two are different models from different vendors; you will see their reviews in a second round. The author is a Claude agent working for the operator, who owns this system and makes the final call.
+
+WHAT YOU ARE REVIEWING
+The full plan is pasted below the line "=== PLAN ===". It proposes replacing Corral Light's per-OS native install (a browser "wall" of AI coding-agent panes; one stdlib-Python hub per machine driving Claude Code, Codex, Grok and Antigravity/Gemini CLIs over ACP, plus a native Ollama) with one multi-arch container image, two mount scopes, and AI-OS Seed bundled inside the image. The system is a personal AI operating system run across a small home fleet (Mac mini, Linux iMac, Linux laptop) and intended later as a free install for novices.
+
+Everything you need is in the paste. Do not open files or run commands; review the text. If a claim in the plan looks wrong but you cannot check it from the text, say "unverifiable from the text" rather than guessing.
+
+YOUR JOB — be adversarial, not polite
+1. VERDICT per part, one line each, BUILD / RESHAPE / KILL with the single strongest reason:
+   P1 the container image itself; P2 the two mount scopes (aios default, home opt-in); P3 the hook fail-open fix; P4 Seed bundled in the image; P5 the login/credential handling; P6 CI-driven lane updates; P7 the phase plan.
+2. FINDINGS, ranked most severe first, at most 10. Each: the claim you are attacking (quote a few words), what is wrong, the concrete failure it causes, and the fix. Prefer defects that would ship a security hole, a silent fail-open, a lockout, data written to the wrong place, or a check that passes while the thing is broken.
+3. ATTACK THESE SPECIFICALLY:
+   - Is a container even the right tool, given agents need host reach and the plan keeps a native "dev mode" for the main machine? Would a simpler non-container fix (uv-pinned Python + a single installer + prebuilt adapter bundles) get 80% of the value? Steelman it.
+   - The hook fail-open section: is the three-part fix sufficient? Can the hub still start with a guard silently disabled? Is "run every hook once with a no-op payload" a check that can pass while the guard is broken?
+   - Same-path bind mounts with $HOME equal to the host's, on a Mac host whose $HOME is /Users/<name>: what breaks inside a Linux container?
+   - ~/notes mounted read-write by default and synced fleet-wide by Syncthing: blast radius of a misbehaving or injected agent. Should the default be read-only?
+   - Injecting CLAUDE_CODE_OAUTH_TOKEN into the container environment: who can read it (docker inspect, /proc, child processes, every agent pane)? Is that worse than a file in a volume?
+   - The pairing and WebAuthn boundary once the hub runs in a VM behind a port publish on 127.0.0.1: anything that changes?
+   - "Lane defaults follow the newest model" at build time: good default or a silent behaviour change?
+4. TESTS: name up to 5 missing tests, especially any check in the plan that would pass while the feature is broken.
+5. WHAT WOULD CHANGE YOUR MIND on your harshest verdict, in one sentence.
+
+FORMAT: Markdown, under 1,200 words. Start with the seven verdict lines. No preamble.
+
+=== PLAN ===
 # Proposal — one portable install for Corral Light (container-first)
 
 Status: **v1 FINAL FOR PANEL REVIEW**, 2026-10-01. Nothing built.
