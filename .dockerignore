@@ -1,0 +1,26 @@
+# Only runtime source goes into the public image. Docs, reviews, tests, host
+# service files and anything machine-local stay out (T-IMG-4).
+.git
+.gitignore
+.dockerignore
+**/__pycache__
+**/*.pyc
+spike/node_modules
+docs
+reviews
+testkit
+tests
+test_*.py
+**/test_*.py
+selftest_*.mjs
+*.plist
+*.service
+*.timer
+install_service.py
+container/pin.py
+container/build.sh
+container/scan_layers.py
+container/compose*.yaml
+container/compose*.tmpl
+.env
+*.local.*
