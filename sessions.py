@@ -816,6 +816,104 @@ class Pane(_core.PaneBase):
         self._close_open_turns("paused")
         return super().pause()
 
+    def cancel(self):
+        """The Stop button (and Esc): stop the running turn AND what is
+        queued behind it.
+
+        The base cancel only interrupted the turn in flight, so anything typed
+        ahead ran the moment the cancel landed: pressing stop on a pane with
+        three queued messages started the next one. Stop means stop. The
+        dropped turns are closed `interrupted` in the ledger and named in the
+        transcript; nothing is re-sent. Returns True when there was anything
+        to stop.
+        """
+        with self._turn_lock:
+            dropped, self._queue = list(self._queue), []
+        lg = self._turns()
+        for t in dropped:
+            lg.mark(getattr(t, "turn", None), "interrupted",
+                    why="stopped before it was sent", was="accepted")
+        ok = super().cancel()
+        if dropped:
+            self.emit("note", {"text": f"stopped — {len(dropped)} queued "
+                                       f"message(s) were not sent"})
+        return bool(ok or dropped)
+
+    def clear_context(self, via=None):
+        """/clear: the same pane, a brand-new conversation, on every lane.
+
+        It used to forward the literal text and trust the agent. Only the
+        Claude SDK special-cases `/clear`; Codex, Grok, Antigravity and Ollama
+        got it as an ordinary prompt and remembered everything. Even on
+        Claude the reset was half-real: the SDK moved to a new conversation
+        id but this pane kept the OLD acp_session, so the next pause, resume
+        or hub restart ran session/load on the pre-clear conversation and
+        quietly brought it all back.
+
+        So Corral owns it. Stop whatever is running, end the agent process,
+        and start a fresh one with session/new: start(), the exact path every
+        new pane takes, so model, effort and posture are re-imposed by
+        _apply_wants() and no lane needs a special case. The pane id, title,
+        seat and on-disk transcript are kept; the `cleared` marker folds the
+        old turns out of view without deleting a byte (PRINCIPLES 18).
+        Returns the turn id of the /clear itself.
+        """
+        if self.state == "starting":
+            raise ValueError("this pane is still starting — try /clear again "
+                             "in a moment")
+        if self._log is None:      # paused: pause() closed it; emit() needs it
+            self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
+        lg = self._turns()
+        try:
+            tid = lg.accept("/clear")
+        except OSError as e:
+            raise ValueError(f"could not record this turn durably, so it "
+                             f"was not accepted: {e}")
+        tid = tid or _core.new_turn_id()
+        user = {"text": "/clear", "turn": tid}
+        if via:
+            user["via"] = via
+        self.emit("user", user)
+        self._note_turn(via)
+        # Everything in flight or queued belonged to the old conversation.
+        self._close_open_turns("cleared by /clear")
+        self._clear_pending("cleared")
+        with self._turn_lock:
+            self._queue = []
+            self._drop_held_peers_locked("cleared")
+            self._turn_running = False
+            self._in_flight = None
+            # Retire any drain still blocked in the OLD client's prompt(): its
+            # captured generation goes stale and it will touch nothing.
+            self._generation += 1
+        old, self.client = self.client, None
+        self._expect_exit = True        # the old process's exit is not news
+        if old is not None:
+            try:
+                old.close()
+            except Exception:           # noqa: BLE001 — it is going away anyway
+                pass
+        self.pid = self.pgid = self.pid_start = None
+        self.acp_session = None
+        self.usage = {}
+        self.error = None
+        self.dead_cause = self.dead_login = None
+        self.emit("cleared", {})
+        # The cap still applies: a paused pane coming back is a new live one.
+        self.mgr._reserve_live(self)
+        self.state = "starting"
+        self.start()                    # marks the pane dead itself on failure
+        if self.state == "dead":
+            lg.mark(tid, "interrupted", why=f"could not start a fresh "
+                                            f"session: {self.error}",
+                    was="accepted")
+        else:
+            lg.mark(tid, "completed", stopReason="cleared")
+            self.emit("turn_end", {"stopReason": "cleared", "usage": self.usage,
+                                   "turn": tid, "queued": 0})
+        self.save_meta()
+        return tid
+
     def stop(self):
         self._close_open_turns("closed")
         return super().stop()
@@ -1131,8 +1229,14 @@ class Pane(_core.PaneBase):
     def send(self, text, via=None):
         # Validate `via` before anything is resumed, titled or queued.
         via = _core.check_via(via)
-        # Typing into a paused or dead pane resumes it; resume() parks, never sends,
-        # a dead pane's old queue.
+        # /clear is Corral's, on EVERY lane, and it is checked before the
+        # resume below: clearing a paused pane means "start it fresh", and
+        # loading the old conversation only to throw it away is wasted work.
+        if (text or "").strip() == "/clear":
+            return self.clear_context(via)
+        # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
+        # stopped means "bring it back", exactly as it does for a paused one.
+        # resume() parks — never sends — whatever was queued when it died.
         if self.state in self.RESUMABLE:
             if not (text or "").strip():
                 raise ValueError("empty prompt")
@@ -1175,11 +1279,9 @@ class Pane(_core.PaneBase):
                 user["via"] = via
             self.emit("user", user)
             self._note_turn(via)     # a human turn answers an open question
-            if text == "/clear":
-                # The SDK resets its own context on `/clear`, but the adapter drops the
-                # notification; this marker folds earlier events out of view (nothing deleted).
-                self.emit("cleared", {})
-            # Queue-and-drain is shared with peer delivery.
+            # (/clear never reaches here: send() hands it to clear_context.)
+            # The queue-and-drain half is shared with peer delivery (DESIGN-5
+            # S7); everything ABOVE this line is what makes it the human's.
             self._dispatch(_QueuedText(text, tid))
             return tid
 

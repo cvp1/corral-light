@@ -661,7 +661,12 @@ function renderLog(p) {
     }
     const w = el('div', 'sys working');
     if (t0) w.dataset.t0 = t0;
-    w.append(el('span', 'wstar', '\u2733'), el('span', 'wtext', workingLabel(t0)));
+    // The hint is also the control: click it to stop, same as Esc or \u25a0 Stop.
+    const hint = el('span', 'wstop', '(esc to interrupt)');
+    hint.title = 'stop this turn';
+    hint.onclick = () => api('/api/session/cancel', { pane: p.id })
+      .catch(err => toast(err.message, true));
+    w.append(el('span', 'wstar', '\u2733'), el('span', 'wtext', workingLabel(t0)), hint);
     log.appendChild(w);
   }
   return log;
@@ -669,7 +674,7 @@ function renderLog(p) {
 
 function workingLabel(t0) {
   const secs = t0 ? Math.max(0, Math.round((Date.now() - new Date(t0)) / 1000)) : null;
-  return ' working\u2026' + (secs != null ? ` ${secs}s` : '') + '  (esc to interrupt)';
+  return ' working\u2026' + (secs != null ? ` ${secs}s` : '') + '  ';
 }
 
 /* Once a second: advance every visible spinner's elapsed time without touching
@@ -852,8 +857,10 @@ function updatePane(rec, p) {
   // selection, and re-anchoring by offset could land on different text.
   const live = liveLogSelection();
   const hold = SEL.down === p.id || (live && live.log === rec.log);
+  const working = ['busy', 'uncertain', 'needs-you'].includes(p.state);
   rec.root.className = 'pane' + ((p.pending.length || p.question) ? ' attn' : '') +
                        (p.state === 'dead' ? ' dead' : '') +
+                       (working ? ' working' : '') +
                        (hold ? ' selhold' : '') +
                        (isTerm(p) ? ' term' : '');
   const hsig = headSignature(p);
@@ -894,6 +901,12 @@ function updatePane(rec, p) {
   if (kind !== rec.kind) {            // only a SHAPE change rebuilds it
     rec.kind = kind;
     rec.comp.replaceChildren(...(kind === 'none' ? [] : [composer(p, kind)]));
+  }
+  // A Stop left half-way (cancelled, or offering Force stop) re-arms once the
+  // turn is really over, so the next turn starts with the polite press.
+  if (!working) {
+    const sb = rec.comp.querySelector('button.stop');
+    if (sb && sb._reset) sb._reset();
   }
   return rec.root;
 }
@@ -1458,7 +1471,50 @@ function composer(p, kind) {
   };
   ta.onblur = hide;
   const b = el('button', 'send', 'Send'); b.onclick = send;
-  c.append(ac, ta, b);
+  // The Stop button. Esc on an empty composer was the only way to interrupt a
+  // turn: invisible, and impossible on a phone. Shown only while the pane is
+  // working (CSS keys off the pane's `working` class, because the composer is
+  // built once and outlives every state change). First press is the polite
+  // one, session/cancel, which also drops whatever was queued behind the turn.
+  // An agent that ignores it for STOP_FORCE_MS gets a second offer: force stop
+  // = pause, which ends the process and keeps the conversation to resume.
+  function stopButton(p) {
+    const STOP_FORCE_MS = 6000;
+    const b = el('button', 'stop', '■ Stop');
+    b.type = 'button';
+    b.title = 'stop the running turn and anything queued behind it (Esc)';
+    let forceAt = 0, timer = null;
+    const reset = () => {
+      forceAt = 0; clearTimeout(timer); timer = null;
+      b.textContent = '■ Stop'; b.classList.remove('force'); b.disabled = false;
+    };
+    b.onclick = async () => {
+      const cur = S.panes.get(p.id) || p;
+      if (forceAt && Date.now() >= forceAt) {
+        b.disabled = true; b.textContent = 'stopping…';
+        try { await api('/api/session/pause', { pane: p.id }); await refresh(); }
+        catch (e) { toast(e.message, true); }
+        return reset();
+      }
+      b.disabled = true; b.textContent = 'stopping…';
+      try { await api('/api/session/cancel', { pane: p.id }); }
+      catch (e) { toast(e.message, true); return reset(); }
+      b.disabled = false;
+      forceAt = Date.now() + STOP_FORCE_MS;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const now = S.panes.get(p.id) || cur;
+        if (now.state === 'busy' || now.state === 'uncertain') {
+          b.textContent = '■ Force stop'; b.classList.add('force');
+          b.title = 'the agent ignored the interrupt — end its process; the '
+                  + 'conversation stays and resumes when you type';
+        } else reset();
+      }, STOP_FORCE_MS);
+    };
+    b._reset = reset;
+    return b;
+  }
+  c.append(ac, ta, b, stopButton(p));
   return c;
 }
 
@@ -2175,6 +2231,9 @@ function connect() {
       refresh().catch(() => {});          // server owns what the state is now
     }
     if (ev.kind === 'paused') { p.state = 'detached'; p.pending = []; }
+    // /clear ended the old conversation server-side (fresh agent session):
+    // nothing it was asking is waiting any more.
+    if (ev.kind === 'cleared') { p.pending = []; p.state = 'starting'; }
     if (ev.kind === 'user') { p.state = 'busy'; p.turnVia = d.via || null; }
     // A peer message starts a turn just as a human's does.
     if (ev.kind === 'peer') { p.state = 'busy'; p.turnVia = 'peer'; }
