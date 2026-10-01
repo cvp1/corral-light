@@ -27,6 +27,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import signal
 import sys
 import threading
@@ -90,6 +91,15 @@ STREAM_RECHECK = 30              # re-verify the cookie behind an open SSE strea
 # Bind the pairing cookie to ONE tailnet identity when Tailscale Serve fronts
 # the hub (corral_core/edge.py). Unset = LAN behaviour, unchanged.
 BOUND_LOGIN = (os.environ.get("CORRAL_TAILSCALE_LOGIN") or "").strip() or None
+# DESIGN-6 S7: the hostname Tailscale Serve presents for this hub, if any. A
+# key enrolled through Serve is scoped to it (WebAuthn binds a credential to
+# its rpId). It comes from configuration, never from a request's Host.
+SERVE_HOST = (os.environ.get("CORRAL_LIGHT_SERVE_HOST") or "").strip().lower() or None
+if SERVE_HOST and not re.fullmatch(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?", SERVE_HOST):
+    SERVE_HOST = None
+KEY_ROUTES = ("/api/pair/key/begin", "/api/pair/key/finish")
+ENROLL_ROUTES = ("/api/pair/key/enroll/begin", "/api/pair/key/enroll/finish",
+                 "/api/pair/key/enroll/approve")
 MAX_BODY = 1 << 20
 
 
@@ -418,6 +428,46 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "")
         return urlparse(origin).netloc == host
 
+    def _key_origin(self):
+        """(origin, rpId) a key ceremony is held to (DESIGN-6 S7). From
+        configuration only: this hub's own localhost origin, or the Serve
+        hostname when the request came through Serve. Never the Host or any
+        forwarded header, which the client writes."""
+        if edge.via_serve(self.headers, self._peer()):
+            return (f"https://{SERVE_HOST}", SERVE_HOST) if SERVE_HOST else (None, None)
+        return f"http://localhost:{PORT}", "localhost"
+
+    def _key_route(self, p, b):
+        """The key-pairing routes. Pair routes are unauthenticated (they are
+        how a browser becomes authenticated); enroll routes arrive here only
+        past the cookie and same-origin checks."""
+        origin, rp_id = self._key_origin()
+        if not origin:
+            return self._json({"error": "key pairing through Serve needs "
+                                        "CORRAL_LIGHT_SERVE_HOST configured"}, 403)
+        try:
+            if p == "/api/pair/key/begin":
+                return self._json(auth.key_begin(b.get("code"), origin, rp_id))
+            if p == "/api/pair/key/finish":
+                auth.key_finish(b, origin, rp_id)
+                serve = edge.via_serve(self.headers, self._peer())
+                tok = auth.mint(user=edge.SERVE_USER if serve else "craig")
+                return self._json({"status": "ok"}, 200, {
+                    "Set-Cookie": edge.cookie_header(
+                        COOKIE, tok, auth.SESSION_TTL, secure=serve)})
+            cookie = self._token()
+            if p == "/api/pair/key/enroll/begin":
+                return self._json(auth.enroll_begin(cookie, b.get("code"), origin, rp_id))
+            if p == "/api/pair/key/enroll/finish":
+                return self._json(auth.enroll_finish(cookie, b, origin, rp_id))
+            if p == "/api/pair/key/enroll/approve":
+                return self._json(auth.enroll_approve(cookie, b, origin, rp_id))
+        except auth.TooMany as e:
+            return self._json({"error": str(e)}, 429)
+        except auth.KeyRefused as e:
+            return self._json({"error": e.reason}, e.status)
+        return self._json({"error": "not found"}, 404)
+
     # ── GET ──────────────────────────────────────────────────────────────
     def do_GET(self):
         p = urlparse(self.path).path
@@ -456,9 +506,12 @@ class Handler(BaseHTTPRequestHandler):
                 code, ttl = auth.new_code()
             except auth.TooMany as e:
                 return self._json({"error": str(e)}, 429)
+            origin, rp_id = self._key_origin()
             return self._json({"code": code, "ttl": ttl,
                                "how": f"corral-light pair {code}",
-                               "host": auth.host_id()})
+                               "host": auth.host_id(),
+                               "keyAvailable": bool(origin) and
+                               auth.key_available(origin, rp_id)})
         if p == "/api/pair/claim":
             tok, status = auth.claim((q.get("code") or [""])[0])
             if not tok:
@@ -485,6 +538,19 @@ class Handler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json({"error": "not paired"}, 401)
+
+        if p == "/api/pair/key/list":
+            # What Settings -> Security keys shows. No spki, no counters.
+            keys, err = auth.load_keys()
+            pol, perr = auth.policy()
+            state, why = auth.verifier_state()
+            return self._json({
+                "policy": pol, "policyError": perr, "keysError": err,
+                "verifier": state if state != "ok" else "ok",
+                "verifierWhy": None if state == "ok" else why,
+                "keys": [{"id": k["id"], "label": k.get("label"),
+                          "origin": k["origin"], "enrolledAt": k.get("enrolledAt"),
+                          "lastUsed": k.get("lastUsed")} for k in keys]})
 
         # Rigs (DESIGN-5 S12): one surface for both products, in the core,
         # and only past the pairing check above.
@@ -647,6 +713,13 @@ class Handler(BaseHTTPRequestHandler):
         # DESIGN-5 S8: token-only routes, before any cookie is looked at.
         if p.startswith("/api/peer/"):
             return self._peer_route(p, "POST")
+        if p in KEY_ROUTES:
+            # Unauthenticated: this is how a browser becomes paired.
+            try:
+                kb = self._body()
+            except ValueError as e:
+                return self._json({"error": str(e)}, 400)
+            return self._key_route(p, kb if isinstance(kb, dict) else {})
         user = self._user()
         if not user:
             return self._json({"error": "not paired"}, 401)
@@ -654,6 +727,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "cross-origin request refused"}, 403)
         try:
             b = self._body()
+            if p in ENROLL_ROUTES:
+                return self._key_route(p, b if isinstance(b, dict) else {})
             if p in ("/api/session/rigs/save", "/api/session/rigs/up",
                      "/api/session/rigs/rm"):
                 from corral_core import rigs
