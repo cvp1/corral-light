@@ -234,7 +234,10 @@ class StructuralIndependence(unittest.TestCase):
         allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/")
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
                          "/manifest.json", "/api/state", "/api/stream",
-                         "/api/search"}
+                         "/api/search",
+                         # DESIGN-6 S4: starts the vendor's login for the Live
+                         # tab's own Claude lane. One exact path, no prefix.
+                         "/api/claude/login"}
         for r in routes:
             if r in allowed_exact or r.startswith(allowed_prefixes):
                 continue

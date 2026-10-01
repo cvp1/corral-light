@@ -48,6 +48,8 @@ if sys.version_info < (3, 9):
         f"static-file containment check, arrived in 3.9.)")
 
 import auth
+import claude_auth
+import claude_login
 import notify
 import sessions
 from corral_core import edge
@@ -113,6 +115,20 @@ FRAME_LOCK = (
 ATTACH_EXCERPT_CHARS = 6000
 
 MGR = sessions.Manager()
+
+
+def _login_signed_in():
+    """A real sign-in (claude_login judged all three facts): read the new
+    credential now rather than in CACHE_S, and bring back what it killed."""
+    claude_auth.status(force=True)
+    MGR.auth_sweep()
+
+
+# DESIGN-6 S4: the vendor's own login, started on a click, in a window on
+# this machine's screen. Its watch thread is its own; the tick never waits on
+# it (a `claude auth status` that hangs must not freeze tick_age_s).
+LOGIN = claude_login.Login(sessions.STATE, on_success=_login_signed_in)
+LOGIN_FROM = ("rail", "banner", "picker", "composer")
 
 # The observer tick. In the full Corral this loop also rebuilt the attention
 # queue, projected the run registry, polled the fleet mailbox and drove push
@@ -381,6 +397,18 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise ValueError("malformed JSON body")
 
+    def _local_human(self):
+        """Is the person who clicked sitting at THIS machine? Loopback socket,
+        and no proxy hop of any kind: Tailscale Serve reaches us from loopback
+        too, so its identity header (or any forwarding header) means the
+        browser is somewhere else, and a window opened here would sit on an
+        unattended desk."""
+        if edge._peer_kind(self._peer()) != "loopback":
+            return False
+        return not any(self.headers.get(h) for h in
+                       ("X-Forwarded-For", "Forwarded", "X-Real-IP",
+                        edge.TS_LOGIN))
+
     def _same_origin(self):
         """A cookie-authed control plane needs CSRF defence. The browser always
         sends Origin on POST; a cross-site form cannot forge it."""
@@ -544,7 +572,9 @@ class Handler(BaseHTTPRequestHandler):
                     since = {str(k): int(v) for k, v in json.loads(raw).items()}
                 except (ValueError, AttributeError, TypeError):
                     since = {}
-            return self._json(MGR.state(since))
+            out = MGR.state(since)
+            out["claudeLogin"] = LOGIN.snapshot()
+            return self._json(out)
         if p == "/api/stream":
             return self._stream()
         return self._json({"error": "not found"}, 404)
@@ -630,6 +660,15 @@ class Handler(BaseHTTPRequestHandler):
                 r = rigs.route(MGR, "POST", p, b, by=user)
                 if r is not None:
                     return self._json(r[1], r[0])
+            if p == "/api/claude/login":
+                # The requester is the hub's own words (which surface, which
+                # pane), never request text: none of it reaches the argv.
+                where = b.get("from") if b.get("from") in LOGIN_FROM else None
+                pane = b.get("pane") if b.get("pane") in MGR.panes else None
+                who = f"pane {pane}" if pane else "browser"
+                r = LOGIN.start(f"{who} ({where})" if where else who,
+                                local=self._local_human())
+                return self._json(r, 200 if r["state"] != "refused" else 403)
             if p == "/api/session/new":
                 agent = b.get("agent", "")
                 posture = b.get("posture") or sessions.DEFAULT_POSTURE

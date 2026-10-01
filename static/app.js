@@ -697,8 +697,15 @@ function renderLog(p) {
                                  permOpen.get(d.requestId) === e.seq &&
                                  p.pending.includes(d.requestId)));
         break;
-      case 'dead': flush();
-        log.appendChild(el('div', 'sys err', `agent stopped — ${d.reason || 'unknown'}`)); break;
+      case 'dead': {
+        flush();
+        const line = log.appendChild(el('div', 'sys err', `agent stopped — ${d.reason || 'unknown'}`));
+        // Only on the death the pane is still in: an old one in the history
+        // must not offer a button for a login that already came back.
+        if (d.cause === 'auth' && p.agent === 'claude' && p.state === 'dead' &&
+            p.deadCause === 'auth') line.appendChild(signInButton('banner', p.id));
+        break;
+      }
       // Quiet unless you asked for detail.
       case 'permission_answered':
         if (detailed) { flush(); log.appendChild(el('div', 'sys', `you chose \u201c${d.optionId}\u201d`)); }
@@ -1469,6 +1476,12 @@ function composer(p, kind) {
   const send = async () => {
     if (sending) return;
     const t = ta.value.trim(); if (!t) return;
+    // Fresh state: the composer outlives the snapshot it was built from.
+    if (isLoginCommand(S.panes.get(p.id) || p, t)) {   // DESIGN-6 S4: a sign-in, not a message
+      ta.value = '';
+      await startLogin('composer', p.id);
+      return;
+    }
     hide();
     sending = true;
     try {
@@ -2093,11 +2106,18 @@ function render() {
   // had been announcing for days). Expired reads as a dead card; expiring
   // reads as a plain one. Both carry the exact remedy. Gone when it is fine.
   const ca = S.claudeAuth;
-  if (ca && (ca.ok === false || ca.warn)) {
+  const claudeLane = (S.agents || []).some(a => a.key === 'claude');
+  if (ca && (ca.ok === false || ca.warn || (ca.ok === null && claudeLane))) {
     const c = el('div', 'ncard' + (ca.ok === false ? ' dead' : ''));
     c.appendChild(el('div', 't', ca.ok === false ? 'Claude login expired'
-                                                  : 'Claude login expiring'));
+                                 : ca.ok === null ? 'Claude login unknown'
+                                 : 'Claude login expiring'));
     c.appendChild(el('div', 'm', ca.why || ''));
+    const said = loginLine(S.claudeLogin);
+    if (said) c.appendChild(el('div', 'fnote', said));
+    const acts = el('div', 'facts');
+    acts.appendChild(signInButton('rail'));
+    c.appendChild(acts);
     n.appendChild(c); items++;
   }
   for (const p of panes) {
@@ -2140,11 +2160,15 @@ function render() {
       try { await api('/api/session/forget', { pane: p.id }); await refresh(); }
       catch (e) { toast(e.message, true); }
     };
-    if (p.resumable) {
+    if (p.resumable || p.deadCause === 'auth') {
       const acts = el('div', 'facts');
-      const rb = el('button', 'fbtn', 'Resume');
-      rb.onclick = async e => { e.stopPropagation(); await resumePane(p); };
-      acts.appendChild(rb);
+      // A login death: Sign in first; the pane resumes by itself after it.
+      if (p.deadCause === 'auth' && p.agent === 'claude') acts.appendChild(signInButton('banner', p.id));
+      if (p.resumable) {
+        const rb = el('button', 'fbtn', 'Resume');
+        rb.onclick = async e => { e.stopPropagation(); await resumePane(p); };
+        acts.appendChild(rb);
+      }
       c.appendChild(acts);
     }
     n.appendChild(c); items++;
@@ -2308,6 +2332,7 @@ async function refresh() {
   if (seq !== refreshSeq) return;      // a newer refresh() has since been issued
   S.agents = d.agents || [];
   S.claudeAuth = d.claudeAuth || null;
+  S.claudeLogin = d.claudeLogin || null;
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
@@ -2436,7 +2461,7 @@ function connect() {
     if (ev.kind === 'question_cleared') p.question = null;
     if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';
-    if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; }
+    if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; p.deadCause = d.cause || null; }
     if (ev.kind === 'closed') { p.state = 'dead'; p.error = null; refresh(); }
     if (ev.kind === 'ready') p.state = 'ready';
     // snapshot()'s observed edges (busy→uncertain, poll()-detected dead):
@@ -2484,6 +2509,49 @@ function rigRefusedRows(e) {
     ? 'Refused — nothing was started:' : ((e && e.message) || 'failed'))];
   for (const why of reasons) rows.push(el('div', 'rigrow bad', '· ' + why));
   return rows;
+}
+
+/* DESIGN-6 S4: Sign in starts the VENDOR's own login (`claude auth login`) in a
+ * window on the hub's screen. The hub never sees a URL, code or token; these
+ * functions only ask it to open the window and say what became of it.
+ *
+ * `/login` typed into the composer is a sign-in only where it cannot mean
+ * anything else: a Claude pane that died of its login. Anywhere else it is
+ * sent as typed, exactly as before. */
+function isLoginCommand(p, text) {
+  return String(text || '').trim().toLowerCase() === '/login' && !!p &&
+         p.agent === 'claude' && p.state === 'dead' && p.deadCause === 'auth';
+}
+
+async function startLogin(from, paneId) {
+  try {
+    const r = await api('/api/claude/login', paneId ? { from, pane: paneId } : { from });
+    toast(r.ok ? 'sign-in window opened on the hub machine — sign in there' : r.why, !r.ok);
+    await refresh();
+    return r;
+  } catch (e) {
+    toast((e.body && e.body.why) || e.message, true);
+    return null;
+  }
+}
+
+function signInButton(from, paneId) {
+  const running = (S.claudeLogin || {}).state === 'running';
+  const b = el('button', 'fbtn', running ? 'Signing in…' : 'Sign in');
+  b.type = 'button';
+  b.disabled = running;
+  b.title = 'opens the Claude login in a window on the hub machine; you sign in there';
+  b.onclick = async e => { e.stopPropagation(); await startLogin(from, paneId); };
+  return b;
+}
+
+/* One line about the last sign-in, or '' when there is nothing to say. */
+function loginLine(cl) {
+  if (!cl || !cl.state || cl.state === 'idle') return '';
+  const what = { 'running': 'sign-in window open', 'signed-in': 'signed in',
+                 'check-status': 'sign-in unclear', 'closed': 'sign-in window closed',
+                 'gave-up': 'stopped watching the sign-in' }[cl.state] || cl.state;
+  return cl.why ? `${what}: ${cl.why}` : what;
 }
 
 /* What Save would write and what Up would refuse, from the panes on screen
@@ -2699,6 +2767,15 @@ function wireDialog() {
       return v.startsWith('group:') ? $('#f-host').value : v;
     };
     dlg._chosenAgent = chosenAgent;   // the close handler submits this, not #f-agent
+    const si = $('#signinrow');
+    if (si) {
+      si.replaceChildren();
+      const lapsed = S.agents.find(a => a.signIn);
+      if (lapsed) {
+        si.appendChild(el('span', null, `${lapsed.label}: ${lapsed.why} `));
+        si.appendChild(signInButton('picker'));
+      }
+    }
     // Land on the FIRST group's first live member (today: Agents → Claude), so
     // reorganising the menu costs nothing on the overwhelmingly common path —
     // open the dialog, press Start. A grouping that adds a click to the default

@@ -85,6 +85,9 @@
     <button type="button" class="btn" id="rigsbtn">Rigs…</button>
     <p class="hint" id="rolehint"></p>
     <label>Agent<select id="f-agent"></select></label>
+    <!-- DESIGN-6 S4: a lane refused for a lapsed login offers Sign in here,
+         because a disabled option cannot be clicked. -->
+    <p class="hint" id="signinrow"></p>
     <!-- Shown only when the chosen agent is a GROUP. Light ships one group, so
          this stays hidden — it is kept because the picker code that fills and
          reads it is shared with the grouped case, and a field the script
