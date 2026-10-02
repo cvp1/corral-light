@@ -1,12 +1,10 @@
 # Isolated branches and review — implementation and test plan
 
-Status: PLAN, v3.2, 2026-10-02. Nothing built. Reviewed in two rounds by a
+Status: PLAN, v3.1, 2026-10-02. Nothing built. Reviewed in two rounds by a
 three-vendor panel (Sol, Gemini, Grok); v3 folds in both rounds. v3.1 settles
 D2 (worktree location) against this machine's facts; see §7 and §8.
 Craig approved the plan and D1–D15 on 2026-10-02; Phase 0 may start. The record
 and synthesis are in `reviews/2026-10-01-worktree-panel/`. §8 lists what changed and why.
-v3.2 (2026-10-02) adds §9: the plan checked against dogma-2 (macOS). "This machine"
-in §0–§8 means omarchy-laptop (Linux) unless §9 says otherwise.
 
 **What this adds.** A pane can start on its own git worktree, on its own
 branch, cut from the repository the user picked. Several agents can then work
@@ -196,7 +194,7 @@ Stdlib only.
 | `commit_tree(reg, tree, index_id, message, expect_head)` | the **commit protocol** below | run hooks; amend; touch the work tree; `read-tree -u`; prompt for a key |
 | `push(reg, remote_name, push_url, oid)` | refuse if the worktree is dirty or HEAD's tree differs from the last reviewed tree; resolve the **effective push destination** (`git remote get-url --push --all <remote>`, which applies `pushInsteadOf`/`insteadOf`); refuse more than one; refuse if it differs from the confirmed one; push to that **URL**, not the remote name: `git push <push_url> <oid>:refs/heads/corral/<slug>` (fully qualified, so a tag of the same name cannot match); verify with `ls-remote <push_url>` | `--force`, `--force-with-lease`, push a ref other than `corral/*` |
 | `open_pr(reg, title, body)` | `gh auth status`; resolve the target repo from the remote URL and show it in the confirmation; `gh pr list --repo R --head …` first, and `gh pr view` if one exists (idempotent); else `gh pr create --repo R --head … --base … --title … --body-file -` | pass text through a shell; let `gh` choose between a fork and its parent |
-| `discard(reg, tree)` | **stop writers first**: cancel the turn, TERM then KILL the owner's process group (never SIGSTOP: a stopped process holding `index.lock` would block the move), wait until `index.lock` is gone, then scan `/proc/*/cwd` and `/proc/*/fd` (Linux; macOS uses `lsof`, §9.3) of the user's processes for anything inside the worktree (catches `setsid` grandchildren and the user's own shells) and refuse, naming them, if any remain; the held queue is kept unsent; `verify`; re-snapshot under the lock and compare to `tree`; write `refs/corral/recovery/<wt-id>/<ts>` → a commit of `tree` with parent HEAD; inventory ignored files into the registry; `mkdir -p <root>/.trash`; journal the move's source and destination; `git worktree move <path> <root>/.trash/<wt-id>-<ts>` (if Phase 0 shows `move` refuses a dirty worktree, a single `--force` is used **only after** the recovery ref exists; never the double `--force` that overrides a lock); `phase: trashed`; branch kept | delete files; delete the branch; prune |
+| `discard(reg, tree)` | **stop writers first**: cancel the turn, TERM then KILL the owner's process group (never SIGSTOP: a stopped process holding `index.lock` would block the move), wait until `index.lock` is gone, then scan `/proc/*/cwd` and `/proc/*/fd` of the user's processes for anything inside the worktree (catches `setsid` grandchildren and the user's own shells) and refuse, naming them, if any remain; the held queue is kept unsent; `verify`; re-snapshot under the lock and compare to `tree`; write `refs/corral/recovery/<wt-id>/<ts>` → a commit of `tree` with parent HEAD; inventory ignored files into the registry; `mkdir -p <root>/.trash`; journal the move's source and destination; `git worktree move <path> <root>/.trash/<wt-id>-<ts>` (if Phase 0 shows `move` refuses a dirty worktree, a single `--force` is used **only after** the recovery ref exists; never the double `--force` that overrides a lock); `phase: trashed`; branch kept | delete files; delete the branch; prune |
 | `restore(reg)` | `git worktree move` back from trash; `phase: active` | overwrite an existing path |
 | `purge(reg, confirm)` | requires `confirm == branch short name`; `git worktree remove --force <trash path>`; delete the branch only if its OID equals the recorded one; keep the recovery ref | touch a path outside `<root>/.trash/`; delete a branch not `corral/*`; delete recovery refs |
 | `reconcile(registry)` | for each common dir in the registry: `worktree list --porcelain -z`; mark `missing`/`tampered`; list unknown paths under root as orphans | prune; delete; edit |
@@ -363,7 +361,6 @@ hand, each lane started in one through the existing UI.
 0.4 `summary` and `snapshot` timings on ~/aios and a 50k-file repo.
 0.5 Confirm `git worktree remove` deletes ignored files and `move` keeps registration.
 0.6 Path-keyed state that every new worktree path meets, whatever the location: mise refuses untrusted config files per path (mise is installed here); Claude Code's auto-memory and project settings are keyed by cwd (record whether a worktree gets the repo's project memory or an empty one); `git config --show-origin` inside a worktree under the state dir picks up no `includeIf "gitdir:"` meant for the repo's folder.
-0.7 macOS (dogma-2), per §9: run 0.1, 0.2 and 0.6 there too; record lane results per platform; prove the Claude lane starts in a worktree **without** pre-trust; record which auto-memory store an `~/ai-os` worktree pane loads and writes; prove the `lsof` replacement for the `/proc` scan finds a shell whose cwd is inside the worktree.
 - Exit: `docs/worktree-phase0.md` with results; plan amended where reality differs.
 
 ### WS1 — `worktrees.py`
@@ -635,8 +632,7 @@ Plus: three lanes, three tasks, one repo, at once; all three published.
 5. Panel synthesis filed; every accepted finding fixed or deferred with a reason.
 6. Commit protocol proven: T-CMT-9..12 and T-CRS-2 green, including a kill at every journalled stage.
 7. Discard proven: T-RMV-11..15 green; nothing dispatches into a trashed or `unknown` pane.
-8. Claude lane: the Phase 0 config diff is attached and a shell command still asks for approval; otherwise Claude ships without worktrees. On macOS the gate is §9.1 instead: no pre-trust, and start proven without it.
-9. macOS: §9 items 9.2–9.5 resolved or deferred with a reason; T-RMV-13 green on darwin.
+8. Claude lane: the Phase 0 config diff is attached and a shell command still asks for approval; otherwise Claude ships without worktrees.
 
 ## 6. Risks
 
@@ -650,7 +646,7 @@ Plus: three lanes, three tasks, one repo, at once; all three published.
 | Hooks skipped on hub commits surprise a team repo | Stated in the Commit button's tooltip and README; pre-push hooks still run on push |
 | Disk growth | `doctor` shows root and trash size; purge is explicit |
 | Large repos make summary slow | Write-free summary on a coalescing worker; Phase 0 timings |
-| Claude trust prompt stalls start | Pre-trust in the pane's config dir; Phase 0. On macOS there is no private config dir (§9.1) |
+| Claude trust prompt stalls start | Pre-trust in the pane's config dir; Phase 0 |
 | An agent force-pushes or rewrites shared refs | D15 preamble; the rail still asks for Claude's shell commands; edit events outside the worktree cancel the turn |
 | Commit signing configured | Hub Commit refuses fast and offers the command to run by hand |
 
@@ -692,22 +688,13 @@ Three places were weighed: the state dir; Gemini's sibling,
   written into the user's repo.
 - **Backups are the same either way.** snapper covers only `/`, not
   `/home`. Uncommitted worktree work is protected by recovery refs and trash
-  (D9), at any location. (dogma-2 differs: Time Machine includes
-  `~/.local/share`; see §9.6.)
+  (D9), at any location.
 - **Cost accepted.** The path is long and hidden, so it is hard to find by
   hand. Mitigations: the review dialog shows the path with a Copy button,
   `corral-light worktrees` lists everything, and `$CORRAL_LIGHT_WORKTREES`
   overrides the root.
 
 ## 8. What changed, and why
-
-### v3.1 to v3.2 (dogma-2 check)
-
-| v3.1 | v3.2 | Why |
-|---|---|---|
-| Facts checked on omarchy-laptop only | §9 adds dogma-2 (macOS) facts and issues | The hub runs on both; four plan mechanisms are Linux-only |
-| Phase 0 items 0.1–0.6 | Adds 0.7 (macOS) | §9 |
-| Ship gate 1–8 | Gate 8 has a macOS form; adds gate 9 | §9.1, §9.3 |
 
 ### v3 to v3.1 (D2 settled)
 
@@ -770,110 +757,3 @@ Three places were weighed: the state dir; Gemini's sibling,
 | Discard while the agent runs | Owner paused first, then re-snapshot under the lock | Grok |
 | Out-of-worktree writes only warned | Edit events outside the worktree cancel the turn and raise a card; D15 preamble | Grok |
 | Branch named `corral` not considered | Probe refuses the repo with the reason | Grok |
-
-## 9. dogma-2 (macOS) check (v3.2)
-
-Checked on dogma-2 (Mac mini M4, macOS 27, APFS) on 2026-10-02 against the
-running hub's code and config. §0–§8 were checked on omarchy-laptop (Linux).
-Items 9.1–9.5 change design or tests; 9.6–9.8 are facts for this host.
-
-### 9.1 No private Claude config dir on macOS, so no pre-trust
-
-`sessions.darwin_keychain_blocks_isolation()` returns true on darwin: setting
-`CLAUDE_CONFIG_DIR` changes the Keychain service name and the login is not
-found. So `posture_enforceable` is false there, and Claude panes run on the
-user's real `~/.claude` and `~/.claude.json`. The §2.3 pre-trust ("only in the
-pane's private config dir") has no private dir to write. Writing trust into
-the real `~/.claude.json` instead would be a global config change per worktree
-path, and it is **not** allowed.
-
-- On darwin the hub never pre-trusts. T-LIF-14 is Linux-only; a darwin test
-  asserts `~/.claude.json` is byte-identical across a worktree create.
-- Evidence that this may not matter: corral-light's lane probes have run
-  Claude in fresh `/private/var/folders/...` dirs (their `~/.claude/projects`
-  entries exist) with no trust entry in `~/.claude.json`. Not yet proven for
-  a start through the UI. Phase 0.7 proves start without pre-trust; if it
-  stalls, the Claude lane ships without worktrees on macOS.
-
-### 9.2 Shared `~/.claude`: cwd-keyed state lands in the user's real home
-
-Because 9.1 shares `~/.claude`, every worktree path creates a permanent
-`~/.claude/projects/<cwd-slug>/` (transcripts) in the user's real home, and
-the pane's auto-memory store is keyed by the worktree path, not the repo.
-
-- For `~/ai-os`, whose store is fold-generated by memory-mesh, an `~/ai-os`
-  worktree pane gets **no** memory index. One past Claude Code `--worktree`
-  session of ai-os on dogma-2 (2026-09, v2.1.219) loaded none. Memory it
-  writes lands in a store that memory-mesh neither folds nor guards (the
-  write guard derives its store from its own install path, i.e. the main
-  checkout).
-- Decision needed before WS2: warn in the dialog for repos with a
-  `.mesh-generated` store, or refuse them. Recommendation: warn, and record
-  the observed behaviour in Phase 0.7 first.
-- `reconcile` and purge never touch `~/.claude/projects/`; the dirs are listed
-  by `doctor` as left behind by purged worktrees.
-
-### 9.3 Discard's `/proc` scan does not exist on macOS
-
-§2.2 `discard` scans `/proc/*/cwd` and `/proc/*/fd` to refuse while any
-process is inside the worktree. macOS has no `/proc`; done as written, the
-scan finds nothing and the move proceeds. On darwin use `lsof` (present at
-`/usr/sbin/lsof`): `lsof -nP -a -u <uid> -d cwd` for cwds plus
-`lsof -nP -u <uid> +D <worktree>` for open files, each under the wrapper's
-timeout. **A scan that fails or times out refuses the discard** (fail closed).
-T-RMV-13 runs on darwin with the `lsof` path. `corral_core.acp.process_start_token`
-already falls back to `ps -o lstart=` off Linux; its one-second resolution is
-accepted for the stale-`index.lock` check (T-GIT-9) and noted there.
-
-### 9.4 Lane results are per platform
-
-Codex's workspace-write sandbox is Seatbelt on macOS and a different
-mechanism on Linux, so a Linux pass does not enable Codex on macOS. The
-`lanes-check.json` on dogma-2 shows Gemini `unknown`. D8 is amended in
-practice: lane enabling is keyed by `(lane, sys.platform)`, and the §5.3
-matrix is run on both hosts.
-
-### 9.5 Case-insensitive APFS and `/private` temp paths
-
-- `/Users` is case-insensitive here, and `os.path.realpath` does not fold
-  case (`.../Ab` opened as `.../aB` resolves to `.../aB`). `<hash6>` from the
-  realpath of the common dir can therefore split one repo into two root dirs.
-  The per-repo lock (dev:inode) stays correct. Fix: derive `<hash6>` from
-  `common_dir_id` (dev:inode), or canonicalise case first (`F_GETPATH`).
-  New test T-CRT-8: one repo opened under two letter-cases gives one repo dir.
-- `tempfile.mkdtemp()` returns `/var/folders/...`, which is a symlink to
-  `/private/var/...`. T-CRT-6 ("root is a symlink → refused") would refuse
-  every darwin test run unless the suite realpaths its temp roots. The suite
-  does that, and T-CRT-6 builds its symlink explicitly.
-
-### 9.6 Backups
-
-Time Machine includes `~/.local/share` on dogma-2 (`tmutil isexcluded`:
-Included). Worktrees and `.trash/` are backed up here, unlike on the laptop,
-and trash size adds to the backup. `doctor` reports trash size (WS5) either
-way; no exclusion is added without Craig.
-
-### 9.7 Paths and tools on dogma-2
-
-| Plan says (laptop) | dogma-2 |
-|---|---|
-| `~/tools/corral-light` | `~/corral-light` (launchd runs the hub from here; never a worktree) |
-| `~/aios` (0.4 timings) | `~/ai-os` |
-| git 2.55 | `/opt/homebrew/bin/git` 2.55.0 first on the hub's launchd PATH; `/usr/bin/git` 2.54.0 (Apple) second. The wrapper resolves git once at start and `doctor` prints which |
-| gh 2.101 | gh 2.96.0, signed in as `cvp1` |
-| Claude Code 2.1.287 | 2.1.285 CLI; panes use the adapter's bundled binary |
-| mise installed | not installed; the mise part of 0.6 is laptop-only |
-| Chromium for T-VIS | none installed; T-VIS skips loudly here, so the visual gate runs on the laptop |
-| git 2.38 via container | Docker 29.6.2 running; the container route works here |
-| `/home` one btrfs subvolume | `~/.local/share`, `~/corral-light`, `~/ai-os`, `~/Github/CC` all on one APFS volume (same `st_dev`) |
-
-### 9.8 Global hooks reach Claude panes on macOS
-
-With a shared `~/.claude` (9.1), user-level hooks run inside Claude panes. On
-2026-10-02 none are wired at user level. `~/ai-os/tools/session_git_guard.py`
-(Stop hook: "commit + push") exists in a settings backup only. If it is
-wired again, it would tell a worktree pane to push, against D15. The guard
-must skip cwds under the worktree root before it is re-wired. Repo-level
-hooks (e.g. `~/ai-os/.claude/settings.json`, tracked) are present in a
-worktree and run the main checkout's scripts by absolute path; Phase 0.7
-records that they do not error there.
