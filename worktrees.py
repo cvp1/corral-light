@@ -21,11 +21,19 @@ WHAT THIS MODULE NEVER DOES
 
 Stdlib only.
 """
+import contextlib
+import fcntl
+import json
 import os
+import re
+import secrets
 import signal
 import subprocess
+import tempfile
 import threading
+import time
 from collections import namedtuple
+from pathlib import Path
 
 # Overridable for tests (a stub binary) and for the git 2.38 release check.
 GIT_BIN = os.environ.get("CORRAL_TEST_GIT") or "git"
@@ -260,3 +268,182 @@ def _pid_running(pid):
         return state != "Z"
     except OSError:
         return True
+
+
+# ── locations (D2) ────────────────────────────────────────────────────────────
+
+def state_dir():
+    """The hub state dir; read per call so tests and the CLI can point it elsewhere."""
+    return Path(os.environ.get("CORRAL_LIGHT_STATE")
+                or Path.home() / ".local" / "share" / "corral-light")
+
+
+def worktree_root():
+    """Where worktrees live: $CORRAL_LIGHT_WORKTREES, else <state>/worktrees.
+
+    Holds only <repo>-<hash6>/ dirs and .trash/. The registry is NOT in here.
+    """
+    return Path(os.environ.get("CORRAL_LIGHT_WORKTREES") or state_dir() / "worktrees")
+
+
+def registry_dir():
+    """Beside the root, never inside it (reconcile would list it as an orphan)."""
+    return state_dir() / "worktree-registry"
+
+
+# ── the registry (D13) ────────────────────────────────────────────────────────
+
+REGISTRY_V = 1
+PHASES = ("intent", "active", "trashed", "purged", "missing", "tampered")
+OP_STATES = ("intent", "done", "unknown")
+_ID_RE = re.compile(r"^wt-[0-9a-f]{6,16}$")
+
+
+class RegistryVersionError(Exception):
+    """An entry written by a newer hub: read-only, never rewritten."""
+
+
+def _fsync_dir(d):
+    fd = os.open(str(d), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write_json(path, obj):
+    """Write `obj` to `path` so a crash leaves the old file or the new one, never a part."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=1, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)                 # our own temp file, never anything else
+        raise
+    _fsync_dir(path.parent)
+
+
+def _now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class Registry:
+    """One JSON file per worktree under registry_dir(), written before git runs.
+
+    Every write happens under an fcntl lock on the directory, so the hub and
+    the `corral-light worktrees` CLI never interleave. An entry whose `v` is
+    newer than REGISTRY_V is refused read-only.
+    """
+
+    def __init__(self, directory=None):
+        self.dir = Path(directory) if directory else registry_dir()
+
+    def _ensure(self):
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    @contextlib.contextmanager
+    def lock(self):
+        self._ensure()
+        with open(self.dir / ".lock", "a") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def _path(self, wt_id):
+        if not isinstance(wt_id, str) or not _ID_RE.match(wt_id):
+            raise ValueError(f"not a worktree id: {wt_id!r}")
+        return self.dir / f"{wt_id}.json"
+
+    def _load(self, path):
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        v = entry.get("v")
+        if v != REGISTRY_V:
+            raise RegistryVersionError(f"registry v{v} is newer than this hub (v{REGISTRY_V})"
+                                       if isinstance(v, int) and v > REGISTRY_V
+                                       else f"registry entry has unknown version {v!r}")
+        return entry
+
+    def read(self, wt_id):
+        return self._load(self._path(wt_id))
+
+    def create(self, **fields):
+        """A new entry in phase `intent`; returns it. Call BEFORE `git worktree add`."""
+        with self.lock():
+            while True:
+                wt_id = "wt-" + secrets.token_hex(3)
+                if not self._path(wt_id).exists():
+                    break
+            entry = {"v": REGISTRY_V, "id": wt_id, "phase": "intent", "created": _now(),
+                     "last_commit": None, "published": None, "recovery_refs": [], "ops": []}
+            entry.update(fields)
+            entry["id"], entry["v"] = wt_id, REGISTRY_V
+            self._check(entry)
+            atomic_write_json(self._path(wt_id), entry)
+            return entry
+
+    def _check(self, entry):
+        if entry.get("phase") not in PHASES:
+            raise ValueError(f"unknown phase {entry.get('phase')!r}")
+        for op in entry.get("ops") or []:
+            if op.get("state") not in OP_STATES:
+                raise ValueError(f"unknown op state {op.get('state')!r}")
+
+    def _mutate(self, wt_id, fn):
+        with self.lock():
+            path = self._path(wt_id)
+            entry = self._load(path)
+            fn(entry)
+            self._check(entry)
+            atomic_write_json(path, entry)
+            return entry
+
+    def update(self, wt_id, **fields):
+        def fn(e):
+            for k in ("id", "v", "ops"):
+                if k in fields:
+                    raise ValueError(f"{k} cannot be set through update()")
+            e.update(fields)
+        return self._mutate(wt_id, fn)
+
+    def begin_op(self, wt_id, op, **fields):
+        """Journal an op in state `intent` before its git runs; returns the op_id."""
+        op_id = "op-" + secrets.token_hex(4)
+
+        def fn(e):
+            rec = {"op_id": op_id, "op": op, "state": "intent", "stage": None, "at": _now()}
+            rec.update(fields)
+            e.setdefault("ops", []).append(rec)
+        self._mutate(wt_id, fn)
+        return op_id
+
+    def set_op(self, wt_id, op_id, **fields):
+        def fn(e):
+            for rec in e.get("ops") or []:
+                if rec.get("op_id") == op_id:
+                    rec.update(fields)
+                    rec["at"] = _now()
+                    return
+            raise KeyError(f"{wt_id} has no op {op_id}")
+        return self._mutate(wt_id, fn)
+
+    def all(self, include_unreadable=False):
+        """Every entry, oldest first. Unreadable ones only with include_unreadable."""
+        if not self.dir.is_dir():
+            return []
+        out = []
+        for f in sorted(self.dir.glob("wt-*.json")):
+            try:
+                out.append(self._load(f))
+            except (OSError, ValueError, RegistryVersionError) as e:
+                if include_unreadable:
+                    out.append({"id": f.stem, "unreadable": str(e)})
+        out.sort(key=lambda e: (e.get("created") or "", e.get("id")))
+        return out
