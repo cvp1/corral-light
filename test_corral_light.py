@@ -3548,7 +3548,8 @@ from test_seat_routes import Routes as SeatRoutes      # noqa: F401,E402
 # Own-branch worktree routes (WS3), over a real socket.
 from test_worktree_routes import WorktreeRoutes        # noqa: F401,E402
 # `corral-light worktrees`: list, restore, purge, resolve (WS5.1).
-from test_worktrees_cli import TheList, TheRestore, ThePurge, TheResolve, TheDispatch  # noqa: F401,E402
+from test_worktrees_cli import (TheList, TheRestore, ThePurge, TheResolve,  # noqa: F401,E402
+                                TheDoctor, TheDispatch)
 
 
 if __name__ == "__main__":
