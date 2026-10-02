@@ -163,15 +163,23 @@ check(document.title === '1 need you · Corral',
     + `waiting agent that the tab does not announce is the whole defect`);
 
 /* And the wiring that makes the tick closed, rather than a comment claiming
- * it is: render() must call setTitle, and the event reducer must call
- * render(). Either one missing and every case above is theatre. */
+ * it is: render() must call setTitle, the event reducer must end by
+ * scheduling a render, and that schedule must reach render() (within one
+ * animation frame; renders coalesce so a burst of events paints once).
+ * Any one missing and every case above is theatre. */
 check(/setTitle\(panes\)/.test(fn('render')),
       'render() does not call setTitle(panes) — the title would only move on '
     + 'a full refresh, if at all');
 const reducer = src.slice(src.indexOf("if (ev.kind === 'permission')"));
-check(/^[\s\S]{0,4000}?\brender\(\);/.test(reducer),
-      'the event reducer no longer ends in render() — a permission event '
-    + 'would not repaint the title in the tick it arrived');
+check(/^[\s\S]{0,4000}?\bscheduleRender\(\);/.test(reducer),
+      'the event reducer no longer ends in scheduleRender() — a permission '
+    + 'event would not repaint the title in the frame it arrived');
+check(/\brender\(\);/.test(fn('scheduleRender')),
+      'scheduleRender() never calls render() — the reducer\'s schedule would '
+    + 'paint nothing');
+check(/requestAnimationFrame\(run\)/.test(fn('scheduleRender')),
+      'scheduleRender() does not coalesce on requestAnimationFrame — a '
+    + 'streamed answer would paint the wall once per chunk again');
 
 /* ── the three surfaces render the projection, not the raw enum ────────── */
 /* Structural, and deliberately shallow: the real proof is the Playwright pass
