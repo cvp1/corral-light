@@ -9,6 +9,7 @@ Run alone: python3 -m unittest test_worktrees -v
 """
 import http.server
 import os
+import signal
 import socketserver
 import stat
 import tempfile
@@ -1390,6 +1391,151 @@ class TheDiscard(CreateCase):
             wt.discard(self.e, snap["tree"], registry=self.reg)
         self.assertEqual(cm.exception.reason, "changed")
         self.assertTrue(self.p.exists())
+
+
+CRASH_SCRIPT = r"""
+import os, sys, json
+sys.path.insert(0, sys.argv[1])
+import worktrees as wt
+entry = wt.Registry().read(sys.argv[2])
+action = sys.argv[3]
+snap = wt.snapshot(entry)
+if action == "commit":
+    wt.commit_tree(entry, snap["tree"], snap["index_id"], "crash test", expect_head=snap["head"])
+elif action == "discard":
+    wt.discard(entry, snap["tree"])
+print(json.dumps(snap))
+"""
+
+
+class TheReconcile(CreateCase):
+
+    def notes(self):
+        return wt.reconcile(self.reg)
+
+    def test_T_REC_1_a_healthy_registry_has_no_notes(self):
+        self.make()
+        self.assertEqual(self.notes(), [])
+
+    def test_T_REC_2_a_deleted_dir_is_missing_reported_once_and_never_pruned(self):
+        e = self.make()
+        import shutil
+        shutil.rmtree(e["path"])                    # the test's own temp tree
+        calls = []
+        real = wt.git
+
+        def spy(args, *a, **k):
+            calls.append(list(args))
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", spy):
+            n1 = self.notes()
+            n2 = self.notes()
+        self.assertEqual([n["id"] for n in n1], [e["id"]])
+        self.assertEqual(n2, [], "reported once")
+        self.assertEqual(self.reg.read(e["id"])["phase"], "missing")
+        self.assertFalse(any("prune" in c for c in calls))
+        self.assertIn(Path(e["path"]).name, real(["worktree", "list"], cwd=self.repo).text)
+
+    def test_T_REC_3_a_branch_deleted_by_hand_is_reported(self):
+        e = self.make()
+        wt.git(["checkout", "-q", "--detach"], cwd=e["path"])
+        wt.git(["branch", "-D", "corral/fix-login"], cwd=self.repo)
+        [n] = self.notes()
+        self.assertIn("corral/fix-login", n["note"])
+
+    def test_T_REC_4_an_unknown_dir_under_the_root_is_an_orphan(self):
+        e = self.make()
+        stray = Path(e["path"]).parent / "stray"
+        stray.mkdir()
+        [n] = self.notes()
+        self.assertEqual(n["kind"], "orphan")
+        self.assertEqual(n["path"], str(stray))
+        self.assertTrue(stray.exists())
+
+    def test_T_REC_5_the_users_own_worktrees_are_untouched_and_unlisted(self):
+        mine = self.tmp / "users-own"
+        wt.git(["worktree", "add", "-q", "-b", "mine", str(mine)], cwd=self.repo)
+        self.make()
+        self.assertEqual(self.notes(), [])
+        self.assertTrue(mine.exists())
+
+    def test_T_REC_6_a_vanished_repo_marks_entries_missing_and_does_not_raise(self):
+        e = self.make()
+        import shutil
+        shutil.rmtree(self.repo)                     # the test's own temp repo
+        notes = self.notes()
+        self.assertEqual(self.reg.read(e["id"])["phase"], "missing")
+        self.assertTrue(any(n["id"] == e["id"] for n in notes))
+
+    def test_an_intent_left_by_a_crash_before_add_becomes_missing(self):
+        pr = wt.probe(self.repo)
+        e = self.reg.create(owner_pane="p", path=str(wt.repo_dir(pr) / "never"), branch="refs/heads/corral/never",
+                            admin_name="never", repo_top=pr["repo_top"], common_dir=pr["common_dir"],
+                            base_ref=pr["branch"], base_sha=pr["head"], subdir="")
+        [n] = self.notes()
+        self.assertEqual(self.reg.read(e["id"])["phase"], "missing")
+        self.assertIn("did not finish", n["note"])
+
+    def test_an_intent_left_by_a_crash_after_add_becomes_active(self):
+        real_update = self.reg.update
+
+        def die_on_active(wt_id, **f):
+            if f.get("phase") == "active":
+                raise KeyboardInterrupt("simulated crash")
+            return real_update(wt_id, **f)
+        with mock.patch.object(self.reg, "update", die_on_active):
+            with self.assertRaises(KeyboardInterrupt):
+                self.make()
+        [e] = self.reg.all()
+        self.reg.update(e["id"], phase="intent", error=None)   # as a SIGKILL would have left it
+        self.notes()
+        self.assertEqual(self.reg.read(e["id"])["phase"], "active")
+
+    # ── crash runs: a real process SIGKILLed at each journalled boundary ──
+
+    def crash(self, action, at, e):
+        import subprocess
+        import sys
+        env = dict(os.environ, CORRAL_WT_TEST="1", CORRAL_WT_CRASH_AT=at)
+        r = subprocess.run([sys.executable, "-c", CRASH_SCRIPT, str(ROOT), e["id"], action],
+                           env=env, capture_output=True, timeout=120)
+        self.assertEqual(r.returncode, -signal.SIGKILL, r.stderr.decode()[-500:])
+
+    def test_T_CRS_2_commit_killed_at_each_stage_finishes_on_restart(self):
+        for i, at in enumerate(("commit:prepared", "commit:ref_moved", "commit:index")):
+            e = self.make(title=f"crash {i}", owner=f"pane{i:04d}")
+            p = Path(e["path"])
+            (p / "a.txt").write_text(f"reviewed {i}\n")
+            want_tree = wt.snapshot(e)["tree"]
+            self.crash("commit", at, e)
+            notes = self.notes()
+            got = self.reg.read(e["id"])
+            op = got["ops"][-1]
+            self.assertEqual(op["state"], "done", (at, op, notes))
+            tip = wt.git(["rev-parse", e["branch"]], cwd=p).text.strip()
+            self.assertEqual(tip, op["new"], at)
+            self.assertEqual(wt.git(["rev-parse", tip + "^{tree}"], cwd=p).text.strip(), want_tree)
+            self.assertEqual(wt.git(["status", "--porcelain"], cwd=p).text, "", at)
+            self.assertEqual(wt.git(["rev-list", "--count", f"{e['base_sha']}..{tip}"], cwd=p).text.strip(), "1")
+            snap = wt.snapshot(e)
+            again = wt.commit_tree(e, snap["tree"], snap["index_id"], "retry",
+                                   expect_head=snap["head"], registry=self.reg)
+            self.assertTrue(again["noop"], f"{at}: a retry made a second commit")
+
+    def test_T_RMV_15_T_CRS_5_discard_killed_mid_move_reports_the_true_location(self):
+        for i, at in enumerate(("discard:journalled", "discard:moved")):
+            e = self.make(title=f"dcrash {i}", owner=f"pane{i:04d}")
+            (Path(e["path"]) / "w.txt").write_text("work\n")
+            self.crash("discard", at, e)
+            self.notes()
+            got = self.reg.read(e["id"])
+            if at == "discard:journalled":
+                self.assertEqual(got["phase"], "active")
+                self.assertTrue(Path(e["path"]).exists())
+            else:
+                self.assertEqual(got["phase"], "trashed")
+                self.assertTrue(Path(got["trash_path"], "w.txt").exists())
+            self.assertEqual(got["ops"][-1]["state"], "done")
 
 
 def _alive(pid):
