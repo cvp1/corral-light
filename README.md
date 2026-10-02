@@ -467,9 +467,10 @@ can overwrite each other's files. Tick **Own branch** in the New dialog and
 the pane gets its own git worktree on a new branch, `corral/<name>`, cut from
 the branch your checkout is on. Your checkout is not touched: its uncommitted
 changes stay where they are, and the dialog says so. The row appears only
-when the folder is inside a git repository and the lane can use it (Claude,
-Codex and Grok; Gemini is held back because its lane runs without asking
-whatever the posture). When the repository cannot take one (no commits yet,
+when the folder is inside a git repository and the lane can use it. Lanes
+are approved per platform, from a test run on that platform: on Linux,
+Claude, Codex and Grok; on macOS, none yet. Gemini is held back everywhere
+because its lane runs without asking whatever the posture. When the repository cannot take one (no commits yet,
 on tmpfs, submodules, a sparse checkout, Git LFS without git-lfs, git older
 than 2.38), the row says why instead of offering the box.
 
@@ -580,7 +581,7 @@ Diagnostic output includes command names, configuration details, environment var
 | `CORRAL_LIGHT_CONSULT_CFG` | `~/.config/corral-light/consult-session.json` | The paired session `consult` keeps (0600). |
 | `CORRAL_LIGHT_WORKTREES` | `<state>/worktrees` | Where own-branch worktrees live. Must be on disk, not tmpfs. |
 | `CORRAL_LIGHT_WORKTREES_ENABLED` | `1` | `0` refuses new own-branch panes; existing ones still resume and can be discarded. |
-| `CORRAL_LIGHT_WORKTREE_LANES` | `claude,codex,grok` | Lanes allowed an own branch. |
+| `CORRAL_LIGHT_WORKTREE_LANES` | Linux: `claude,codex,grok`; macOS: none | Lanes allowed an own branch; setting it overrides the per-platform list. |
 
 The default address is local-only by design. If you change `CORRAL_LIGHT_BIND` to expose the server on a network, protect access with your network controls and pairing code.
 
