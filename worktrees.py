@@ -29,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import stat
 import subprocess
@@ -1298,18 +1299,44 @@ LOCK_WAIT_S = 5
 IGNORED_INVENTORY_MAX = 500
 
 
-def processes_in(path):
-    """[(pid, command)] of this user's processes whose cwd or an open fd is inside `path`.
+SCAN_TIMEOUT_S = 20
 
-    Reads /proc, so it catches setsid'd grandchildren and the user's own
-    shells, not just the processes the hub started. Never includes us.
+
+class ScanFailed(Exception):
+    """The process scan could not answer. Discard refuses: it must fail closed."""
+
+
+def _have_proc():
+    return os.path.isdir("/proc/self/fd")
+
+
+def _lsof_bin():
+    """lsof, where macOS keeps it first; None when there is none."""
+    for cand in ("/usr/sbin/lsof", shutil.which("lsof")):
+        if cand and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def processes_in(path):
+    """[(pid, command)] of this user's processes whose cwd or an open file is inside `path`.
+
+    Linux reads /proc (it catches setsid'd grandchildren and the user's own
+    shells, not just what the hub started); elsewhere lsof +D (macOS has no
+    /proc: docs/worktree-plan-macos.md M1). Never includes us. Raises
+    ScanFailed when it cannot answer, so a caller never reads "none" into
+    "could not look".
     """
     root = os.path.realpath(path)
+    return _procs_proc(root) if _have_proc() else _procs_lsof(root)
+
+
+def _procs_proc(root):
     me, uid, found = os.getpid(), os.getuid(), []
     try:
         pids = [int(d) for d in os.listdir("/proc") if d.isdigit()]
-    except OSError:
-        return found
+    except OSError as e:
+        raise ScanFailed(f"cannot list /proc: {e}") from None
     for pid in pids:
         if pid == me:
             continue
@@ -1334,6 +1361,37 @@ def processes_in(path):
                 cmd = "?"
             found.append((pid, cmd[:120]))
     return found
+
+
+def _procs_lsof(root):
+    """lsof -F output: `p<pid>` starts a process, `c<command>` names it.
+
+    lsof's exit code is no signal (1 both when it finds processes and when a
+    path is bad), so: records mean found; no records and anything on stderr
+    means the scan failed; no records and silence means none.
+    """
+    lsof = _lsof_bin()
+    if not lsof:
+        raise ScanFailed("lsof is not installed, so open files cannot be checked")
+    try:
+        # cwd: beside the worktree, never inside it (lsof would count itself).
+        r = _run([lsof, "-nP", "-w", "-a", "-u", str(os.getuid()), "+D", root, "-F", "pc"],
+                 os.path.dirname(root), timeout=SCAN_TIMEOUT_S, check=False, max_out=8 << 20)
+    except GitTimeout:
+        raise ScanFailed(f"lsof took over {SCAN_TIMEOUT_S}s") from None
+    if r.truncated:
+        raise ScanFailed("lsof produced more output than can be read")
+    me, found, pid = os.getpid(), {}, None
+    for line in r.out.decode("utf-8", "replace").splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+            if pid != me:
+                found.setdefault(pid, "?")
+        elif line.startswith("c") and pid in found:
+            found[pid] = line[1:120]
+    if not found and (r.err.strip() or r.rc not in (0, 1)):
+        raise ScanFailed(f"lsof failed: {r.err_text.strip()[:200] or f'exit {r.rc}'}")
+    return sorted(found.items())
 
 
 def _wait_lock_gone(idx):
@@ -1361,7 +1419,11 @@ def discard(entry, tree, registry=None, tmp_dir=None):
     """
     registry = registry or Registry()
     p = entry["path"]
-    busy = processes_in(p)
+    try:
+        busy = processes_in(p)
+    except ScanFailed as e:
+        raise Refused("busy", f"could not check for processes inside the worktree ({e}); "
+                              "nothing was moved") from None
     if busy:
         raise Refused("busy", "still running inside the worktree: " +
                       ", ".join(f"pid {pid} ({cmd})" for pid, cmd in busy))
