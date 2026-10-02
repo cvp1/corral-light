@@ -647,12 +647,21 @@ def plan_slug(title, pr, fallback):
 ADD_TIMEOUT_S = 300
 
 
-class IdentityError(Exception):
-    """A worktree is not what the registry says. `reason`: missing | tampered | identity."""
+class Refused(Exception):
+    """An action refused for a machine-readable `reason` (a route answers 409 with it).
+
+    Reasons: busy, changed, identity, missing, tampered, signing, uncommitted,
+    remote_changed, non_ff, unknown.
+    """
 
     def __init__(self, reason, detail):
         self.reason = reason
+        self.detail = detail
         super().__init__(f"{reason}: {detail}")
+
+
+class IdentityError(Refused):
+    """A worktree is not what the registry says. `reason`: missing | tampered | identity."""
 
 
 def repo_lock_key(pr):
@@ -840,13 +849,20 @@ def _unlink_own_temp(path):
 
 
 @contextlib.contextmanager
-def _temp_index(tmp_dir, content):
-    """A private copy of an index, removed afterwards; the real one is never touched."""
+def _temp_index(tmp_dir, content, mtime_ns=None):
+    """A private copy of an index, removed afterwards; the real one is never touched.
+
+    Pass the real index's `mtime_ns`: git's racy-clean check compares each
+    entry's mtime with the index file's own mtime, and a copy stamped "now"
+    would make a same-size edit made in the same instant look unchanged.
+    """
     Path(tmp_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, path = tempfile.mkstemp(prefix=".corral-index-", dir=str(tmp_dir))
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(content)
+        if mtime_ns is not None:
+            os.utime(path, ns=(mtime_ns, mtime_ns))
         yield path
     finally:
         _unlink_own_temp(path)
@@ -876,35 +892,41 @@ def snapshot(entry, tmp_dir=None):
     Never: touches the real index, or rebuilds on a timer.
     """
     verify(entry)
-    p = entry["path"]
     with repo_lock(entry):
-        idx = _index_path(p)
+        return _snapshot_locked(entry, tmp_dir)
+
+
+def _snapshot_locked(entry, tmp_dir=None):
+    """snapshot() for a caller that already holds repo_lock(entry)."""
+    p = entry["path"]
+    idx = _index_path(p)
+    try:
+        real = Path(idx).read_bytes()
+        idx_mtime = os.stat(idx).st_mtime_ns
+    except FileNotFoundError:
+        real, idx_mtime = b"", None
+    head = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=p).text.strip()
+    too_big = []
+    for path in _names(p, ["ls-files", "--others", "--exclude-standard", "-z"]):
         try:
-            real = Path(idx).read_bytes()
-        except FileNotFoundError:
-            real = b""
-        head = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=p).text.strip()
-        too_big = []
-        for path in _names(p, ["ls-files", "--others", "--exclude-standard", "-z"]):
-            try:
-                st = os.lstat(os.path.join(p, path))
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode) and st.st_size > SNAP_UNTRACKED_MAX:
-                too_big.append({"path": path, "size": st.st_size})
-        specs = [b"."] + [b":(exclude,literal)" + os.fsencode(b["path"]) for b in too_big]
-        with _temp_index(tmp_dir or registry_dir() / "tmp", real) as tmp:
-            env = {"GIT_INDEX_FILE": tmp}
-            git(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], cwd=p,
-                env_extra=env, input=b"\0".join(specs) + b"\0", timeout=SNAPSHOT_TIMEOUT_S)
-            tree = git(["write-tree"], cwd=p, env_extra=env, timeout=SNAPSHOT_TIMEOUT_S).text.strip()
-        staged = set(_names(p, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD", "--"]))
-        unstaged = set(_names(p, ["diff", "--name-only", "-z", "--no-renames", "--"]))
-        ignored = _names(p, ["ls-files", "--others", "--ignored", "--exclude-standard",
-                             "--directory", "-z"])
-        pin = git(["commit-tree", tree, "-p", head], cwd=p,
-                  input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
-        git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
+            st = os.lstat(os.path.join(p, path))
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size > SNAP_UNTRACKED_MAX:
+            too_big.append({"path": path, "size": st.st_size})
+    specs = [b"."] + [b":(exclude,literal)" + os.fsencode(b["path"]) for b in too_big]
+    with _temp_index(tmp_dir or registry_dir() / "tmp", real, idx_mtime) as tmp:
+        env = {"GIT_INDEX_FILE": tmp}
+        git(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], cwd=p,
+            env_extra=env, input=b"\0".join(specs) + b"\0", timeout=SNAPSHOT_TIMEOUT_S)
+        tree = git(["write-tree"], cwd=p, env_extra=env, timeout=SNAPSHOT_TIMEOUT_S).text.strip()
+    staged = set(_names(p, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD", "--"]))
+    unstaged = set(_names(p, ["diff", "--name-only", "-z", "--no-renames", "--"]))
+    ignored = _names(p, ["ls-files", "--others", "--ignored", "--exclude-standard",
+                         "--directory", "-z"])
+    pin = git(["commit-tree", tree, "-p", head], cwd=p,
+              input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
+    git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
     return {"tree": tree, "head": head, "base_sha": entry["base_sha"],
             "index_id": hashlib.sha256(real).hexdigest(),
             "staged_differs": sorted(staged & unstaged), "too_big": too_big,
@@ -997,3 +1019,126 @@ def diff(entry, tree):
                     budget -= len(pr.out)
         files.append(f)
     return {"base": base, "tree": tree, "files": files, "truncated": truncated}
+
+
+# ── crash points (tests only) ─────────────────────────────────────────────────
+
+def _crash_point(name):
+    """SIGKILL ourselves at `name` when the crash suite asks (T-CRS-*). Inert otherwise."""
+    if os.environ.get("CORRAL_WT_TEST") == "1" and os.environ.get("CORRAL_WT_CRASH_AT") == name:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+# ── commit (D5) ───────────────────────────────────────────────────────────────
+
+COMMIT_TIMEOUT_S = 120
+RECOVERY_REF = "refs/corral/recovery/"
+
+
+def _ts():
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{secrets.token_hex(2)}"
+
+
+def _tree_of_index(p, content, tmp_dir):
+    """write-tree of an index's bytes, via a private copy (write-tree may rewrite the index)."""
+    with _temp_index(tmp_dir, content) as tmp:
+        return git(["write-tree"], cwd=p, env_extra={"GIT_INDEX_FILE": tmp}).text.strip()
+
+
+def _replace_index(idx, content):
+    """Swap `content` in as the real index the way git does: O_EXCL index.lock, then rename."""
+    lock = idx + ".lock"
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        raise Refused("busy", "another git process holds the worktree's index.lock") from None
+    try:
+        os.write(fd, content)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(lock, idx)
+
+
+def _reconcile_index(p, new, tmp_dir):
+    """Point the real index at commit `new` without touching the work tree (step 6)."""
+    idx = _index_path(p)
+    with _temp_index(tmp_dir, Path(idx).read_bytes(), os.stat(idx).st_mtime_ns) as tmp:
+        env = {"GIT_INDEX_FILE": tmp}
+        git(["read-tree", new], cwd=p, env_extra=env, timeout=COMMIT_TIMEOUT_S)
+        git(["update-index", "-q", "--refresh"], cwd=p, env_extra=env, check=False,
+            timeout=COMMIT_TIMEOUT_S)
+        content = Path(tmp).read_bytes()
+    _replace_index(idx, content)
+
+
+def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_dir=None):
+    """Commit exactly the reviewed `tree` on the pane's branch (the §2.2 protocol).
+
+    1. refuse if commit.gpgSign is set (commit-tree would not sign);
+    2. under the repo lock: refuse on index.lock; re-snapshot and require the
+       same tree and the same real-index identity; branch must be expect_head;
+    3. keep staged content that differs from the file as a recovery ref;
+    4. commit-tree → new, journalled `prepared`;
+    5. compare-and-swap update-ref, journalled `ref_moved`;
+    6. rebuild the index from `new` on a copy, refresh stat, swap in under
+       index.lock, journalled `done`;
+    7. postcondition: branch == new and the index's tree == the reviewed tree.
+    Never: runs hooks, amends, touches the work tree, runs read-tree -u, or
+    prompts for a key. Hub commits are unsigned; the Commit button says so.
+    """
+    registry = registry or Registry()
+    tmp_dir = tmp_dir or registry_dir() / "tmp"
+    if not (message or "").strip():
+        raise ValueError("a commit message is required")
+    p = entry["path"]
+    sign = git(["config", "--type=bool", "--get", "commit.gpgSign"], cwd=p, check=False)
+    if sign.text.strip() == "true":
+        raise Refused("signing", "this repository signs commits (commit.gpgSign); hub commits "
+                                 "cannot be signed, so commit in the worktree by hand")
+    v = verify(entry)
+    with repo_lock(entry):
+        idx = _index_path(p)
+        if os.path.exists(idx + ".lock"):
+            raise Refused("busy", "another git process holds the worktree's index.lock")
+        now = _snapshot_locked(entry, tmp_dir)
+        if now["tree"] != tree or now["index_id"] != index_id:
+            raise Refused("changed", "files changed since you opened review; refresh it")
+        v = verify(entry)
+        if v["oid"] != expect_head or now["head"] != expect_head:
+            raise Refused("identity", f"the branch moved since review (now {v['oid'][:12]})")
+        head_tree = git(["rev-parse", expect_head + "^{tree}"], cwd=p).text.strip()
+        if head_tree == tree:
+            return {"commit": None, "noop": True, "recovery_refs": []}
+        recovery = []
+        if now["staged_differs"]:
+            staged_tree = _tree_of_index(p, Path(idx).read_bytes(), tmp_dir)
+            keep = git(["commit-tree", staged_tree, "-p", expect_head], cwd=p,
+                       input=b"corral: staged content kept before hub commit\n").text.strip()
+            ref = f"{RECOVERY_REF}{entry['id']}/{_ts()}-index"
+            git(["update-ref", ref, keep, ""], cwd=p)
+            recovery.append(ref)
+            registry.update(entry["id"], recovery_refs=list(
+                registry.read(entry["id"]).get("recovery_refs") or []) + [ref])
+        msg = message.strip() + "\n"
+        new = git(["commit-tree", tree, "-p", expect_head], cwd=p, input=msg.encode(),
+                  timeout=COMMIT_TIMEOUT_S).text.strip()
+        op = registry.begin_op(entry["id"], "commit", stage="prepared", new=new,
+                               expect_old=expect_head, tree=tree)
+        _crash_point("commit:prepared")
+        r = git(["update-ref", entry["branch"], new, expect_head], cwd=p, check=False)
+        if r.rc != 0:
+            registry.set_op(entry["id"], op, state="done", stage="refused")
+            raise Refused("identity", "the branch moved while committing; nothing was committed")
+        registry.set_op(entry["id"], op, stage="ref_moved")
+        _crash_point("commit:ref_moved")
+        _reconcile_index(p, new, tmp_dir)
+        _crash_point("commit:index")
+        ok = (git(["rev-parse", entry["branch"]], cwd=p).text.strip() == new
+              and _tree_of_index(p, Path(idx).read_bytes(), tmp_dir) == tree)
+        registry.set_op(entry["id"], op, state="done" if ok else "unknown", stage="done")
+        if not ok:
+            raise Refused("unknown", "the commit landed but the index does not match; "
+                                     "resolve it with `corral-light worktrees`")
+        registry.update(entry["id"], last_commit=new)
+        return {"commit": new, "noop": False, "recovery_refs": recovery}

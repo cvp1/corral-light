@@ -744,6 +744,22 @@ class TheSnapshot(CreateCase):
         (p / "a.txt").write_text("y\n")
         self.assertNotEqual(wt.snapshot(e)["tree"], t1)
 
+    def test_T_SNP_7_a_racily_clean_same_size_edit_is_seen(self):
+        """git trusts stat data unless an entry is as new as the index file
+        itself ("racy clean"), then it re-reads content. A copied index must
+        keep the real one's mtime or that check silently stops working."""
+        e = self.make()
+        p = Path(e["path"])
+        a = p / "a.txt"
+        st = a.stat()
+        a.write_text("z\n")                               # same size as "a\n"
+        os.utime(a, ns=(st.st_atime_ns, st.st_mtime_ns))   # same mtime as checkout
+        idx = Path(wt._index_path(p))
+        os.utime(idx, ns=(st.st_mtime_ns, st.st_mtime_ns))  # entry is racily clean
+        time.sleep(1.1)                                    # a copy stamped now is a later second
+        base_tree = wt.git(["rev-parse", e["base_sha"] + "^{tree}"], cwd=p).text.strip()
+        self.assertNotEqual(wt.snapshot(e)["tree"], base_tree, "the edit was missed")
+
     def test_T_SNP_2b_the_real_index_is_never_touched(self):
         e = self.make()
         p = Path(e["path"])
@@ -926,6 +942,147 @@ class TheDiff(CreateCase):
         self.assertEqual((f["status"], f["old_path"], f["path"]), ("R", "a.txt", "b.txt"))
         raw = [c for c in calls if "diff-tree" in c and "--raw" in c][0]
         self.assertEqual(raw[:3], ["-c", "diff.renameLimit=1000", "diff-tree"])
+
+
+class TheCommit(CreateCase):
+
+    def setUp(self):
+        super().setUp()
+        self.e = self.make()
+        self.p = Path(self.e["path"])
+
+    def review(self):
+        return wt.snapshot(self.e)
+
+    def commit(self, snap, message="hub commit", **kw):
+        return wt.commit_tree(self.e, snap["tree"], snap["index_id"], message,
+                              expect_head=snap["head"], **kw)
+
+    def status(self):
+        return wt.git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=self.p).out
+
+    def test_T_CMT_1_the_commit_tree_is_exactly_the_reviewed_tree(self):
+        (self.p / "a.txt").write_text("reviewed\n")
+        (self.p / "n.txt").write_text("new\n")
+        snap = self.review()
+        r = self.commit(snap)
+        self.assertEqual(wt.git(["rev-parse", r["commit"] + "^{tree}"], cwd=self.p).text.strip(),
+                         snap["tree"])
+        self.assertEqual(wt.git(["rev-parse", self.e["branch"]], cwd=self.p).text.strip(), r["commit"])
+        self.assertEqual(wt.git(["rev-parse", r["commit"] + "^"], cwd=self.p).text.strip(), snap["head"])
+        self.assertEqual(self.reg.read(self.e["id"])["last_commit"], r["commit"])
+        self.assertEqual(self.reg.read(self.e["id"])["ops"][-1]["state"], "done")
+
+    def test_T_CMT_2_a_file_changed_after_review_refuses(self):
+        (self.p / "a.txt").write_text("reviewed\n")
+        snap = self.review()
+        (self.p / "a.txt").write_text("changed after\n")
+        with self.assertRaises(wt.Refused) as cm:
+            self.commit(snap)
+        self.assertEqual(cm.exception.reason, "changed")
+        self.assertEqual(wt.git(["rev-parse", self.e["branch"]], cwd=self.p).text.strip(), snap["head"])
+
+    def test_T_CMT_3_a_moved_branch_refuses(self):
+        (self.p / "a.txt").write_text("reviewed\n")
+        snap = self.review()
+        moved = wt.git(["commit-tree", snap["tree"], "-p", snap["head"]], cwd=self.p,
+                       input=b"external\n").text.strip()
+        wt.git(["update-ref", self.e["branch"], moved], cwd=self.p)
+        with self.assertRaises(wt.Refused) as cm:
+            self.commit(snap)
+        self.assertEqual(cm.exception.reason, "identity")
+        self.assertEqual(wt.git(["rev-parse", self.e["branch"]], cwd=self.p).text.strip(), moved)
+
+    def test_T_CMT_4_hooks_are_not_run(self):
+        hooks = self.repo / ".git" / "hooks"
+        marker = self.tmp / "hook-ran"
+        for h in ("pre-commit", "commit-msg", "post-commit"):
+            f = hooks / h
+            f.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+            f.chmod(0o755)
+        (self.p / "a.txt").write_text("x\n")
+        self.commit(self.review())
+        self.assertFalse(marker.exists())
+
+    def test_T_CMT_5_status_is_clean_for_the_reviewed_paths_and_later_files_stay(self):
+        (self.p / "a.txt").write_text("x\n")
+        snap = self.review()
+        self.commit(snap)
+        (self.p / "late.txt").write_text("after\n")
+        self.assertEqual(self.status(), b"?? late.txt\0")
+
+    def test_T_CMT_6_empty_message_refused_and_nothing_to_commit_is_a_noop(self):
+        (self.p / "a.txt").write_text("x\n")
+        with self.assertRaises(ValueError):
+            self.commit(self.review(), message="  \n")
+        r = self.commit(self.review(), message="m")
+        self.assertTrue(r["commit"])
+        r2 = self.commit(self.review(), message="again")
+        self.assertTrue(r2["noop"])
+        self.assertIsNone(r2["commit"])
+
+    def test_T_CMT_7_a_force_added_file_is_committed_and_a_second_commit_is_a_noop(self):
+        (self.p / ".gitignore").write_text("*.log\n")
+        (self.p / "keep.log").write_text("forced\n")
+        wt.git(["add", "-f", "keep.log"], cwd=self.p)
+        r = self.commit(self.review())
+        names = wt.git(["ls-tree", "-r", "--name-only", r["commit"]], cwd=self.p).text.split()
+        self.assertIn("keep.log", names)
+        self.assertEqual(self.status(), b"")
+        self.assertTrue(self.commit(self.review())["noop"])
+
+    def test_T_CMT_8_gpg_sign_configured_refuses_fast(self):
+        wt.git(["config", "commit.gpgSign", "true"], cwd=self.repo)
+        (self.p / "a.txt").write_text("x\n")
+        snap = self.review()
+        t0 = time.monotonic()
+        with self.assertRaises(wt.Refused) as cm:
+            self.commit(snap)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(cm.exception.reason, "signing")
+        idx = Path(wt._index_path(self.p))
+        self.assertFalse(Path(str(idx) + ".lock").exists())
+
+    def test_T_CMT_9_no_tracked_file_shows_modified_afterwards(self):
+        for i in range(30):
+            (self.p / f"f{i}.txt").write_text(f"{i}\n")
+        (self.p / "a.txt").write_text("x\n")
+        self.commit(self.review())
+        self.assertEqual(self.status(), b"")
+        diff = wt.git(["diff", "--name-only"], cwd=self.p).out
+        self.assertEqual(diff, b"")
+
+    def test_T_CMT_10_a_staged_blob_that_differs_is_kept_as_a_recovery_ref(self):
+        (self.p / "a.txt").write_text("staged version\n")
+        wt.git(["add", "a.txt"], cwd=self.p)
+        (self.p / "a.txt").write_text("working version\n")
+        snap = self.review()
+        self.assertEqual(snap["staged_differs"], ["a.txt"])
+        r = self.commit(snap)
+        [ref] = r["recovery_refs"]
+        self.assertTrue(ref.startswith(f"refs/corral/recovery/{self.e['id']}/"))
+        self.assertEqual(wt.git(["show", f"{ref}:a.txt"], cwd=self.p).text, "staged version\n")
+        self.assertEqual(wt.git(["show", f"{r['commit']}:a.txt"], cwd=self.p).text, "working version\n")
+        self.assertIn(ref, self.reg.read(self.e["id"])["recovery_refs"])
+
+    def test_T_CMT_11_the_real_index_changing_after_review_refuses(self):
+        (self.p / "a.txt").write_text("x\n")
+        (self.p / "b.txt").write_text("b\n")
+        snap = self.review()
+        wt.git(["add", "b.txt"], cwd=self.p)      # same tree via add -A, different index
+        with self.assertRaises(wt.Refused) as cm:
+            self.commit(snap)
+        self.assertEqual(cm.exception.reason, "changed")
+
+    def test_T_CMT_12_an_index_lock_refuses_and_is_never_removed(self):
+        (self.p / "a.txt").write_text("x\n")
+        snap = self.review()
+        lock = Path(wt._index_path(self.p) + ".lock")
+        lock.write_text("")
+        with self.assertRaises(wt.Refused) as cm:
+            self.commit(snap)
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertTrue(lock.exists())
 
 
 def _alive(pid):
