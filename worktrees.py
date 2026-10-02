@@ -761,3 +761,60 @@ def verify(entry):
                                         f"not {entry['branch']}")
     oid = git(["rev-parse", "--verify", "-q", entry["branch"] + "^{commit}"], cwd=p).text.strip()
     return {"oid": oid}
+
+
+# ── summary (F3) ──────────────────────────────────────────────────────────────
+
+SUMMARY_TIMEOUT_S = 20
+
+
+def summary(entry):
+    """Files changed and lines added/removed vs the base. Writes nothing.
+
+    Tracked: `git diff --numstat <base_sha>` (working tree vs the base commit,
+    so agent commits still count). Untracked: `ls-files --others
+    --exclude-standard`. Runs with GIT_OPTIONAL_LOCKS=0; never touches any
+    index and never writes objects. `digest` changes whenever any changed
+    file's content-relevant stat changes, so the rail can tell "new since
+    you looked" even when the totals stay the same.
+    """
+    p = entry["path"]
+    q = dict(cwd=p, timeout=SUMMARY_TIMEOUT_S, optional_locks_off=True)
+    num = git(["diff", "--numstat", "-z", "--no-renames", "--no-textconv", "--no-ext-diff",
+               entry["base_sha"], "--"], **q)
+    files, added, deleted, binary, paths = 0, 0, 0, [], []
+    for rec in num.out.split(b"\0"):
+        if not rec:
+            continue
+        a, d, path = rec.split(b"\t", 2)
+        path = path.decode("utf-8", "surrogateescape")
+        files += 1
+        paths.append(path)
+        if a == b"-":
+            binary.append(path)
+        else:
+            added += int(a)
+            deleted += int(d)
+    other = git(["ls-files", "--others", "--exclude-standard", "-z"], **q)
+    untracked = []
+    for rec in other.out.split(b"\0"):
+        if not rec:
+            continue
+        path = rec.decode("utf-8", "surrogateescape")
+        try:
+            size = os.lstat(os.path.join(p, path)).st_size
+        except OSError:
+            size = None
+        untracked.append({"path": path, "size": size})
+        paths.append(path)
+    h = hashlib.sha256(num.out + b"\1" + other.out)
+    for path in sorted(paths):
+        try:
+            st = os.lstat(os.path.join(p, path))
+            h.update(f"{path}\0{st.st_size}\0{st.st_mtime_ns}\0{st.st_ino}\n".encode(
+                "utf-8", "surrogateescape"))
+        except OSError:
+            h.update(f"{path}\0gone\n".encode("utf-8", "surrogateescape"))
+    return {"files": files + len(untracked), "added": added, "deleted": deleted,
+            "binary": binary, "untracked": untracked, "digest": h.hexdigest()[:16],
+            "truncated": num.truncated or other.truncated}
