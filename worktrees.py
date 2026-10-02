@@ -1602,6 +1602,22 @@ def reconcile(registry=None):
                 if not t or os.path.realpath(t) not in reg or not os.path.isdir(t):
                     registry.update(e["id"], phase="missing", error="the trashed copy is gone")
                     note(e, "missing", f"the trashed copy of {e['branch']} is gone")
+    for child in orphans(known):
+        note(None, "orphan", f"{child} is under the worktree root but in no registry entry",
+             path=str(child))
+    return notes
+
+
+def orphans(known=None, registry=None):
+    """Paths under the worktree root (and its trash) that no registry entry names.
+
+    Read-only: lists, never removes. `known` is a set of realpaths; without
+    it, every entry's path and trash path are read from the registry.
+    """
+    if known is None:
+        known = {os.path.realpath(e[k]) for e in (registry or Registry()).all()
+                 for k in ("path", "trash_path") if e.get(k)}
+    out = []
     root = worktree_root()
     if root.is_dir():
         for rd in sorted(root.iterdir()):
@@ -1609,6 +1625,5 @@ def reconcile(registry=None):
                 continue
             for child in sorted(rd.iterdir()):
                 if os.path.realpath(child) not in known:
-                    note(None, "orphan", f"{child} is under the worktree root but in no registry entry",
-                         path=str(child))
-    return notes
+                    out.append(child)
+    return out

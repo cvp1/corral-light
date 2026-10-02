@@ -23,6 +23,10 @@
 #                resume | close | forget | reopen | rename | seat | config |
 #                attach | quote     the whole pane surface from a terminal
 #   corral-light rig save|up|list|rm <name>   saved seats
+#   corral-light worktrees [list|restore|purge|resolve]   own-branch worktrees:
+#                               list them (read only), restore a discarded one,
+#                               purge one for good (typed branch name), settle an
+#                               action with an unknown outcome (worktrees_cli.py)
 #   corral-light lanes check [--job]   installed against latest per lane (read only;
 #                               --job = edge-triggered notices for a scheduler)
 #   corral-light lanes update <lane>   stage a lane's newer adapter, prove it on a
@@ -38,6 +42,7 @@ case "${1:-}" in
   pair)  exec "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); import auth; ok,msg=auth.approve(sys.argv[2] if len(sys.argv)>2 else ''); print(msg, flush=True); sys.exit(0 if ok else 2)" "$D" "${2:-}" ;;
   serve) exec "$PY" "$D/hub.py" ;;
   doctor) exec "$PY" "$D/doctor.py" ;;
+  worktrees) shift; exec "$PY" "$D/worktrees_cli.py" "$@" ;;
   launch) shift; exec "$PY" "$D/launch.py" "$@" ;;
   install-service) shift; exec "$PY" "$D/install_service.py" "$@" ;;
   diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;

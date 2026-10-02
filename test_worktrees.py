@@ -1916,6 +1916,20 @@ class LifecycleSafety(LifecycleCase):
             self.assertFalse(_alive(pid))
         self.assertEqual(self.entry(p)["phase"], "trashed")
 
+    def test_T_RMV_4b_restored_from_another_process_the_pane_resumes(self):
+        """The CLI restores through the registry, not the hub: Resume must read
+        the entry as it is now, not the reason cached at discard."""
+        p = self.pane()
+        self.say(p, "write a.txt kept")
+        snap = self.mgr.worktree_snapshot(p.id)
+        self.mgr.worktree_discard(p.id, snap["tree"])
+        with self.assertRaises(ValueError):
+            p.resume()
+        wt.restore(self.entry(p), registry=wt.Registry())     # as `corral-light worktrees restore`
+        p.resume()
+        self.assertEqual(p.state, "ready", p.error)
+        self.assertEqual(Path(self.entry(p)["path"], "a.txt").read_text().strip(), "kept")
+
     def test_T_RMV_14_a_message_sent_during_discard_is_never_dispatched(self):
         p = self.pane()
         self.say(p, "write a.txt x")

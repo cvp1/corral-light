@@ -779,8 +779,12 @@ class Pane(_core.PaneBase):
         """Attach a fresh agent process to this pane's conversation (from detached or dead)."""
         if self.state not in self.RESUMABLE:
             raise ValueError(f"pane is {self.state}, not detached or dead")
-        if self.worktree_id and self.worktree_blocked:
-            raise ValueError(self.worktree_blocked)
+        if self.worktree_id:
+            # Read the entry as it is now: the CLI restores or resolves it from
+            # another process, so a reason cached at discard may be stale.
+            self.worktree_blocked = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self))
+            if self.worktree_blocked:
+                raise ValueError(self.worktree_blocked)
         if not self.acp_session and self.worktree_id:
             # D14: a worktree pane whose first start failed retries, in place.
             self.mgr._reserve_live(self)
