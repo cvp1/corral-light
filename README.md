@@ -24,8 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh
 (No `curl`? `wget -qO- https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash` does the same.)
 
 That is the whole install. It asks two questions at the start — which
-assistants you have an account for, and whether Claude may keep memory
-between conversations — then works on its own for about five minutes on a
+assistants you have an account for (Enter means Claude only), and whether
+Claude may remember past conversations — then works on its own for about five minutes on a
 normal connection (twenty with Gemini, which is a 1.5 GB download). At the
 end it offers each assistant's sign-in, one at a time, and opens your browser
 on Corral Light, already paired. Then you can start typing.
@@ -47,8 +47,8 @@ one on most desktops). Everything after that is the installer's job.
 
 | Step | What it checks, then does |
 |---|---|
-| 1 | Confirms Linux, your CPU, glibc, a desktop and free disk space. Refuses to run as root. |
-| 2 | Installs any missing base tools with your package manager, after showing you the command. Checks the internet. Then asks its two questions. |
+| 1 | Confirms Linux, your CPU, glibc and a desktop. Refuses to run as root. Then asks its two questions, before anything is installed or downloaded. |
+| 2 | Installs any missing base tools with your package manager, after showing you the command. Checks the internet and free disk space. |
 | 3 | Clones this repo to `~/tools/corral-light` and AI-OS Seed to `~/tools/ai-os-seed`, each at a pinned version. Puts the `corral-light` command on your PATH. |
 | 4 | Downloads a private copy of Node.js (checksum verified) into `~/.local/share/corral-light/node`. Your system's Node, if any, is not touched. |
 | 5 | Installs the Claude and ChatGPT adapters from the lock file (`npm ci`). |
