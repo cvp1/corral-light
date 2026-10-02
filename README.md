@@ -21,9 +21,18 @@ Open a terminal and paste this:
 curl -fsSL https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash
 ```
 
-That is the whole install. About five minutes on a normal connection (twenty
-with Gemini, which is a 1.5 GB download). When it finishes, your browser is
-open on Corral Light, already signed in to it, and you can start typing.
+(No `curl`? `wget -qO- https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash` does the same.)
+
+That is the whole install. It asks two questions at the start — which
+assistants you have an account for, and whether Claude may keep memory
+between conversations — then works on its own for about five minutes on a
+normal connection (twenty with Gemini, which is a 1.5 GB download). At the
+end it offers each assistant's sign-in, one at a time, and opens your browser
+on Corral Light, already paired. Then you can start typing.
+
+Honest limit: on Linux there is no safe way to make a web link run an
+installer, so this is one line to paste into a terminal (Ctrl+Alt+T opens
+one on most desktops). Everything after that is the installer's job.
 
 **What you need**
 
@@ -32,28 +41,36 @@ open on Corral Light, already signed in to it, and you can start typing.
 | Computer | Linux on x86-64 or arm64 — Ubuntu, Debian, Fedora, Arch, openSUSE, Alpine. A desktop, so a browser can open. |
 | Accounts | At least one of: Claude (Pro or Max), ChatGPT (Plus, Pro or Team), Grok (SuperGrok or X Premium), a Google account for Gemini. The installer asks you to sign in to each one you chose; you can skip any of them and come back later. |
 | Disk | About 600 MB; 2.1 GB with Gemini. |
-| Your password | Only if a basic tool is missing (`git`, `python3`, `curl`, `cron`). The installer names what it will install and runs your distro's own package manager, nothing else. |
+| Your password | Only if a basic tool is missing (`git`, `python3`, `curl`, `cron`). The installer names what it will install and runs your distro's own package manager, nothing else. Nothing shows while you type the password; that is normal. |
 
 **What the installer does, in order**
 
 | Step | What it checks, then does |
 |---|---|
-| 1 | Confirms Linux, your CPU, a desktop and an internet connection. Refuses to run as root. |
-| 2 | Installs any missing base tools with your package manager, after showing you the command. |
+| 1 | Confirms Linux, your CPU, glibc, a desktop and free disk space. Refuses to run as root. |
+| 2 | Installs any missing base tools with your package manager, after showing you the command. Checks the internet. Then asks its two questions. |
 | 3 | Clones this repo to `~/tools/corral-light` and AI-OS Seed to `~/tools/ai-os-seed`, each at a pinned version. Puts the `corral-light` command on your PATH. |
 | 4 | Downloads a private copy of Node.js (checksum verified) into `~/.local/share/corral-light/node`. Your system's Node, if any, is not touched. |
 | 5 | Installs the Claude and ChatGPT adapters from the lock file (`npm ci`). |
-| 6 | Installs Claude Code (Anthropic's own installer), the Grok CLI (pinned, into a private prefix) and the Antigravity runtime for Gemini (pinned, checksum verified). |
-| 7 | Installs AI-OS Seed into `~/aios`, runs its selftests and its demo job through the real run logger, writes your `CLAUDE.md` through Seed's stage-then-approve gate, starts the memory mesh, offers to wire the memory hooks (one yes/no), and syncs the scheduler to cron. Then runs Seed's post-install audit. |
-| 8 | Installs Corral Light as a **user** service (systemd), starts it, enables it to survive logout, and enables the watchdog timer. Waits until the hub answers. |
-| 9 | Offers each assistant's own sign-in, one at a time. Each opens your browser (or prints a device code if there is no display). |
+| 6 | Installs Claude Code (a pinned version, through Anthropic's own installer, which verifies the binary; Claude Code then keeps itself current), the Grok CLI (pinned, into a private prefix) and the Antigravity runtime for Gemini (pinned, checksum verified). |
+| 7 | Installs AI-OS Seed into `~/aios`, runs its selftests and its demo job through the real run logger, writes your `CLAUDE.md` through Seed's stage-then-approve gate, starts the memory mesh, wires the memory hooks if you said yes, and syncs the scheduler to cron. Then runs Seed's post-install audit. On a re-run, each of these is checked separately, so a run that stopped halfway finishes next time. |
+| 8 | Refuses a port another program holds. Installs Corral Light as a **user** service (systemd), starts it (or restarts it if the code changed), enables it to survive logout, and enables the watchdog timer. Waits until a hub that identifies itself as Corral Light answers. |
+| 9 | Offers each assistant's own sign-in, one at a time. Each opens your browser (or prints a device code if there is no display). Any of them can be skipped. |
 | 10 | Opens Corral Light in your browser, already paired (`corral-light launch`). |
-| 11 | Writes a receipt and prints `corral-light doctor`. |
+| 11 | Writes a receipt and prints what is done and what is still to do, per assistant, with the exact command for each. |
 
 Every step checks before it changes anything, so **running the same line
 again is safe**: it updates what moved and repairs what is missing, and never
 installs twice. Everything it prints also goes to
-`~/.local/share/corral-light/install.log`.
+`~/.local/share/corral-light/install.log`, and the versions it actually
+installed (down to the git commit) go to `install-receipt.json` beside it.
+
+What is pinned, and what is not: Seed's tag, Node, the two adapters (lock
+file), the Grok CLI and the Antigravity runtime are pinned and
+checksum-verified where a checksum exists. Corral Light itself installs from
+`master` unless you set `CORRAL_LIGHT_REF` to a commit; the commit used is
+in the receipt. Claude Code is installed at a pinned version through
+Anthropic's installer and then updates itself, which is Anthropic's policy.
 
 **Choosing what to install**
 
@@ -62,10 +79,10 @@ and pass options:
 
 ```
 curl -fsSLO https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh
-bash install.sh --lanes claude,grok          # just these two
+bash install.sh --lanes claude,grok          # just these two (otherwise it asks)
 bash install.sh --workspace ~/work/aios      # Seed somewhere other than ~/aios
 bash install.sh --skip-logins                # sign in later (see below)
-bash install.sh --yes                        # no questions
+bash install.sh --yes                        # no questions: all four assistants, memory on
 bash install.sh --help                       # every option, and every version it pins
 ```
 
