@@ -148,6 +148,18 @@ class Behaviour(_Run):
         self.assertTrue(log.is_file())
         self.assertIn("Checking this machine", log.read_text(encoding="utf-8"))
 
+    def test_unexpected_failure_inside_main_stops_the_run_and_names_the_step(self):
+        # The ERR trap must be live INSIDE the `main | tee` subshell: a plain
+        # failing command (not a die) has to end the run with the step named.
+        _stub(self.stubs, "curl", 'exit 0')                       # internet "reachable"
+        _stub(self.stubs, "git", 'echo "git stub: boom" >&2; exit 1')
+        r = self.run_sh("--yes", "--no-service", "--no-schedule")
+        self.assertNotEqual(r.returncode, 0)
+        out = r.stdout + r.stderr
+        self.assertIn("Step failed: Fetching Corral Light and AI-OS Seed", out)
+        self.assertNotIn("Node.js", out.split("Step failed")[0].split("[4/11]")[-1] if "[4/11]" in out else "")
+        self.assertFalse((self.home / ".local/share/corral-light/node").exists())
+
     def test_uninstall_on_an_empty_home_is_a_clean_no_op(self):
         r = self.run_sh("--uninstall", "--yes")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

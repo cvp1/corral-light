@@ -74,12 +74,12 @@ Anthropic's installer and then updates itself, which is Anthropic's policy.
 
 **Choosing what to install**
 
-The one-liner installs all four assistants. To choose, download the script
-and pass options:
+The one-liner asks which assistants you have; pressing Enter means Claude
+only. To decide up front, download the script and pass options:
 
 ```
 curl -fsSLO https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh
-bash install.sh --lanes claude,grok          # just these two (otherwise it asks)
+bash install.sh --lanes claude,grok          # just these two (otherwise it asks; Enter = Claude only)
 bash install.sh --workspace ~/work/aios      # Seed somewhere other than ~/aios
 bash install.sh --skip-logins                # sign in later (see below)
 bash install.sh --yes                        # no questions: all four assistants, memory on
