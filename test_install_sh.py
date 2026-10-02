@@ -84,6 +84,11 @@ class Static(unittest.TestCase):
         self.assertIn("--approve memory-hooks --apply", TEXT)
         self.assertNotRegex(TEXT, r'>\s*"\$AIOS/CLAUDE\.md"')
 
+    def test_no_piped_grep_q_under_pipefail(self):
+        # grep -q exits at the first match; under pipefail the producer's SIGPIPE
+        # then fails the whole pipeline (seen live: the glibc probe died on Arch).
+        self.assertNotRegex(TEXT, r"\|\s*grep -q")
+
     def test_no_vendor_api_keys(self):
         for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GROK_CODE_XAI_API_KEY"):
             self.assertNotIn(key, TEXT)
