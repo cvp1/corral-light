@@ -297,18 +297,31 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 /* One-pane mode: fill the grid's measured height so only the transcript scrolls. */
 .grid.one{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr);align-content:stretch}
 .grid.one .pane{height:100%}
+/* With minimized chips the bar takes its own content-sized row above the pane;
+   in the single stretch row it collapsed to a few pixels. */
+.grid.one:has(> .minbar){grid-template-rows:auto minmax(0,1fr)}
 /* Minimized chips: one row that scrolls horizontally like browser tabs; full
    title and state live in the tooltip/aria-label. */
-.minbar{grid-column:1/-1;display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;padding:2px 2px 6px}
+.minbar{grid-column:1/-1;display:flex;align-items:flex-start;gap:8px;flex-wrap:nowrap;
+  overflow-x:auto;overflow-y:hidden;padding:1px 2px 0;scrollbar-width:thin;
+  /* Fixed height: grid sizing ignores a scroll container's own scrollbar, and its
+     automatic minimum is 0, so an auto-height bar was squeezed or overlapped the
+     pane below. 33px of chips plus 11px held for the scrollbar; the negative
+     margin hands that room back to the gap when nothing scrolls. */
+  height:44px;margin-bottom:-11px;box-sizing:border-box}
+.minbar::before{content:'Minimized';flex:none;height:32px;line-height:32px;padding:0 4px 0 2px;font-family:var(--mono);
+  font-size:10.5px;letter-spacing:.7px;text-transform:uppercase;color:var(--faint)}
 /* Uniform fixed-size tabs, so a chip's width never depends on its title. */
-.minchip{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);
-  border-radius:8px;padding:3px 10px;font-size:11.5px;cursor:pointer;color:var(--dim);
-  flex:0 0 190px;width:190px;min-width:0;height:26px;box-sizing:border-box}
+.minchip{display:flex;align-items:center;gap:8px;background:var(--raise);border:1px solid var(--line2);
+  border-radius:10px;padding:0 12px;font-size:12.5px;cursor:pointer;color:var(--ink);
+  flex:0 0 220px;width:220px;min-width:0;height:32px;box-sizing:border-box;
+  box-shadow:var(--shadow-sm);transition:border-color .12s,transform .12s,background .12s}
 .minchip .mt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 @media (pointer:coarse){.minchip{min-height:28px}}
-.minchip:hover{border-color:var(--ember);color:var(--ink)}
+.minchip:hover,.minchip:focus-visible{border-color:var(--ember);color:var(--ink);
+  background:color-mix(in srgb,var(--raise) 82%,var(--ember) 18%);transform:translateY(-1px)}
 .minchip .mt{flex:1;text-align:left}
-.minchip .d{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+.minchip .d{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none;box-sizing:border-box}
 /* Mark the pane that owns the whole grid. */
 .pane.solo .ph::before{content:'⛶ full';font-family:var(--mono);font-size:10.5px;
   text-transform:uppercase;letter-spacing:.7px;border:1px solid var(--line2);
@@ -325,7 +338,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip.d-your-turn .d{background:var(--sage);animation:none}
 .minchip.d-dead .d{background:var(--rust);animation:none}
 .minchip.d-idle .d{background:var(--line2);animation:none}
-.minchip.d-idle{opacity:.78}
+.minchip.d-idle{color:var(--dim)}
 .minchip.d-paused .d{background:transparent;border:1px solid var(--line2);animation:none}
 .empty{grid-column:1/-1;display:grid;place-items:center;height:70vh;text-align:center;color:var(--dim);
   /* Rows packed in the middle so the first-run lines read as one group. */
@@ -695,7 +708,7 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .perm .why.dig{font-size:10.5px;color:var(--faint);letter-spacing:.03em}
 
 /* ── status bar: a fixed strip under the whole app ── */
-.app{height:calc(100vh - 25px)}
+body:has(> .statusbar) .app{height:calc(100vh - 25px)}
 .statusbar{position:fixed;left:0;right:0;bottom:0;height:25px;z-index:30;
   display:flex;align-items:center;gap:16px;padding:0 14px;overflow:hidden;
   white-space:nowrap;background:var(--panel);border-top:1px solid var(--line);
@@ -992,7 +1005,7 @@ dialog{border-radius:16px;box-shadow:var(--shadow-md);backdrop-filter:blur(24px)
 dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 .statusbar{height:27px;gap:14px;border-top-color:var(--hairline);
   background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(20px)}
-.app{height:calc(100vh - 27px)}
+body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 .mobile-actions{display:none}
 
 @media(max-width:1100px){
@@ -1035,7 +1048,8 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
     border-radius:8px;background:var(--raise);color:var(--ink);font:inherit}
   .mobile-actions button{width:34px;font-size:20px;line-height:1}
   .mobile-actions select{min-width:0;flex:1;padding:0 8px}
-  .grid{padding-top:58px}
+  /* Clear the floating .mobile-actions bar (top 34px + 46px tall). */
+  .grid{padding-top:92px}
 }
 
 /* UI session stage (browser_ui.py). Scoped under .uistage because .stage and
