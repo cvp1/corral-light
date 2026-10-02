@@ -1,0 +1,223 @@
+#!/usr/bin/python3
+"""Tests for worktrees.py: per-pane git worktrees (plan: docs/worktree-review-plan.md).
+
+Real git in temp repos, never the user's. Test IDs (T-GIT-*, T-REG-*, ...)
+are the plan's §5.2 catalogue.
+
+Collected by test_corral_light.py, so `python3 test_corral_light.py` runs it.
+Run alone: python3 -m unittest test_worktrees -v
+"""
+import http.server
+import os
+import socketserver
+import stat
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent
+FIXTURES = ROOT / "testkit" / "fixtures" / "merge-tree"
+
+# Isolate every git call in this suite from the user's config.
+TEST_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+    "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+}
+
+import worktrees as wt  # noqa: E402
+
+
+class GitCase(unittest.TestCase):
+    """A temp dir with one initialised repo; the env is isolated per test."""
+
+    def setUp(self):
+        self._env = mock.patch.dict(os.environ, TEST_ENV)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        self.tmp = Path(tempfile.mkdtemp(prefix="corral-wt-test-"))
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        wt.git(["init", "-q", "-b", "main"], cwd=self.repo)
+        (self.repo / "a.txt").write_text("a\n")
+        wt.git(["add", "-A"], cwd=self.repo)
+        wt.git(["commit", "-qm", "base"], cwd=self.repo)
+
+    def stub_git(self, body):
+        """A fake git binary (a shell script) for wrapper behaviour tests."""
+        p = self.tmp / "stub-git"
+        p.write_text("#!/bin/sh\n" + body + "\n")
+        p.chmod(p.stat().st_mode | stat.S_IXUSR)
+        return str(p)
+
+
+class TheGitWrapper(GitCase):
+
+    def test_T_GIT_1_nonzero_raises_with_rc_and_capped_stderr(self):
+        with self.assertRaises(wt.GitError) as cm:
+            wt.git(["rev-parse", "--verify", "no-such-ref"], cwd=self.repo)
+        e = cm.exception
+        self.assertEqual(e.rc, 128)
+        self.assertIn("rev-parse", " ".join(e.cmd))
+        self.assertLessEqual(len(e.err), 400)
+        r = wt.git(["rev-parse", "--verify", "no-such-ref"], cwd=self.repo, check=False)
+        self.assertEqual(r.rc, 128)
+
+    def test_T_GIT_2_a_push_that_wants_credentials_fails_fast_and_never_asks(self):
+        class Deny(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="x"')
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = socketserver.TCPServer(("127.0.0.1", 0), Deny)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        marker = self.tmp / "askpass-was-called"
+        askpass = self.stub_git(f"touch {marker}; echo secret")
+        wt.git(["config", "core.askPass", askpass], cwd=self.repo)
+        url = f"http://127.0.0.1:{srv.server_address[1]}/r.git"
+        t0 = time.monotonic()
+        r = wt.git(["push", url, "HEAD:refs/heads/x"], cwd=self.repo,
+                   check=False, timeout=30)
+        self.assertNotEqual(r.rc, 0)
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertFalse(marker.exists(), "an askpass helper was run")
+
+    def test_T_GIT_3_a_hung_git_is_killed_with_its_whole_group(self):
+        pidfile = self.tmp / "child.pid"
+        stub = self.stub_git(f"sleep 300 & echo $! > {pidfile}; wait")
+        with mock.patch.object(wt, "GIT_BIN", stub):
+            t0 = time.monotonic()
+            with self.assertRaises(wt.GitTimeout):
+                wt.git(["status"], cwd=self.repo, timeout=1)
+        self.assertLess(time.monotonic() - t0, 8)
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and _alive(child):
+            time.sleep(0.05)
+        self.assertFalse(_alive(child), "the grandchild survived the timeout")
+
+    def test_T_GIT_4_a_path_beginning_with_a_dash_is_a_path(self):
+        (self.repo / "-n").write_text("x\n")
+        wt.git(["add", "--", "-n"], cwd=self.repo)
+        r = wt.git(["ls-files", "-z", "--", "-n"], cwd=self.repo)
+        self.assertEqual(r.out, b"-n\0")
+
+    def test_T_GIT_5_routing_variables_in_the_hub_env_never_reach_git(self):
+        decoy = self.tmp / "decoy"
+        decoy.mkdir()
+        wt.git(["init", "-q"], cwd=decoy)
+        decoy_index = decoy / ".git" / "index"
+        poison = {
+            "GIT_DIR": str(decoy / ".git"),
+            "GIT_WORK_TREE": str(decoy),
+            "GIT_INDEX_FILE": str(decoy_index),
+            "GIT_CONFIG_PARAMETERS": "'user.name'='Decoy'",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "user.email",
+            "GIT_CONFIG_VALUE_0": "decoy@example.invalid",
+            "GIT_OBJECT_DIRECTORY": str(decoy / ".git" / "objects"),
+        }
+        with mock.patch.dict(os.environ, poison):
+            top = wt.git(["rev-parse", "--show-toplevel"], cwd=self.repo).text.strip()
+            (self.repo / "b.txt").write_text("b\n")
+            wt.git(["add", "b.txt"], cwd=self.repo)
+            name = wt.git(["config", "--get", "user.name"], cwd=self.repo,
+                          check=False).text.strip()
+        self.assertEqual(Path(top).resolve(), self.repo.resolve())
+        self.assertNotEqual(name, "Decoy")
+        self.assertFalse(decoy_index.exists(), "the decoy index was written")
+        self.assertIn(b"b.txt", wt.git(["ls-files", "-z"], cwd=self.repo).out)
+
+    def test_T_GIT_5b_the_sanitised_env_sets_the_no_prompt_variables(self):
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/x", "GIT_CONFIG_KEY_3": "a"}):
+            env = wt.git_env()
+        self.assertNotIn("GIT_DIR", env)
+        self.assertNotIn("GIT_CONFIG_KEY_3", env)
+        for k, v in {"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat",
+                     "GIT_EDITOR": "true", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
+                     "LC_ALL": "C", "GH_PROMPT_DISABLED": "1"}.items():
+            self.assertEqual(env.get(k), v, k)
+        self.assertNotIn("GIT_OPTIONAL_LOCKS", env)
+        self.assertEqual(wt.git_env(optional_locks_off=True)["GIT_OPTIONAL_LOCKS"], "0")
+
+    def test_T_GIT_6_output_past_the_cap_is_truncated_while_streaming(self):
+        stub = self.stub_git("head -c 209715200 /dev/zero")
+        with mock.patch.object(wt, "GIT_BIN", stub):
+            r = wt.git(["log"], cwd=self.repo, max_out=1 << 20, timeout=60)
+        self.assertTrue(r.truncated)
+        self.assertEqual(len(r.out), 1 << 20)
+        self.assertEqual(r.rc, 0)
+
+    def test_T_GIT_7_merge_tree_conflicts_are_a_result_not_an_error(self):
+        for ver in ("2.38", "2.55"):
+            clean = wt.parse_merge_tree(
+                int((FIXTURES / f"merge-tree-{ver}-clean.rc").read_text()),
+                (FIXTURES / f"merge-tree-{ver}-clean.bin").read_bytes())
+            self.assertTrue(clean["clean"])
+            self.assertEqual(clean["conflicts"], [])
+            self.assertRegex(clean["tree"], r"^[0-9a-f]{40}$")
+            for case, paths in (("conflict", ["f.txt"]), ("rendel", ["r2.txt"])):
+                res = wt.parse_merge_tree(
+                    int((FIXTURES / f"merge-tree-{ver}-{case}.rc").read_text()),
+                    (FIXTURES / f"merge-tree-{ver}-{case}.bin").read_bytes())
+                self.assertFalse(res["clean"], case)
+                self.assertEqual(res["conflicts"], paths, case)
+                self.assertIsNone(res["tree"], "a conflicted tree is never a result")
+                self.assertTrue(any("CONFLICT" in m["message"] for m in res["messages"]))
+        with self.assertRaises(wt.GitError):
+            wt.parse_merge_tree(128, b"fatal: bad\n")
+
+    def test_T_GIT_8_input_goes_on_a_closed_pipe_and_nothing_inherits_stdin(self):
+        tree = wt.git(["write-tree"], cwd=self.repo).text.strip()
+        msg = "hub commit\n\nbody line\n"
+        oid = wt.git(["commit-tree", tree], cwd=self.repo, input=msg.encode()).text.strip()
+        body = wt.git(["cat-file", "commit", oid], cwd=self.repo).text
+        self.assertTrue(body.endswith("\n\n" + msg), body)
+        stub = self.stub_git("cat")         # would block forever on an inherited tty
+        with mock.patch.object(wt, "GIT_BIN", stub):
+            r = wt.git(["x"], cwd=self.repo, timeout=5)
+        self.assertEqual(r.out, b"")
+
+    def test_T_GIT_9_a_lock_is_cleared_only_when_our_recorded_child_is_gone(self):
+        lock = self.repo / ".git" / "index.lock"
+        lock.write_text("")
+        me = {"pid": os.getpid(), "start": "proc:not-my-start-token", "lock": str(lock)}
+        self.assertFalse(wt.lock_is_ours_and_stale(str(lock), me),
+                         "a live pid with another start token is not ours to clear")
+        self.assertFalse(wt.lock_is_ours_and_stale(str(lock), None))
+        self.assertFalse(wt.lock_is_ours_and_stale(
+            str(lock), dict(me, lock=str(self.repo / "other.lock"))))
+        import subprocess
+        p = subprocess.Popen(["true"])
+        p.wait()
+        gone = {"pid": p.pid, "start": "proc:whatever", "lock": str(lock)}
+        if not _alive(p.pid):
+            self.assertTrue(wt.lock_is_ours_and_stale(str(lock), gone))
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:                                   # a zombie counts as gone
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+if __name__ == "__main__":
+    unittest.main()
