@@ -719,6 +719,215 @@ class TheSummary(CreateCase):
         self.assertEqual(s["binary"], ["a.txt"])
 
 
+class TheSnapshot(CreateCase):
+
+    def objects(self):
+        return sum(os.path.getsize(os.path.join(r, f))
+                   for r, _, fs in os.walk(self.repo / ".git" / "objects") for f in fs)
+
+    def test_T_SNP_1_the_tree_is_what_add_all_and_write_tree_would_give(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("changed\n")
+        (p / "n.txt").write_text("new\n")
+        snap = wt.snapshot(e)
+        wt.git(["add", "-A"], cwd=p)
+        self.assertEqual(snap["tree"], wt.git(["write-tree"], cwd=p).text.strip())
+        self.assertEqual(snap["head"], e["base_sha"])
+
+    def test_T_SNP_2_same_content_same_tree_one_byte_different_tree(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("x\n")
+        t1 = wt.snapshot(e)["tree"]
+        self.assertEqual(wt.snapshot(e)["tree"], t1)
+        (p / "a.txt").write_text("y\n")
+        self.assertNotEqual(wt.snapshot(e)["tree"], t1)
+
+    def test_T_SNP_2b_the_real_index_is_never_touched(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("x\n")
+        idx = Path(wt.git(["rev-parse", "--path-format=absolute", "--git-path", "index"],
+                          cwd=p).text.strip())
+        before = idx.read_bytes()
+        snap = wt.snapshot(e)
+        self.assertEqual(idx.read_bytes(), before)
+        self.assertEqual(snap["index_id"], wt.hashlib.sha256(before).hexdigest())
+
+    def test_T_SNP_3_ignored_files_are_inventoried_and_excluded(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / ".gitignore").write_text(".env\nout/\n")
+        (p / ".env").write_text("SECRET=1\n")
+        (p / "out").mkdir()
+        (p / "out" / "x.bin").write_text("x")
+        snap = wt.snapshot(e)
+        names = wt.git(["ls-tree", "-r", "--name-only", snap["tree"]], cwd=p).text.split()
+        self.assertNotIn(".env", names)
+        self.assertIn(".gitignore", names)
+        self.assertEqual(snap["ignored"]["count"], 2)
+        self.assertIn(".env", snap["ignored"]["sample"])
+
+    def test_T_SNP_5_a_big_untracked_file_is_inventoried_not_added(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "data.bin").write_bytes(os.urandom(3 << 20))
+        before = self.objects()
+        snap = wt.snapshot(e)
+        names = wt.git(["ls-tree", "-r", "--name-only", snap["tree"]], cwd=p).text.split()
+        self.assertNotIn("data.bin", names)
+        self.assertEqual(snap["too_big"], [{"path": "data.bin", "size": 3 << 20}])
+        self.assertLess(self.objects() - before, 3 << 20)
+
+    def test_T_SNP_6_the_review_ref_pins_the_tree_across_gc(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "pinned.txt").write_text("only in the snapshot\n")
+        snap = wt.snapshot(e)
+        (p / "pinned.txt").unlink()
+        wt.git(["gc", "-q", "--prune=now"], cwd=self.repo, timeout=120)
+        self.assertEqual(wt.git(["cat-file", "-t", snap["tree"]], cwd=p).text.strip(), "tree")
+        ref = wt.git(["rev-parse", f"refs/corral/review/{e['id']}^{{tree}}"], cwd=p).text.strip()
+        self.assertEqual(ref, snap["tree"])
+
+    def test_force_added_and_intent_to_add_files_are_in_the_tree(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / ".gitignore").write_text("*.log\n")
+        (p / "keep.log").write_text("forced\n")
+        wt.git(["add", "-f", "keep.log"], cwd=p)
+        (p / "ita.txt").write_text("intent\n")
+        wt.git(["add", "-N", "ita.txt"], cwd=p)
+        names = wt.git(["ls-tree", "-r", "--name-only", wt.snapshot(e)["tree"]], cwd=p).text.split()
+        self.assertIn("keep.log", names)
+        self.assertIn("ita.txt", names)
+
+    def test_staged_content_that_differs_from_the_file_is_flagged(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("staged\n")
+        wt.git(["add", "a.txt"], cwd=p)
+        (p / "a.txt").write_text("working\n")
+        self.assertEqual(wt.snapshot(e)["staged_differs"], ["a.txt"])
+
+    def test_the_temp_index_is_cleaned_up(self):
+        e = self.make()
+        tmp = self.tmp / "panedir"
+        tmp.mkdir()
+        wt.snapshot(e, tmp_dir=tmp)
+        self.assertEqual(list(tmp.iterdir()), [])
+
+
+class TheDiff(CreateCase):
+
+    def snapdiff(self, e):
+        return wt.diff(e, wt.snapshot(e)["tree"])
+
+    def by_path(self, d):
+        return {f["path"]: f for f in d["files"]}
+
+    def test_T_DIF_1_unified_output_with_worktree_relative_paths(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("a\nb\n")
+        (p / "n.txt").write_text("n\n")
+        f = self.by_path(self.snapdiff(e))
+        self.assertEqual(f["a.txt"]["status"], "M")
+        self.assertEqual((f["a.txt"]["add"], f["a.txt"]["del"]), (1, 0))
+        self.assertIn("--- a/a.txt\n+++ b/a.txt\n", f["a.txt"]["patch"])
+        self.assertIn("@@", f["a.txt"]["patch"])
+        self.assertEqual(f["n.txt"]["status"], "A")
+
+    def test_T_DIF_2_caps_hold_and_the_json_stays_under_2_mib(self):
+        e = self.make()
+        p = Path(e["path"])
+        for i in range(120):
+            (p / f"f{i}.txt").write_text(("line %d\n" % i) * 3000)
+        d = self.snapdiff(e)
+        self.assertLessEqual(len(wt.json.dumps(d)), 2 << 20)
+        self.assertTrue(d["truncated"])
+        self.assertEqual(len(d["files"]), 120, "every file is listed even past the caps")
+        self.assertTrue(any(f["patch"] is None for f in d["files"]))
+
+    def test_T_DIF_3_binary_and_oversize_files_have_no_hunks(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "bin.dat").write_bytes(b"\0\1\2\3" * 10)
+        wt.git(["add", "-f", "bin.dat"], cwd=p)
+        (p / "big.txt").write_text("x\n" * 400_000)        # 800 KB tracked via add
+        wt.git(["add", "big.txt"], cwd=p)
+        f = self.by_path(self.snapdiff(e))
+        self.assertTrue(f["bin.dat"]["binary"])
+        self.assertIsNone(f["bin.dat"]["patch"])
+        self.assertTrue(f["big.txt"]["too_big"])
+        self.assertIsNone(f["big.txt"]["patch"])
+
+    def test_T_DIF_4_a_symlink_out_of_the_worktree_is_a_symlink_change(self):
+        e = self.make()
+        p = Path(e["path"])
+        secret = self.tmp / "outside-secret.txt"
+        secret.write_text("TOP SECRET\n")
+        (p / "link").symlink_to(secret)
+        f = self.by_path(self.snapdiff(e))["link"]
+        self.assertTrue(f["symlink"])
+        self.assertNotIn("TOP SECRET", f["patch"] or "")
+        self.assertIn(str(secret), f["patch"])
+
+    def test_T_DIF_5_hostile_user_config_does_not_change_output(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / ".gitattributes").write_text("*.txt diff=evil\n")
+        for k, v in (("diff.external", "false"), ("color.ui", "always"),
+                     ("color.diff", "always"), ("diff.evil.textconv", "tr a-z A-Z"),
+                     ("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true")):
+            wt.git(["config", k, v], cwd=self.repo)
+        (p / "a.txt").write_text("hello\n")
+        f = self.by_path(self.snapdiff(e))["a.txt"]
+        self.assertIn("+hello\n", f["patch"])
+        self.assertNotIn("\x1b[", f["patch"])
+        self.assertIn("--- a/a.txt", f["patch"])
+
+    def test_T_DIF_6_odd_names_round_trip(self):
+        e = self.make()
+        p = Path(e["path"])
+        names = ["with space.txt", 'quote"d.txt', "new\nline.txt"]
+        for n in names:
+            (p / n).write_text("x\n")
+        raw = b"latin1-\xe9.txt"
+        with open(os.path.join(os.fsencode(p), raw), "wb") as fh:
+            fh.write(b"y\n")
+        d = self.snapdiff(e)
+        got = {f["path"] for f in d["files"]}
+        for n in names:
+            self.assertIn(n, got)
+        odd = [f for f in d["files"] if f.get("path_b64")]
+        self.assertEqual(len(odd), 1)
+        self.assertEqual(wt.base64.b64decode(odd[0]["path_b64"]), raw)
+
+    def test_T_DIF_7_a_rename_is_a_rename_and_the_argv_puts_c_first(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("a\n" * 50)
+        wt.git(["add", "a.txt"], cwd=p)
+        wt.git(["commit", "-qm", "grow"], cwd=p)
+        e2 = dict(e, base_sha=wt.git(["rev-parse", "HEAD"], cwd=p).text.strip())
+        wt.git(["mv", "a.txt", "b.txt"], cwd=p)
+        calls = []
+        real = wt.git
+
+        def spy(args, *a, **k):
+            calls.append(list(args))
+            return real(args, *a, **k)
+        tree = wt.snapshot(e2)["tree"]
+        with mock.patch.object(wt, "git", spy):
+            d = wt.diff(e2, tree)
+        [f] = d["files"]
+        self.assertEqual((f["status"], f["old_path"], f["path"]), ("R", "a.txt", "b.txt"))
+        raw = [c for c in calls if "diff-tree" in c and "--raw" in c][0]
+        self.assertEqual(raw[:3], ["-c", "diff.renameLimit=1000", "diff-tree"])
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
