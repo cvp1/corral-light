@@ -1,7 +1,6 @@
 # Isolated branches and review — implementation and test plan
 
-Status: PLAN, v3.2, 2026-10-02. Nothing built. Phase 0 done: results in
-`docs/worktree-phase0.md`, folded in as v3.2. Reviewed in two rounds by a
+Status: PLAN, v3.1, 2026-10-02. Nothing built. Reviewed in two rounds by a
 three-vendor panel (Sol, Gemini, Grok); v3 folds in both rounds. v3.1 settles
 D2 (worktree location) against this machine's facts; see §7 and §8.
 The operator approved the plan and D1–D15 on 2026-10-02; Phase 0 may start. The record
@@ -42,8 +41,8 @@ separate, explicit, typed-confirmation purge.
 | D5 | Who commits | Agents may commit. The hub's Commit writes **exactly the reviewed tree** with plumbing (`commit-tree` + compare-and-swap `update-ref`), then reconciles the worktree's index by the protocol in §2.2. Hub commits are unsigned and skip pre-commit and commit-msg hooks; those hooks never run retroactively. Pre-push hooks still run on Publish. The Commit button says all of this | Reviewed equals committed; a hook cannot change content after review; a missing `node_modules` cannot brick Commit. Anyone needing hooks or a signature commits in the worktree with the copied command |
 | D6 | Merge | **Cut from v1.** Review offers Push & PR, and "Copy merge command" for the user's own terminal | Both reviewers: merging into a checkout an editor has open can destroy unsaved work, and no lock spans check and merge |
 | D7 | Push and PR | Push the reviewed commit OID to `refs/heads/corral/<slug>` on a remote whose URL is shown and bound into the confirmation. PR via `gh` when signed in, else a compare URL. Never force | Uses the user's credentials; publication cannot be redirected after confirmation |
-| D8 | Lanes | Enabled per lane only after that lane passes the Phase 0 matrix. Never `host:` (cwd ignored) or Ollama (no tools). **After Phase 0: Claude, Codex, Grok enabled; Gemini held** (its lane runs `yolo` whatever the posture) until the posture is honoured or the operator accepts it | Successful edits do not prove a lane stays in its worktree |
-| D9 | Deletion | Discard = recovery ref + plain `git worktree move` (never `--force`) into `<root>/.trash/`. Purge (real deletion) is a separate typed-confirmation action. Never `rm -rf`, never automatic `git worktree prune` | Ignored files (`.env`, datasets, outputs) have no git history; prune is repository-wide |
+| D8 | Lanes | Enabled per lane only after that lane passes the Phase 0 matrix. Never `host:` (cwd ignored) or Ollama (no tools) | Successful edits do not prove a lane stays in its worktree |
+| D9 | Deletion | Discard = recovery ref + `git worktree move` into `<root>/.trash/`. Purge (real deletion) is a separate typed-confirmation action. Never `rm -rf`, never automatic `git worktree prune` | Ignored files (`.env`, datasets, outputs) have no git history; prune is repository-wide |
 | D10 | Display state | Unchanged; review status is a separate badge | `displayState` is pinned by the cross-product parity table |
 | D11 | Busy panes | Every review action is refused while the pane's turn is running or a tool call is open; during an action the pane's send queue is held. After Commit or Publish the queue drains; after Discard or any failed action it does **not** — queued messages stay visible as not sent | An agent writing between preview and action is the commonest lost-work path; a queue that drains into a trashed pane restarts a writer |
 | D12 | Port | **Refused for worktree panes in v1** | A safe hand-off needs a transactional ownership change; v1.1 |
@@ -193,9 +192,9 @@ Stdlib only.
 | `snapshot(reg)` | **copy** the worktree's real index (`git rev-parse --git-path index`, which for a linked worktree is under `<common_dir>/worktrees/<name>/`) to a temp file under the pane dir, then with that temp index `add -A` and `write-tree` → **tree OID**. Starting from the real index keeps files the agent force-added (`add -f`) and intent-to-add entries. Untracked files over 512 KiB are not added; they are inventoried with the ignored files and named in review, so one review of a dataset cannot fill `.git/objects`. Records the **real index identity** (sha256 of its bytes) and whether any path is staged with content different from its working file. Pins the tree with `refs/corral/review/<wt-id>` (a commit of the tree) until the next snapshot or retirement, so gc cannot collect what the user is looking at. Returns the tree OID, HEAD, the base tip, the index identity and both inventories | touch the real index; rebuild on a timer |
 | `diff(reg, tree)` | `git -c diff.renameLimit=1000 diff-tree -r -z --raw -M --no-textconv --no-ext-diff <base_sha> <tree>` (`-c` before the subcommand; after it, `diff-tree -c` means combined diff) for identities, then per-file patches with `-p --no-color --src-prefix=a/ --dst-prefix=b/`, each capped; files over 512 KiB or binary listed without hunks | follow symlinks; render textconv |
 | `commit_tree(reg, tree, index_id, message, expect_head)` | the **commit protocol** below | run hooks; amend; touch the work tree; `read-tree -u`; prompt for a key |
-| `push(reg, remote_name, push_url, oid)` | refuse if the worktree is dirty or HEAD's tree differs from the last reviewed tree; resolve the **effective push destination** (`git remote get-url --push --all <remote>`, which applies `pushInsteadOf`/`insteadOf`); refuse more than one; refuse if it differs from the confirmed one; push to that **URL**, not the remote name: `git push <push_url> <oid>:refs/heads/corral/<slug>` (fully qualified, so a tag of the same name cannot match); verify with `ls-remote <push_url>`; failure causes come from stderr (a non-fast-forward rejection is rc 1, not 128) | `--force`, `--force-with-lease`, push a ref other than `corral/*` |
+| `push(reg, remote_name, push_url, oid)` | refuse if the worktree is dirty or HEAD's tree differs from the last reviewed tree; resolve the **effective push destination** (`git remote get-url --push --all <remote>`, which applies `pushInsteadOf`/`insteadOf`); refuse more than one; refuse if it differs from the confirmed one; push to that **URL**, not the remote name: `git push <push_url> <oid>:refs/heads/corral/<slug>` (fully qualified, so a tag of the same name cannot match); verify with `ls-remote <push_url>` | `--force`, `--force-with-lease`, push a ref other than `corral/*` |
 | `open_pr(reg, title, body)` | `gh auth status`; resolve the target repo from the remote URL and show it in the confirmation; `gh pr list --repo R --head …` first, and `gh pr view` if one exists (idempotent); else `gh pr create --repo R --head … --base … --title … --body-file -` | pass text through a shell; let `gh` choose between a fork and its parent |
-| `discard(reg, tree)` | **stop writers first**: cancel the turn, TERM then KILL the owner's process group (never SIGSTOP: a stopped process holding `index.lock` would block the move), wait until `index.lock` is gone, then scan `/proc/*/cwd` and `/proc/*/fd` of the user's processes for anything inside the worktree (catches `setsid` grandchildren and the user's own shells) and refuse, naming them, if any remain; the held queue is kept unsent; `verify`; re-snapshot under the lock and compare to `tree`; write `refs/corral/recovery/<wt-id>/<ts>` → a commit of `tree` with parent HEAD; inventory ignored files into the registry; `mkdir -p <root>/.trash`; journal the move's source and destination; `git worktree move <path> <root>/.trash/<wt-id>-<ts>` (plain `move`: Phase 0 showed a dirty worktree moves without `--force`, and `index.lock` does not block it, so the wait above is the hub's own guard; never any `--force`). Writers to stop include hub-spawned helpers that inherit the pane cwd, such as `seat_mcp.py`; the `/proc` scan found one in Phase 0; `phase: trashed`; branch kept | delete files; delete the branch; prune |
+| `discard(reg, tree)` | **stop writers first**: cancel the turn, TERM then KILL the owner's process group (never SIGSTOP: a stopped process holding `index.lock` would block the move), wait until `index.lock` is gone, then scan `/proc/*/cwd` and `/proc/*/fd` of the user's processes for anything inside the worktree (catches `setsid` grandchildren and the user's own shells) and refuse, naming them, if any remain; the held queue is kept unsent; `verify`; re-snapshot under the lock and compare to `tree`; write `refs/corral/recovery/<wt-id>/<ts>` → a commit of `tree` with parent HEAD; inventory ignored files into the registry; `mkdir -p <root>/.trash`; journal the move's source and destination; `git worktree move <path> <root>/.trash/<wt-id>-<ts>` (if Phase 0 shows `move` refuses a dirty worktree, a single `--force` is used **only after** the recovery ref exists; never the double `--force` that overrides a lock); `phase: trashed`; branch kept | delete files; delete the branch; prune |
 | `restore(reg)` | `git worktree move` back from trash; `phase: active` | overwrite an existing path |
 | `purge(reg, confirm)` | requires `confirm == branch short name`; `git worktree remove --force <trash path>`; delete the branch only if its OID equals the recorded one; keep the recovery ref | touch a path outside `<root>/.trash/`; delete a branch not `corral/*`; delete recovery refs |
 | `reconcile(registry)` | for each common dir in the registry: `worktree list --porcelain -z`; mark `missing`/`tampered`; list unknown paths under root as orphans | prune; delete; edit |
@@ -259,13 +258,13 @@ objects and can invoke configured merge drivers; the docstring says so.
   retries in the same worktree and Forget offers Discard.
 - Every `create` (with or without `worktree`) resolves its cwd and refuses one
   inside the worktree root unless the caller is the owning pane resuming (D14).
-- **Claude trust: none.** Phase 0 showed a Claude pane starts and works on a
-  never-trusted worktree path, with no entry written to
-  `projects[path].hasTrustDialogAccepted` and no stall, and its shell
-  commands still reach the approval rail. The hub therefore writes nothing
-  to the pane's config dir for worktrees. Claude's auto-memory for a
-  worktree pane resolves to the main repo's project key, so it is shared;
-  transcripts go under the worktree's own key.
+- **Claude trust.** Before `start()`, the hub marks **only the worktree's
+  canonical path** trusted in the pane's private `CLAUDE_CONFIG_DIR` (the hub
+  already seeds that dir). Phase 0 must attach the exact JSON diff and show
+  that a shell command in the pane still reaches the approval rail. If either
+  is not proven, the hub does not pre-trust and the Claude lane stays
+  disabled for worktrees. The dialog says the folder is trusted for that
+  pane.
 - `Pane.from_meta` reads `worktree_id`; the registry is loaded once by the
   Manager. A pane whose entry is `missing`, `tampered` or `trashed` comes back
   detached with a note, and `resume` refuses with the reason.
@@ -316,9 +315,7 @@ Snapshot is a POST because it writes objects and holds the pane.
   (status letter, +/−, filter) and unified diff with line numbers and sticky
   hunk headers; add and delete colours from `.perm pre`. A banner when
   ignored files exist ("12 ignored files are not in this review; Discard
-  keeps them in trash"). Binary files are listed first under a banner ("3
-  binary files, often build output such as `__pycache__`"); in Phase 0 every
-  lane's commit swept `.pyc` files in. Footer: Commit, Push & PR, Copy merge command,
+  keeps them in trash"). Footer: Commit, Push & PR, Copy merge command,
   Discard, Refresh. Disabled buttons say why. A 409 refreshes the snapshot and
   shows the reason. Under 820 px it is full-screen with the file list above
   the diff.
@@ -333,10 +330,10 @@ Snapshot is a POST because it writes objects and holds the pane.
 
 | Lane | Expectation from the panel | Phase 0 check |
 |---|---|---|
-| Claude | **Phase 0: pass.** No trust stall, no pre-trust needed; rail asks for shell; agent commit works | enabled |
-| Codex | **Phase 0: pass.** Agent commit fails (`index.lock` read-only in its sandbox); hub Commit covers it. Tool events carry **no `locations`**, so the out-of-worktree guard cannot see its edits; the sandbox is the guard. Do not widen the sandbox to the common dir | enabled |
-| Grok | **Phase 0: pass.** Locations reported; rail asks; agent commit works | enabled |
-| Gemini | **Phase 0: works but held.** Edits, tests and commit fine; the lane runs `mode = yolo` and never asks, whatever the posture | held (D8) |
+| Claude | Trust prompt possible for a new path; worktree recognised by git | Pre-trust works; no handshake stall; edits stay in the worktree |
+| Codex | Workspace-write sandbox likely blocks `git add`/`commit` (admin dir is outside cwd) | Confirm; hub Commit covers it. Do not widen the sandbox to the common dir (that exposes every branch) |
+| Grok | Unknown; tools that test `isdir(".git")` would misdetect a worktree | Edits, `git status`, commit |
+| Gemini | Reported to work; unverified | Same |
 
 A lane is enabled only when its row passes. Also checked for every lane: no
 tool event's `locations` fall outside the worktree during the matrix run. In
@@ -364,7 +361,7 @@ hand, each lane started in one through the existing UI.
 0.4 `summary` and `snapshot` timings on ~/aios and a 50k-file repo.
 0.5 Confirm `git worktree remove` deletes ignored files and `move` keeps registration.
 0.6 Path-keyed state that every new worktree path meets, whatever the location: mise refuses untrusted config files per path (mise is installed here); Claude Code's auto-memory and project settings are keyed by cwd (record whether a worktree gets the repo's project memory or an empty one); `git config --show-origin` inside a worktree under the state dir picks up no `includeIf "gitdir:"` meant for the repo's folder.
-- Exit: `docs/worktree-phase0.md` with results; plan amended where reality differs. **Done 2026-10-02** (v3.2). Moved to P4: a `gh` PR on a throwaway repo, a real hub restart with live worktree panes, three lanes published at once.
+- Exit: `docs/worktree-phase0.md` with results; plan amended where reality differs.
 
 ### WS1 — `worktrees.py`
 1.1 `git()` wrapper: env sanitising, caps, process-group timeout. T-GIT-*.
@@ -566,7 +563,7 @@ detached child that keeps writing after the turn ends), `checkout <branch>`,
 - T-LIF-11 close keeps; reopen restores; forget offers discard and deletes nothing.
 - T-LIF-12 port of a worktree pane refused; port of other panes unchanged.
 - T-LIF-13 `host:` and Ollama refused; a lane not yet enabled refused.
-- T-LIF-14 a Claude worktree pane's config dir gains no trust entry for the worktree path and no permission-mode change (JSON diff asserted empty).
+- T-LIF-14 Claude pane's config dir gains exactly one change: trust for the worktree's canonical path (JSON diff asserted); no permission-mode change.
 - T-LIF-15 two concurrent creates at eleven live panes: one succeeds, one is refused before any git call.
 - T-LIF-16 a failed start leaves a dead pane owning the worktree; Resume retries there.
 - T-LIF-17 a plain create (no `worktree`) whose cwd is inside the worktree root → 400.
@@ -635,7 +632,7 @@ Plus: three lanes, three tasks, one repo, at once; all three published.
 5. Panel synthesis filed; every accepted finding fixed or deferred with a reason.
 6. Commit protocol proven: T-CMT-9..12 and T-CRS-2 green, including a kill at every journalled stage.
 7. Discard proven: T-RMV-11..15 green; nothing dispatches into a trashed or `unknown` pane.
-8. Claude lane: met in Phase 0 (no pre-trust, shell commands reach the rail); T-LIF-14 keeps it so.
+8. Claude lane: the Phase 0 config diff is attached and a shell command still asks for approval; otherwise Claude ships without worktrees.
 
 ## 6. Risks
 
@@ -651,7 +648,6 @@ Plus: three lanes, three tasks, one repo, at once; all three published.
 | Large repos make summary slow | Write-free summary on a coalescing worker; Phase 0 timings |
 | Claude trust prompt stalls start | Pre-trust in the pane's config dir; Phase 0 |
 | An agent force-pushes or rewrites shared refs | D15 preamble; the rail still asks for Claude's shell commands; edit events outside the worktree cancel the turn |
-| Claude "allow always" in a worktree pane writes to the main checkout's `.claude/settings.local.json` (Phase 0) | Rail offers allow-once only for worktree panes, or the hub refuses the persistent option; WS2.7 checks the adapter allows it |
 | Commit signing configured | Hub Commit refuses fast and offers the command to run by hand |
 
 ## 7. Questions the panel settled
@@ -699,19 +695,6 @@ Three places were weighed: the state dir; Gemini's sibling,
   overrides the root.
 
 ## 8. What changed, and why
-
-### v3.1 to v3.2 (Phase 0 results, `docs/worktree-phase0.md`)
-
-| v3.1 | v3.2 | Evidence |
-|---|---|---|
-| Discard might need one `--force` | Plain `move`, never `--force` | Dirty worktree moved without it, on 2.38 and 2.55 |
-| Stop the owner's process group | Also hub helpers with the pane cwd | `/proc` scan found `seat_mcp.py` in the worktree |
-| Pre-trust Claude's worktree path | No pre-trust | No stall, no trust entry, rail still asks |
-| All lanes after the matrix | Claude, Codex, Grok; Gemini held | Gemini lane runs `yolo` regardless of posture |
-| Out-of-worktree guard for every lane | Not for Codex (no `locations`); its sandbox guards | Codex events carry no locations |
-| Push failures by rc | From stderr; non-ff is rc 1 | Observed |
-| Binaries named | Listed first with a build-output banner | Every lane committed `.pyc` files |
-| merge-tree argv to be frozen | Frozen; fixtures in `testkit/fixtures/merge-tree/` | Identical bytes and rc on 2.38.5 and 2.55.0 |
 
 ### v3 to v3.1 (D2 settled)
 
