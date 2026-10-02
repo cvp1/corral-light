@@ -2058,3 +2058,40 @@ def _alive(pid):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheMacAddendum(unittest.TestCase):
+    """docs/worktree-plan-macos.md M1-M4, checked here by forcing the darwin paths.
+
+    The real proof is Phase 0.7 on mac-host; these keep the code honest until then.
+    """
+
+    def setUp(self):
+        import sessions
+        self.sessions = sessions
+        env = {k: v for k, v in os.environ.items() if k != "CORRAL_LIGHT_WORKTREE_LANES"}
+        self._env = mock.patch.dict(os.environ, env, clear=True)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def platform(self, name):
+        return mock.patch.object(self.sessions.sys, "platform", name)
+
+    def test_M2_lanes_are_enabled_per_platform(self):
+        with self.platform("linux"):
+            for lane in ("claude", "codex", "grok"):
+                self.assertIsNone(self.sessions.worktree_refusal(lane), lane)
+        with self.platform("darwin"):
+            for lane in ("claude", "codex", "grok"):
+                why = self.sessions.worktree_refusal(lane)
+                self.assertIsNotNone(why, lane)
+                self.assertIn("macOS", why)
+                self.assertIn("lane matrix", why)
+        with self.platform("win32"):
+            self.assertIsNotNone(self.sessions.worktree_refusal("claude"))
+
+    def test_M2_an_explicit_lane_list_still_opts_in_for_the_matrix_run(self):
+        with self.platform("darwin"), mock.patch.dict(os.environ,
+                                                      {"CORRAL_LIGHT_WORKTREE_LANES": "claude"}):
+            self.assertIsNone(self.sessions.worktree_refusal("claude"))
+            self.assertIsNotNone(self.sessions.worktree_refusal("codex"))
