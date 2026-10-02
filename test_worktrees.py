@@ -2095,3 +2095,87 @@ class TheMacAddendum(unittest.TestCase):
                                                       {"CORRAL_LIGHT_WORKTREE_LANES": "claude"}):
             self.assertIsNone(self.sessions.worktree_refusal("claude"))
             self.assertIsNotNone(self.sessions.worktree_refusal("codex"))
+
+
+class TheMacDiscardScan(CreateCase):
+    """M1: off Linux there is no /proc; discard scans with lsof and fails closed."""
+
+    def setUp(self):
+        super().setUp()
+        self.e = self.make()
+        self.p = Path(self.e["path"])
+        self._noproc = mock.patch.object(wt, "_have_proc", lambda: False)
+        self._noproc.start()
+        self.addCleanup(self._noproc.stop)
+        if not wt._lsof_bin():
+            self.skipTest("lsof absent: the darwin scan path did NOT run here")
+
+    def child(self, argv, cwd):
+        import subprocess
+        c = subprocess.Popen(argv, cwd=cwd, start_new_session=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (c.kill(), c.wait()))
+        return c
+
+    def discard(self):
+        snap = wt.snapshot(self.e)
+        return wt.discard(self.e, snap["tree"], registry=self.reg)
+
+    def test_M1_T_RMV_13_darwin_a_process_whose_cwd_is_inside_blocks_discard(self):
+        c = self.child(["sleep", "30"], self.p)
+        self.assertTrue(wait_for(lambda: any(pid == c.pid for pid, _ in wt.processes_in(self.p)), 5))
+        with self.assertRaises(wt.Refused) as cm:
+            self.discard()
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertIn(str(c.pid), cm.exception.detail)
+        self.assertIn("sleep", cm.exception.detail)
+        self.assertTrue(self.p.exists())
+
+    def test_M1_an_open_file_inside_counts_too(self):
+        import sys
+        (self.p / "held.txt").write_text("x\n")
+        c = self.child([sys.executable, "-c",
+                        "import sys,time; f=open(sys.argv[1]); print('open', flush=True); time.sleep(30)",
+                        str(self.p / "held.txt")], self.tmp)
+        c.stdout.readline()
+        self.assertIn(c.pid, [pid for pid, _ in wt.processes_in(self.p)])
+
+    def test_M1_a_quiet_worktree_scans_clean_and_discards(self):
+        self.assertEqual(wt.processes_in(self.p), [])
+        r = self.discard()
+        self.assertTrue(Path(r["trash_path"]).is_dir())
+
+    def stub_lsof(self, body):
+        stub = self.stub_git(body)
+        return mock.patch.object(wt, "_lsof_bin", lambda: stub)
+
+    def test_M1_a_failed_scan_refuses_and_moves_nothing(self):
+        for body in ('echo "lsof: status error on x: Permission denied" >&2; exit 1',
+                     "exit 2"):
+            with self.stub_lsof(body):
+                with self.assertRaises(wt.Refused) as cm:
+                    self.discard()
+            self.assertEqual(cm.exception.reason, "busy", body)
+            self.assertIn("could not check", cm.exception.detail)
+            self.assertTrue(self.p.exists(), body)
+            self.assertEqual(self.reg.read(self.e["id"])["phase"], "active")
+
+    def test_M1_a_scan_that_times_out_refuses(self):
+        with self.stub_lsof("sleep 10"), mock.patch.object(wt, "SCAN_TIMEOUT_S", 1):
+            with self.assertRaises(wt.Refused) as cm:
+                self.discard()
+        self.assertIn("could not check", cm.exception.detail)
+        self.assertTrue(self.p.exists())
+
+    def test_M1_no_lsof_at_all_refuses(self):
+        with mock.patch.object(wt, "_lsof_bin", lambda: None):
+            with self.assertRaises(wt.Refused) as cm:
+                self.discard()
+        self.assertIn("lsof", cm.exception.detail)
+
+    def test_M1_on_linux_an_unreadable_proc_fails_closed_too(self):
+        self._noproc.stop()
+        with mock.patch.object(wt.os, "listdir", side_effect=PermissionError("no")):
+            with self.assertRaises(wt.ScanFailed):
+                wt.processes_in(self.p)
+        self._noproc.start()
