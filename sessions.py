@@ -6,6 +6,7 @@ Corral stores only what ACP does not: which agent process is live, the ordered
 event stream per pane, and pending permission requests. Each pane's permission
 posture is set by Corral, never inherited from the host's ambient config.
 """
+import contextlib
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import acp
 import claude_auth
 import ledger
 import mcp
+import worktrees as _wt
 
 ROOT = Path(__file__).resolve().parent
 # Separate from the full Corral's state dir so two hubs never share panes or keys.
@@ -63,6 +65,43 @@ TURN_VIAS = _core.TURN_VIAS
 MAX_ROSTER = MAX_PANES * 5      # cap on all panes, live or detached
 MAX_PROMPT = 200_000
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
+
+# ── own-branch worktrees (docs/worktree-review-plan.md) ──────────────────────
+# Lanes that passed the Phase 0 matrix (docs/worktree-phase0.md). Gemini is held:
+# its lane runs `yolo` whatever the posture. Never host:* (cwd ignored) or ollama
+# (no tools). Override with CORRAL_LIGHT_WORKTREE_LANES=a,b; kill switch
+# CORRAL_LIGHT_WORKTREES_ENABLED=0 refuses new worktree panes (existing ones
+# still resume and can still be discarded).
+WORKTREE_LANES = ("claude", "codex", "grok")
+WORKTREE_PREAMBLE = (
+    "[Corral] You are working in a git worktree on your own branch. Work only "
+    "inside this folder. Do not push, rebase, reset, or touch other branches; "
+    "the user reviews and publishes.")
+
+
+def worktree_lanes():
+    raw = os.environ.get("CORRAL_LIGHT_WORKTREE_LANES")
+    return tuple(x.strip() for x in raw.split(",") if x.strip()) if raw else WORKTREE_LANES
+
+
+def worktree_refusal(agent):
+    """Why `agent` cannot start on its own branch here, or None."""
+    if os.environ.get("CORRAL_LIGHT_WORKTREES_ENABLED", "1") == "0":
+        return "own branches are switched off (CORRAL_LIGHT_WORKTREES_ENABLED=0)"
+    if agent.startswith("host:"):
+        return "remote lanes ignore the folder, so they cannot use an own branch"
+    if agent == "ollama":
+        return "the local lane has no tools, so an own branch would do nothing"
+    if agent not in worktree_lanes():
+        return f"own branches are not enabled for the {agent} lane yet"
+    return None
+
+
+def inside_worktree_root(path):
+    root = os.path.realpath(_wt.worktree_root())
+    p = os.path.realpath(path)
+    return p == root or p.startswith(root + os.sep)
+
 STALL_S = 300                  # busy with nothing emitted for this long = suspect
 PARKED_PREVIEW_CHARS = 120     # chars of each parked message quoted in a note
 
@@ -597,6 +636,10 @@ def available_agents():
 class Pane(_core.PaneBase):
     """One conversation: an agent process + its event history."""
 
+    # worktree_id: the registry entry (worktrees.py) this pane owns, or None.
+    META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id",)
+    worktree_id = None
+
 
 
     def _init_runtime(self):
@@ -633,6 +676,12 @@ class Pane(_core.PaneBase):
         self._lock = threading.Lock()
         self._text_lock = threading.Lock()   # coalesced streamed text (core)
         self._text_acc, self._text_timer, self._text_last = "", None, 0.0
+        # Own-branch worktrees: review actions hold the send queue (D11).
+        self.held = False
+        self._action_lock = threading.Lock()
+        self.worktree_summary = None
+        self.worktree_blocked = None      # why resume is refused (missing/tampered/trashed)
+        self._preamble_due = False        # D15: the first prompt carries the preamble
 
 
 
@@ -679,6 +728,7 @@ class Pane(_core.PaneBase):
         p.role = meta.get("role")
         p.role_sha = meta.get("role_sha")
         p.role_delivery = meta.get("role_delivery")
+        p.worktree_id = meta.get("worktree_id")
         # No process of its own yet.
         p.pid = p.pgid = p.pid_start = None
         p._init_runtime()
@@ -729,6 +779,17 @@ class Pane(_core.PaneBase):
         """Attach a fresh agent process to this pane's conversation (from detached or dead)."""
         if self.state not in self.RESUMABLE:
             raise ValueError(f"pane is {self.state}, not detached or dead")
+        if self.worktree_id and self.worktree_blocked:
+            raise ValueError(self.worktree_blocked)
+        if not self.acp_session and self.worktree_id:
+            # D14: a worktree pane whose first start failed retries, in place.
+            self.mgr._reserve_live(self)
+            if self._log is None:
+                self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
+            self.error = None
+            self._preamble_due = True
+            self.start()
+            return self
         if not self.acp_session:
             raise ValueError("this pane has no agent session to resume")
         prior = self.state
@@ -989,6 +1050,8 @@ class Pane(_core.PaneBase):
                 "kind": data.get("kind"), "status": data.get("status"),
                 "content": (data.get("content") or [])[:6],
                 "locations": (data.get("locations") or [])[:8]})
+            if self.worktree_id and not self._replaying:
+                self._worktree_guard(data)
         elif kind == "stall_notice":
             # Informational only: a clock can't tell a wedged agent from a slow one.
             self.emit("note", {"text": data.get("text") or "no output for a "
@@ -1282,7 +1345,11 @@ class Pane(_core.PaneBase):
             # (/clear never reaches here: send() hands it to clear_context.)
             # The queue-and-drain half is shared with peer delivery (DESIGN-5
             # S7); everything ABOVE this line is what makes it the human's.
-            self._dispatch(_QueuedText(text, tid))
+            agent_text = text
+            if self._preamble_due:            # D15: once, on the first prompt
+                agent_text = WORKTREE_PREAMBLE + "\n\n" + text
+                self._preamble_due = False
+            self._dispatch(_QueuedText(agent_text, tid))
             return tid
 
     def _drain(self):
@@ -1368,6 +1435,99 @@ class Pane(_core.PaneBase):
             if self.state != "dead":
                 self.state = "needs-you" if self.pending else (
                     "busy" if self._queue else "ready")
+            if self.worktree_id:
+                self.mgr.worktree_turn_ended(self)
+
+    # ── own-branch worktrees: the held queue (D11) ──────────────────────────
+
+    def _dispatch(self, item, at=None):
+        """As the core's, except that while a review action holds the pane the
+        prompt is queued and no drain starts."""
+        if self.held:
+            if at is None:
+                self._queue.append(item)
+            else:
+                self._queue.insert(at, item)
+            return
+        return super()._dispatch(item, at)
+
+    WRITE_KINDS = ("edit", "delete", "move")
+
+    def _worktree_guard(self, data):
+        """An edit/delete/move tool event outside the worktree (and its admin dir)
+        cancels the turn and tells the user at once (§2.6). The write already
+        happened; the point is hearing about it now, not at review. Shell
+        commands usually report only their cwd, so they are not covered."""
+        if data.get("kind") not in self.WRITE_KINDS:
+            return
+        e = self.mgr.worktree_entry(self)
+        if not e:
+            return
+        allowed = [os.path.realpath(e["path"]),
+                   os.path.realpath(Path(e["common_dir"]) / "worktrees" / e["admin_name"])]
+        base = _wt.agent_cwd(e)
+        outside = []
+        for loc in data.get("locations") or []:
+            raw = (loc or {}).get("path")
+            if not raw:
+                continue
+            real = os.path.realpath(raw if os.path.isabs(raw) else base / raw)
+            if not any(real == a or real.startswith(a + os.sep) for a in allowed):
+                outside.append(raw)
+        if not outside:
+            return
+        if getattr(self, "_escape_turn", None) == self._in_flight and self._in_flight is not None:
+            return                                  # one card per turn
+        self._escape_turn = self._in_flight
+        self.emit("worktree", {"escape": {"paths": outside[:8], "tool": data.get("title"),
+                                          "kind": data.get("kind")}})
+        self.emit("note", {"text": "this agent changed a file outside its own branch: "
+                                   + ", ".join(outside[:8]) + " — its turn was stopped"})
+        threading.Thread(target=self._cancel_quietly, daemon=True).start()
+
+    def _cancel_quietly(self):
+        with contextlib.suppress(Exception):
+            self.cancel()
+
+    def worktree_view(self):
+        """What the browser shows for this pane's own branch, or None."""
+        if not self.worktree_id:
+            return None
+        e = self.mgr.worktree_entry(self) or {}
+        branch = (e.get("branch") or "")[len("refs/heads/"):]
+        return {"id": self.worktree_id, "branch": branch, "path": e.get("path"),
+                "repo": e.get("repo_top"), "subdir": e.get("subdir"),
+                "base": (e.get("base_ref") or "")[len("refs/heads/"):],
+                "baseSha": e.get("base_sha"), "phase": e.get("phase"),
+                "blocked": self.worktree_blocked, "held": self.held,
+                "summary": self.worktree_summary,
+                "published": e.get("published"), "lastCommit": e.get("last_commit")}
+
+    def release_hold(self, drain):
+        """End a review action's hold. `drain`: run what queued meanwhile (after
+        Commit or Publish); otherwise keep it visible as not sent (Discard, failure)."""
+        with self._turn_lock:
+            self.held = False
+            if not self._queue:
+                return
+            if drain and self.state not in ("dead", "detached") and not self._turn_running:
+                self.state = "busy"
+                self._turn_running = True
+                threading.Thread(target=self._drain, daemon=True).start()
+                return
+        if not drain:
+            self._park_stale_queue()
+
+    def _on_permission(self, req):
+        """Worktree panes never offer "allow always": Phase 0 showed Claude saves
+        such rules to the MAIN checkout's .claude/settings.local.json, so one
+        worktree's approval would widen every later session there."""
+        if self.worktree_id:
+            opts = req.get("options") or []
+            kept = [o for o in opts if str(o.get("kind", "")) != "allow_always"]
+            if kept and len(kept) != len(opts):
+                req = dict(req, options=kept)
+        return super()._on_permission(req)
 
     def answer(self, request_id, option_id, digest=None):
         req = self.pending.get(request_id)
@@ -1491,6 +1651,8 @@ class Pane(_core.PaneBase):
             "role": getattr(self, "role", None),
             # Set when the transcript was carried from another lane (port.py).
             "portedFrom": getattr(self, "ported_from", None),
+            # Own branch (worktrees.py): None for an ordinary pane.
+            "worktree": self.worktree_view(),
             "usage": self.usage, "alive": alive,
             "events": [e for e in self.events if e["seq"] > since],
             "seq": self.events[-1]["seq"] if self.events else 0,
@@ -1613,6 +1775,9 @@ class Manager(_core.ManagerBase):
         """
         import socket
         import port as port_mod
+        if self.get(from_id).worktree_id:
+            raise ValueError("a pane on its own branch cannot be ported yet; "
+                             "publish or discard its branch first")
         pack = self.port_preview(from_id, to_agent)
         if not sha or pack["sha"] != sha:
             raise ValueError("the preview is out of date — reopen and check it")
@@ -1716,7 +1881,7 @@ class Manager(_core.ManagerBase):
 
 
     def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None,
-               role=None, role_sha=None):
+               role=None, role_sha=None, worktree=False, title=None):
         if agent.startswith("host:"):
             # The picker's list could be seconds stale; the spawn must not be.
             refresh_host_lanes()
@@ -1735,6 +1900,18 @@ class Manager(_core.ManagerBase):
         cwd = Path(cwd).expanduser()
         if not cwd.is_dir():
             raise ValueError(f"not a directory: {cwd}")
+        # D14: a worktree has exactly one owner, which resumes rather than creates.
+        if inside_worktree_root(cwd):
+            raise ValueError("that folder belongs to another pane's own branch; "
+                             "open or resume that pane instead")
+        pr = None
+        if worktree:
+            why = worktree_refusal(agent)
+            if why:
+                raise ValueError(why)
+            pr = _wt.probe(cwd)
+            if pr["refusals"]:
+                raise ValueError(pr["refusals"][0])
         # Reserve the slot under the lock and register before start(), so the cap
         # holds under concurrency and `ready` never names an unknown pane.
         with self._lock:
@@ -1751,9 +1928,26 @@ class Manager(_core.ManagerBase):
             if role:
                 pane.role, pane.role_sha, pane.role_delivery = role, role_sha, "preamble"
             self.panes[pane.id] = pane
+        if worktree:
+            try:
+                e = _wt.create(pr, title or "", pane.id, registry=self.worktree_registry())
+            except Exception:
+                self.panes.pop(pane.id, None)  # no worktree, no pane
+                raise
+            pane.worktree_id = e["id"]
+            pane.cwd = str(_wt.agent_cwd(e))
+            pane.title = Pane._default_title(agent, cwd)   # the repo's name, not the slug
+            pane._preamble_due = True
+            pane.save_meta()
         try:
             pane.start()
-        except Exception:
+        except Exception as e:
+            if pane.worktree_id:
+                # D14: the pane stays, dead, owning its worktree; Resume retries
+                # there and Forget offers Discard.
+                pane.state, pane.error = "dead", f"could not start: {e}"
+                pane.save_meta()
+                raise
             self.panes.pop(pane.id, None)     # never leave a phantom in the roster
             raise
         return pane
@@ -1851,6 +2045,7 @@ class Manager(_core.ManagerBase):
         # Replies the previous hub held in memory are recorded dropped, never re-sent.
         self._peer_queue_orphans()
         self.not_restored = skipped + unreadable   # said out loud, not dropped
+        self._worktree_restore()
 
     def _reserve_live(self, pane):
         """Refuse to attach a process when MAX_PANES live ones exist; marks the
@@ -1884,6 +2079,8 @@ class Manager(_core.ManagerBase):
         if not m.get("closed"):
             raise ValueError("that conversation is not archived")
         pane = Pane.from_meta(m, self)
+        if pane.worktree_id:
+            pane.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(pane))
         pane.save_meta(closed=False)      # or the next restart re-archives it
         with self._lock:
             if pane_id in self.panes:
@@ -1943,6 +2140,173 @@ class Manager(_core.ManagerBase):
 
 
 
+
+    # ── own-branch worktrees ─────────────────────────────────────────────────
+
+    def worktree_registry(self):
+        reg = getattr(self, "_wt_registry", None)
+        if reg is None:
+            reg = self._wt_registry = _wt.Registry()
+        return reg
+
+    def worktree_entry(self, pane):
+        """The pane's registry entry, or None (unreadable entries count as none)."""
+        if not pane.worktree_id:
+            return None
+        try:
+            return self.worktree_registry().read(pane.worktree_id)
+        except (OSError, ValueError, _wt.RegistryVersionError):
+            return None
+
+    def _worktree_blocked_reason(self, entry):
+        if entry is None:
+            return "this pane's own-branch record is missing; see `corral-light worktrees`"
+        phase = entry.get("phase")
+        if phase == "trashed":
+            return "this branch was discarded; restore it from `corral-light worktrees` to resume"
+        if phase in ("missing", "tampered", "purged"):
+            return f"this pane's worktree is {phase}: {entry.get('error') or ''}".strip()
+        if any(o.get("state") == "unknown" for o in entry.get("ops") or []):
+            return "an action on this branch has an unknown outcome; resolve it with `corral-light worktrees`"
+        return None
+
+    def _worktree_restore(self):
+        """After restore(): block panes whose worktree is not usable, then
+        reconcile in the background and report what it found."""
+        owned = [p for p in self.panes.values() if p.worktree_id]
+        if not owned and not self.worktree_registry().all():
+            return
+        for p in owned:
+            p.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(p))
+
+        def run():
+            try:
+                notes = _wt.reconcile(self.worktree_registry())
+            except Exception as e:           # noqa: BLE001 — a note, never a crash
+                print(f"corral-light: worktree reconcile failed: {e}", file=sys.stderr, flush=True)
+                return
+            by_id = {p.worktree_id: p for p in list(self.panes.values()) if p.worktree_id}
+            for n in notes:
+                p = by_id.get(n.get("id"))
+                if p:
+                    p.emit("note", {"text": f"own branch: {n['note']}"}, activity=False)
+                else:
+                    print(f"corral-light: worktrees: {n['note']}", file=sys.stderr, flush=True)
+            for p in by_id.values():
+                p.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(p))
+        t = threading.Thread(target=run, daemon=True, name="worktree-reconcile")
+        self._wt_reconcile_thread = t
+        t.start()
+
+    def worktree_turn_ended(self, pane):
+        """Queue a summary for `pane` on the single worker (at most one pending each)."""
+        lock = self.__dict__.setdefault("_wt_sum_lock", threading.Lock())
+        with lock:
+            pending = self.__dict__.setdefault("_wt_sum_pending", [])
+            if pane.id not in pending:
+                pending.append(pane.id)
+            if self.__dict__.get("_wt_sum_running"):
+                return
+            self._wt_sum_running = True
+        threading.Thread(target=self._worktree_summary_worker, daemon=True,
+                         name="worktree-summary").start()
+
+    def _worktree_summary_worker(self):
+        lock = self._wt_sum_lock
+        while True:
+            with lock:
+                if not self._wt_sum_pending:
+                    self._wt_sum_running = False
+                    return
+                pid = self._wt_sum_pending.pop(0)
+            p = self.panes.get(pid)
+            e = self.worktree_entry(p) if p else None
+            if not e or e.get("phase") != "active":
+                continue
+            try:
+                summ = _wt.summary(e)
+            except Exception as err:         # noqa: BLE001 — a note, never a crash
+                p.emit("note", {"text": f"could not count this branch's changes: {err}"},
+                       activity=False)
+                continue
+            p.worktree_summary = summ
+            p.emit("worktree", {"summary": summ}, activity=False)
+
+    def _worktree_action(self, pane_id, fn, drain_after):
+        """Run a review action on a quiet pane (D11): refuse while busy, hold the
+        queue meanwhile, then drain (Commit/Publish) or park (Discard/failure)."""
+        p = self.get(pane_id)
+        if not p.worktree_id:
+            raise ValueError("this pane is not on its own branch")
+        e = self.worktree_entry(p)
+        if e is None:
+            raise _wt.Refused("missing", "this pane's own-branch record is missing")
+        if not p._action_lock.acquire(blocking=False):
+            raise _wt.Refused("busy", "another action is already running on this pane")
+        ok = False
+        try:
+            with p._turn_lock:
+                if p._turn_running or p.state in ("busy", "needs-you", "uncertain") or p.pending:
+                    raise _wt.Refused("busy", "the agent is still working; wait for its turn to end")
+                p.held = True
+            result = fn(p, e)
+            ok = True
+            return result
+        finally:
+            try:
+                p.release_hold(drain=ok and drain_after)
+            finally:
+                p._action_lock.release()
+
+    def worktree_snapshot(self, pane_id):
+        """Open review: snapshot (a tree OID) plus its diff."""
+        def go(p, e):
+            snap = _wt.snapshot(e, tmp_dir=p.dir)
+            snap["diff"] = _wt.diff(e, snap["tree"])
+            snap["summary"] = p.worktree_summary = _wt.summary(e)
+            return snap
+        return self._worktree_action(pane_id, go, drain_after=True)
+
+    def worktree_commit(self, pane_id, tree, head, index_id, message):
+        def go(p, e):
+            r = _wt.commit_tree(e, tree, index_id, message, expect_head=head,
+                                registry=self.worktree_registry(), tmp_dir=p.dir)
+            p.worktree_summary = _wt.summary(self.worktree_entry(p))
+            p.emit("worktree", {"summary": p.worktree_summary, "commit": r["commit"]},
+                   activity=False)
+            return r
+        return self._worktree_action(pane_id, go, drain_after=True)
+
+    def worktree_publish(self, pane_id, oid, tree, remote, push_url, pr=None):
+        def go(p, e):
+            r = _wt.push(e, remote, push_url, oid, tree, registry=self.worktree_registry())
+            if pr:
+                r.update(_wt.open_pr(self.worktree_entry(p), pr.get("title") or "",
+                                     pr.get("body") or "", pr.get("repo") or "",
+                                     registry=self.worktree_registry(), remote=remote))
+            p.emit("worktree", {"published": r}, activity=False)
+            return r
+        return self._worktree_action(pane_id, go, drain_after=True)
+
+    def worktree_discard(self, pane_id, tree):
+        """Stop the agent (cancel, then end its process group), then discard (D9)."""
+        def go(p, e):
+            if p.client and p.client.alive:
+                p._expect_exit = True
+                with contextlib.suppress(Exception):
+                    p.client.cancel(p.acp_session)
+                p.client.close()           # TERM then KILL of the adapter's group
+                p.client = None
+            p.pid = p.pgid = p.pid_start = None
+            p.state = "detached"
+            r = _wt.discard(e, tree, registry=self.worktree_registry(), tmp_dir=p.dir)
+            p.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(p))
+            p.save_meta()
+            p.emit("worktree", {"discarded": r}, activity=False)
+            p.emit("note", {"text": f"branch discarded: kept as {r['recovery_ref']}; "
+                                    f"files moved to {r['trash_path']}"})
+            return r
+        return self._worktree_action(pane_id, go, drain_after=False)
 
     def state(self, since=None):
         since = since or {}
