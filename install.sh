@@ -160,7 +160,7 @@ press_enter() {   # 0 = go on, 1 = skip
 has_lane() { case ",$LANES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 have() { command -v "$1" >/dev/null 2>&1; }
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
-hub_alive() { curl -fs --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"service": "corral-light"'; }
+hub_alive() { curl -fs --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null | grep >/dev/null '"service": "corral-light"'; }
 
 # Sign-in state, per assistant. Only "has a credential file"; whether the
 # subscription behind it works is the assistant's own business.
@@ -201,7 +201,7 @@ uninstall() {
   printf '%sThis removes what the installer added. Sign-ins (~/.claude, ~/.grok, …) and your own\n' "$B"
   printf 'files stay unless you say otherwise. Each removal names its target first.%s\n' "$N"
   step "Service"
-  if [ "$NO_SERVICE" = 0 ] && systemctl --user list-unit-files corral-light.service 2>/dev/null | grep -q '^corral-light.service'; then
+  if [ "$NO_SERVICE" = 0 ] && systemctl --user list-unit-files corral-light.service 2>/dev/null | grep >/dev/null '^corral-light.service'; then
     printf '  stopping and removing: corral-light.service, corral-light-watch.timer, %s\n' "$DROPIN"
     systemctl --user disable --now corral-light.service 2>/dev/null || true
     systemctl --user disable --now corral-light-watch.timer 2>/dev/null || true
@@ -263,10 +263,9 @@ main() {
     *) die "Unsupported CPU: $ARCH" "Supported: x86_64 and arm64." ;;
   esac
   ok "Linux $ARCH"
-  if ! ldd --version 2>&1 | head -1 | grep -qiE 'glibc|gnu libc'; then
-    die "This Linux does not use glibc (Alpine/musl?)." "The prebuilt Node.js and assistant binaries need glibc 2.28+. Use a glibc-based distro for this release."
-  fi
-  glibc="$(ldd --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+  libc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+  case "$libc" in glibc\ *) ;; *) die "This Linux does not use glibc (Alpine/musl?)." "The prebuilt Node.js and assistant binaries need glibc 2.28+. Use a glibc-based distro for this release." ;; esac
+  glibc="${libc#glibc }"
   if [ -n "$glibc" ] && [ "$(printf '%s\n2.28\n' "$glibc" | sort -V | head -1)" != "2.28" ]; then
     die "glibc $glibc is too old; 2.28 or newer is needed (Ubuntu 20.04+, Debian 10+, Fedora 29+)."
   fi
@@ -339,7 +338,7 @@ main() {
   if [ "$NO_SCHEDULE" = 0 ]; then
     cron_unit=""
     for u in cronie cron crond; do
-      if systemctl list-unit-files "$u.service" 2>/dev/null | grep -q "^$u.service"; then cron_unit="$u"; break; fi
+      if systemctl list-unit-files "$u.service" 2>/dev/null | grep >/dev/null "^$u.service"; then cron_unit="$u"; break; fi
     done
     if [ -n "$cron_unit" ] && ! systemctl is-active --quiet "$cron_unit"; then
       if have sudo; then
@@ -676,7 +675,7 @@ EOF
       systemctl --user enable --now corral-light.service >/dev/null 2>&1 || systemctl --user start corral-light.service
       ok "service enabled and started"
     fi
-    if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+    if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep >/dev/null 'Linger=yes'; then
       if loginctl enable-linger "$USER" 2>/dev/null; then ok "service survives logout (linger enabled)"
       else warn "could not enable linger; the hub stops when you log out (sudo loginctl enable-linger $USER fixes that)"; fi
     fi
