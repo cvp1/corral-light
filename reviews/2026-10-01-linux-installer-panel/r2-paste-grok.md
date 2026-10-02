@@ -1,3 +1,293 @@
+ROUND 2 — same panel, same fixed constraints C1–C5, same rules (text only; platform knowledge allowed and labelled).
+
+WHAT HAPPENED SINCE ROUND 1
+The author applied the round-1 findings that were verifiable and shipped install.sh 1.1.1 (1.1.0 plus: an INT trap that explains a re-run; each sign-in capped at ten minutes with `timeout --foreground`; the summary and README name `bash ~/tools/corral-light/install.sh --uninstall`, the copy the clone keeps; launch.py catches an approve failure (exit 3) and treats an opener that exits non-zero within 3 s as failure (exit 4, URL printed); the end summary says to open a NEW terminal). Changes: the two questions (which assistants, memory on/off) moved to the start, in plain words; `--lanes` is validated at parse time; `exec </dev/null` so no child can eat the piped script, with questions read from /dev/tty; logging is `main | tee` with PIPESTATUS, and `set -E` so the ERR trap reaches functions; `die` names the step and the log; a glibc 2.28+ / musl check via getconf; a free-disk check (1.2 GB, 3.6 GB with Gemini); the internet check now runs after the package step; a port-in-use check before starting the hub, and the health wait requires the JSON to identify itself as corral-light; the systemd drop-in quotes its Environment= lines and the service is restarted when the checkout or drop-in changed; the Seed step reconciles each phase on a re-run (install → verify → CLAUDE.md region → mesh → hooks → sync → audit), reading gated_writes from Seed's receipt instead of hiding behind the receipt's existence; the Claude login check parses JSON; the codex binary is checked to exist; `--yes` means "all four assistants, memory on"; no terminal and no --yes answers every question "no"; every `cmd | grep -q` was removed (pipefail + SIGPIPE made the glibc probe fail on a real machine — a round-1 reviewer predicted this class); Claude Code is installed at a pinned version through Anthropic's installer; the pairing code moved to the URL fragment (`/#pair=`), and the page strips it with replaceState; the end summary lists, per assistant, signed-in or the exact command, and says "Ready" only when every chosen assistant is signed in and the browser opened.
+Also: the page's full pairing flow was cut off in the round-1 paste. The part you did not see: after the code is shown, a 1.5 s poll calls `/api/pair/claim?code=…`; `ok` hides the pairing screen and starts the app; `expired` (unknown, used, or timed-out code) discards the preset and mints a fresh code the normal way. So a preset code IS claimed, and expiry recovers.
+The installer was run end to end twice in an isolated fake HOME with stubbed `crontab` (first run and re-run), with the hub started on port 8099 and the pre-approved code claimed once (second claim: expired). The service, cron, mesh and login steps were exercised only by reading, not by running, because the test machine is the author's live system.
+
+Rejected or deferred, with reasons: "switch Seed to systemd timers" (Seed's Linux scheduler is cron by design, out of scope); "a desktop double-click entry point" (Linux desktops block untrusted .desktop launchers; the README now states the one-paste-line floor honestly); "rollback" (the design is idempotent re-run, not transaction); "Ubuntu 24.04 dropped cron" (not true — the `cron` package is present; it is installed if missing); "CODEX_HOME is not persisted for the service" (not needed — codex_launcher.py sets CODEX_HOME to that path itself).
+
+Below are the other two reviewers' round-1 reviews, then the NEW install.sh 1.1.1 in full.
+
+YOUR JOB — converge
+1. CROSS-EXAMINE. For each other reviewer: the finding of theirs you most agree with, and the claim you think is WRONG (factually or as a design), with why. Change any of your own round-1 verdicts if warranted and say so.
+2. RE-VERDICT on install.sh 1.1.1: BUILD / RESHAPE / KILL, one line.
+3. REMAINING BUGS in 1.1.1, ranked, at most 8, each with the exact construct, the trigger, and a fix. New bugs introduced by the changes count double.
+4. THE MOM TEST, round 2: on the 1.1.1 flow (two questions, then unattended, then sign-ins), what still stops her? At most 5, each with the fix.
+5. SHIP GATE: the shortest list of checks (at most 6) that, if green, would justify telling Craig "send this to your mother". Each must be runnable by one person in under an hour on a fresh Ubuntu 24.04 VM.
+6. ONE-LINE BOTTOM LINE for Craig.
+
+FORMAT: Markdown, under 1,200 words. No preamble.
+
+
+=== ROUND-1 REVIEW BY ASTRA ===
+# Astra (gpt-6-astra, high) — round 1
+
+pane 11d02ed1a81d · complete True
+
+Overall approach — **BUILD:** a native user service with vendor-owned sign-ins fits the constraints; dependable onboarding needs explicit completion checks.
+install.sh — **RESHAPE:** a Seed receipt suppresses unfinished setup, so rerunning can permanently preserve a broken installation.
+README top — **RESHAPE:** it promises repair, reproducibility, and browser readiness that the implementation does not establish.
+launch.py + page change — **RESHAPE:** automatic pairing is reasonable, but hub identity, credential exposure, opener success, and expired-code recovery need verification.
+
+**The mom test**
+
+On a fresh Ubuntu 24.04 desktop:
+
+- She must find a terminal and paste a command; this does not meet “clicking on a link.”
+- If `curl` is absent, she sees `curl: command not found`. The installer cannot install its own downloader before being downloaded.
+- `Assistants: claude,codex,grok,gemini` selects everything without asking which accounts she owns, including the 1.5 GB download.
+- `Missing: … Will run: sudo apt-get install …` introduces package-manager terminology. The password prompt displays no typing feedback; explain that explicitly.
+- A download, checksum, package, or selftest failure ends with `Fix what it names`. That is a support request disguised as recovery guidance.
+- `Wire the memory hooks now? [Y/n]` asks her to decide about unfamiliar memory behavior and edits to `settings.json`.
+- `Claude: … account (Pro or Max)` and subsequent account prompts require credentials and possibly subscriptions she lacks. Skipping remains possible, but readiness becomes unclear.
+- `service survives logout (linger enabled)` describes a technical policy choice without explaining background resource use.
+- `opening … (paired)` can appear even when the opener immediately fails.
+- `You are set up` appears despite failed logins or launch. The suggested `cd … && claude` fails if Claude was excluded.
+- README’s `bytes and a digest`, `/status`, `doctor`, and `journalctl` require knowledge she should not need.
+
+**Bugs and reliability failures, highest severity first**
+
+1. **Destructive uninstall without ownership checks.** Constructs: `rm -rf "$NODE_DIR" "$TOOLS_PREFIX" "$BIN/grok"` and recursive clone/state deletion; uninstall precedes the root refusal. Existing user installations, overridden paths, or root execution can delete unrelated content. **Fix:** validate paths and UID before either mode; use an ownership manifest, protect preexisting files, and show exact removal targets.
+
+2. **Resume skips incomplete Seed setup.** `if [ -f "$AIOS/.cc-seed/receipt.json" ]; then skip …` encloses all subsequent verification, approvals, hooks, scheduling, and audit. Failure after receipt creation—or rerunning without `--no-schedule`—leaves those steps undone. **Fix:** reconcile each phase independently, using Seed’s supported checks; retain `install.py --approve` for gated writes.
+
+3. **Service updates and readiness are unreliable.** `enable --now … || restart …` does not restart an already-running service after changes. Existing units retain their original arguments; whether port arguments override the environment is unverifiable from the text. Any successful `/health` response passes, including another application on occupied port 8098. **Fix:** verify hub identity/version/configuration, detect port conflicts, restart changed deployments, and persist the address for later `launch`.
+
+4. **Bootstrap ordering breaks missing-tool recovery.** `curl -fsSI` runs before package installation. Without curl, a saved installer reports “No internet connection.” If Python is absent, `pyyaml` never enters `missing`. **Fix:** bootstrap required tools first; always verify/install YAML afterward. Distinguish DNS, proxy, TLS, and HTTP failures.
+
+5. **Distribution support exceeds implementation.** Python 3.8 is rejected only after package changes. From platform knowledge, official Linux Node binaries require glibc and generally fail on Alpine’s musl; non-systemd cron is never verified as running. ARM64 Node selection alone establishes no other runtime’s compatibility. **Fix:** preflight Python/libc/init and every selected runtime; publish a tested support matrix. Node version/hash validity and Antigravity ARM64 support are **unverifiable from the text**.
+
+6. **Seed detection fails open.** `--detect … || true`, human-output regexes, and `grep -v -F "$AIOS"` discard errors and permit substring collisions between workspace names. Another install can be missed or ordinary output mistaken for one. **Fix:** require successful structured detection and compare canonical paths exactly.
+
+7. **Terminal and logging handling is incomplete.** `[ -r /dev/tty ]` does not prove the process has a controlling terminal. Opening it can still fail. Unredirected children such as npm inherit the piped script’s stdin and can consume it. `tee` removes stdout’s TTY status, changing interactive CLI behavior; process-substitution failure is not reliably checked. **Fix:** download before execution, open/test a dedicated terminal descriptor, isolate child stdin, and keep interactive authentication outside blanket logging.
+
+8. **Failure reporting masks unsuccessful completion.** `launch … || true`, `doctor || true`, and contract failure followed by `ok "memory hooks wired and proven"` permit false success. `ERR` lacks inheritance into functions/subshells; `set -e` is suppressed in conditional/`||` contexts, so it is not a completion framework. **Fix:** explicit phase outcomes, meaningful exit codes, truthful degraded status, and contextual error reporting.
+
+9. **Service execution differs from installation.** `SERVICE_PATH` omits locations accepted by `have claude`, and may select a different Python. Unquoted `Environment=PATH=$SERVICE_PATH` breaks paths containing whitespace; systemd specifiers need escaping. Generated shell wrappers also embed paths without shell-safe encoding. **Fix:** resolve runtime executables explicitly, generate correctly escaped units/wrappers, and validate them before activation.
+
+10. **Authentication checks are weak.** Grepping `"loggedIn": true` depends on formatting; with `pipefail`, early `grep -q` termination can also produce false negatives. A nonempty auth file proves neither validity nor subscription access. Codex’s executable is used without checking it exists. **Fix:** parse documented machine-readable status, validate required executables, and report authenticated versus usable separately. Current CLI contracts are **unverifiable from the text**.
+
+11. **Options lack a coherent contract.** Missing `$2` values abort abruptly; invalid ports fail late; `--yes` still launches interactive authentication and may need sudo credentials. `--skip-logins` does not guarantee Gemini won’t prompt later. No-display handling only explicitly selects device authentication for Grok/Codex. **Fix:** validate arguments first; document unattended combinations and unsupported headless flows; generate lane-specific next steps.
+
+12. **Launch can declare success without opening or pairing.** `Popen` success proves process creation only; an immediate `xdg-open` failure is discarded. `--url` can target an unrelated host while approval modifies local auth state. Literal IPv6 addresses lack brackets. The pasted JS ends before claiming/fallback, so expiry recovery is **unverifiable from the text**. **Fix:** validate endpoint/state correspondence, format URLs properly, observe opener failure, and test claim/recovery end to end.
+
+**Security**
+
+- **`curl | bash`: real supply-chain risk.** TLS protects transport, not a compromised moving branch. Smallest improvement: download an immutable release, verify its authenticated digest/signature, then execute.
+- **Pins:** `master` moves; a tag is not intrinsically immutable; Claude’s installer/channel and existing Claude binaries are unpinned. Grok’s top-level version does not freeze dependencies; missing lockfile falls back to resolution. Use immutable commits and artifact hashes, require locks, record actual versions, and describe Claude’s separate update policy honestly.
+- **Pair URL:** a preapproved code is a bearer credential. Query strings can reach request logs, history, referrers, process listings, and—on fallback—the installer log. Prefer a fragment, remove it immediately, redact logs, and enforce atomic single-use, expiry, rate limiting, and sufficient entropy. Those backend guarantees are **unverifiable from the text**.
+- **Shell PATH edits:** user-local PATH is normal, but prepending changes command precedence and modifying two startup files is intrusive. Avoid duplicates and record reversible changes.
+- **Systemd PATH:** explicit PATH is appropriate; escaping and trusted directory ownership are required. Avoid inherited arbitrary search paths.
+
+**Missing for repeatability**
+
+1. A desktop launch/install entry point with prerequisites handled.
+2. A tested release manifest covering architectures, dependencies, and actual versions.
+3. Transactional staging, concurrency locking, rollback, and per-phase reconciliation.
+4. Early disk, runtime, network, privilege, and port preflight.
+5. Verified browser pairing and one usable selected lane before declaring success.
+6. A bounded, redacted diagnostic bundle and actionable recovery screen.
+
+**Automated checks**
+
+1. Bash syntax/ShellCheck plus argument-table tests on every PR.
+2. Fake command binaries under temporary HOME to inject failure after every phase; rerun and assert completion without duplication.
+3. Disposable systemd VMs: active-service upgrade, custom port, occupied port, logout persistence.
+4. PTY and no-controlling-terminal tests for piped input, sudo, login, and logging.
+5. x86-64/ARM64 distro runners checking executable compatibility and scheduler operation.
+6. Python/browser integration tests for wrong hub, opener failure, expired/reused codes, URL removal, and credential-free logs.
+
+**Most likely failure:** her machine lacks `curl`, so the advertised installation command fails before the installer can help.
+
+
+=== ROUND-1 REVIEW BY GEMINI38 ===
+# Gemini (gemini-3.8-flash-high) — round 1
+
+pane 595f30ca1c7b · complete True
+
+### 1. Verdict
+
+* **Overall Approach: RESHAPE** — Monolithic installer tries to orchestrate six distinct external ecosystems (distro pkgs, systemd user services, npm node distribution, four vendor AI CLI auth flows, and Seed cron/git hooks) in one brittle shell pass rather than decoupling runtime provisioning from interactive authorization.
+* **install.sh: RESHAPE** — Fatal I/O redirection bug silently breaks error trapping, non-standard cron handling breaks modern Ubuntu 24.04, and unescaped heredoc parameter expansions mutate runtime configs during installation.
+* **README.md (top): RESHAPE** — Promises a magical zero-friction one-liner ("my mom could use") but hides mandatory interactive `sudo`, four disparate corporate OAuth sign-ins, and complex command-line diagnostics behind a facade.
+* **launch.py and static/app.js: RESHAPE** — The CLI side mints and pre-approves correctly, but the browser JavaScript fails to auto-claim the preset code, leaving the user staring at an unnecessary pairing prompt.
+
+---
+
+### 2. The Mom Test
+
+Walking a clean Ubuntu 24.04 LTS desktop:
+
+1. **Terminal Barrier**:
+   * *Experience*: She is asked to "Open a terminal and paste this: `curl -fsSL ... | bash`". A non-technical user does not know what terminal shortcut to press, what `curl` is, or how to paste without accidentally triggering unwanted shell escapes.
+2. **Sudo Password Prompt**:
+   * *Line she sees*: `Missing: git pyyaml cron ... Will run: sudo apt-get install -y git python3-yaml cron`
+   * *Experience*: The terminal stops and asks `[sudo] password for <user>:`. She does not know what `sudo` means, why her keystrokes are invisible, or whether typing her password into an untrusted script is safe.
+3. **Internal Architecture Jargon (Memory Hooks)**:
+   * *Line she sees*: `Memory hooks. Without them, memory is written but never read back into a conversation. Wiring them edits Claude Code's settings.json; ... Wire the memory hooks now? [Y/n]`
+   * *Experience*: Complete paralysis. She has no idea what "memory hooks", "settings.json", or "wiring" mean.
+4. **Three Uncoordinated Browser OAuth Takeovers**:
+   * *Lines she sees*:
+     * `Claude: your browser will open to sign in with your Claude account (Pro or Max). (press Enter to continue, or type s to skip)`
+     * `Grok: sign in with your X / Grok account.`
+     * `ChatGPT: sign in with your ChatGPT account (Plus, Pro or Team).`
+   * *Experience*: Her browser pops open 3 to 4 times consecutively requesting external logins. If she lacks paid subscriptions for all four, the installer halts or marks steps as failed.
+5. **Dangling Terminal Command**:
+   * *Line she sees*: `First thing to try: open a terminal, run cd ~/aios && claude and type /status`
+   * *Experience*: Rather than delivering a ready-to-use GUI desktop app, she is told to navigate shell directories and execute subcommands.
+
+---
+
+### 3. Bugs and Reliability Failures
+
+1. **`exec > >(tee -a "$LOG")` Breaks `trap ... ERR` and Subshell Error Handling**
+   * *Construct*: `exec > >(tee -a "$LOG") 2>&1` (Line 115) combined with `set -e` and `trap on_error ERR`.
+   * *Trigger*: In Bash, piping file descriptors through asynchronous process substitution causes standard error traps to miss failures inside pipeline segments or subshells, and background `tee` processes can race with script exit.
+   * *User sees*: Silent premature exits or hanging installs without triggering `on_error`.
+   * *Fix*: Avoid `exec > >(tee ...)`. Instead wrap the invocation or tee explicitly inside targeted commands, or invoke `exec > >(tee -a "$LOG")` only after setting `set -o pipefail` and handling subshell trap propagation via `set -E`.
+
+2. **Cron Package Missing / Deprecated on Modern Distros (Ubuntu 24.04)**
+   * *Construct*: `apt:cron) out+=(cron) ;;` (Line 173) and `systemctl enable --now "$cron_unit"` (Line 210).
+   * *Trigger*: Ubuntu 24.04 LTS drops standard `cron` by default in favor of `systemd-timesyncd` and systemd timers. Installing `cron` works, but checking `systemctl list-unit-files "$u.service"` fails if the daemon is masked or replaced by `cronie`/`systemd-cron`.
+   * *User sees*: Warning `could not start cron — Seed's scheduled jobs will not run until it is`.
+   * *Fix*: Standardize on native systemd user timers instead of requiring a root-managed cron daemon.
+
+3. **CLAUDE.md Staged Heredoc Evaluates Variables at Install Time**
+   * *Construct*: `cat > "$AIOS/.cc-seed/staged/claude-md.proposed" <<EOF ... \`$AIOS\` ... EOF` (Lines 319–358).
+   * *Trigger*: The heredoc delimiter `<<EOF` is unquoted. Bash expands `$AIOS`, `$CL`, `$SEED`, and any backticks inside the documentation block at install time.
+   * *User sees*: Staged content corrupted or shell evaluation syntax errors during generation if backticks are evaluated.
+   * *Fix*: Quote the heredoc delimiter: `cat > "..." <<'EOF'` and interpolate only strictly needed environment variables through controlled templating (e.g., `envsubst` or sed).
+
+4. **Preset Pairing Code in `static/app.js` Is Never Claimed**
+   * *Construct*: `app.js` sets `code = preset; ttl = 300; how = ...` but does not issue a claim/redeem call to `/api/pair/claim` or the hub's authorization endpoint.
+   * *Trigger*: `corral-light launch` opens `http://127.0.0.1:8098/?pair=ABC-XYZ`.
+   * *User sees*: The browser wall opens, strips `?pair=` from the address bar, but remains stuck on the pairing modal showing `ABC-XYZ` waiting for manual approval.
+   * *Fix*: In `app.js`, when `preset` is non-null, immediately invoke `await api('/api/pair/claim', { code: preset })` to obtain the session cookie and dismiss the modal.
+
+5. **Antigravity Installer Missing Executable/Flag Guarantees**
+   * *Construct*: `python3 "$CL/install_antigravity_acp.py" --install` (Line 282).
+   * *Trigger*: Script fails if external dependencies (e.g. system glibc, tarballs, or missing python requests) fail; download is 1.5 GB without bandwidth timeout checks.
+   * *User sees*: Step 6 fails mid-download, terminating the script via `set -e`.
+   * *Fix*: Wrap execution in retry logic and verify download checksum before triggering installation.
+
+6. **Hardcoded Port Conflict Detection**
+   * *Construct*: `curl -fs --max-time 2 "http://127.0.0.1:$PORT/health"` (Line 395).
+   * *Trigger*: Port 8098 occupied by another application (or a zombie hub instance).
+   * *User sees*: If another service runs on 8098, `install-service` succeeds but the service fails to bind; curl health check times out after 60s and script aborts: `die "The hub did not answer on port 8098 within 60 s."`.
+   * *Fix*: Check port availability before starting: `python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', $PORT))"` and prompt or increment port automatically.
+
+7. **`claude auth status` JSON Parsing Failure**
+   * *Construct*: `"$BIN/claude" auth status 2>/dev/null | grep -q '"loggedIn": true'` (Line 414).
+   * *Trigger*: Anthropic updates Claude CLI output format (plain text, markdown, or updated JSON schema keys like `"status": "authenticated"`).
+   * *User sees*: False negative; installer repeatedly forces user into `claude auth login` on every installer run even if already logged in.
+   * *Fix*: Test execution exit status or use robust JSON parsing: `claude auth status --json 2>/dev/null | python3 -c "import sys, json; sys.exit(0 if json.load(sys.stdin).get('loggedIn') else 1)"`.
+
+8. **`ask_yn` Default Logic Overrides Explicit Input on EOF**
+   * *Construct*: `read -r ans < "$TTY_IN" || ans=""` (Line 100).
+   * *Trigger*: Non-interactive terminal redirect or severed terminal connection during piped execution (`curl | bash`).
+   * *User sees*: If `/dev/tty` is unavailable, defaults are automatically selected without user consent, potentially overwriting settings.
+   * *Fix*: Explicitly check `[ -t 0 ]` and fail fast if user interaction is required but no TTY exists.
+
+9. **`launch.py` Assumes Localhost Only**
+   * *Construct*: `if bind in ("0.0.0.0", "", "::"): bind = "127.0.0.1"` (Line 38).
+   * *Trigger*: Hub executed in WSL2, container, or remote VM where the browser is on the host machine.
+   * *User sees*: Browser attempts to connect to `127.0.0.1` inside a container or host where port 8098 is not forwarded.
+   * *Fix*: Respect `CORRAL_LIGHT_PUBLIC_URL` or display clear host IP instructions when running headless/remote.
+
+10. **Systemd User Unit Drop-in PATH Injection Vulnerability**
+    * *Construct*: `Environment=PATH=$SERVICE_PATH` (Line 377).
+    * *Trigger*: `$HOME/.local/bin` is prepended to the systemd service PATH before `/usr/bin`.
+    * *User sees*: Any rogue binary placed in `~/.local/bin` shadows system utilities executed by the hub service.
+    * *Fix*: Order system directories first or isolate runner environments: `Environment=PATH=/usr/local/bin:/usr/bin:/bin:$BIN:$NODE_DIR/bin`.
+
+11. **Idempotency Failure on Repo Checkout with Uncommitted User Edits**
+    * *Construct*: `sync_repo` skips updates if `git status --porcelain` is non-empty (Line 223).
+    * *Trigger*: User edits `~/tools/corral-light` or `~/tools/ai-os-seed`.
+    * *User sees*: Installer outputs a warning and silently leaves outdated code; subsequent steps expecting new features fail down the line.
+    * *Fix*: Warn and prompt the user explicitly whether to stash changes or abort.
+
+12. **Codex Token Path Hardcoded Across Environments**
+    * *Construct*: `CODEX_HOME_DIR="$HOME/.config/corral-light/codex-home"` (Line 432).
+    * *Trigger*: Codex ACP adapter expects auth at standard `$CODEX_HOME` or default home directory; environment variable is only exported during login subshell, not persisted globally.
+    * *User sees*: ChatGPT lane fails in the web wall because the systemd service does not inherit `CODEX_HOME`.
+    * *Fix*: Add `Environment=CODEX_HOME=%h/.config/corral-light/codex-home` to `10-installer.conf`.
+
+---
+
+### 4. Security
+
+* **`curl | bash` Pattern**:
+  * *Risk*: Real. MitM or compromised CDN can serve arbitrary code directly into user context.
+  * *Fix*: Publish checksums/GPG signatures; instruct users to download, inspect, and run: `curl -O ... && bash install.sh`.
+* **Unpinned Claude Code Installer**:
+  * *Risk*: High. `curl -fsSL https://claude.ai/install.sh | bash` downloads and runs unpinned, mutable remote code without hash verification.
+  * *Fix*: Pin the Anthropic installer script hash or install a pinned version via npm/binary archive with SHA-256 verification.
+* **Pre-approved Pairing Code in URL (`/?pair=...`)**:
+  * *Risk*: Moderate. URLs leak via browser history, process listing (`ps aux` showing browser command line), and web proxy logs.
+  * *Fix*: Pass code via URL hash fragment `/#pair=...` (never sent over HTTP, not stored in server logs) and enforce a strict 60-second single-use expiry.
+* **PATH Edits to `~/.profile` and `~/.bashrc`**:
+  * *Risk*: Low. Standard pattern, but appending unquoted strings can allow injection if directory paths contain spaces.
+  * *Fix*: Use safe quoting and check if path is already present in `PATH` before appending.
+* **Drop-in `Environment=PATH=` Line**:
+  * *Risk*: Moderate. Placing user-writable directories (`$BIN`, `$NODE_DIR/bin`) ahead of system paths in a persistent service allows persistent local binary hijacking.
+  * *Fix*: Restrict permissions on `$BIN` and place system bin dirs first.
+
+---
+
+### 5. What Is Missing for "100% Reliable and Repeatable"
+
+1. **Systemd User Session Linger Activation Verification**:
+   * *Problem*: `loginctl enable-linger` requires root/polkit privileges; if it fails, the user service terminates on logout.
+   * *Addition*: Verify linger state via `loginctl show-user $USER --property=Linger` and provide a clear warning if it cannot be enabled without sudo.
+2. **Dynamic Free Port Negotiation**:
+   * *Problem*: Hardcoded port `8098` causes catastrophic installation halt if already bound.
+   * *Addition*: Implement fallback port scanning in `launch.py` and `hub.py`, updating the receipt and drop-in configuration accordingly.
+3. **Automated Offline Dependency Bundling**:
+   * *Problem*: Flaky network during the 1.5 GB Gemini runtime or Node tarball download breaks the run mid-stream.
+   * *Addition*: Resume support (`curl -C -`) and pre-flight disk space check (verifying at least 3 GB free before starting).
+4. **Node Architecture & Glibc Verification**:
+   * *Problem*: Downloaded Node v24 LTS tarball requires Glibc 2.28+; running on musl distros (Alpine) or older Glibc crashes immediately.
+   * *Addition*: Run `ldd --version` check prior to downloading prebuilt Node binaries, falling back to distro node if incompatible.
+5. **Headless / Browserless Graceful Degrade**:
+   * *Problem*: When no desktop exists, the installer claims "the browser URL will be printed", but script flow assumes browser pairing.
+   * *Addition*: Explicitly detect SSH/headless sessions and format the output with an ASCII QR code or copy-paste link with token.
+6. **Atomic Rollback Mechanism**:
+   * *Problem*: A failure at Step 7 leaves half-installed systemd units and cloned git repos in an invalid state.
+   * *Addition*: Trap errors to run an internal cleanup/rollback of incomplete steps before exiting.
+
+---
+
+### 6. Automated Regression Tests
+
+1. **Clean Room Container Test (Ubuntu 24.04 LTS)**:
+   * *Test*: Run `install.sh --yes --skip-logins` in a minimal `ubuntu:noble` Docker image with `systemd` enabled.
+   * *Validation*: Verify exit code 0, all receipts written, systemd service active, and curl to `/health` returns 200.
+2. **Idempotence & No-Op Test**:
+   * *Test*: Run `install.sh --yes --skip-logins` twice consecutively on the same VM.
+   * *Validation*: Second run completes with zero package installations, zero modified git files, and identical `install-receipt.json`.
+3. **Dirty Git Repo Conflict Test**:
+   * *Test*: Modify a tracked file in `~/tools/corral-light` and run `install.sh`.
+   * *Validation*: Script exits gracefully with a distinct error code without clobbering uncommitted work.
+4. **Custom Port Collision Test**:
+   * *Test*: Spin up a dummy `nc -l 8098` socket and run the installer with `--port 8098`.
+   * *Validation*: Assert installer rejects or relocates port gracefully rather than timing out on curl health check.
+5. **Pairing Handshake Verification Test (Python Playwright)**:
+   * *Test*: Run `corral-light launch --print`, capture URL, navigate via headless Chromium, and verify session cookie exchange.
+   * *Validation*: Page reaches dashboard without human intervention; pairing modal disappears automatically.
+6. **Uninstall Cleanliness Audit**:
+   * *Test*: Run `install.sh --uninstall` answering yes to all prompts.
+   * *Validation*: Inspect `$HOME` and systemd directories to verify no orphan unit files, drop-ins, or path leaks remain.
+
+---
+
+### 7. The Single Point of Failure
+
+The installer will most likely fail on Craig's mother's machine when it abruptly halts at an intimidating `[sudo]` password prompt to install basic packages like `cron` and `git`, followed by opening multiple confusing browser tabs demanding paid account logins before showing any working user interface.
+
+
+=== install.sh 1.1.1 ===
+```bash
 #!/usr/bin/env bash
 # Corral Light + AI-OS Seed — the Linux installer.
 #
@@ -25,7 +315,7 @@
 #
 # Options:
 #   --lanes a,b,c     which assistants to set up: claude, codex, grok, gemini
-#                     (default: ask, Enter = claude; all four with --yes). gemini is a 1.5 GB download.
+#                     (default: ask; all four with --yes). gemini is a 1.5 GB download.
 #   --workspace DIR   where AI-OS Seed lives (default: ~/aios)
 #   --port N          hub port (default: 8098)
 #   --yes             no questions: all four assistants, memory on; sign-ins still run
@@ -42,7 +332,7 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.1.2"
+INSTALLER_VERSION="1.1.1"
 
 # ── pins ────────────────────────────────────────────────────────────────────
 CORRAL_LIGHT_REPO="${CORRAL_LIGHT_REPO:-https://github.com/cvp1/corral-light}"
@@ -160,11 +450,7 @@ press_enter() {   # 0 = go on, 1 = skip
 has_lane() { case ",$LANES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 have() { command -v "$1" >/dev/null 2>&1; }
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
-hub_alive() {
-  local body
-  body="$(curl -fs --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null)" || return 1
-  printf '%s' "$body" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("service") == "corral-light" else 1)' 2>/dev/null
-}
+hub_alive() { curl -fs --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null | grep >/dev/null '"service": "corral-light"'; }
 
 # Sign-in state, per assistant. Only "has a credential file"; whether the
 # subscription behind it works is the assistant's own business.
@@ -252,11 +538,6 @@ uninstall() {
 }
 
 main() {
-  # Runs as one side of `main | tee`, a subshell that inherits the options
-  # and traps the outer shell had when it forked — so arm them here, not there.
-  set -Eeuo pipefail
-  trap on_error ERR
-  trap on_int INT
   # Both modes: never as root, Linux only.
   [ "$(uname -s)" = Linux ] || die "This installer is for Linux." "macOS and Windows are not covered by this first release."
   [ "$(id -u)" != 0 ] || die "Do not run this as root." "Assistants sign in and work as you. Run it as your normal user; it asks for sudo only if a package is missing."
@@ -377,10 +658,10 @@ main() {
       printf '    2  ChatGPT   (Plus, Pro or Team)\n'
       printf '    3  Grok      (SuperGrok or X Premium)\n'
       printf '    4  Gemini    (a Google account; this one is a 1.5 GB download)\n'
-      printf '  Type the numbers, like  1 3  (or  1 2 3 4  for all) — or just press Enter for Claude only: '
+      printf '  Type the numbers, like  1 3  — or just press Enter for all four: '
       read -r picks < "$TTY_IN" || picks=""
       if [ -z "${picks//[^1-4]/}" ]; then
-        LANES="claude"
+        LANES="claude,codex,grok,gemini"
       else
         LANES=""
         case "$picks" in *1*) LANES="$LANES,claude" ;; esac
@@ -394,9 +675,10 @@ main() {
   ok "assistants: $LANES"
   WIRE_HOOKS=0
   if [ "$NO_SCHEDULE" = 0 ]; then
-    printf '\n  %sShould Claude remember your past conversations?%s\n' "$B" "$N"
-    printf '  (It adds a few lines to Claude'"'"'s settings file; they are printed when written and can be removed.)\n'
-    if ask_yn "Remember past conversations?" Y; then WIRE_HOOKS=1; fi
+    printf '\n  %sMay Claude keep what it learns between conversations in %s?%s\n' "$B" "$AIOS" "$N"
+    printf '  This adds a few lines to Claude Code'"'"'s settings file. The exact lines are printed when it\n'
+    printf '  happens, and  install.py --revoke memory-hooks  takes them out again.\n'
+    if ask_yn "Keep memory between conversations?" Y; then WIRE_HOOKS=1; fi
   fi
   need_mb=1200; has_lane gemini && need_mb=3600
   free_mb="$(df -Pm "$HOME" | awk 'NR==2 {print $4}')"
@@ -646,7 +928,7 @@ EOF
 
   # ── 8. service ────────────────────────────────────────────────────────────
   step "Running Corral Light"
-  SERVICE_PATH="$NODE_DIR/bin:/usr/local/bin:/usr/bin:/bin:$BIN"
+  SERVICE_PATH="$NODE_DIR/bin:$BIN:/usr/local/bin:/usr/bin:/bin"
   if ! hub_alive; then
     # Nothing of ours answers; if the port is held anyway, say so now instead
     # of waiting 60 s for a hub that can never bind it.
@@ -665,7 +947,6 @@ EOF
     new_dropin="$(cat <<EOF
 # Written by the Corral Light installer. The hub needs the private Node and
 # ~/.local/bin on its PATH; a user service does not inherit your shell's.
-# System directories come before ~/.local/bin on purpose.
 [Service]
 Environment="PATH=$SERVICE_PATH"
 Environment="CORRAL_NODE_BIN=$NODE_DIR/bin"
@@ -796,10 +1077,10 @@ PY
   printf '  Remove:          bash %s/install.sh --uninstall\n\n' "$CL"
 }
 
-# Outer shell: no errexit and no ERR trap here, or a failure inside main would
-# be reported twice (main's own trap already named the step). main re-arms both.
 trap - ERR
 set +e
 main "$@" 2>&1 | tee -a "$LOG"
 rc="${PIPESTATUS[0]}"
 exit "$rc"
+
+```
