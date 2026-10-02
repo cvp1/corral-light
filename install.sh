@@ -42,7 +42,7 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.1.2"
+INSTALLER_VERSION="1.1.3"
 
 # ── pins ────────────────────────────────────────────────────────────────────
 CORRAL_LIGHT_REPO="${CORRAL_LIGHT_REPO:-https://github.com/cvp1/corral-light}"
@@ -81,7 +81,49 @@ NO_SERVICE=0
 NO_SCHEDULE=0
 UNINSTALL=0
 
-usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { cat <<'USAGE'
+Corral Light + AI-OS Seed — the Linux installer.
+
+  curl -fsSL https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash
+  wget -qO-  https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash
+
+One command. It asks two questions at the start (which assistants you have
+an account for, and whether Claude may keep memory between conversations),
+then works on its own. When it finishes, Corral Light is running as a user
+service, your browser is open on it (already paired), AI-OS Seed is
+installed and verified in ~/aios, and each assistant you chose has been
+offered its own sign-in. Run it again any time: every step checks before it
+changes anything, so a second run repairs or updates and never duplicates.
+
+What it pins (so two machines installed a month apart get the same thing):
+  Corral Light     git ref  $CORRAL_LIGHT_REF  (default: master; set a commit for an exact repeat —
+                   the commit actually installed is written to the receipt)
+  AI-OS Seed       git tag  $AIOS_SEED_REF     (default: v0.4.9-alpha)
+  Node.js          v24.21.0 LTS, SHA-256 checked, private copy (never touches a system Node)
+  Claude + ChatGPT adapters   spike/package-lock.json in the Corral Light checkout (npm ci)
+  Grok CLI         @xai-official/grok 1.0.46 from npm, into a private prefix
+  Antigravity      the release pinned in install_antigravity_acp.py (SHA-256 checked)
+  Claude Code      2.1.285 through Anthropic's own installer, which verifies the binary's
+                   SHA-256; Claude Code then keeps itself current (Anthropic's policy, not ours)
+
+Options:
+  --lanes a,b,c     which assistants to set up: claude, codex, grok, gemini
+                    (default: ask, Enter = claude; all four with --yes). gemini is a 1.5 GB download.
+  --workspace DIR   where AI-OS Seed lives (default: ~/aios)
+  --port N          hub port (default: 8098)
+  --yes             no questions: all four assistants, memory on; sign-ins still run
+  --skip-logins     do not start any sign-in (you can run them later)
+  --no-service      do not install the systemd user service; start the hub
+                    for this session only
+  --no-schedule     (testing) skip Seed's scheduler, memory mesh and hooks
+  --uninstall       stop the service and remove what this script installed
+  --help
+
+Everything it prints also goes to ~/.local/share/corral-light/install.log.
+It never runs as root, never touches a system Python or Node, and the only
+step that asks for your password is installing missing distro packages.
+USAGE
+}
 need_value() { [ $# -ge 2 ] && [ -n "$2" ] || { echo "option $1 needs a value (try --help)" >&2; exit 2; }; }
 
 while [ $# -gt 0 ]; do
@@ -110,10 +152,11 @@ for l in ${LANES//,/ }; do
 done
 case "$HOME" in *[[:space:]]*) echo "This installer cannot handle a home directory with spaces in its path ($HOME)." >&2; exit 2 ;; esac
 
-# When this script arrives through `curl | bash`, stdin IS the script. No child
-# may read it (an npm or vendor installer that reads stdin would eat the rest
-# of this file). Questions go to the terminal directly, below.
-exec </dev/null
+# When this script arrives through `curl | bash`, stdin IS the script, and
+# bash reads it as it goes. So: nothing above the last line may touch stdin
+# (an `exec </dev/null` here would end the script at this line), and no child
+# may read it either — main runs with stdin from /dev/null, at the very end,
+# and questions go to the terminal directly.
 
 # ── output ──────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -369,8 +412,11 @@ main() {
 
   # ── the two questions, before anything slow ───────────────────────────────
   if [ -z "$LANES" ]; then
-    if [ "$YES" = 1 ] || [ "$TTY_IN" = /dev/null ]; then
+    if [ "$YES" = 1 ]; then
       LANES="claude,codex,grok,gemini"
+    elif [ "$TTY_IN" = /dev/null ]; then
+      LANES="claude"
+      warn "no terminal to ask which assistants you have — setting up Claude only (use --lanes or --yes)"
     else
       printf '\n  %sWhich assistants do you have an account for?%s\n' "$B" "$N"
       printf '    1  Claude    (claude.ai — Pro or Max)\n'
@@ -623,7 +669,8 @@ EOF
       ok "memory mesh started (event log at ~/memory-events, fold every 5 minutes)"
     fi
     if gated memory-hooks; then
-      skip "memory hooks already wired"
+      if [ "$WIRE_HOOKS" = 1 ]; then skip "memory hooks already wired"
+      else skip "memory hooks are already wired from an earlier run and were left in place — to remove: python3 $SEED/install.py --target $AIOS --revoke memory-hooks"; fi
     elif [ "$WIRE_HOOKS" = 1 ]; then
       CI=true python3 "$SEED/install.py" --target "$AIOS" --approve memory-hooks --apply
       if python3 "$SEED/install.py" --target "$AIOS" --contract; then
@@ -675,6 +722,7 @@ EOF
     DROPIN_CHANGED=0
     if [ ! -f "$DROPIN" ] || [ "$(cat "$DROPIN")" != "$new_dropin" ]; then printf '%s\n' "$new_dropin" > "$DROPIN"; DROPIN_CHANGED=1; fi
     systemctl --user daemon-reload
+    systemctl --user enable corral-light.service >/dev/null 2>&1 || true
     if systemctl --user is-active --quiet corral-light.service; then
       if [ "$CL_CHANGED" = 1 ] || [ "$DROPIN_CHANGED" = 1 ]; then
         systemctl --user restart corral-light.service
@@ -683,7 +731,7 @@ EOF
         skip "service already running, nothing changed"
       fi
     else
-      systemctl --user enable --now corral-light.service >/dev/null 2>&1 || systemctl --user start corral-light.service
+      systemctl --user start corral-light.service
       ok "service enabled and started"
     fi
     if ! loginctl show-user "$USER" -p Linger 2>/dev/null | grep >/dev/null 'Linger=yes'; then
@@ -701,7 +749,9 @@ EOF
     if hub_alive; then
       skip "a Corral Light hub already answers on port $PORT"
     else
-      ( cd "$CL" && PATH="$SERVICE_PATH" CORRAL_LIGHT_PORT="$PORT" nohup "$CL/corral-light" serve >> "$STATE/hub.log" 2>&1 < /dev/null & )
+      # The whole subshell is redirected and exec's the hub: no shell in between
+      # keeps this script's output pipe open, so the installer can finish.
+      ( cd "$CL" && exec env PATH="$SERVICE_PATH" CORRAL_LIGHT_PORT="$PORT" nohup "$CL/corral-light" serve ) >> "$STATE/hub.log" 2>&1 </dev/null &
       ok "hub started for this session (log: $STATE/hub.log)"
     fi
   fi
@@ -719,7 +769,7 @@ EOF
       else
         printf '  %sClaude:%s your browser will open to sign in with your Claude account (Pro or Max).\n' "$B" "$N"
         if press_enter; then
-          if timeout --foreground 600 "$(claude_bin)" auth login < "$TTY_IN"; then ok "Claude: signed in"; else warn "Claude sign-in did not finish (ten-minute limit) — later: claude auth login"; fi
+          if timeout --foreground -k 10 600 "$(claude_bin)" auth login < "$TTY_IN"; then ok "Claude: signed in"; else warn "Claude sign-in did not finish (ten-minute limit) — later: claude auth login"; fi
         else skip "Claude sign-in skipped"; fi
       fi
     fi
@@ -729,7 +779,7 @@ EOF
         printf '  %sGrok:%s sign in with your X / Grok account.\n' "$B" "$N"
         if press_enter; then
           grok_login=("$BIN/grok" login); [ "$HEADLESS" = 1 ] && grok_login+=(--device-auth)
-          if timeout --foreground 600 "${grok_login[@]}" < "$TTY_IN"; then ok "Grok: signed in"
+          if timeout --foreground -k 10 600 "${grok_login[@]}" < "$TTY_IN"; then ok "Grok: signed in"
           else warn "Grok sign-in did not finish (ten-minute limit) — later: grok login"; fi
         else skip "Grok sign-in skipped"; fi
       fi
@@ -741,7 +791,7 @@ EOF
         if press_enter; then
           mkdir -p "$CODEX_HOME_DIR"; chmod 700 "$CODEX_HOME_DIR"
           codex_login=("$CL/spike/node_modules/.bin/codex" login); [ "$HEADLESS" = 1 ] && codex_login+=(--device-auth)
-          if CODEX_HOME="$CODEX_HOME_DIR" timeout --foreground 600 "${codex_login[@]}" < "$TTY_IN"; then ok "ChatGPT: signed in"
+          if CODEX_HOME="$CODEX_HOME_DIR" timeout --foreground -k 10 600 "${codex_login[@]}" < "$TTY_IN"; then ok "ChatGPT: signed in"
           else warn "ChatGPT sign-in did not finish — later: CODEX_HOME=$CODEX_HOME_DIR $CL/spike/node_modules/.bin/codex login"; fi
         else skip "ChatGPT sign-in skipped"; fi
       fi
@@ -782,7 +832,7 @@ PY
     esac
   done
   if [ ${#todo[@]} -eq 0 ] && [ "$LAUNCH_OK" = 1 ]; then
-    printf '\n%sReady.%s Corral Light is running and every assistant you chose is signed in.\n' "$B" "$N"
+    printf '\n%sReady.%s Corral Light is running, every assistant you chose has a sign-in, and the browser was opened on it.\n' "$B" "$N"
   else
     printf '\n%sInstalled.%s Corral Light is running. Still to do:\n' "$B" "$N"
     for t in "${todo[@]}"; do printf '    %s\n' "$t"; done
@@ -800,6 +850,6 @@ PY
 # be reported twice (main's own trap already named the step). main re-arms both.
 trap - ERR
 set +e
-main "$@" 2>&1 | tee -a "$LOG"
+main "$@" </dev/null 2>&1 | tee -a "$LOG"
 rc="${PIPESTATUS[0]}"
 exit "$rc"

@@ -44,14 +44,31 @@ class _Run(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def _env(self):
+        return {"HOME": str(self.home), "USER": "tester", "TERM": "dumb",
+                "PATH": f"{self.stubs}:/usr/bin:/bin"}
+
     def run_sh(self, *args, stdin=subprocess.DEVNULL):
-        env = {"HOME": str(self.home), "USER": "tester", "TERM": "dumb",
-               "PATH": f"{self.stubs}:/usr/bin:/bin"}
-        return subprocess.run(["bash", str(SCRIPT), *args], env=env, stdin=stdin,
+        return subprocess.run(["bash", str(SCRIPT), *args], env=self._env(), stdin=stdin,
                               capture_output=True, text=True, timeout=60)
+
+    def run_piped(self, *args):
+        """The published way: the script arrives on bash's stdin (curl | bash)."""
+        with SCRIPT.open("rb") as fh:
+            return subprocess.run(["bash", "-s", "--", *args], env=self._env(), stdin=fh,
+                                  capture_output=True, text=True, timeout=60)
 
 
 class Static(unittest.TestCase):
+    def test_usage_does_not_read_dollar_zero(self):
+        # $0 is "bash" when the script is piped in; help must be self-contained.
+        self.assertNotIn('"$0"', TEXT)
+
+    def test_background_hub_does_not_hold_the_log_pipe(self):
+        # --no-service starts the hub in the background; the subshell must be
+        # fully redirected and exec the hub, or tee waits on it forever.
+        self.assertIn('nohup "$CL/corral-light" serve ) >> "$STATE/hub.log" 2>&1 </dev/null &', TEXT)
+
     def test_bash_syntax(self):
         r = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -59,6 +76,10 @@ class Static(unittest.TestCase):
     def test_strict_mode_and_error_trap(self):
         self.assertIn("set -Eeuo pipefail", TEXT)
         self.assertIn("trap on_error ERR", TEXT)
+        # Nothing may redirect the script's own stdin before the last line.
+        body, last = TEXT.rsplit("\n", 2)[0], TEXT.rsplit("\n", 2)[-2]
+        self.assertNotRegex(body, r"^\s*exec\s*<", msg="stdin redirect above the main call")
+        self.assertIn('main "$@" </dev/null', TEXT)
 
     def test_pins_are_present_and_well_formed(self):
         for name in ("NODE_VERSION", "NODE_SHA256_X64", "NODE_SHA256_ARM64",
@@ -159,6 +180,18 @@ class Behaviour(_Run):
         self.assertIn("Step failed: Fetching Corral Light and AI-OS Seed", out)
         self.assertNotIn("Node.js", out.split("Step failed")[0].split("[4/11]")[-1] if "[4/11]" in out else "")
         self.assertFalse((self.home / ".local/share/corral-light/node").exists())
+
+    def test_piped_through_bash_runs_to_the_end(self):
+        # bash reads a piped script incrementally: any stdin redirection above
+        # the last line would end the script early. Both --help and a real run
+        # must behave exactly as the file-based invocation does.
+        r = self.run_piped("--help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--uninstall", r.stdout)
+        r = self.run_piped("--yes", "--no-service")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("No internet connection", r.stdout + r.stderr)   # main ran, and reached step 2
+        self.assertIn("[2/11]", r.stdout)
 
     def test_uninstall_on_an_empty_home_is_a_clean_no_op(self):
         r = self.run_sh("--uninstall", "--yes")
