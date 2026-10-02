@@ -277,6 +277,42 @@ class TheDoctor(CliCase):
         self.assertEqual({d: _tree_snapshot(d) for d in (self.state, self.repo / ".git")}, before)
         self.assertIn("own branches", "\n".join(lines))
 
+    def test_M4_doctor_lists_claude_transcripts_left_by_worktrees_that_are_gone(self):
+        from unittest import mock
+        import re
+        home = self.tmp / "home"
+        projects = home / ".claude" / "projects"
+        live = self.make(owner="p1")
+        gone, r = self.trashed(owner="p2")
+        short = gone["branch"][len("refs/heads/"):]
+        wt.purge(self.reg.read(gone["id"]), short, registry=self.reg)
+        slug = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)            # noqa: E731
+        for e in (live, gone):
+            (projects / slug(e["path"])).mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            blob = "\n".join(self.lines())
+        [line] = [x for x in blob.splitlines() if "~/.claude/projects" in x]
+        listed = line.split("never deleted): ", 1)[1].split(", ")
+        self.assertEqual(listed, [slug(gone["path"])],
+                         "only a gone worktree's transcripts are leftovers, never a live one's")
+        self.assertIn("~/.claude/projects", blob)
+        self.assertTrue((projects / slug(gone["path"])).is_dir(), "doctor lists, never deletes")
+
+    def test_M_doctor_names_the_git_binary_it_uses(self):
+        blob = "\n".join(self.lines())
+        self.assertIn(wt.GIT_BIN, blob)
+        self.assertTrue(os.path.isabs(wt.GIT_BIN), "git is resolved once, to a path")
+
+    def test_M_doctor_reads_the_filesystem_without_proc(self):
+        from unittest import mock
+        mount = ("/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n"
+                 "/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse)\n"
+                 "map -hosts on /System/Volumes/Data/net (autofs, automounted, nobrowse)\n")
+        self.assertEqual(wt._fstype_from_mount(mount, "/System/Volumes/Data/srv/x"), "apfs")
+        self.assertEqual(wt._fstype_from_mount(mount, "/opt/x"), "apfs")
+        self.assertEqual(wt._fstype_from_mount(mount, "/System/Volumes/Data/net/box"), "autofs")
+        self.assertIsNone(wt._fstype_from_mount("", "/x"))
+
     def test_T_DOC_6_an_empty_install_is_one_quiet_line_each(self):
         blob = "\n".join(self.lines())
         self.assertIn("no own-branch worktrees yet", blob)

@@ -2205,3 +2205,34 @@ class TheMacPaths(CreateCase):
     def test_M3_the_suite_realpaths_its_temp_roots(self):
         self.assertEqual(str(self.tmp), os.path.realpath(self.tmp),
                          "on macOS mkdtemp is behind /var -> /private/var; T-CRT-6 would refuse")
+
+
+class TheMacClaudeHome(LifecycleCase):
+    """M4: on macOS Claude panes share the real ~/.claude; the hub must not touch it."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.tmp / "home"
+        (self.home / ".claude" / "projects").mkdir(parents=True)
+        (self.home / ".claude.json").write_text('{"projects": {}, "numStartups": 3}\n')
+        (self.home / ".claude" / "settings.json").write_text('{"permissions": {}}\n')
+        h = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        h.start()
+        self.addCleanup(h.stop)
+        real = self.sessions.AGENTS["fake"]
+        # A Claude-shaped lane: posture through a config dir, which darwin cannot give.
+        self.sessions.AGENTS["fake"] = dict(real, posture_via_config_dir=True)
+
+    def test_M4_T_LIF_14_darwin_the_real_claude_home_is_byte_identical(self):
+        before = (_tree_snapshot(self.home / ".claude"),
+                  (self.home / ".claude.json").read_bytes())
+        with mock.patch.object(self.sessions.sys, "platform", "darwin"):
+            p = self.pane()
+            self.assertNotIn("CLAUDE_CONFIG_DIR", self.sessions.spawn_env(
+                self.sessions.AGENTS["fake"], self.sessions.seed_config_dir(self.tmp / "cfg", "auto")))
+            self.say(p, "write a.txt from a worktree")
+            snap = self.mgr.worktree_snapshot(p.id)
+            self.mgr.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "m")
+        after = (_tree_snapshot(self.home / ".claude"),
+                 (self.home / ".claude.json").read_bytes())
+        self.assertEqual(after, before)

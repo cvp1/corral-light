@@ -42,7 +42,9 @@ from collections import namedtuple
 from pathlib import Path
 
 # Overridable for tests (a stub binary) and for the git 2.38 release check.
-GIT_BIN = os.environ.get("CORRAL_TEST_GIT") or "git"
+# Resolved once, at start, on the hub's own PATH: a host can have two gits
+# (dogma-2: Homebrew 2.55 ahead of Apple's 2.54), and doctor says which ran.
+GIT_BIN = os.environ.get("CORRAL_TEST_GIT") or shutil.which("git") or "git"
 
 DEFAULT_TIMEOUT_S = 20
 DEFAULT_MAX_OUT = 8 << 20          # 8 MiB per stream
@@ -494,7 +496,10 @@ def _existing_ancestor(p):
 
 
 def _fstype(path):
-    """The filesystem type of the mount holding `path` (or its nearest existing ancestor)."""
+    """The filesystem type of the mount holding `path` (or its nearest existing ancestor).
+
+    Linux reads /proc/self/mountinfo; elsewhere (macOS) parses `mount`.
+    """
     target = os.path.realpath(_existing_ancestor(path))
     best, kind = "", None
     try:
@@ -505,7 +510,24 @@ def _fstype(path):
                 if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) >= len(best):
                     best, kind = mnt, right.split()[0]
     except OSError:
-        return None
+        try:
+            out = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return _fstype_from_mount(out, target)
+    return kind
+
+
+def _fstype_from_mount(text, target):
+    """BSD/macOS `mount` lines (`<dev> on <dir> (<type>, ...)`): the longest match's type."""
+    best, kind = "", None
+    for line in text.splitlines():
+        m = re.match(r"^.+? on (.+) \(([^,)]+)", line)
+        if not m:
+            continue
+        mnt, fs = m.group(1), m.group(2).strip()
+        if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) >= len(best):
+            best, kind = mnt, fs
     return kind
 
 
