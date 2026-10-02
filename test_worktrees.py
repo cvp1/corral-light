@@ -206,6 +206,92 @@ class TheGitWrapper(GitCase):
             self.assertTrue(wt.lock_is_ours_and_stale(str(lock), gone))
 
 
+class RegCase(GitCase):
+    def setUp(self):
+        super().setUp()
+        self.state = self.tmp / "state"
+        self._st = mock.patch.dict(os.environ, {"CORRAL_LIGHT_STATE": str(self.state),
+                                                 "CORRAL_LIGHT_WORKTREES": str(self.tmp / "wtroot")})
+        self._st.start()
+        self.addCleanup(self._st.stop)
+        self.reg = wt.Registry()
+
+
+class TheRegistry(RegCase):
+
+    def test_paths_follow_the_env_and_the_registry_sits_beside_the_root(self):
+        self.assertEqual(wt.registry_dir(), self.state / "worktree-registry")
+        self.assertEqual(wt.worktree_root(), self.tmp / "wtroot")
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREES": ""}):
+            self.assertEqual(wt.worktree_root(), self.state / "worktrees")
+
+    def test_round_trip_and_ops_journal(self):
+        e = self.reg.create(owner_pane="p1", path="/x/y", branch="refs/heads/corral/y")
+        self.assertRegex(e["id"], r"^wt-[0-9a-f]{6}$")
+        self.assertEqual(e["phase"], "intent")
+        self.assertEqual(e["v"], 1)
+        op = self.reg.begin_op(e["id"], "commit", expect_old="a" * 40)
+        got = self.reg.read(e["id"])
+        self.assertEqual(got["ops"][-1]["state"], "intent")
+        self.reg.set_op(e["id"], op, state="done", stage="done", new="b" * 40)
+        got = self.reg.read(e["id"])
+        self.assertEqual(got["ops"][-1], dict(got["ops"][-1], state="done", new="b" * 40))
+        self.reg.update(e["id"], phase="active")
+        self.assertEqual([x["id"] for x in self.reg.all()], [e["id"]])
+        self.assertEqual(self.reg.read(e["id"])["phase"], "active")
+
+    def test_ids_never_reach_outside_the_registry(self):
+        for bad in ("../x", "wt-zz", "wt-abc/../../etc", ""):
+            with self.assertRaises(ValueError):
+                self.reg.read(bad)
+        with self.assertRaises(ValueError):
+            self.reg.update(self.reg.create(owner_pane="p")["id"], phase="nonsense")
+
+    def test_T_REG_1_a_killed_writer_leaves_the_old_file_or_the_new_one(self):
+        e = self.reg.create(owner_pane="p", path="/p")
+        f = wt.registry_dir() / f"{e['id']}.json"
+        import subprocess
+        import sys
+        script = (
+            "import os,sys; sys.path.insert(0, %r); import worktrees as wt\n"
+            "r = wt.Registry()\n"
+            "i = 0\n"
+            "while True:\n"
+            "    i += 1; r.update(%r, note='x' * (i %% 50000))\n" % (str(ROOT), e["id"]))
+        for _ in range(8):
+            p = subprocess.Popen([sys.executable, "-c", script], env=dict(os.environ))
+            time.sleep(0.15 + 0.05 * _)
+            p.kill()
+            p.wait()
+            got = wt.json.loads(f.read_text())           # parses, never partial
+            self.assertEqual(got["id"], e["id"])
+        self.assertEqual([x["id"] for x in self.reg.all()], [e["id"]],
+                         "a leftover temp file is not an entry")
+
+    def test_T_REG_3_an_unknown_future_version_is_refused_and_never_rewritten(self):
+        e = self.reg.create(owner_pane="p")
+        f = wt.registry_dir() / f"{e['id']}.json"
+        f.write_text(wt.json.dumps(dict(e, v=2)))
+        before = f.read_bytes()
+        with self.assertRaises(wt.RegistryVersionError):
+            self.reg.read(e["id"])
+        with self.assertRaises(wt.RegistryVersionError):
+            self.reg.update(e["id"], phase="active")
+        self.assertEqual(f.read_bytes(), before)
+        listed = self.reg.all(include_unreadable=True)
+        self.assertEqual(listed[0]["unreadable"], "registry v2 is newer than this hub (v1)")
+
+    def test_the_lock_serialises_writers(self):
+        order = []
+        with self.reg.lock():
+            t = threading.Thread(target=lambda: (self.reg.lock().__enter__(), order.append("second")))
+            t.start()
+            time.sleep(0.2)
+            order.append("first")
+        t.join(5)
+        self.assertEqual(order, ["first", "second"])
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
