@@ -33,6 +33,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -615,9 +616,35 @@ RESERVED_SLUGS = {"head"}
 BRANCH_PREFIX = "refs/heads/corral/"
 
 
+def _true_case(path):
+    """On macOS, `path` with each existing component in its on-disk letter case.
+
+    APFS is usually case-insensitive and realpath does not fold case, so
+    `.../Ab` opened as `.../aB` would hash as another repository
+    (docs/worktree-plan-macos.md M3). An exact match wins (a case-sensitive
+    volume may hold both); a component that does not exist is left as given.
+    Elsewhere the path is returned unchanged.
+    """
+    if sys.platform != "darwin":
+        return path
+    parts = Path(path).parts
+    out = Path(parts[0])
+    for i, name in enumerate(parts[1:], 1):
+        try:
+            entries = os.listdir(out)
+        except OSError:
+            return str(out.joinpath(*parts[i:]))
+        if name not in entries:
+            folded = [e for e in entries if e.casefold() == name.casefold()]
+            name = folded[0] if len(folded) == 1 else name
+        out = out / name
+    return str(out)
+
+
 def repo_dir(pr):
-    """<root>/<repo name>-<hash6>: one dir per repository, from the common dir's realpath."""
-    common = os.path.realpath(pr["common_dir"])
+    """<root>/<repo name>-<hash6>: one dir per repository, from the common dir's realpath
+    (in its on-disk letter case on macOS)."""
+    common = _true_case(os.path.realpath(pr["common_dir"]))
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(pr["repo_top"]).name).strip("-.") or "repo"
     return worktree_root() / f"{name[:40]}-{hashlib.sha256(common.encode()).hexdigest()[:6]}"
 
