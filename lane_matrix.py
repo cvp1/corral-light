@@ -12,15 +12,8 @@ same hub API a browser uses:
             posture, expect a permission card, REFUSE it  -> round-trip?
          -> close
 
-and print a markdown table. It measures what the resilience review's K4
-asked for (Astra and Grok 2026-09-28): not whether a lane ADVERTISES
-`loadSession`, but whether the model still knows what it was told after its
-process was replaced. The permission probe is always refused, so the run has
-no side effects on the machine; the target file is checked afterwards.
-
-This script owns the panes it opens, so unlike `corral-light say` it DOES
-bound each turn (TURN_BUDGET_S) and cancels its own turn on expiry — a
-matrix that hangs on one lane measures nothing about the others.
+and print a markdown table. The permission probe is always refused, and the
+target file is checked afterwards. Each turn is bounded by TURN_BUDGET_S.
 """
 from __future__ import annotations
 
@@ -39,8 +32,7 @@ sys.path.insert(0, str(HERE))
 import consult                                          # noqa: E402
 from consult import ConsultError                        # noqa: E402
 
-TURN_BUDGET_S = 300         # one short turn on a slow lane; past this it is a
-                            # finding ("timed out"), not something to wait on
+TURN_BUDGET_S = 300         # past this a turn is reported as timed out
 POLL_S = 1.0
 WORDS = ("amber", "basalt", "cobalt", "dahlia", "ember", "fjord", "garnet",
          "harbor", "indigo", "juniper", "kestrel", "lantern", "marigold",

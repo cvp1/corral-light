@@ -1,27 +1,9 @@
 #!/usr/bin/python3
 """hub — Corral Light's server: static PWA, SSE event stream, POST control plane.
 
-Stdlib only.
-
-WHAT THIS SERVER DOES NOT HAVE, AND WHY THAT IS THE POINT
-    The full Corral's hub carries fifteen more routes: the fleet mailbox, the
-    attention queue, the run registry, the scheduler, the Library index, mail,
-    FinOps, delegate boards, tmux adoption. Every one of them reads state that
-    only exists on linux-host. They are not stubbed here — a route that
-    answers `{"error": "unavailable"}` is still a surface to maintain and still
-    a failure for the browser to render. Light is the Live tab: conversations,
-    and the permission rail that unblocks them.
-
-TRANSPORT
-    ONE multiplexed SSE stream per browser (every pane's events on one
-    connection, so the 6-per-origin cap never bites) plus plain POST for input
-    and approvals. Python's stdlib has no WebSocket server and hand-rolling
-    RFC 6455 to move text over a LAN is risk with no payoff.
-
-AUTHORITY BOUNDARY
-    Answering a permission prompt inside a pane is the AGENT's own tool gate on
-    its own host — that is what a conversation is. There is no route here that
-    dispatches work anywhere else, at any privilege level.
+Stdlib only. One multiplexed SSE stream per browser carries every pane's
+events; input and permission answers are plain POSTs. No route dispatches
+work anywhere other than the panes on this host.
 """
 import json
 import mimetypes
@@ -36,11 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-# Checked HERE, before anything imports, because the alternative is worse than
-# a hard exit: on 3.8 the static-path containment check (`Path.is_relative_to`,
-# 3.9+) raises AttributeError inside a request handler — a route that 500s
-# rather than a startup that refuses, i.e. a security check failing OPEN-ish on
-# a version nobody tested. Degrade toward safety, loudly (P4).
+# Checked before imports: the static containment check needs Path.is_relative_to.
 if sys.version_info < (3, 9):
     raise SystemExit(
         f"corral-light needs Python 3.9 or newer; this is "
@@ -59,36 +37,21 @@ STATIC = ROOT / "static"
 
 
 def _safe_static_path(rel):
-    """Resolve `rel` under STATIC; refuse anything that escapes it.
-
-    A STRING prefix check (`str(f).startswith(str(base))`) is not a
-    containment check: if a sibling directory happens to share STATIC's path
-    as a string prefix (e.g. `corral-light/static-secret/`),
-    `/static/../static-secret/file` resolves OUTSIDE `static/` while its
-    string path still starts with the string ".../corral-light/static".
-    Comparing the actual path hierarchy with `is_relative_to()` holds
-    regardless of what a sibling happens to be named. A pure function so the
-    containment logic is testable without a live HTTP request.
-    """
+    """Resolve `rel` under STATIC; None if it escapes (path-wise, not by
+    string prefix, so a sibling like `static-secret/` cannot match)."""
     base = STATIC.resolve()
     f = (base / rel).resolve()
     return f if f.is_relative_to(base) else None
 
 
-# 127.0.0.1 by default, unlike ranch's Corral. Light runs on a personal machine
-# that moves between networks — a coffee-shop LAN is not the ranch LAN, and the
-# pairing gate should not be the only thing between an arbitrary wifi and an
-# agent holding tools in a working tree. Binding wider is a deliberate act:
-# CORRAL_LIGHT_BIND=0.0.0.0.
+# Loopback by default; set CORRAL_LIGHT_BIND=0.0.0.0 to expose on the network.
 BIND = os.environ.get("CORRAL_LIGHT_BIND", "127.0.0.1")
 PORT = int(os.environ.get("CORRAL_LIGHT_PORT", "8098"))
-COOKIE = "corral_light"          # its own cookie name, so a browser paired to
-                                 # a full Corral on the same host cannot have
-                                 # its session silently overwritten by this one
-SSE_PING = 20                    # keep proxies and sleeping laptops honest
+COOKIE = "corral_light"          # distinct from full Corral's cookie on the same host
+SSE_PING = 20                    # keepalive for proxies and sleeping clients
 STREAM_RECHECK = 30              # re-verify the cookie behind an open SSE stream
-# Bind the pairing cookie to ONE tailnet identity when Tailscale Serve fronts
-# the hub (corral_core/edge.py). Unset = LAN behaviour, unchanged.
+# Bind the pairing cookie to one tailnet identity behind Tailscale Serve
+# (corral_core/edge.py); unset = LAN behaviour.
 BOUND_LOGIN = (os.environ.get("CORRAL_TAILSCALE_LOGIN") or "").strip() or None
 MAX_BODY = 1 << 20
 
@@ -108,52 +71,31 @@ FRAME_LOCK = (
     ("X-Frame-Options", "DENY"),
     ("Content-Security-Policy", "frame-ancestors 'none'"),
 )
-# How much of a note a chat-only lane gets quoted into its composer. Bounded
-# (P8) and deliberately modest: this text goes into a context window, it is
-# visible in the box before anything is sent, and a note that does not fit is
-# a note to open in a lane that can read files.
+# How much of a note a chat-only lane gets quoted into its composer.
 ATTACH_EXCERPT_CHARS = 6000
 
 MGR = sessions.Manager()
 
 
 def _login_signed_in():
-    """A real sign-in (claude_login judged all three facts): read the new
-    credential now rather than in CACHE_S, and bring back what it killed."""
+    """On a confirmed sign-in, re-read the credential now and revive affected panes."""
     claude_auth.status(force=True)
     MGR.auth_sweep()
 
 
-# DESIGN-6 S4: the vendor's own login, started on a click, in a window on
-# this machine's screen. Its watch thread is its own; the tick never waits on
-# it (a `claude auth status` that hangs must not freeze tick_age_s).
+# The vendor's own login, started on a click; its watch thread never blocks the tick.
 LOGIN = claude_login.Login(sessions.STATE, on_success=_login_signed_in)
 LOGIN_FROM = ("rail", "banner", "picker", "composer")
 
-# The observer tick. In the full Corral this loop also rebuilt the attention
-# queue, projected the run registry, polled the fleet mailbox and drove push
-# notifications. Here it does the ONE thing that must not be lost with them:
-# call snapshot() on every pane, which is what actually asks the OS whether
-# each agent process is still alive and broadcasts the state edge when the
-# answer disagrees with our own bookkeeping (busy → uncertain, poll()-detected
-# dead). Without it, a pane whose adapter wedged with its pipe open renders a
-# healthy pulsing `busy` until someone reloads. A monitor cannot certify its
-# own liveness — this one's is exposed as /health's tick_age_s, for a watcher
-# outside this process (P21).
+# The observer tick: snapshot() every pane so dead or wedged adapters surface as
+# state edges. Its own liveness is /health's tick_age_s, for an outside watcher.
 TICK_S = 5
 _TICK = {"at": 0.0, "errors": 0}
 
 
 def _observe_loop():
-    """Poll pane liveness. Failures skip a PANE, never the tick or the thread.
-
-    The tick advances per pane, inside the loop (Astra and Grok 2026-09-28,
-    P0-d): it used to update only after the whole loop, so ONE pane whose
-    snapshot() raised froze tick_age_s for the entire hub — and a watchdog
-    judging that number would page (or, as first planned, restart and kill
-    twelve healthy panes) over one bad row. A failing pane is counted in
-    `errors`, which /health reports, instead of hiding the observer's pulse.
-    """
+    """Poll pane liveness. A failing pane is counted in `errors` and skipped;
+    the tick advances per pane so one bad pane cannot freeze tick_age_s."""
     while True:
         time.sleep(TICK_S)
         _observe_once()
@@ -171,25 +113,18 @@ def _observe_once():
             _TICK["errors"] += 1
         _TICK["at"] = time.time()
     _TICK["at"] = time.time()               # an empty roster still ticks
-    # The Claude login, on the same pulse: warn before it lapses, and bring
-    # back what it killed once the operator has signed in again (2026-09-30).
+    # The Claude login: warn before it lapses, revive panes after sign-in.
     try:
         MGR.auth_sweep()
     except Exception:                              # noqa: BLE001
         _TICK["errors"] += 1
 
 
-# ── needs-you, off the glass (P0-e'; Astra and Grok 2026-09-28) ─────────────
-# The first plan notified when MGR.subscribers was empty. Both reviews: an SSE
-# subscriber proves a stream is OPEN, not that a human is LOOKING — a
-# backgrounded tab keeps one, which is exactly when you are not looking. So
-# the browser (and the CLI, when it prints) reports the highest seq a human
-# surface actually showed, per pane, and a `permission` or `dead` event that
-# nobody has seen after a grace period becomes a desktop notification.
-# In memory on purpose: after a restart nothing has been seen, which errs
-# toward telling you.
-NOTIFY_GRACE_S = 20         # a focused browser acks within a second or two;
-                            # twenty means "nobody looked", not "slow network"
+# ── needs-you, off the glass ─────────────────────────────────────────────────
+# Human surfaces report the highest seq they showed per pane; a `permission` or
+# `dead` event still unseen after NOTIFY_GRACE_S becomes a desktop notification.
+# An open SSE stream is not proof anyone is looking. Kept in memory only.
+NOTIFY_GRACE_S = 20
 NOTIFY_KINDS = ("permission", "dead")
 SEEN = {}                   # pane id -> highest seq a human surface showed
 _NOTIFY_PENDING = {}        # pane id -> newest unseen notifiable event
@@ -199,9 +134,7 @@ _NOTIFY_LOCK = threading.Lock()
 def pending_payloads(pane):
     """What a human must see to answer each pending card, oldest first.
 
-    Built from the record answer() enforces (`_gate`), never from the event
-    ring. An oversize payload is withheld exactly as the browser withholds
-    it: only refusal is possible for bytes nobody can be shown.
+    Built from the `_gate` record answer() enforces; oversize payloads are withheld.
     """
     out = []
     for rid, req in list(pane.pending.items()):
@@ -281,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "corral-light"
 
     def log_message(self, *a):
-        pass                     # silent in steady state (P7)
+        pass                     # silent in steady state
 
     # ── plumbing ─────────────────────────────────────────────────────────
     def _carries_body(self):
@@ -291,13 +224,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, code, body, ctype="application/json", extra=None):
         if self._carries_body() and not getattr(self, "_body_read", False):
-            # Answering a request without reading its body leaves those bytes
-            # on a keep-alive socket, where they parse as the NEXT request —
-            # with no Serve headers, so past the identity gate (Astra 1,
-            # 2026-09-24, reproduced). Grok, same day: the flag used to be set
-            # BEFORE the read, so a bad/oversized Content-Length 400 stayed
-            # keep-alive, and a GET with a body was never covered. Any answer
-            # to a request whose body we did not consume ends the connection.
+            # An unread body would parse as the next request on a keep-alive
+            # socket, bypassing the identity gate: close the connection.
             self.close_connection = True
         data = body if isinstance(body, bytes) else str(body).encode()
         self.send_response(code)
@@ -330,11 +258,8 @@ class Handler(BaseHTTPRequestHandler):
         return m.value if m else None
 
     def _peer_route(self, p, method):
-        """DESIGN-5 S8: the seat tools' routes. Runs BEFORE the cookie check
-        and never reads the cookie: the pane token alone decides who is
-        sending (sessions.ManagerBase.peer_http), so a browser session can
-        never be used to send as a pane. Answers only a caller on THIS
-        machine -- the MCP child dials loopback by construction."""
+        """The seat tools' routes: authenticated by pane token only (never the
+        cookie), and only for a caller on this machine."""
         import ipaddress
         peer = self._peer()
         try:
@@ -344,11 +269,8 @@ class Handler(BaseHTTPRequestHandler):
             local = False
         if not local:
             return self._json({"error": "peer routes answer only on this machine"}, 403)
-        # SAME UNIX USER, checked by the kernel, not assumed (measured
-        # 2026-09-29: the Claude adapter puts the pane token on a world-
-        # readable command line). On Linux the calling socket's owner is in
-        # /proc/net/tcp; unknown is refused, never waved through (P4). Other
-        # platforms have no such table here -- the README says so.
+        # Same UNIX user, via /proc/net/tcp on Linux (the pane token can be on
+        # a world-readable command line); unknown is refused.
         if sys.platform.startswith("linux"):
             uid = edge.local_peer_uid(self.client_address,
                                       self.connection.getsockname())
@@ -362,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._body()
             except ValueError as e:
                 return self._json({"error": str(e)}, 400)
-        else:       # a GET's arguments are its query (S11's /api/peer/turn)
+        else:       # a GET's arguments are its query
             body = {k: v[0] for k, v in
                     parse_qs(urlparse(self.path).query).items()}
         status, obj = MGR.peer_http(method, p,
@@ -379,8 +301,7 @@ class Handler(BaseHTTPRequestHandler):
         return user if user and edge.audience_ok(user, self.headers, self._peer()) else None
 
     def _edge_refused(self):
-        """Identity binding for a hub fronted by Tailscale Serve (corral_core/
-        edge.py). Unbound (no CORRAL_TAILSCALE_LOGIN) => never refuses."""
+        """Identity binding behind Tailscale Serve; never refuses when unbound."""
         ok, why = edge.identity_ok(self.headers, BOUND_LOGIN, self._peer())
         if ok:
             return False
@@ -392,17 +313,14 @@ class Handler(BaseHTTPRequestHandler):
         n = parse_content_length(self.headers.get("Content-Length", 0))
         try:
             raw = self.rfile.read(n)
-            self._body_read = True   # only now are the bytes off the socket
+            self._body_read = True
             return json.loads(raw or b"{}")
         except ValueError:
             raise ValueError("malformed JSON body")
 
     def _local_human(self):
-        """Is the person who clicked sitting at THIS machine? Loopback socket,
-        and no proxy hop of any kind: Tailscale Serve reaches us from loopback
-        too, so its identity header (or any forwarding header) means the
-        browser is somewhere else, and a window opened here would sit on an
-        unattended desk."""
+        """Is the clicker at this machine? Loopback socket and no proxy or
+        Tailscale Serve header (Serve also arrives via loopback)."""
         if edge._peer_kind(self._peer()) != "loopback":
             return False
         return not any(self.headers.get(h) for h in
@@ -410,8 +328,7 @@ class Handler(BaseHTTPRequestHandler):
                         edge.TS_LOGIN))
 
     def _same_origin(self):
-        """A cookie-authed control plane needs CSRF defence. The browser always
-        sends Origin on POST; a cross-site form cannot forge it."""
+        """CSRF defence: a browser's Origin on POST must match Host."""
         origin = self.headers.get("Origin")
         if origin is None:
             return True                       # non-browser client (curl, tests)
@@ -425,16 +342,12 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(urlparse(self.path).query)
 
         if p == "/health":
-            # Unauthenticated on purpose: an outside watchdog reads this.
-            # Non-sensitive by design — liveness and counts, no titles, no
-            # content (P20: this can answer on an open port).
+            # Unauthenticated for outside watchdogs: liveness and counts only.
             age = int(time.time() - _TICK["at"]) if _TICK["at"] else -1
             panes = list(MGR.panes.values())
             live = sum(1 for x in panes if x.state not in ("dead", "detached"))
             blocked = sum(len(x.pending) for x in panes)
-            # orphans_reaped: adapters a PREVIOUS hub left running that this
-            # one stopped at boot (Grok 2026-09-28). The count the pane-host
-            # decision (review §6, step 8) is waiting on.
+            # orphans_reaped: adapters a previous hub left running, stopped at boot.
             reaped = sum(1 for v in getattr(MGR, "orphans", {}).values()
                          if v in ("reaped", "killed"))
             return self._json({"ok": 1, "service": "corral-light",
@@ -447,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
         if self._edge_refused():
             return
 
-        # DESIGN-5 S8: token-only routes, before any cookie is looked at.
+        # Token-only routes, before any cookie is looked at.
         if p.startswith("/api/peer/"):
             return self._peer_route(p, "GET")
 
@@ -473,9 +386,7 @@ class Handler(BaseHTTPRequestHandler):
         if p in ("/", "/index.html"):
             return self._static("index.html")
         if p == "/sw.js":
-            # Served from the root so its scope covers the whole app. A worker
-            # under /static/ could only control /static/*, which is not where
-            # the app is.
+            # Served from the root so its scope covers the whole app.
             return self._static("sw.js")
         if p == "/manifest.json":
             return self._static("manifest.json")
@@ -486,29 +397,22 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             return self._json({"error": "not paired"}, 401)
 
-        # Rigs (DESIGN-5 S12): one surface for both products, in the core,
-        # and only past the pairing check above.
+        # Rigs: shared core route, past the pairing check.
         if p == "/api/session/rigs":
             from corral_core import rigs
             st, out = rigs.route(MGR, "GET", p)
             return self._json(out, st)
 
         if p == "/api/search":
-            # Content search for the palette. Additive: a broken or missing
-            # index degrades to an error string IN the payload and an empty
-            # hit list, never a non-200 that would make the palette look
-            # broken when only one of its four sources is.
+            # Content search for the palette; a broken index degrades in-payload.
             import content
             return self._json(content.search((q.get("q") or [""])[0]))
         if p == "/api/content/status":
-            # What the index knows — for the palette's empty state, so "no
-            # results" can distinguish "nothing matches" from "you have not
-            # pointed this at anything yet".
+            # Index status, for the palette's empty state.
             import content
             return self._json(content.status())
         if p == "/api/session/search":
-            # What was SAID in any pane, live or archived (transcripts.py).
-            # A broken index degrades to an error string in the payload.
+            # Transcript search across live and archived panes.
             import transcripts
             try:
                 return self._json(transcripts.search(
@@ -529,9 +433,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/session/schedule":
             return self._json({"jobs": MGR.schedule.list()})
         if p == "/api/session/roles":
-            # Every role, with the lanes each one can start on and why not
-            # (roles.py). A broken role tree degrades the dialog to "no
-            # roles", never to a 500.
+            # Every role with the lanes it can start on; errors degrade in-payload.
             try:
                 import roles
                 out = [dict(r, resolvableOn=roles.resolvable_on(r["id"]))
@@ -540,12 +442,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:                  # noqa: BLE001
                 return self._json({"roles": [], "error": str(e)[-200:]})
         if p == "/api/session/pending":
-            # The AUTHORITATIVE pending permission payloads, with the digest
-            # an approval must carry (Astra/Grok 2026-09-28, CLI). The event
-            # ring is a bounded presentation cache — a permission older than
-            # MAX_EVENTS has left it while still blocking the agent — so a
-            # terminal answering a card reads it from pane.pending, the same
-            # record answer() checks the digest against.
+            # Authoritative pending permission payloads (from pane.pending, not
+            # the bounded event ring), with the digest an approval must carry.
             try:
                 pane = MGR.get((q.get("pane") or [""])[0])
                 return self._json({"pane": pane.id, "state": pane.state,
@@ -590,18 +488,14 @@ class Handler(BaseHTTPRequestHandler):
         """One SSE connection carries every pane's events."""
         q = queue.Queue(maxsize=1000)
         try:
-            # Subscribe INSIDE the try: a reset while the headers are being
-            # written used to skip the finally and leak the queue (Astra 5,
-            # Gemini 5, 2026-09-24).
+            # Subscribe inside the try so a reset cannot leak the queue.
             MGR.subscribe(q)
             self._stream_body(q)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
             MGR.unsubscribe(q)
-            # HTTP/1.1 keep-alive would otherwise hold the socket open after an
-            # expired stream returns (measured 2026-09-24). A finished stream
-            # ends its connection.
+            # A finished stream ends its keep-alive connection.
             self.close_connection = True
 
     def _stream_body(self, q):
@@ -618,9 +512,7 @@ class Handler(BaseHTTPRequestHandler):
         last = time.time()
         checked = time.time()
         while True:
-            # The cookie was verified when this stream OPENED and never
-            # again, so a stolen cookie's transcript feed outlived its
-            # 12h TTL (Astra finding 3, 2026-09-24). Re-verify on a clock.
+            # Re-verify the cookie periodically so a stream cannot outlive its TTL.
             if time.time() - checked > STREAM_RECHECK:
                 checked = time.time()
                 if not self._user():
@@ -644,7 +536,7 @@ class Handler(BaseHTTPRequestHandler):
         self._body_read = False
         if self._edge_refused():
             return
-        # DESIGN-5 S8: token-only routes, before any cookie is looked at.
+        # Token-only routes, before any cookie is looked at.
         if p.startswith("/api/peer/"):
             return self._peer_route(p, "POST")
         user = self._user()
@@ -661,8 +553,7 @@ class Handler(BaseHTTPRequestHandler):
                 if r is not None:
                     return self._json(r[1], r[0])
             if p == "/api/claude/login":
-                # The requester is the hub's own words (which surface, which
-                # pane), never request text: none of it reaches the argv.
+                # Only allow-listed values describe the requester; no request text.
                 where = b.get("from") if b.get("from") in LOGIN_FROM else None
                 pane = b.get("pane") if b.get("pane") in MGR.panes else None
                 who = f"pane {pane}" if pane else "browser"
@@ -676,8 +567,7 @@ class Handler(BaseHTTPRequestHandler):
                 role = (b.get("role") or "").strip() or None
                 role_sha, preamble, notes = None, "", []
                 if role:
-                    # Resolved before anything is created, so a refusal costs
-                    # no process and reads as a message on the dialog.
+                    # Resolve before creating, so a refusal costs no process.
                     import roles
                     try:
                         r = roles.resolve(role, lane=agent or None,
@@ -691,30 +581,13 @@ class Handler(BaseHTTPRequestHandler):
                 pane = MGR.create(agent, b.get("cwd") or str(sessions.default_cwd()),
                                   posture, (b.get("model") or "").strip() or None,
                                   effort, role=role, role_sha=role_sha)
-                # The preamble comes BACK rather than being sent from here:
-                # it lands in the composer, visible, and goes as the first
-                # turn only when you press send (P17).
+                # The preamble is returned to the composer, not sent from here.
                 return self._json({"ok": True, "pane": pane.snapshot(),
                                    "preamble": preamble, "notes": notes})
             if p == "/api/content/attach":
-                # What "attach a note to a pane" MEANS lives here, in one
-                # place, because it is not the same thing for every lane and
-                # the difference is load-bearing:
-                #
-                #   a lane WITH tools  -> a reference. The agent opens the file
-                #       itself, through its own permission gate, so the bytes
-                #       reach the model the same way any other file it reads
-                #       does — visible in the transcript, refusable in the
-                #       rail. Corral does not smuggle file contents into a
-                #       prompt behind the gate's back.
-                #   a lane WITHOUT    -> a quoted excerpt, bounded and clearly
-                #       fenced. A path handed to an agent with no filesystem
-                #       is a dead end that looks like a working feature.
-                #
-                # Returning TEXT (not markup, not a command) keeps this a
-                # composer convenience: it lands in the box, the operator reads it,
-                # and nothing is sent until he presses send. The attach itself
-                # authorizes nothing (P17).
+                # Composer text only, nothing is sent. A lane with tools gets
+                # the path (it reads the file through its own permission gate);
+                # a lane without gets a bounded, fenced excerpt.
                 import content
                 item = content.get((b.get("id") or "").strip())
                 if item is None:
@@ -740,14 +613,11 @@ class Handler(BaseHTTPRequestHandler):
                                    "dir": str(Path(item["path"]).parent)})
             if p == "/api/session/send":
                 if b.get("panes"):
-                    # Same prompt, several panes: the first half of a panel.
+                    # Same prompt, several panes.
                     r = MGR.fanout(list(b.get("panes") or []), b.get("text", ""))
                     return self._json({"ok": r["sent"] > 0, **r})
-                # `turn` is the ledger id, durable before this ack
-                # (P0-ledger): a client can ask later what became of it.
-                # `via` is the CALLER's word for where this came from
-                # ("consult", "cli"); the browser sends none. A label on the
-                # supported path, not a control -- see TURN_VIAS.
+                # `turn` is the durable ledger id; `via` is the caller's
+                # origin label ("consult", "cli"), not a control.
                 tid = MGR.get(b.get("pane", "")).send(b.get("text", ""),
                                                       via=b.get("via") or None)
                 return self._json({"ok": True, "turn": tid})
@@ -774,8 +644,7 @@ class Handler(BaseHTTPRequestHandler):
                     (b.get("value") or "").strip())
                 return self._json({"ok": True, "config": r})
             if p == "/api/session/pause":
-                # Stop the process, keep the conversation. Close was the only
-                # exit, so interrupted work had nowhere to sit.
+                # Stop the process, keep the conversation.
                 pane = MGR.pause(b.get("pane", ""))
                 return self._json({"ok": True, "pane": pane.snapshot()})
             if p == "/api/session/reopen":
@@ -789,10 +658,8 @@ class Handler(BaseHTTPRequestHandler):
                                    MGR.set_pinned(b.get("pane", ""),
                                                   b.get("pinned", True))})
             if p == "/api/session/seat":
-                # A HUMAN verb (DESIGN-5 S6), behind the pairing cookie like
-                # every route below the auth check: naming a pane is how it
-                # becomes addressable by other panes, so no agent-facing path
-                # may reach this. "" unbinds.
+                # Human-only (cookie-gated): a seat makes a pane addressable
+                # by other panes. "" unbinds.
                 pane = MGR.bind_seat(b.get("pane", ""), b.get("seat"))
                 return self._json({"ok": True, "seat": pane.seat})
             if p == "/api/session/rename":
@@ -803,7 +670,7 @@ class Handler(BaseHTTPRequestHandler):
                     b.get("minimized", True))
                 return self._json({"ok": True, "minimized": m})
             if p == "/api/session/port/preview":
-                # The exact bytes a port would send, and their sha (port.py).
+                # The exact bytes a port would send, and their sha.
                 pack = MGR.port_preview(b.get("pane", ""), b.get("agent", ""))
                 return self._json({"ok": True, **pack})
             if p == "/api/session/port":
@@ -812,7 +679,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": r["delivered"], "delivered": r["delivered"],
                                    "error": r["error"], "pane": r["pane"].snapshot()})
             if p == "/api/session/schedule/add":
-                # schedule.py: the SAME create+send a click takes, at a time.
                 job = MGR.schedule.add(
                     b.get("agent", ""), b.get("cwd") or str(sessions.default_cwd()),
                     b.get("prompt", ""), b.get("when", ""),
@@ -827,8 +693,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True,
                                    "removed": MGR.schedule.remove(b.get("id", ""))})
             if p == "/api/session/seen":
-                # A human surface SHOWED this pane up to `seq` (P0-e'). The
-                # browser calls it only while the page is visible and focused.
+                # A human surface showed this pane up to `seq` (sent only while
+                # the page is visible and focused).
                 return self._json({"ok": True, "seen": mark_seen(
                     b.get("pane", ""), b.get("seq") or 0)})
             if p == "/api/session/cancel":
@@ -847,31 +713,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    """ThreadingHTTPServer that does not print a traceback when a client
-    simply goes away.
-
-    WHY (mac-host, 2026-08-31): the log filled with
-
-        Exception occurred during processing of request from …
-        ConnectionResetError: [Errno 54] Connection reset by peer
-
-    raised inside `handle_one_request` at `self.rfile.readline(...)` — i.e.
-    BEFORE any of this module's code runs, which is why Handler's own
-    BrokenPipe/ConnectionReset guards never caught it. socketserver's default
-    `handle_error` prints the full traceback for it.
-
-    Nothing is wrong when this happens. The peer closed the socket before
-    sending a request line, which is the normal end of a browser's speculative
-    preconnect, a reloaded tab's abandoned SSE stream, and every keep-alive
-    socket a laptop takes with it when it sleeps. A cockpit that prints a
-    stack trace for the routine case teaches its operator that stack traces
-    are routine — and the next one, which is real, gets scrolled past.
-
-    Narrow ON PURPOSE: exactly the exception types that mean "the other end
-    left", and everything else still gets the loud default. Silencing errors
-    generally would be the opposite of distrusting green (P1); this silences
-    a non-error.
-    """
+    """ThreadingHTTPServer that stays quiet when a client simply disconnects
+    (raised before Handler code runs); all other errors keep the default."""
 
     daemon_threads = True
     _QUIET = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
@@ -887,19 +730,9 @@ _SHUTTING_DOWN = {"sig": None}
 
 
 def _on_shutdown_signal(signum, frame):              # noqa: ARG001
-    """SIGTERM/SIGINT: say what is being cut off, then exit. Nothing else.
-
-    Resilience review v2, P0-b' (Astra and Grok 2026-09-28). Runs on the MAIN
-    thread (Python delivers signals there), where serve_forever is parked in
-    select() holding no pane lock, so emit() cannot deadlock. It writes one
-    `note` per pane with a turn in flight or messages queued, naming them —
-    the transcript on disk is then truthful about the interruption — and
-    does NOT pause(): pause clears the queue and the in-flight prompt was
-    already popped, so "persist then pause" lost exactly the message that
-    mattered. The adapters are left to the service manager (KillMode=mixed
-    signals them only after this returns) and, where they outlive the hub,
-    to the next boot's orphan reap. A second signal exits immediately.
-    """
+    """SIGTERM/SIGINT: note interrupted turns in each pane's transcript, then
+    exit. Does not pause() (that would drop queued messages); adapters are
+    left to the service manager. A second signal exits immediately."""
     name = signal.Signals(signum).name
     if _SHUTTING_DOWN["sig"] is not None:
         os._exit(128 + signum)
@@ -914,8 +747,7 @@ def _on_shutdown_signal(signum, frame):              # noqa: ARG001
 
 
 def write_pidfile():
-    """STATE/hub.pid: who is serving, for `corral-light watch` (P0-d').
-    pid + start-time fingerprint, so a reused pid is not mistaken for us."""
+    """Write STATE/hub.pid (pid + start-time fingerprint) for `corral-light watch`."""
     try:
         from corral_core.acp import process_start_token
         sessions.STATE.mkdir(parents=True, exist_ok=True)
@@ -936,34 +768,22 @@ def install_shutdown_handler():
 
 
 def serve(bind=BIND, port=PORT):
-    # The hub runs as a systemd unit, and every pane it spawns inherits its
-    # environment -- so until 2026-09-09 every interactive agent under it
-    # carried systemd's INVOCATION_ID and passed the "scheduled estate" gate
-    # in _lib/mail.py and ontology/_sender (measured live: grok, codex and
-    # claude children of the hub all had it). An agent in a pane is the
-    # interactive case those gates exist to refuse. Drop the unit identity
-    # here, once, before the first spawn; the gates additionally require
-    # CC_SCHEDULED_JOB, which only observability/log_run.py sets.
+    # Drop the service-unit identity so interactive panes never look like
+    # scheduled jobs to environment-based gates.
     for _k in ("INVOCATION_ID", "JOURNAL_STREAM", "CC_SCHEDULED_JOB"):
         os.environ.pop(_k, None)
     threading.Thread(target=_observe_loop, daemon=True).start()
     threading.Thread(target=_notify_loop, daemon=True).start()
-    MGR.schedule.start()                    # schedule.py: scheduled prompts
-    # Where a pane's seat-tools child dials this hub (DESIGN-5 S8). Loopback
-    # when bound to every interface; the bound address otherwise, since a hub
-    # bound to one LAN address does not answer on 127.0.0.1.
+    MGR.schedule.start()
+    # Where a pane's seat-tools child dials this hub: loopback when bound to
+    # all interfaces, else the bound address.
     sessions._core.PEER_HUB_URL = (
         f"http://{'127.0.0.1' if bind in ('0.0.0.0', '', '::') else bind}:{port}")
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     install_shutdown_handler()
     write_pidfile()
-    # flush=True, and it is not cosmetic. Python line-buffers stdout only when
-    # it is a TTY; under systemd, launchd, or `> log 2>&1` it is block-buffered,
-    # so this line — the ONE signal that the server bound its port — sat in a
-    # 8 KB buffer and never appeared. Measured 2026-08-31 from a fresh clone:
-    # the service was up and healthy with a zero-byte log, which reads exactly
-    # like a service that failed to start.
+    # flush: stdout is block-buffered under a service manager.
     print(f"corral-light: http://{bind}:{port}/", flush=True)
     httpd.serve_forever()
 

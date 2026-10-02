@@ -1,9 +1,8 @@
 #!/usr/bin/python3
 """Install the exact Google native Antigravity ACP release used by Corral.
 
-This intentionally pins one archive plus SHA-256 per platform. A changed
-upstream release is an operator decision, not a silent in-place update to an
-agent that can act in a working tree.
+Pins one archive plus SHA-256 per platform; upstream changes are never
+picked up silently.
 """
 import argparse
 import hashlib
@@ -17,34 +16,10 @@ import urllib.request
 import zipfile
 
 
-# ONE PINNED ARCHIVE PER PLATFORM, AND NO ROW MEANS NO INSTALL.
-#
-# Before a platform guard existed, running --install on a Mac downloaded the
-# Linux archive, verified its SHA correctly, installed it — and
-# `corral-light doctor` then reported the Antigravity lane as **ok**, because
-# availability is "the files exist on disk". The pane would die at exec.
-#
-# That is the exact failure this whole codebase argues against: a picker
-# listing a binary that cannot run is a button that lies, and it is WORSE than
-# the honest "not installed" it replaced, because the operator has stopped
-# looking. Refuse at install, where the platform is knowable and the message
-# can say why (P4: degrade toward safety, loudly).
-#
-# Google publishes under .../releases/linux/ and .../releases/macos/ (the
-# darwin/ and mac/ paths 404). There is no darwin-x86_64 build (404,
-# 2026-10-01), so an Intel Mac — or an x86-64 Python under Rosetta — is refused.
-#
-# The linux-x86_64 digest was pinned from its first download. The two rows
-# added 2026-10-01 are pinned the same way, trust-on-first-download: the
-# archive was fetched whole (length matched Content-Length, zip test clean)
-# and its SHA-256 written here. darwin-arm64 was then run live; linux-arm64
-# has not been executed on any host.
-#
-# `args` is per build, because the builds disagree: Google registered the
-# Linux server as `agy_acp_server.par --uid=`, and the macOS build has no
-# such flag — it dies "Unknown command line flag 'uid'" before initialize
-# (2026-10-01), while a bare start handshakes. linux-arm64 is assumed to
-# match linux-x86_64 (same registration); not yet run.
+# One pinned archive per platform; no row means no install, since another
+# platform's build would install but fail at exec while the lane reads
+# available. No darwin-x86_64 build exists. `args` differs per build: the
+# macOS server rejects `--uid=`.
 BASE_URL = "https://dl.google.com/agy-extensions/releases/"
 RELEASES = {
     ("Linux", "x86_64"): {
@@ -71,13 +46,8 @@ RUNTIME = Path.home() / ".local/lib/corral/antigravity-acp"
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 DOWNLOAD_ATTEMPTS = 3      # short reads only; every attempt is still SHA-checked
 
-# The server refuses session/new — "Authentication required … No
-# authentication method selected" — until settings.json names one. Installed
-# files and a clean initialize handshake do not reveal that, so the lane read
-# available and died on first use (Omarchy, 2026-09-27). The installer picks
-# oauth-personal: the operator's own Google login, the subscription path.
-# NEVER gemini-api-key — a vendor key silently changes who pays and who sees
-# the data, and that is the operator's call, not an installer default.
+# The server refuses session/new until settings.json names an auth method.
+# Default to the user's own Google login, never an API key.
 SETTINGS = Path.home() / ".gemini/antigravity-acp/settings.json"
 AUTH_TYPE = "oauth-personal"
 
@@ -103,9 +73,7 @@ class ShortDownload(RuntimeError):
 def download(url, destination):
     size = 0
     with urllib.request.urlopen(url, timeout=30) as source, Path(destination).open("wb") as out:
-        # A connection that closes early ends the read loop exactly like a
-        # finished one (seen 2026-10-01: 92 MB of a 315 MB archive, no error).
-        # The SHA check would still refuse it, but say what actually happened.
+        # An early close ends the loop like a finished read; detect it explicitly.
         expected = source.headers.get("Content-Length")
         while True:
             chunk = source.read(1024 * 1024)
@@ -123,8 +91,6 @@ def host_platform(system=None, machine=None):
     """(system, machine) normalized to the RELEASES keys."""
     system = system or platform.system()
     machine = machine or platform.machine()
-    # Same CPU, different reporting conventions: Windows/WSL and some BSDs
-    # say AMD64; Linux says aarch64 where macOS says arm64.
     if machine in ("x86_64", "amd64", "AMD64"):
         machine = "x86_64"
     elif machine in ("arm64", "aarch64", "ARM64"):
@@ -178,9 +144,8 @@ def auth_problem(settings=None):
 
 
 def select_auth(settings=None):
-    """Select AUTH_TYPE where nothing is selected. A choice already made —
-    including an API key — is the operator's and is left alone, as is a
-    file that is not a JSON object (it is not ours to rewrite)."""
+    """Select AUTH_TYPE where nothing is selected; leave an existing choice
+    or a non-object file alone."""
     settings = Path(settings or SETTINGS)
     current = auth_type(settings)
     if current:
@@ -215,11 +180,8 @@ def install(destination=RUNTIME, settings=None):
     if destination.exists():
         raise RuntimeError(f"refusing to replace incomplete runtime: {destination}")
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # BESIDE the destination, never /tmp. The last step is os.replace, which
-    # is atomic only within one filesystem; this pinned "/tmp" and on a Linux
-    # box whose /tmp is tmpfs (Omarchy, 2026-09-27) it failed EXDEV — "Invalid
-    # cross-device link" — after the download and the SHA check had both
-    # passed. Same directory also keeps a 1.5 GB archive out of RAM.
+    # Beside the destination, not /tmp: os.replace is atomic only within one
+    # filesystem (a tmpfs /tmp fails EXDEV).
     with tempfile.TemporaryDirectory(prefix=".corral-antigravity-acp-",
                                      dir=destination.parent) as td:
         extract, _ = fetch(row, td, row["sha256"])
@@ -230,8 +192,7 @@ def install(destination=RUNTIME, settings=None):
 def fetch(row, workdir, expect_sha):
     """Download row's archive into workdir and extract the expected files.
     Returns (extract_dir, sha256). With expect_sha None the digest is only
-    measured — trust-on-first-download, for `lanes update` staging a release
-    nobody has pinned yet; the caller writes it into RELEASES on green."""
+    measured (trust-on-first-download)."""
     archive = Path(workdir) / "release.zip"
     for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         try:
@@ -274,9 +235,6 @@ def main(argv=None):
         ok = installed_ok()
         problem = platform_problem()
         if ok and problem:
-            # Installed AND wrong-platform: the files are there, so
-            # `installed_ok` is true and the lane reads available — say the
-            # thing that actually matters instead of the reassuring half.
             print(f"installed, but UNRUNNABLE here — {problem}", flush=True)
             return 1
         if ok and auth_problem():

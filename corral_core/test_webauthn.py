@@ -1,8 +1,6 @@
-"""DESIGN-6 S6: the assertion verifier (corral_core/webauthn.py).
+"""The WebAuthn assertion verifier (corral_core/webauthn.py).
 
-Until the live key-pairing check captures a real authenticator's assertion,
-the golden vector is built here: a throwaway P-256 key made by openssl signs
-authData || SHA-256(clientDataJSON) exactly as an authenticator would. No key
+The golden vector is built here with a throwaway openssl P-256 key; no key
 material is checked in.
 """
 import hashlib

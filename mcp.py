@@ -15,10 +15,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-# corral-light, NOT corral: sharing one MCP config with the full build would
-# mean a server added on ranch silently appears in every pane here, on a host
-# that may not have its credential or its network path. Same reasoning as the
-# separate state dir.
+# Separate from full Corral's MCP config, so servers never leak across builds.
 CONFIG = Path(os.environ.get("CORRAL_MCP_CONFIG",
                              Path.home() / ".config/corral-light/mcp.json"))
 NAME = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -78,8 +75,7 @@ class Registry:
             raise McpError("http servers require url")
         item.setdefault("enabled", True)
         item.pop("name", None)
-        # Direct secrets are an unsafe configuration shape. Use auth_ref and
-        # let the eventual keyring adapter resolve it at connection time.
+        # Secrets are referenced by auth_ref handle, never stored inline.
         if "headers" in item or "env" in item:
             raise McpError("store secret handles as auth_ref; direct headers/env are refused")
         raw = self.raw()
@@ -119,14 +115,8 @@ class Registry:
     def session_servers(self):
         """Return descriptors for Corral's proxy, never the upstream server.
 
-        ACP's McpServer type is an untagged enum (McpServerHttp | McpServerSse
-        | McpServerStdio); a Rust-strict agent (Grok Build) tries each variant
-        and rejects the WHOLE session/new call if none match exactly -- no
-        partial credit for "close enough". McpServerStdio requires `env`
-        (an array, empty is fine) alongside name/command/args; omitting it
-        entirely, not just leaving it empty, was enough to fail every variant
-        and kill session creation for every agent this registry serves, the
-        moment any server was registered in it.
+        `env` is required (empty is fine): strict ACP agents reject the whole
+        session/new if McpServerStdio lacks it.
         """
         out = []
         for item in self.list():

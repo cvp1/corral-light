@@ -1,20 +1,14 @@
 #!/usr/bin/python3
-"""The Claude login, foreseen and survived (mac-host, 2026-09-30, 05:41).
+"""The Claude login, foreseen and survived.
 
-A pane died at its first prompt with `-32000 Authentication required` — the
-refresh token had lapsed — and the only way back was: read the JSON-RPC
-error, guess, open a terminal, `/login`, come back, press ↻. Three fixes,
-each with a test that could fail:
+  * claude_auth reads the credential's own expiry (never a token) and says
+    expired / expiring / fine / cannot tell; cannot tell is not fine.
+  * a pane that dies of it says so with the exact remedy and carries
+    `cause: auth`.
+  * Manager.auth_sweep resumes those panes after the next sign-in (the expiry
+    moved), never against the same dead credential, and notifies once.
 
-  * claude_auth reads the credential's OWN expiry (never a token) and says
-    expired / expiring / fine / cannot tell — and cannot tell is not fine.
-  * a pane that dies of it says so in English with the exact remedy, and
-    carries `cause: auth` for the rail and the sweep.
-  * Manager.auth_sweep resumes those panes after the NEXT sign-in (the
-    expiry moved), never against the same dead credential, and notifies on
-    the edge exactly once.
-
-Collected by test_corral_light.py (`from test_claude_auth import *`).
+Collected by test_corral_light.py.
 """
 import os
 import sys
@@ -230,7 +224,7 @@ class ADeadLoginIsSurvived(FakeLaneCase):
         self.assertIsNone(p.dead_cause)
         notes = [e["data"]["text"] for e in p.events if e["kind"] == "note"]
         self.assertTrue(any("login is back" in n for n in notes), notes)
-        # It works again, and the lost prompt was NOT re-sent for him.
+        # It works again, and the lost prompt was not re-sent.
         self.assertNotIn("echo: hello", self.texts(p))
         p.send("hello again")
         self.assertTrue(wait_for(lambda: "echo: hello again" in self.texts(p)))

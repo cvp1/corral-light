@@ -1,14 +1,6 @@
 #!/usr/bin/python3
-"""Tests for Corral Light.
-
-TWO KINDS, AND THE SECOND IS THE POINT
-    1. Behaviour: the ollama lane's protocol, the bounds, the static-path
-       containment.
-    2. STRUCTURE: proof that this build has not quietly grown back the parts it
-       was forked to shed. A "light" fork does not get heavy in one commit; it
-       gets heavy one convenience import at a time, and by then the fork's whole
-       justification is gone and nobody notices because everything still works.
-       These tests fail loudly on the FIRST such import.
+"""Tests for Corral Light: lane behaviour, bounds, and structural
+independence from full Corral.
 
 Run: python3 -m unittest test_corral_light -v   (from this directory)
 """
@@ -22,15 +14,8 @@ import types
 import unittest
 from pathlib import Path
 
-# sessions.STATE binds at IMPORT time from CORRAL_LIGHT_STATE, so a suite run
-# without one writes into the LIVE store. Measured 2026-09-11: a plain
-# `python3 test_corral_light.py` created TEN pane directories under
-# ~/.local/share/corral-light/panes, mixed in with real ones. A test suite must
-# never be able to touch the running product's state, and "remember the env
-# var" is not a mechanism -- so default it here, before anything imports
-# sessions. A caller that sets its own (line ~595 does) is unaffected.
-# corral/test_roles.py carries the same guard for CORRAL_STATE, for the same
-# reason and after the same accident.
+# Default the state dir before anything imports sessions (STATE binds at
+# import time), so the suite never writes into the live store.
 os.environ.setdefault("CORRAL_LIGHT_STATE",
                       tempfile.mkdtemp(prefix="corral-light-test-"))
 
@@ -38,40 +23,22 @@ ROOT = Path(__file__).resolve().parent
 
 
 def acp_unanswered():
-    """The core's "no human selection yet" sentinel.
-
-    Distinct from a falsy option id on purpose: a vendor is entitled to an
-    optionId of "" or 0, and reading that as "no selection" made the human's
-    click vanish (2026-08-31 panel, grok finding 8).
-    """
+    """The core's "no human selection yet" sentinel, distinct from a falsy option id."""
     import acp
     return acp._UNANSWERED
 
 import ollama_acp
 
-# The shared rail contract, collected into THIS suite so `python3 -m unittest
-# test_corral_light` proves the permission rail too. It lives in corral_core
-# because full Corral runs the same file: a contract that lives in one product
-# proves one product, which is exactly how the 2026-08-31 rail fixes shipped to
-# Corral and not to the product other people run.
+# The shared permission-rail and edge contracts, collected into this suite.
 from corral_core.test_acp_rail import *          # noqa: F401,F403
 from corral_core.test_edge import *              # noqa: F401,F403
 
 
 class TheCoreNeverImportsFullCorral(unittest.TestCase):
-    """Corral Light is the public, MIT, standalone product.
-
-    The core lives in THIS tree so the dependency can only point one way:
-    `corral/` reaches sideways for `corral_core`, never the reverse. If the
-    core ever imported from `corral/`, Light would stop working on a host
-    that has no full Corral checkout — which is every host but linux-host —
-    and the fork would be re-opened from the other end.
-    """
+    """The core never imports from full Corral; the dependency points one way."""
 
     def test_no_module_in_the_core_reaches_into_corral(self):
-        """Statements, not prose. The core's docstrings talk about `corral/`
-        at length — explaining the rule is not breaking it — so this reads
-        the parsed imports rather than grepping the text."""
+        """Reads parsed imports, not text, so prose about `corral/` does not count."""
         import ast
         core = ROOT / "corral_core"
         for f in sorted(core.glob("*.py")):
@@ -89,16 +56,10 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
                     f"product must stand alone")
 
     def test_the_core_names_no_host(self):
-        """This repository is PUBLIC. The core is code that arrived from a
-        private sibling, so it is the one place a machine name, a LAN address
-        or an account can cross over by accident — comments carry incident
-        history and incident history is full of hostnames. The rest of the
-        tree was scrubbed by hand when it was forked; this keeps the core
-        scrubbed by machine."""
+        """The public core names no machine, LAN address or account."""
         import re
         bad = re.compile(r"linux-host|mac-host|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
-        # *.toml too (DESIGN-5 S12, T12.4): the rig template ships in the core
-        # and is the file a user copies, cwd paths and all.
+        # *.toml too: the rig template ships in the core and is copied by users.
         files = sorted((ROOT / "corral_core").glob("*.py")) + \
             sorted((ROOT / "corral_core").glob("*.toml"))
         self.assertIn("rig.example.toml", [f.name for f in files])
@@ -110,11 +71,9 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
                        f"repository: {line.strip()[:90]}")
 
     def test_the_core_imports_with_nothing_but_this_tree_on_the_path(self):
-        """Not just a text check: actually import it in a clean interpreter
-        whose path contains only this directory."""
+        """Import the core in a clean interpreter whose path holds only this directory."""
         import subprocess
-        # Keep the stdlib, drop every workspace entry: the question is whether
-        # the core needs a SIBLING product, not whether it needs `json`.
+        # Keep the stdlib, drop every workspace entry.
         prog = ("import sys; "
                 "sys.path[:] = [%r] + [p for p in sys.path "
                 "                      if 'Github/CC' not in p and p]; "
@@ -126,17 +85,8 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
 
 
 def _config_dir_only(spec):
-    """The claude lane as it was BEFORE the ACP `mode` route existed: posture
-    imposable only through CLAUDE_CONFIG_DIR.
-
-    The three tests below were written when that was the only mechanism, so
-    they said "the config dir is unusable here" by asserting
-    `posture_enforceable` is False. That is no longer the same sentence: the
-    lane can now impose a posture over session/set_config_option, so the
-    overall answer is legitimately True on a host where the config dir is
-    dead. Narrowing the spec keeps each test pointed at the mechanism it was
-    actually written to guard — the Keychain finding of 2026-08-31 is still
-    fully asserted — instead of quietly asserting the new route away.
+    """The claude lane with posture imposable only through CLAUDE_CONFIG_DIR
+    (no ACP `mode` route).
     """
     narrowed = dict(spec)
     narrowed.pop("posture_via_acp_mode", None)
@@ -144,12 +94,8 @@ def _config_dir_only(spec):
 
 
 def _pin_sessions_platform(test, name):
-    """Force sessions.sys.platform for the rest of this test.
-
-    Isolation via CLAUDE_CONFIG_DIR is a platform fact (darwin refuses it).
-    Tests of the copy/resync/chmod path must pin linux; tests of the
-    refusal must pin darwin. Leaving them on the host's platform is how
-    the suite went red on mac-host the day the Keychain finding landed.
+    """Force sessions.sys.platform for the rest of this test; CLAUDE_CONFIG_DIR
+    isolation is platform-dependent (darwin refuses it).
     """
     import sessions
     real = sessions.sys.platform
@@ -163,22 +109,14 @@ class StructuralIndependence(unittest.TestCase):
     PY_FILES = sorted(p for p in ROOT.glob("*.py"))
 
     def test_no_module_imports_the_cc_workspace(self):
-        """No `_lib`, no `harness`, no `lightsail`, no sibling project.
-
-        This is the load-bearing one. Light is meant to be copyable to a
-        machine that has none of the fleet on it; a single `from _lib import …`
-        makes that false, and the failure appears not at import time but the
-        first time someone runs it somewhere else.
+        """No `_lib`, `harness`, `lightsail` or sibling-project import: Light must
+        run on a host that has none of them.
         """
         banned = ("_lib", "harness", "lightsail", "cc_handoff", "Github/CC/")
         for f in self.PY_FILES:
             for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
                 s = line.strip()
-                # Only lines that could EXECUTE. A first cut flagged any line
-                # containing both a banned word and "import", which matched
-                # this file's own docstring describing the rule — a scanner
-                # that cannot survive its own documentation is a scanner that
-                # gets deleted the first time it cries wolf.
+                # Only lines that could execute, so docstrings describing the rule don't match.
                 if not (s.startswith(("import ", "from ")) or "Path(" in s):
                     continue
                 for token in banned:
@@ -187,26 +125,7 @@ class StructuralIndependence(unittest.TestCase):
                                   f"workspace: {s[:90]}")
 
     def test_no_heavy_corral_module_is_imported(self):
-        """The fleet modules are absent from the tree AND from every import.
-
-        `ssh_acp` LEFT this list on 2026-09-01, deliberately and with the operator's
-        go: the host shell lanes came back. It is the one heavy module whose
-        dependency was never the fleet — ranch generated its lane list from the
-        lightsail estate, but the adapter itself needs only ssh and a bash, so
-        it ports to a standalone host intact. Light supplies the inventory from
-        a hand-written ssh-hosts.json instead (sessions.EXTRA_SSH_HOSTS), and
-        `estate`/`fleet`/`lightsail` stay banned above — which is what keeps
-        this an added lane rather than the fork quietly reconverging.
-
-        Everything else on this list still has a fleet-shaped dependency and
-        stays out. Moving a name off this list is a decision, not a fix.
-        """
-        # `schedule` came OFF this list on 2026-09-29 (the operator: "lift the ban"):
-        # Light's schedule.py is the full Corral's scheduled prompts ported
-        # without the runs registry, `refire` and `remind` -- no fleet-shaped
-        # dependency remains, and the module keeps the name the feature has
-        # everywhere else. It shipped one commit as `later.py` while the ban
-        # stood.
+        """The heavy fleet modules are absent from the tree and from every import."""
         heavy = ("fleet", "estate", "finops", "runs", "attention", "asks",
                  "push", "library", "mail", "today", "residency",
                  "delegates", "browser_ui", "foreign", "aios_memory",
@@ -235,8 +154,7 @@ class StructuralIndependence(unittest.TestCase):
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
                          "/manifest.json", "/api/state", "/api/stream",
                          "/api/search",
-                         # DESIGN-6 S4: starts the vendor's login for the Live
-                         # tab's own Claude lane. One exact path, no prefix.
+                         # Starts the vendor's login for the Live tab's Claude lane; exact path only.
                          "/api/claude/login"}
         for r in routes:
             if r in allowed_exact or r.startswith(allowed_prefixes):
@@ -244,13 +162,7 @@ class StructuralIndependence(unittest.TestCase):
             self.fail(f"hub.py serves {r}, which is not a Live-surface route")
 
     def test_frontend_calls_no_route_the_hub_does_not_serve(self):
-        """The browser and the server agree on the API surface.
-
-        The front end is a TRIM of the full Corral's app.js, so a leftover
-        `api('/api/attention')` would not be a syntax error — it would be a
-        silent 404 on every render, which is exactly the class of bug a trim
-        produces.
-        """
+        """Every `api()` path in the front end is a route the hub serves."""
         import re
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         hub = (ROOT / "hub.py").read_text(encoding="utf-8")
@@ -261,20 +173,9 @@ class StructuralIndependence(unittest.TestCase):
                           f"app.js calls {path}, which hub.py does not serve")
 
     def test_nothing_hardcodes_a_path_from_the_machine_it_was_built_on(self):
-        """No `/home/<someone>`, no `/Users/<someone>`, outside the plist.
-
-        This is the whole "does it work on a blank box" question in one test.
-        It was NOT hypothetical: app.js shipped `S.lastCwd ||
-        '/home/USER/Github/CC'` as the new-conversation default, inherited
-        from the full Corral, so the first thing a fresh install did was refuse
-        to start a pane in a directory that does not exist there. The host
-        knows its own home; nothing here should be guessing at it.
-        """
+        """No `/home/<someone>` or `/Users/<someone>` path outside the plist."""
         import re
-        # This file is excluded, and only this file: it is the one place whose
-        # CONTENT is the rule, so it quotes the literal it forbids. Same trap
-        # the CC-workspace scanner fell into — a check that cannot survive its
-        # own documentation gets deleted the first time it cries wolf.
+        # This file is excluded: it quotes the literals it forbids.
         checked = [f for f in self.PY_FILES if f.name != Path(__file__).name]
         checked += [ROOT / "static" / "app.js", ROOT / "static" / "index.html",
                     ROOT / "corral-light"]
@@ -295,12 +196,7 @@ class StructuralIndependence(unittest.TestCase):
         self.assertIn('"defaultCwd"', sess)
 
     def test_config_dirs_are_not_the_full_corrals(self):
-        """Every per-user config path is corral-light's own.
-
-        A shared MCP config would mean a server added on the fleet host
-        silently appears in every pane here, on a machine that may have
-        neither its credential nor a network path to it.
-        """
+        """Every per-user config path is corral-light's own, not full Corral's."""
         for name in ("mcp.py", "codex_launcher.py"):
             text = (ROOT / name).read_text(encoding="utf-8")
             for i, line in enumerate(text.splitlines(), 1):
@@ -311,21 +207,8 @@ class StructuralIndependence(unittest.TestCase):
                                  f"{name}:{i} shares the full Corral's config")
 
     def test_every_print_flushes(self):
-        """Under a service manager, stdout is block-buffered, not line-buffered.
-
-        The startup banner — the one signal that the server bound its port —
-        sat in an 8 KB buffer and never reached the log. Measured from a fresh
-        clone: a healthy server with a zero-byte log file, which reads exactly
-        like a server that failed to start. Every diagnostic print here is
-        read by someone through `systemctl --user status` or a log file, never
-        through a terminal.
-        """
-        # ast, not string matching. The first cut walked the source counting
-        # parentheses and its depth counter was already 0 before it reached
-        # the opening one, so every call "ended" at the word `print` and the
-        # check compared the flag against the literal string 'print'. It
-        # failed loudly here rather than passing vacuously, which is the only
-        # reason it got fixed instead of shipped.
+        """Every print flushes: under a service manager stdout is block-buffered."""
+        # Walk the AST rather than matching strings.
         import ast
         for f in self.PY_FILES:
             tree = ast.parse(f.read_text(encoding="utf-8"))
@@ -340,18 +223,7 @@ class StructuralIndependence(unittest.TestCase):
                     f"{f.name}:{node.lineno} prints without flush=True")
 
     def test_nothing_reads_or_writes_the_full_corrals_state(self):
-        """Both builds must be able to run on ONE host without touching.
-
-        Ports, cookies, MCP config and codex home were all namespaced from the
-        start; `antigravity_acp.py` was not. It arrived from upstream still
-        reading CORRAL_STATE and deriving CATALOG from it — so on a host
-        running both, this lane wrote its session records into the OTHER
-        product's directory and seeded its model picker from the OTHER hub's
-        negotiated catalog. Found 2026-08-31 by auditing that exact question.
-
-        Checks the whole tree, because the leak came in with a vendored file
-        and the next one will too.
-        """
+        """No module reads or writes full Corral's state (CORRAL_STATE)."""
         for f in self.PY_FILES:
             if f.name == Path(__file__).name:
                 continue
@@ -643,12 +515,7 @@ class ContentIndex(unittest.TestCase):
         self.assertIn("fh.read(MAX_FILE)", source)
 
     def test_dotdirs_are_not_indexed(self):
-        """A `.hidden/secret.md` matching the query must not surface.
-
-        Vaults carry `.obsidian`, `.trash` and `.git`; indexing those puts
-        deleted notes and plugin config into a search box that looks like it
-        is showing you your notes.
-        """
+        """A `.hidden/secret.md` matching the query must not surface."""
         titles = [h["title"] for h in self.content.search("fox")["hits"]]
         self.assertNotIn("Secret", titles)
 
@@ -687,8 +554,7 @@ class ContentIndex(unittest.TestCase):
                           "get() served a path that now resolves outside the root")
 
     def test_deleted_files_leave_the_index(self):
-        """Accretion needs a removal path (P23) — a store that only grows
-        keeps answering with files that are gone."""
+        """A store that only grows keeps answering with files that are gone."""
         self.assertTrue(self.content.search("hydroponics")["hits"])
         (self.notes / "sub" / "beta.md").unlink()
         self.content.refresh(force=True)
@@ -744,13 +610,7 @@ class AttachSemantics(unittest.TestCase):
                           f"{key} does not say whether it can read a file")
 
     def test_the_browser_never_renders_content_as_markup(self):
-        """The reason mdview.py could stay deleted.
-
-        Notes carry pasted third-party text and this is an authed control
-        surface (P20). The snippet is the only file-derived string that
-        reaches the page, and el() sets textContent — so an innerHTML
-        assignment fed by a hit would be the whole argument collapsing.
-        """
+        """File-derived snippets reach the page via textContent, never innerHTML."""
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         for bad in ("innerHTML = r.snippet", "innerHTML = h.snippet",
                     "innerHTML = d.text", "insertAdjacentHTML"):
@@ -787,20 +647,10 @@ class AttachSemantics(unittest.TestCase):
 
 
 class PlatformHonesty(unittest.TestCase):
-    """A lane must not report available on a host that cannot run it.
-
-    The operator ran `doctor` on a Mac 2026-08-31; Antigravity showed the honest
-    "not installed". The obvious next step — `install_antigravity_acp.py
-    --install` — would have downloaded the pinned LINUX x86-64 archive,
-    verified its SHA correctly, installed it, and then doctor would have
-    reported the lane **ok** for a binary that cannot exec there. Worse than
-    the honest failure it replaced, because the operator stops looking.
-    """
+    """A lane must not report available on a host that cannot run it."""
 
     def test_each_pinned_row_names_its_own_platform(self):
-        """DESIGN-6 T-F3.1. A row is only honest if its archive is the build
-        for the key it sits under: the URL directory and the release suffix
-        both have to agree with (system, machine)."""
+        """A row's URL directory and release suffix both match its (system, machine) key."""
         import install_antigravity_acp as m
         self.assertEqual(set(m.RELEASES), {("Linux", "x86_64"),
                                            ("Linux", "arm64"),
@@ -817,9 +667,7 @@ class PlatformHonesty(unittest.TestCase):
             self.assertRegex(row["sha256"], r"^[0-9a-f]{64}$", (system, machine))
 
     def test_each_build_is_started_with_its_own_flags(self):
-        """2026-10-01: the macOS build died "Unknown command line flag 'uid'"
-        before initialize, because the launcher passed the Linux
-        registration to every build. doctor said ok; the pane was dead."""
+        """Each platform build is launched with its own flags."""
         import install_antigravity_acp as m
         import antigravity_acp_launcher as la
         mac = m.release_for("Darwin", "arm64")
@@ -843,9 +691,9 @@ class PlatformHonesty(unittest.TestCase):
                              m.RELEASES[("Linux", "arm64")]["release"], name)
 
     def test_install_refuses_on_a_platform_with_no_row(self):
-        """DESIGN-6 T-F3.1/T-F3.3. Google publishes no darwin-x86_64 build
-        (404, 2026-10-01): an Intel Mac, or an x86-64 Python under Rosetta, is
-        refused with the reason, and the download is never attempted."""
+        """A platform with no pinned build (e.g. darwin-x86_64) is refused before
+        any download.
+        """
         import install_antigravity_acp as m
         real = m.platform.system, m.platform.machine, m.download
         calls = []
@@ -866,7 +714,6 @@ class PlatformHonesty(unittest.TestCase):
             m.platform.system, m.platform.machine, m.download = real
 
     def test_a_mac_on_apple_silicon_resolves(self):
-        """DESIGN-6 T-F3.3: this test used to assert the opposite."""
         import install_antigravity_acp as m
         real = m.platform.system, m.platform.machine
         try:
@@ -877,8 +724,7 @@ class PlatformHonesty(unittest.TestCase):
             m.platform.system, m.platform.machine = real
 
     def test_a_digest_mismatch_installs_nothing(self):
-        """DESIGN-6 T-F3.2. The archive downloads, its digest is wrong, and
-        the install directory and its parent are left exactly as they were."""
+        """A digest mismatch leaves the install directory and its parent untouched."""
         import zipfile
         import install_antigravity_acp as m
         with tempfile.TemporaryDirectory() as root:
@@ -903,8 +749,7 @@ class PlatformHonesty(unittest.TestCase):
             self.assertFalse((root / "settings.json").exists())
 
     def test_a_short_download_is_named_not_hashed(self):
-        """2026-10-01: a 315 MB archive arrived as 92 MB with no error. The
-        reader must say the download ended short."""
+        """A truncated download is reported as short, not hashed."""
         import io
         import install_antigravity_acp as m
 
@@ -991,10 +836,9 @@ class PlatformHonesty(unittest.TestCase):
 
 
 class AntigravityInstallsBesideItsDestination(unittest.TestCase):
-    """Omarchy, 2026-09-27: /tmp is tmpfs, the installer pinned its work dir
-    to /tmp, and the final os.replace into ~/.local/lib failed EXDEV after the
-    download and the SHA check had both passed. The rename is only atomic
-    within one filesystem, so the work dir must sit beside the destination."""
+    """The work dir sits beside the destination: os.replace is atomic only
+    within one filesystem (EXDEV across a tmpfs /tmp).
+    """
 
     def test_the_final_rename_stays_in_the_destination_directory(self):
         import hashlib
@@ -1033,10 +877,9 @@ class AntigravityInstallsBesideItsDestination(unittest.TestCase):
 
 
 class AntigravitySignInIsSelected(unittest.TestCase):
-    """Omarchy, 2026-09-27: installed, handshake ok, lane read available —
-    and session/new said "Authentication required … No authentication method
-    selected". The installer selects the operator's Google login; it never
-    selects an API key and never overrides a choice already made."""
+    """The installer selects the operator's Google login; never an API key,
+    and never overriding a choice already made.
+    """
 
     def test_install_selects_the_google_login_where_nothing_is_set(self):
         import install_antigravity_acp as m
@@ -1091,15 +934,7 @@ class AntigravitySignInIsSelected(unittest.TestCase):
 
 
 class PrintedCommandsWork(unittest.TestCase):
-    """A command shown to a human is a promise that running it does the thing.
-
-    Measured on mac-host, 2026-08-31: `doctor` told the operator to run
-    `CODEX_HOME=… codex login --device-auth`, and codex refused —
-    "CODEX_HOME points to '…', but that path does not exist". The directory is
-    only created at pane-spawn time, which cannot have happened yet, because
-    not being logged in is exactly why the message is on screen. The lane
-    printed an instruction that could never work as pasted.
-    """
+    """A command shown to a human must work as pasted."""
 
     def test_the_codex_login_command_creates_its_own_home(self):
         import codex_launcher
@@ -1124,16 +959,7 @@ class PrintedCommandsWork(unittest.TestCase):
 
 
 class LanesRefuseAtPickTime(unittest.TestCase):
-    """Installed is not the same question as usable.
-
-    Three separate times this build shipped a lane that reported available
-    and then died on its first prompt — antigravity (wrong platform), codex
-    (a login command that could not run), and grok (`ok` from a resolver whose
-    own docstring says it does not probe auth; the operator hit `Authentication
-    required` on mac-host, 2026-08-31). available_agents() exists to stop a
-    picker listing a binary that is not installed; a binary that is installed
-    and cannot authenticate is the same lie one layer in.
-    """
+    """A lane that is installed but cannot authenticate is refused at pick time."""
 
     CREDENTIALED = ("codex", "grok")     # lanes gated on a vendor login
 
@@ -1167,20 +993,12 @@ class LanesRefuseAtPickTime(unittest.TestCase):
 
 
 class DialogIsUsableOnDayOne(unittest.TestCase):
-    """The new-conversation dialog must work BEFORE anything has run.
-
-    All three of the operator's mac-host symptoms on 2026-08-31 were this: a Claude
-    pane that died with `Authentication required`, no model to pick, no effort
-    to pick. One cause — a lane's model/effort lists come only from a
-    completed session/new, so a lane that cannot authenticate can never fill
-    its own pickers, and the first thing an operator does on a new box is open
-    that dialog.
-    """
+    """The new-conversation dialog must work before any session has run."""
 
     def test_the_claude_lane_is_probed_live_not_guessed_at(self):
-        """A credential-FILE check is a guess about where a vendor keeps its
-        secret, and for Claude on macOS that guess is wrong (Keychain). The
-        only portable answer is to run the handshake."""
+        """On macOS Claude keeps its secret in the Keychain, so the lane is probed
+        with a live handshake rather than a credential-file check.
+        """
         import sessions
         spec = sessions.AGENTS["claude"]
         self.assertTrue(spec.get("live_probe"))
@@ -1226,18 +1044,8 @@ class DialogIsUsableOnDayOne(unittest.TestCase):
 
 
 class QuietOnlyWhereItIsNotAnError(unittest.TestCase):
-    """A client going away is not an incident; a bug still is.
-
-    mac-host, 2026-08-31: the log filled with ConnectionResetError tracebacks
-    raised inside handle_one_request's `rfile.readline` — before any of this
-    code runs, which is why Handler's own guards never saw them. That is the
-    normal end of a browser preconnect, an abandoned SSE stream, and every
-    keep-alive socket a laptop takes with it when it sleeps.
-
-    A cockpit that prints a stack trace for the routine case teaches its
-    operator that stack traces are routine, and the next one — which is real
-    — gets scrolled past. So: silence exactly the "peer left" exceptions and
-    nothing else. This test exists to keep that list from growing.
+    """Silence only the "peer left" connection errors; every other exception
+    still logs.
     """
 
     def _handle(self, exc):
@@ -1277,16 +1085,7 @@ class QuietOnlyWhereItIsNotAnError(unittest.TestCase):
 
 
 class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
-    """The directory that gives a pane its posture must not cost it its login.
-
-    mac-host, 2026-08-31: `claude` worked in a terminal, and every Corral pane
-    died at its first prompt with `Authentication required`. A pane runs under
-    a private CLAUDE_CONFIG_DIR seeded by copying
-    ~/.claude/.credentials.json — and on macOS that file need not exist, because
-    Claude Code can keep the OAuth in the Keychain. So the private dir was
-    created with no credential in it and the agent could not authenticate. The
-    pane was broken by the very mechanism that exists to give it a posture.
-    """
+    """The private config dir that imposes posture must not cost the pane its login."""
 
     def _fake_home(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1326,13 +1125,8 @@ class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
             Path.home = real
 
     def test_a_credential_file_still_gets_a_private_dir(self):
-        """The normal path must be unchanged — this is a fallback, not a
-        replacement for the posture mechanism.
-
-        Note the payload: `{}` used to be enough here, because the rule was
-        "the file exists". It is now "the file carries a token", so this test
-        had to say what a real credential looks like. That is the contract
-        change made visible, which is what a test is for.
+        """A real credential file still gets a private dir; this is a fallback,
+        not a replacement.
         """
         import sessions
         _pin_sessions_platform(self, "linux")
@@ -1362,20 +1156,8 @@ class PrivateConfigDirCannotBreakTheLane(unittest.TestCase):
 
 
 class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
-    """The login the operator verified must be the one the agent uses.
-
-    mac-host, 2026-08-31, in the order the operator found them: logged in; verified he
-    was logged in; ran /usage and got token STATISTICS instead of the
-    subscription usage page; the next prompt failed `Authentication required`.
-    A statistics page instead of a subscription page is what API-key mode
-    looks like — the agent was never using the login he had just checked.
-
-    acp.AcpClient merges this process's whole environment into the child,
-    which is right for PATH and HOME and wrong for a credential: an
-    ANTHROPIC_API_KEY exported in the shell that started the hub outranks the
-    OAuth login silently. codex_launcher has stripped these prefixes since
-    2026-08-23 with a comment naming the case; the Claude lane — the one
-    everybody uses — never got the same guard.
+    """Ambient vendor API keys are stripped so the agent uses the verified
+    login, not API-key mode.
     """
 
     def test_stripped_vars_do_not_reach_the_child_process(self):
@@ -1399,16 +1181,8 @@ class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
             os.environ.pop("ANTHROPIC_API_KEY", None)
 
     def test_both_doors_strip_for_every_lane(self):
-        """start() and resume() are two doors into the same room; a guard on
-        one of them is a guard on neither.
-
-        Measured at the process boundary through the REAL start() and
-        resume(), for every lane in the roster. The first version of this test
-        (2026-08-31) counted the string `strip_env=strip_prefixes()` in
-        sessions.py — a source grep that goes vacuous under any refactor and
-        cannot tell a stripped child from an unstripped one (completion review
-        2026-09-09, Grok). Removing the strip from either door now fails this
-        test for every lane on that door; proven by doing exactly that.
+        """start() and resume() both strip vendor keys, measured at the process
+        boundary for every lane.
         """
         import sessions, tempfile, sys as _sys, time, json as _json
         work = Path(tempfile.mkdtemp())
@@ -1531,19 +1305,8 @@ class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
 
 
 class NoParentSessionLeaksIntoAPane(unittest.TestCase):
-    """A pane must not inherit another Claude Code session's identity.
-
-    MEASURED 2026-08-31 — the first thing in this investigation that was
-    measured rather than proposed. Running `corral-light diagnose` from inside
-    a Claude Code session showed eleven CLAUDE_* variables from the PARENT
-    session reaching the spawned agent, CLAUDE_CONFIG_DIR among them.
-
-    That last one is the sharp edge, and it interacts with the fallback added
-    two commits earlier: Corral sets CLAUDE_CONFIG_DIR when it can impose a
-    posture and deliberately does NOT set it when it cannot. In exactly that
-    case an inherited value wins — so a hub started from inside a Claude Code
-    session would hand every pane the parent's config directory. "Do not set
-    it" only means "use the default" when nothing else is setting it.
+    """A pane must not inherit a parent Claude Code session's CLAUDE_* variables,
+    CLAUDE_CONFIG_DIR above all.
     """
 
     PARENT_VARS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
@@ -1576,10 +1339,7 @@ class NoParentSessionLeaksIntoAPane(unittest.TestCase):
             os.environ.pop("CLAUDECODE", None)
 
     def test_session_identity_vars_are_not_called_credentials(self):
-        """GROK_AGENT / GROK_SESSION_ID are this process's session, not a
-        vendor API key. Treating the GROK_ prefix as a credential made
-        `doctor` nag inside a Grok TUI session about variables nobody
-        exported as a secret."""
+        """GROK_AGENT / GROK_SESSION_ID are session identity, not a vendor API key."""
         import sessions
         saved = {k: os.environ.get(k) for k in ("GROK_AGENT", "GROK_SESSION_ID")}
         os.environ["GROK_AGENT"] = "grok"
@@ -1597,7 +1357,7 @@ class NoParentSessionLeaksIntoAPane(unittest.TestCase):
 
 
 class DiagnoseIsSafeToPaste(unittest.TestCase):
-    """The instrument built after three unmeasured theories in a row."""
+    """`diagnose` runs a real turn and reports what doctor cannot."""
 
     def test_it_prompts_which_is_the_step_doctor_skips(self):
         import diagnose, inspect
@@ -1607,25 +1367,21 @@ class DiagnoseIsSafeToPaste(unittest.TestCase):
                       "exists to answer 'does a turn run'")
 
     def test_it_surfaces_adapter_stderr(self):
-        """acp.py has always captured this and only ever used the last line
-        inside an exit reason — the detail behind every failure in this saga
-        was collected and thrown away."""
+        """The adapter's stderr tail is surfaced, not discarded."""
         import diagnose, inspect
         self.assertIn("stderr_tail", inspect.getsource(diagnose.diagnose))
 
     def test_it_runs_a_positive_control(self):
-        """Narrowing suspects is not the same as settling the question. The
-        control re-runs with ONE variable removed — the private config dir,
-        which is the only thing Corral adds to a terminal that already works."""
+        """The control re-runs without the private config dir, the only thing
+        Corral adds to a working terminal.
+        """
         import diagnose, inspect
         src = inspect.getsource(diagnose._control)
         self.assertIn("_run_once(spec, cwd, None", src,
                       "the control must run WITHOUT the private config dir")
 
     def test_the_credential_shape_reports_lengths_not_values(self):
-        """A token's LENGTH is diagnostic; its content is not. The operator's file is
-        322 bytes where a working one is 508 — knowing which field is missing
-        is the difference between a theory and a fact."""
+        """Token lengths are reported; values never are."""
         import diagnose, tempfile, io, contextlib
         d = Path(tempfile.mkdtemp()) / "c.json"
         d.write_text(json.dumps({"claudeAiOauth": {
@@ -1658,19 +1414,7 @@ class DiagnoseIsSafeToPaste(unittest.TestCase):
 
 
 class AnEmptyTokenIsNotACredential(unittest.TestCase):
-    """The measured root cause, found on linux-host 2026-08-31.
-
-    ~/.claude/.credentials.json existed, parsed, and carried every expected
-    key — accessToken, refreshToken, expiresAt, scopes, subscriptionType —
-    with accessToken="" , refreshToken="" and expiresAt=0. A file that is
-    complete by every structural test and authenticates nothing.
-
-    That defeats every check this build made before it. `is_file()` passes.
-    The copy into the pane's private CLAUDE_CONFIG_DIR succeeds. The
-    directory then LOOKS credentialed, the handshake succeeds because it does
-    not authenticate, and the first prompt fails. Four theories died on this
-    because all four asked whether the file was THERE.
-    """
+    """A credential file with empty tokens is not a usable credential."""
 
     def _cred(self, payload):
         d = Path(tempfile.mkdtemp()) / ".credentials.json"
@@ -1707,8 +1451,7 @@ class AnEmptyTokenIsNotACredential(unittest.TestCase):
         self.assertFalse(sessions.usable_credential(bad))
 
     def test_token_names_are_matched_at_any_depth(self):
-        """The vendor's key names and nesting are theirs to change; asserting
-        a shape would be one more guess of the kind that cost four rounds."""
+        """Token keys are matched at any depth; the vendor owns the nesting."""
         import sessions
         self.assertTrue(sessions.usable_credential(self._cred(
             {"a": {"b": {"c": {"access_token": "z" * 40}}}})))
@@ -1732,18 +1475,8 @@ class AnEmptyTokenIsNotACredential(unittest.TestCase):
 
 
 class TheCopiedCredentialResyncs(unittest.TestCase):
-    """The measured root cause, round two — found by the positive control.
-
-    mac-host, 2026-08-31: the control settled that this WAS the private config
-    dir, but the credential in the copy was real (108 chars, a genuine future
-    expiresAt) — ruling out both earlier theories (missing file, empty
-    token). What was left: seed_config_dir() copied the credential exactly
-    ONCE, ever, guarded by `if not dst.is_file()`. diagnose and the picker's
-    probe both reuse ONE FIXED directory across every invocation, so a copy
-    made the first time that directory existed is frozen from that moment —
-    and Claude Code rotates OAuth tokens (the operator's own terminal: "login
-    expires in 2 days"), so a frozen copy's refresh token goes invalid at the
-    auth server while looking, structurally, exactly like a working one.
+    """The private config dir's credential tracks the source instead of
+    freezing at first copy (OAuth tokens rotate).
     """
 
     def _home_with_cred(self, token="a"):
@@ -1776,10 +1509,9 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
             Path.home = real
 
     def test_the_pane_shares_the_one_login_file(self):
-        """2026-09-30: a COPY went stale inside a running pane the moment any
-        other holder refreshed (rotation kills every other refresh token).
-        The pane's credential is a link to the source, so there is nothing
-        per-pane to go stale — and re-seeding keeps it a link."""
+        """The pane's credential is a link to the one login file, so there is
+        nothing per-pane to go stale; re-seeding keeps it a link.
+        """
         import sessions
         _pin_sessions_platform(self, "linux")
         home, cred = self._home_with_cred("a")
@@ -1799,8 +1531,7 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
             Path.home = real
 
     def test_a_legacy_copy_is_replaced_by_the_link(self):
-        """Pane dirs made before 2026-09-30 hold a stale COPY; the next seed
-        (spawn or resume) swaps it for the link."""
+        """A legacy credential COPY is replaced by the link on the next seed."""
         import sessions
         _pin_sessions_platform(self, "linux")
         home, cred = self._home_with_cred("b")
@@ -1840,25 +1571,12 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
 
 
 class TheStaleCopyTheoryWasWrong(unittest.TestCase):
-    """Recorded honestly: fix #2 (stale-copy resync) did not resolve the operator's
-    failure. His `expiresAt` was IDENTICAL across the run before and after
-    that fix shipped — proof the source token had not rotated at all, so
-    there was nothing for a resync to fix. The mechanism was never staleness.
-
-    What survived: byte-identical, valid-looking credentials, still failing
-    ONLY when read through the private config dir rather than ~/.claude
-    directly. That points at the directory, not the file's content — so the
-    next instruments are a permission audit and a content-equality proof,
-    and the next code change (locking the dir to 0700) is defensive
-    hardening offered honestly as unproven, not as another confident theory.
-    """
+    """The private config dir is locked to its owner and audited."""
 
     def test_the_config_dir_is_locked_to_the_owner(self):
-        """Measured 2026-08-31: plain mkdir left it at 0o775 on this host —
-        group AND world read/execute on a directory built to carry a copied
-        OAuth token. Some credential-handling CLIs refuse to trust a token in
-        a loosely-permissioned directory even when the file itself is
-        locked down, the way ssh refuses a loose ~/.ssh."""
+        """The config dir is 0700: some CLIs refuse a token in a loosely
+        permissioned directory.
+        """
         import sessions
         _pin_sessions_platform(self, "linux")
         home = Path(tempfile.mkdtemp())
@@ -1897,7 +1615,7 @@ class TheStaleCopyTheoryWasWrong(unittest.TestCase):
 
 
 class DiagnoseAuditsPermissionsAndContent(unittest.TestCase):
-    """The instruments built after fix #2 turned out not to be the answer."""
+    """diagnose audits permissions and content equality of the credential."""
 
     def test_it_compares_real_and_private_permissions(self):
         import diagnose, inspect
@@ -1927,26 +1645,9 @@ class DiagnoseAuditsPermissionsAndContent(unittest.TestCase):
 
 
 class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
-    """The confirmed root cause — read from the vendor's own source, not
-    inferred, after five theories that were.
-
-    spike/node_modules/@anthropic-ai/claude-agent-sdk/cli.js:
-
-        function Kg(A=""){
-          let q=O8();
-          let Y = !process.env.CLAUDE_CONFIG_DIR ? "" :
-                  `-${sha256(q).digest('hex').substring(0,8)}`;
-          return `Claude Code${D4().OAUTH_FILE_SUFFIX}${A}${Y}`
-        }
-
-    the macOS Keychain service-name generator used with
-    `security find-generic-password`. Setting CLAUDE_CONFIG_DIR — to ANY
-    value — switches the lookup to a suffixed service name no interactive
-    `claude login` has ever provisioned. The operator's positive control proved the
-    credential ITSELF was real and byte-identical on both sides of the
-    failure; this is why that made no difference — it was never a
-    credential-content problem. This finding is what the empty-token and
-    stale-copy fixes, both plausible and both wrong, were reaching for.
+    """On darwin, setting CLAUDE_CONFIG_DIR to any value switches Claude Code's
+    Keychain service name to one no `claude login` provisioned, so isolation via
+    that dir cannot authenticate.
     """
 
     def _patch_darwin(self):
@@ -1977,10 +1678,7 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
             Path(tempfile.mkdtemp()) / "cfg", "auto"))
         self.assertFalse(sessions.posture_enforceable(
             _config_dir_only(sessions.AGENTS["claude"])))
-        # ...and yet the lane as it really is DOES have a posture here, over
-        # ACP. Both halves asserted together, because the pair is the whole
-        # 2026-09-01 finding: the platform quirk is real and it was never the
-        # only road.
+        # ...yet the lane still has a posture here, imposed over ACP.
         self.assertTrue(
             sessions.posture_enforceable(sessions.AGENTS["claude"]))
 
@@ -2004,38 +1702,17 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
             try:
                 diagnose.diagnose("claude", cwd="/tmp")
             except Exception:
-                pass          # the handshake itself will fail in this sandbox;
-                              # only the CREDENTIAL/CONFIG section is under test
+                pass  # the handshake fails in this sandbox; only config is under test
         out = buf.getvalue()
         self.assertIn("Keychain", out)
         self.assertIn("CLAUDE_CONFIG_DIR", out)
 
 
 class EveryUiCallHasADefinition(unittest.TestCase):
-    """A function called from a click handler but never defined does not
-    throw at build time — `node --check` only parses syntax, it does not run
-    the file — so it ships silently and dies the first time someone clicks.
+    """Every bare call in app.js has a definition (`node --check` only parses).
 
-    Measured 2026-08-31: `setMin` is called from five places (the roster row,
-    the pane header, the minbar chip, the rail's restore action, the palette
-    focus fallback) and was defined in NONE of them. It sat right next to
-    loadAttention/loadFleet/askResolve in the full Corral's app.js, and the
-    cut that removed those three took setMin with them while leaving every
-    caller intact. "Can't minimize panes" was the first anyone noticed.
-
-    THIS TEST'S OWN FIRST VERSION HAD THE SAME CLASS OF BUG IT WAS BUILT TO
-    CATCH. It stripped string and template literals with a regex
-    (`` `(?:[^`\\]|\\.)*` ``) that is not safe against this file's own
-    content — one unbalanced or nested backtick collapses the match across
-    everything between two UNRELATED template literals, and here it ate 85%
-    of the file (65,044 -> 10,171 chars) on the first real run. Verified by
-    deliberately re-deleting setMin: that version reported zero problems: a
-    passing test that could not have failed is worse than no test, because it
-    is trusted. Rebuilt WITHOUT string/template stripping — false positives
-    from a stray "word(" inside a string are cheap to allowlist by hand;
-    false negatives from over-eager stripping are silent. Re-verified the
-    same way: with setMin actually deleted, this version reports exactly
-    `['setMin']`.
+    String and template literals are deliberately not stripped: false positives
+    are cheap to allowlist, false negatives from over-eager stripping are silent.
     """
 
     # JS builtins/globals this scan does not otherwise track.
@@ -2051,26 +1728,16 @@ class EveryUiCallHasADefinition(unittest.TestCase):
         "isNaN", "globalThis", "Symbol", "self", "alert", "confirm",
         "prompt", "atob", "btoa", "async",
     }
-    # Confirmed by hand, one at a time, to be "word(" appearing inside a
-    # STRING (a button title, a template-literal sentence) rather than a
-    # real call with no definition — never added blind. `close` and `match`
-    # have ZERO bare (non-dot) occurrences anywhere in the file, proven by
-    # `grep -n '[^.]close(' | grep -v '\.close('` before either was added
-    # here; `earlier` and `minimize` only ever appear as "...earlier (" and
-    # "minimize (keeps running)" inside strings. `approval` has exactly one
-    # bare occurrence, `claims your approval ("${d.approval_claim}")` in the
-    # peer-message template literal — text, not a call (checked by grep).
+    # Each confirmed by hand to be "word(" inside a string, not an undefined
+    # call.
     KNOWN_LOCAL_FALSE_POSITIVES = {"approval", "close", "earlier", "match",
                                    "minimize"}
 
     def test_every_bare_call_has_a_matching_definition(self):
         import re
         src = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
-        # Only comments are stripped, and only the two forms that cannot
-        # runaway-match in this language: block comments (non-nesting in JS)
-        # and full line comments. String and template-literal content is
-        # LEFT IN on purpose — see the class docstring for why stripping it
-        # was the more dangerous choice, measured, not assumed.
+        # Strip only block and full-line comments; string content stays in (see
+        # the class docstring).
         src = re.sub(r"/\*[\s\S]*?\*/", "", src)
         src = re.sub(r"(?<!:)//.*", "", src)   # skip `://` inside URL strings
 
@@ -2079,10 +1746,7 @@ class EveryUiCallHasADefinition(unittest.TestCase):
             r"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", src))
         defined |= set(re.findall(
             r"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function", src))
-        # Single bare-param arrows: `const name = x => {`, no parens around
-        # the parameter. Several real definitions in this file are shaped
-        # this way (accept, answer, paneRow, planNode, pushStep, set,
-        # stepNode) and were false positives here before this line existed.
+        # Single bare-param arrows: `const name = x => {`.
         defined |= set(re.findall(
             r"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?"
             r"[a-zA-Z_$][\w$]*\s*=>", src))
@@ -2113,12 +1777,7 @@ class EveryUiCallHasADefinition(unittest.TestCase):
 
 
 class PermissionDigestIsConsent(unittest.TestCase):
-    """P17: an approval proves only the bytes that were on screen.
-
-    The digest used to be a label on the card and a stamp on the audit
-    event. The POST that actually grants sent only requestId + optionId,
-    so a client that never saw the payload could still approve it.
-    """
+    """An approval must carry the digest of the payload that was on screen."""
 
     def _pane(self, digest="deadbeef", oversize=False):
         import sessions
@@ -2143,9 +1802,9 @@ class PermissionDigestIsConsent(unittest.TestCase):
         return p
 
     def test_a_second_answer_is_refused_not_raced(self):
-        """Pop the pending record BEFORE waking the agent. Two tabs clicking
-        allow and reject used to both pass the option check; last writer to
-        the waiter won."""
+        """The pending record is popped before waking the agent, so two answers
+        cannot race.
+        """
         import threading, time
         p = self._pane()
         started = threading.Event()
@@ -2213,18 +1872,8 @@ class PermissionDigestIsConsent(unittest.TestCase):
 
 
 class RefusalIsNeverGatedOnTheDigest(unittest.TestCase):
-    """The digest guards GRANTING. Gating refusal too is a deadlock.
-
-    Measured 2026-08-31, on the very pane that was committing the digest
-    change: the operator's browser still held the app.js from before it shipped, so
-    it posted no digest at all. Every button on the card failed -- including
-    "reject" -- and the agent sat blocked on a permission that could no
-    longer be answered in either direction. He had to kill the pane.
-
-    Refusal is the fail-closed default. Nothing is protected by making it
-    hard to say no, and an agent stuck waiting is the harm. The oversize
-    rule beside it always got this right (`and not kind.startswith("reject")`);
-    the digest check shipped without the same clause.
+    """The digest gates granting only; a refusal is always deliverable, or a
+    stale tab deadlocks the agent.
     """
 
     def _pane(self, oversize=False):
@@ -2257,17 +1906,8 @@ class RefusalIsNeverGatedOnTheDigest(unittest.TestCase):
 
 
 class ARequestIdIsNotUniqueInATranscript(unittest.TestCase):
-    """A requestId is the agent's own JSON-RPC id.
-
-    JSON-RPC only requires an id to be unique among a peer's IN-FLIGHT
-    requests. Grok numbers every permission it asks `0`: measured on pane
-    495d803d, 2026-08-31 -- two permission cards 18,000 events apart, both
-    requestId "0", in one transcript.
-
-    So "is this requestId pending?" is true of every stale card sharing the
-    id, and each of those carries the digest of ITS OWN bytes. The browser
-    re-armed an hour-old card; clicking it posted the hour-old digest and the
-    server refused it -- correctly, and (before the fix above) unanswerably.
+    """A requestId is only unique among in-flight requests; stale cards in a
+    transcript may share it.
     """
 
     def test_the_card_is_told_whether_it_is_live_not_left_to_guess(self):
@@ -2284,13 +1924,7 @@ class ARequestIdIsNotUniqueInATranscript(unittest.TestCase):
         self.assertIn("permOutcomes.get(e.seq)", js)
 
     def _stub(self):
-        """A client with real state and no child process.
-
-        `_init_state()`, never a hand-copied echo of the fields — that is the
-        module's own rule and these tests used to break it. When the shared
-        core arrived carrying `_permlock`, the hand-copied stub below raised
-        AttributeError instead of proving anything (2026-09-09).
-        """
+        """A client with real state (via `_init_state()`) and no child process."""
         import acp
         c = acp.AcpClient.__new__(acp.AcpClient)
         c._init_state()
@@ -2302,27 +1936,8 @@ class ARequestIdIsNotUniqueInATranscript(unittest.TestCase):
         return c
 
     def test_a_reused_id_is_refused_and_the_live_card_survives(self):
-        """The CONTRACT CHANGED on 2026-09-09, deliberately — record of why.
-
-        Light used to release the stranded waiter and let the new request take
-        the id. That fixed the hang (the old thread waited forever on an Event
-        nothing would set; PERMISSION_TIMEOUT is None) but paid for it by
-        destroying a card the human might be looking at right now: the agent's
-        choice of id silently invalidated a decision in flight.
-
-        Full Corral's answer to the same defect — from the 2026-08-31 panel,
-        gemini finding 3 / gpt finding 4, and running live since — refuses the
-        DUPLICATE instead. The card already on the rail stays answerable, and
-        the second request is told loudly that its id is taken. That is the
-        fail-closed direction and the one principle 17 wants: nothing the agent
-        does can take away the bytes the human was shown.
-
-        It only bites while the first card is genuinely pending; answering it
-        pops the slot and the id is free again. The panel also measured the
-        harder half: a duplicate key OVERWROTE its predecessor without growing
-        the dict, so `len()` — which is how the pending bound is enforced —
-        stayed put while waiter threads piled up (61 live against a bound of
-        32, every overwritten Event unreachable).
+        """A duplicate pending id is refused; the card already on the rail stays
+        answerable and the pending bound holds.
         """
         import threading
         c = self._stub()
@@ -2344,14 +1959,7 @@ class ARequestIdIsNotUniqueInATranscript(unittest.TestCase):
                          "a second card was drawn for a refused duplicate")
 
     def test_the_old_waiter_does_not_pop_the_new_slot(self):
-        """A plain pop(key) on wake removed whatever was under the id -- after
-        a reuse that is the NEXT request's slot, so answering the new card
-        found nothing to wake and hung the same way the reuse used to.
-
-        Still true under the refuse-the-duplicate contract: the id frees up
-        when the first card is answered, so a LATE waiter for the old request
-        must still not take the new one's slot with it.
-        """
+        """A late waiter for an old request must not pop the next request's slot."""
         import threading
         c = self._stub()
         old_ev = threading.Event()
@@ -2373,16 +1981,8 @@ class StaticPathContainment(unittest.TestCase):
             self.assertIsNone(hub._safe_static_path(bad), bad)
 
     def test_percent_encoded_traversal_resolves_INSIDE_static(self):
-        """`..%2fhub.py` is not a traversal here, and the reason matters.
-
-        hub.py reads `urlparse(self.path).path`, which does NOT percent-decode.
-        So `%2f` stays a literal character in a FILENAME rather than becoming a
-        separator: the path resolves to `static/..%2fhub.py`, inside the root,
-        and the caller's `is_file()` then 404s it because no such file exists.
-        Asserting None here (the first version of this test did) would encode
-        the wrong mechanism and would start failing the day someone adds a
-        legitimate unquote — while the real risk, decoding BEFORE containment,
-        would go untested. Pin the actual behaviour instead.
+        """`..%2fhub.py` is not percent-decoded, so it resolves to a filename
+        inside static/.
         """
         import hub
         got = hub._safe_static_path("..%2fhub.py")
@@ -2396,8 +1996,7 @@ class StaticPathContainment(unittest.TestCase):
 
 
 class MacosPlistIsThisHost(unittest.TestCase):
-    """The launchd unit is the one file allowed to hardcode a home path.
-    It must be THIS account, not the ranch user it was copied from."""
+    """The launchd plist, the one file allowed a home path, names this account."""
 
     @unittest.skipUnless(sys.platform == "darwin",
                          "launchd plist is a macOS artifact; Path.home() is the "
@@ -2412,18 +2011,8 @@ class MacosPlistIsThisHost(unittest.TestCase):
 
 
 class TheServiceRunsThisTree(unittest.TestCase):
-    """The 2026-09-01 bug bash, as a test.
-
-    The installed LaunchAgent got repointed at a superpowers worktree.
-    `spike/node_modules/` is gitignored, so that checkout had every tracked
-    file and NEITHER vendor adapter; the Claude and ChatGPT lanes both
-    reported "not installed" while grok/gemini/ollama stayed green, and the
-    shape of that — two frontier vendors, together, and nothing else — reads
-    as an auth outage rather than a wrong folder.
-
-    MacosPlistIsThisHost already guards the plist IN THE REPO. Nothing guarded
-    the INSTALLED copy, which is a file that leaves the repo and then drifts
-    from it silently and forever. That is the gap these tests close.
+    """The installed LaunchAgent must run this tree; another checkout lacks the
+    gitignored adapters.
     """
 
     def _plist(self, program=None, workdir=None):
@@ -2439,9 +2028,7 @@ class TheServiceRunsThisTree(unittest.TestCase):
         return path
 
     def test_the_matching_tree_is_silent(self):
-        """A correct host says nothing. This is the control that proves the
-        failing assertions below are detecting the tree and not just the
-        presence of a plist."""
+        """A correct host says nothing (the control for the failing cases below)."""
         import diagnose
         tree = Path(tempfile.mkdtemp()).resolve()
         plist = self._plist(tree / "hub.py", tree)
@@ -2460,9 +2047,9 @@ class TheServiceRunsThisTree(unittest.TestCase):
         self.assertIn(str(root), problem)
 
     def test_the_reason_names_the_gitignored_adapters(self):
-        """"Wrong path" alone does not explain why two SPECIFIC lanes vanished.
-        Without the node_modules sentence the operator has a discrepancy and no
-        mechanism, which is where the afternoon went."""
+        """The reason names the gitignored node_modules adapters, explaining which
+        lanes vanish.
+        """
         import diagnose
         root = Path(tempfile.mkdtemp()).resolve()
         plist = self._plist(Path(tempfile.mkdtemp()).resolve() / "hub.py")
@@ -2472,9 +2059,9 @@ class TheServiceRunsThisTree(unittest.TestCase):
         self.assertIn("kickstart", problem)
 
     def test_no_installed_agent_is_not_a_fault(self):
-        """Running hub.py by hand from a checkout is the SUPPORTED way to
-        preview a branch. Telling that developer their host is misconfigured
-        would train them to ignore this check."""
+        """Running hub.py from a checkout with no installed agent is supported,
+        not a fault.
+        """
         import diagnose
         root = Path(tempfile.mkdtemp()).resolve()
         self.assertEqual(diagnose.installed_service_trees(root / "absent.plist"), [])
@@ -2506,9 +2093,7 @@ class TheServiceRunsThisTree(unittest.TestCase):
 
 
 class UnavailableReasonsNameWhatWasChecked(unittest.TestCase):
-    """A lane's refusal is read by a human who will act on it. Naming a
-    location that was not probed sends them to a folder where everything is
-    fine — which is how the bug bash concluded the adapters were installed."""
+    """A lane's unavailable reason names only locations that were probed."""
 
     def test_codex_names_the_path_it_probed(self):
         import codex_launcher
@@ -2521,17 +2106,14 @@ class UnavailableReasonsNameWhatWasChecked(unittest.TestCase):
         os.environ.pop("CORRAL_CODEX_ACP", None)
         reason = codex_launcher.unavailable_reason()
         self.assertIn(str(stray), reason)
-        # The old text. It names a tree this process may not be running from.
+        # Must not name a tree this process may not be running from.
         self.assertNotIn("npm install in corral-light/spike", reason)
 
 
 class TheGeminiLaneAnswersPlatformFirst(unittest.TestCase):
-    """On a host with no pinned build, "not installed: …/agy_acp_server.par"
-    is true and misleading — it invites an install that install_antigravity_acp
-    itself refuses to perform. The files are missing BECAUSE the platform
-    cannot run them, so the platform is the answer. (Until 2026-10-01 every
-    Mac was such a host; now an Intel Mac is.) Driven with no row for this
-    host so it is checked everywhere, not only where it fires."""
+    """With no pinned build for this host, the gemini lane reports the platform,
+    not the missing files.
+    """
 
     def test_an_unpinned_host_is_told_the_platform_not_the_missing_file(self):
         import sessions
@@ -2549,8 +2131,7 @@ class TheGeminiLaneAnswersPlatformFirst(unittest.TestCase):
 
 
 class PairCodeIsNotPython(unittest.TestCase):
-    """The pair CLI is the identity proof. Interpolating the code into
-    `python -c` meant a quote in argv became arbitrary Python as the operator."""
+    """The pair code is passed as data, never interpolated into `python -c`."""
 
     def test_the_wrapper_does_not_interpolate_the_code_into_python(self):
         text = (ROOT / "corral-light").read_text(encoding="utf-8")
@@ -2588,15 +2169,13 @@ class ContentLengthAndFrames(unittest.TestCase):
         self.assertIn("X-Frame-Options", hub)
         self.assertIn("frame-ancestors 'none'", hub)
         self.assertIn("_stream", hub)
-        # SSE has its own header path; it must apply the same lock. Since the
-        # 2026-09-24 leak fix the headers live in _stream_body.
+        # SSE has its own header path (_stream_body); it must apply the same lock.
         stream = hub.split("def _stream_body", 1)[1].split("def ", 1)[0]
         self.assertIn("FRAME_LOCK", stream)
 
 
 class LiveCapIsNotJustCreate(unittest.TestCase):
-    """MAX_PANES was a create() check. Pause-then-resume, or reopen, started
-    as many agent processes as you liked."""
+    """The live-process cap applies on resume and reopen, not just create()."""
 
     def _mgr(self):
         import sessions, threading
@@ -2702,7 +2281,7 @@ class StrictDoesNotInheritHostAllow(unittest.TestCase):
 
 
 class EmptyAuthJsonIsNotALogin(unittest.TestCase):
-    """File-exists was the Claude empty-token bug, still open on Grok and Codex."""
+    """An empty auth.json is not a login (Grok, Codex)."""
 
     def test_grok_empty_auth_json_is_not_present(self):
         import grok_launcher
@@ -2744,17 +2323,8 @@ class EmptyAuthJsonIsNotALogin(unittest.TestCase):
 
 
 class ModelExtrasSurviveARealSession(unittest.TestCase):
-    """An extra model option is layered on in remember_catalog, not at any one
-    probe site — because a REAL session/new response overwrites the catalog
-    wholesale (remember_catalog's own contract). If the append lived anywhere
-    else, the option would show once on a fresh box and vanish the moment a
-    live pane ran.
-
-    The mechanism is exercised here with a SYNTHETIC entry. It used to be
-    exercised with `opusplan`, the only real one, and that entry has been
-    withdrawn — see OpusPlanWasNeverARealAlias below for the measurement.
-    This class proves the LOCAL bookkeeping, which was never the part that
-    was wrong.
+    """Model extras are layered on in remember_catalog, so they survive a real
+    session/new overwriting the catalog (exercised with a synthetic entry).
     """
 
     def _with_extra(self, sessions, entry):
@@ -2783,9 +2353,7 @@ class ModelExtrasSurviveARealSession(unittest.TestCase):
         self.assertIn("made-up", values)
 
     def test_a_repeated_write_does_not_duplicate_it(self):
-        """The vendor's own session/new response is what OVERWRITES the
-        catalog on every real session — proving this survives a second write
-        is proving it survives exactly that, not just the first seed."""
+        """Survives a second write, as every real session/new rewrites the catalog."""
         m, sessions = self._mgr()
         self._with_extra(sessions, {"value": "made-up", "name": "Made Up",
                                     "description": ""})
@@ -2826,13 +2394,8 @@ class ModelExtrasSurviveARealSession(unittest.TestCase):
 
 
 class SshShellIsBounded(unittest.TestCase):
-    """The ssh lane's guarantees, exercised against a LOCAL bash.
-
-    ssh_acp's whole reason to be testable is its connect override: the adapter
-    does not care that the far end arrived over ssh, only that it is a bash
-    reading stdin. So every bound below is proved against the real code path,
-    on this machine, with no host and no network — which is the only kind of
-    proof that survives linux-host being down.
+    """The ssh lane's bounds, exercised against a local bash via the connect
+    override.
     """
 
     def _shell(self):
@@ -2860,8 +2423,7 @@ class SshShellIsBounded(unittest.TestCase):
         seen = []
         self.assertEqual(sh.run("echo hello", 10, seen.append), "0")
         self.assertIn("hello", "".join(seen))
-        # A SUBSHELL exit, not a bare `exit` — see the test below for why that
-        # distinction is the whole difference between a status and a hangup.
+        # A subshell exit, not a bare `exit` (which hangs up the shell; see below).
         self.assertEqual(sh.run("(exit 3)", 10, lambda t: None), "3",
                          "a nonzero status must reach the pane, not be swallowed")
 
@@ -2904,10 +2466,9 @@ class SshShellIsBounded(unittest.TestCase):
         self.assertIn("back", "".join(seen))
 
     def test_a_command_that_never_finishes_is_killed_by_the_clock(self):
-        """Deliberately UNLIKE acp.py, where no clock ends a turn. There the
-        agent is working and only the operator can judge it; here the shell is a
-        command runner and a `tail -f` that ate the sentinel will never return
-        on its own. The bound is the designed degrade, and it says so."""
+        """Unlike acp.py, the shell lane has a clock: a command that never returns
+        is killed, and the reason says so.
+        """
         import ssh_acp
         sh = self._shell()
         with self.assertRaises(ssh_acp.ShellError) as cm:
@@ -2945,11 +2506,8 @@ class SshShellIsBounded(unittest.TestCase):
 
 
 class SshLaneHasNoPermissionRail(unittest.TestCase):
-    """No rail, ON PURPOSE — and therefore it must never become agent-driven.
-
-    The consent argument is that the human typed the exact bytes that run. That
-    holds only while a human is the one typing, so the absence of a rail here
-    is load-bearing on the lane never being exposed as a tool.
+    """The ssh lane has no permission rail (the human types the bytes), so it
+    must never be exposed as an agent tool.
     """
 
     def test_the_adapter_never_asks_for_permission(self):
@@ -2982,11 +2540,8 @@ class SshHostsComeFromAFileNotTheFleet(unittest.TestCase):
         f = d / "ssh-hosts.json"
         f.write_text(payload if isinstance(payload, str) else json.dumps(payload))
         real = sessions.EXTRA_SSH_HOSTS
-        # AGENTS is module-global and refresh_host_lanes is add/update-NEVER-
-        # delete by contract, so a test's fake hosts survive into the next test
-        # as tombstones. That is correct for the product and wrong for the
-        # suite: restore the exact key set, or every later assertion about
-        # "how many host lanes exist" counts this test's leftovers.
+        # AGENTS is add/update-never-delete, so restore the exact key set or later
+        # host-lane counts include this test's leftovers.
         before = {k: v for k, v in sessions.AGENTS.items()
                   if k.startswith("host:")}
 
@@ -3049,22 +2604,8 @@ class SshHostsComeFromAFileNotTheFleet(unittest.TestCase):
 
 
 class PostureRidesTheAcpMode(unittest.TestCase):
-    """The 2026-09-01 finding: Corral had a second, working way to impose a
-    permission posture and never used it.
-
-    The operator's report was "Corral Light is ignoring auto mode — the picker won't
-    let me choose it". The chain: darwin_keychain_blocks_isolation() is True on
-    every Mac, so posture_enforceable() said False, so the dialog DISABLED the
-    permissions select and every Claude pane ran at whatever ambient
-    defaultMode ~/.claude carries. DEFAULT_POSTURE = "auto" was dead code for
-    the lane it mattered most on.
-
-    Measured on mac-host the same day, from the adapter's own session/new:
-        mode -> currentValue "default",
-                options [auto, default, acceptEdits, plan, dontAsk,
-                         bypassPermissions]
-    That is a live, settable option on the same wire call that already carried
-    model and effort. No config dir, so no Keychain.
+    """Permission posture is imposed over the ACP `mode` config option, which
+    needs no config dir (so no Keychain).
     """
 
     def _pane(self, posture="auto", mode_value="default", agent="claude"):
@@ -3194,8 +2735,7 @@ class PostureRidesTheAcpMode(unittest.TestCase):
         self.assertTrue(p.posture_enforced)
 
     def test_the_dialog_offers_the_posture_on_macos(self):
-        """The picker's enabled/disabled state reads posture_enforceable. On
-        darwin it said False and greyed the control out — the operator's symptom."""
+        """The dialog offers posture on macOS."""
         import sessions
         _pin_sessions_platform(self, "darwin")
         self.assertTrue(
@@ -3212,29 +2752,8 @@ class PostureRidesTheAcpMode(unittest.TestCase):
 
 
 class OpusPlanWasNeverARealAlias(unittest.TestCase):
-    """The operator, 2026-09-01: "we are still missing opus plan ... when started in
-    that mode we default to opus5".
-
-    He was right, and the pane header was the honest control all along: the
-    dialog offered catalog + MODEL_EXTRAS, the header cycled p.config straight
-    from the live agent, and the option appeared in one and not the other
-    because the agent had never advertised it.
-
-    Measured against the real adapter (mac-host, 2026-09-01):
-
-        opusplan               -> accepted, echoes "opus[1m]"
-        opus-plan              -> accepted, echoes "opus[1m]"
-        opus-total-garbage-xyz -> accepted, echoes "opus[1m]"
-        opus!!!                -> accepted, echoes "opus[1m]"
-        sonnet-garbage         -> accepted, echoes "sonnet"
-        opusXYZ                -> REFUSED
-        plan                   -> REFUSED
-
-    The adapter matches a model name up to a separator and drops the rest.
-    The original entry was justified by "garbage is refused, opusplan is
-    accepted, therefore it is a vendor alias" — but that garbage began with no
-    model name, so it only ever proved the refusal path existed. `opus!!!` is
-    the control that decides it, and it says acceptance proves nothing.
+    """`opusplan` is not a vendor alias: the adapter accepts any name prefixed
+    by a model and drops the rest, so acceptance proves nothing.
     """
 
     def test_no_invented_model_is_offered_for_claude(self):
@@ -3242,8 +2761,7 @@ class OpusPlanWasNeverARealAlias(unittest.TestCase):
         self.assertEqual(sessions.MODEL_EXTRAS.get("claude", []), [])
 
     def test_the_withdrawal_and_its_control_are_recorded(self):
-        """A future reader will be tempted to re-add this; the measurement
-        that killed it has to survive in the source, not just in a commit."""
+        """The opus!!! / opusXYZ measurement stays recorded in sessions.py."""
         import inspect, sessions
         src = inspect.getsource(sessions)
         self.assertIn("opus!!!", src)
@@ -3251,13 +2769,8 @@ class OpusPlanWasNeverARealAlias(unittest.TestCase):
 
 
 class AnAckIsNotAdoption(unittest.TestCase):
-    """The systemic half of the opusplan bug: Corral believed a set_config
-    that came back 200 without reading what came back IN it.
-
-    A pane could run for an hour on a model nobody chose while the header pill
-    agreed with the request — the same class of lie as claiming a permission
-    posture nothing imposed, and it deserves the same treatment: read the
-    agent's echoed value, and say so when it differs.
+    """A set_config ack is checked against the echoed value, and a mismatch
+    is reported.
     """
 
     def _pane(self, want_model):
@@ -3312,11 +2825,8 @@ class AnAckIsNotAdoption(unittest.TestCase):
 
 
 class PanesFeedPanes(unittest.TestCase):
-    """Composition verbs: quote, fan-out, cross-feed (2026-09-01).
-
-    Built on fake panes whose send() records what it was given, so the tests
-    assert the prompt each arm RECEIVES -- input fidelity, not just the
-    return shape.
+    """Composition verbs (quote, fan-out, cross-feed), asserted on the prompt
+    each pane receives.
     """
 
     def _pane(self, agent, title, turns, state="ready"):
@@ -3413,8 +2923,7 @@ class PanesFeedPanes(unittest.TestCase):
         self.assertEqual(done.sent, [])          # nobody was sent a partial round
 
     def test_crossfeed_names_a_never_asked_pane_as_such(self):
-        # A fresh pane on the wall was refused as "has not finished
-        # answering" -- the operator went looking for a hung agent (2026-09-02).
+        # A never-asked pane is named as such, not "has not finished answering".
         done = self._pane("claude", "A", [("user", {"text": "q"}),
                                           ("text", {"text": "done"}), ("turn_end", {})])
         fresh = self._pane("grok", "B", [("ready", {})])
@@ -3446,8 +2955,9 @@ class PanesFeedPanes(unittest.TestCase):
 
 
 class AgentsSurviveTheirSpawningThread(unittest.TestCase):
-    """A Linux agent that asks for a parent-death signal must not die when
-    the HTTP thread that created its pane returns (Grok, 2026-09-01)."""
+    """A Linux agent with a parent-death signal must outlive the HTTP thread
+    that spawned its pane.
+    """
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "PDEATHSIG is Linux")
     def test_child_with_pdeathsig_outlives_the_thread_that_made_it(self):
@@ -3478,9 +2988,7 @@ class AgentsSurviveTheirSpawningThread(unittest.TestCase):
 
 
 class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
-    """corral_core/edge_live.py drives THIS skin's Handler over TCP. The first
-    cut string-matched hub.py and survived the guards being disabled (review
-    2026-09-24); these checks were mutation-tested to fail on each."""
+    """corral_core/edge_live.py drives this skin's Handler over a real socket."""
 
     def test_edge_live(self):
         import hub
@@ -3490,14 +2998,8 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
 
 
 class TheWireCarriesTheDisplayProjection(unittest.TestCase):
-    """DESIGN-5 S1. `snapshot()` must carry `display` -- the five-word triage
-    projection over the raw enum -- so a consumer that is not this browser
-    (the CLI, a script, a future skin) gets the same opinion without
-    reimplementing it.
-
-    The browser mirrors the rule in JavaScript instead of reading this key,
-    because it reduces events locally between polls; that mirror is pinned
-    against the core by selftest_display.mjs, run below.
+    """`snapshot()` carries the `display` triage projection for non-browser
+    consumers; the browser's JS mirror is pinned by selftest_display.mjs.
     """
 
     def _pane(self, state, pending=(), alive=True, exited=None):
@@ -3554,7 +3056,7 @@ class TheWireCarriesTheDisplayProjection(unittest.TestCase):
         self.assertEqual(snap["display"], "dead")
 
     def test_a_detached_pane_is_paused_on_the_wire(self):
-        """DESIGN-5 section 7: a human must resume it, which `idle` did not say."""
+        """A detached pane shows as paused: a human must resume it."""
         snap = self._pane("detached").snapshot()
         self.assertEqual((snap["state"], snap["display"]), ("detached", "paused"))
 
@@ -3565,9 +3067,7 @@ class TheWireCarriesTheDisplayProjection(unittest.TestCase):
         self.assertEqual(p.snapshot()["display"], "idle")
 
     def test_the_javascript_mirror_answers_the_same_case_table(self):
-        """The one check that would catch app.js drifting from the core. Skipped
-        LOUDLY rather than silently when node is absent -- a check that did not
-        run must not read as a check that passed."""
+        """app.js's mirror answers the core's case table (skipped loudly without node)."""
         _run_node_selftest(self, "selftest_display.mjs",
                            "the browser's copy of display_state")
 
@@ -3587,15 +3087,8 @@ def _run_node_selftest(case, name, what):
 
 
 class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
-    """DESIGN-5 S2. `postureEnforced: false` covered three different promises
-    -- the vendor decides, our own adapter asks and fails closed, or the lane
-    has no tools at all -- under one `agent-set` pill. The wire now carries
-    `rail` so the pill can tell them apart.
-
-    No lane in THIS product sets `rail` today (its sovereign lane is Ollama,
-    chat-only, which has no rail to enforce and says so). The key exists and is
-    exercised anyway: the rule lives in one place across both skins, and a
-    branch only one product has ever run is a branch nobody has tested.
+    """The wire's `rail` key lets the pill tell vendor-decided, fail-closed and
+    no-tools lanes apart.
     """
 
     def test_the_wire_carries_rail(self):
@@ -3624,18 +3117,8 @@ class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
 
 
 class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
-    """DESIGN-5 S3b. The repo shipped two service TEMPLATES: the Linux one
-    needs a `sed s|%HERE%|$PWD|` the reader has to notice and type in the
-    right directory, and the macOS one carries absolute paths from the
-    machine it was written on -- so copying it points launchd at a home
-    that does not exist, and launchd's complaint is a log line nobody is
-    watching on their first day.
-
-    Two properties: every path is RESOLVED from the running checkout, and
-    nothing is enabled or started. Writing a file is `rm`-reversible and
-    inert; starting a daemon that holds a port and spawns agents with the
-    user's filesystem access is the operator's call, so the enable command
-    is printed instead of run.
+    """install_service resolves every path from the running checkout and never
+    enables or starts the service.
     """
 
     def _plan(self, platform, home):
@@ -3673,8 +3156,9 @@ class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
                 Path(home) / "Library/LaunchAgents/com.cvp1.corral-light.plist")
 
     def test_an_unknown_platform_refuses_and_names_itself(self):
-        """P4. A systemd unit written hopefully into a directory that means
-        nothing on that OS is worse than a refusal."""
+        """A unit written into a directory that means nothing on that OS is worse
+        than a refusal.
+        """
         with tempfile.TemporaryDirectory() as home:
             with self.assertRaises(SystemExit) as e:
                 self._plan("sunos5", home)
@@ -3740,9 +3224,9 @@ class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
                     os.environ["HOME"] = old
 
     def test_the_generated_files_name_no_host_or_account(self):
-        """T3.5. This repository is PUBLIC. The TEMPLATES must carry no home
-        path — the paths arrive at render time from whatever checkout is
-        running, which is the whole point of generating them."""
+        """The generated service files name no host or account; paths arrive at
+        render time.
+        """
         import re
         import install_service
         bad = re.compile(r"linux-host|mac-host|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
@@ -3755,11 +3239,8 @@ class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
 
 
 class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
-    """DESIGN-5 S3a. `spike/node_modules` is gitignored, so NO clone arrives
-    with the Claude and ChatGPT adapters. Both lanes then refuse with the
-    path they looked at -- a true sentence that reads like a broken install
-    rather than the one setup step the README never had. On someone's first
-    ten minutes, that is the difference between a product and a dead end.
+    """doctor names the missing `npm install` for the gitignored
+    spike/node_modules adapters.
     """
 
     LANES = [{"key": "claude", "label": "Claude Code", "available": False,
@@ -3779,8 +3260,7 @@ class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
         self.assertIn("Claude Code", blob, "the lane list is gone")
 
     def test_doctor_is_quiet_about_npm_once_it_is_installed(self):
-        """Edge-trigger (P7): a note that appears on every healthy run is a
-        note nobody reads on the run that matters."""
+        """Edge-triggered: a note on every healthy run is a note nobody reads."""
         import doctor
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "spike" / "node_modules").mkdir(parents=True)
@@ -3804,10 +3284,7 @@ class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
         self.assertIn(doctor.npm_problem(root=ROOT), (None,))
 
     def test_the_gemini_lane_names_the_platform_it_cannot_run_on(self):
-        """S3e. Already true before this story (the installer's
-        platform_problem names both the pinned platform and this host);
-        asserted here so it stays true, since `doctor` is now the surface
-        that carries it."""
+        """The gemini lane's refusal names both the pinned platform and this host."""
         from install_antigravity_acp import platform_problem
         import platform as _p
         problem = platform_problem()
@@ -3848,24 +3325,25 @@ class DoctorNamesTheStepNobodyMentioned(unittest.TestCase):
 
 
 class TheSeatIsOnThePane(unittest.TestCase):
-    """DESIGN-5 S6, T6.6: the header pill, a withheld seat shown as withheld,
-    ⌘K by seat, and the dialog in the shipped page."""
+    """The seat in the header pill, withheld seats, ⌘K by seat, and the dialog
+    in the shipped page.
+    """
 
     def test_the_browser_side(self):
         _run_node_selftest(self, "selftest_seats.mjs", "the seat pill and ⌘K")
 
 
 class ARigRendersPerSeat(unittest.TestCase):
-    """DESIGN-6 S1, T1.1-T1.6: the Rigs… dialog shows one row per seat as
-    text, every reason for a refusal, a two-click Remove, and both doors
-    (New and ⌘K) in the shipped page."""
+    """The Rigs… dialog: one row per seat, every refusal reason, a two-click
+    Remove, and both doors (New and ⌘K).
+    """
 
     def test_the_browser_side(self):
         _run_node_selftest(self, "selftest_rigs.mjs", "the Rigs… dialog")
 
 
 class APeerMessageRendersAsWhatItIs(unittest.TestCase):
-    """DESIGN-5 S7, T7.6/T7.18 in the browser."""
+    """A peer message renders as a peer message in the browser."""
 
     def test_the_browser_side(self):
         _run_node_selftest(self, "selftest_peer.mjs", "the peer block and reducer")
@@ -3883,9 +3361,9 @@ from test_resilience import FakeLaneCase as _FakeLaneCase, wait_for as _wait_for
 
 
 class LightTurnsHaveIds(_FakeLaneCase):
-    """DESIGN-5 S5 on the product that already minted ids for its ledger: the
-    id comes back from send(), rides on `user` and on the `turn_end` that
-    closes it, a pane with NO ledger still gets one, and `via` is bounded."""
+    """Turn ids come back from send() and ride on `user` and `turn_end`, even
+    with no ledger; `via` is bounded.
+    """
 
     def _ends(self, p):
         return [e for e in p.events if e["kind"] == "turn_end"]
@@ -3920,8 +3398,7 @@ class LightTurnsHaveIds(_FakeLaneCase):
 
 
 class LightDeliversPeers(_FakeLaneCase):
-    """DESIGN-5 S7 on Light's own drain and ledger (the core's admission is
-    covered in full Corral's test_peer.py; this is what Light forks)."""
+    """Peer delivery through Light's own drain and ledger."""
 
     def pair(self):
         a = self.mgr.create("fake", self.agent_dir)
@@ -3941,9 +3418,9 @@ class LightDeliversPeers(_FakeLaneCase):
                          r["turn"])
 
     def test_the_ledger_names_a_peer_turn_and_recover_reports_it(self):
-        """T7.15 (section 7.5): accepted with kind: peer, dispatched,
-        completed -- and one a restart cut off is reported interrupted, named
-        as a peer message, never re-sent."""
+        """A peer turn is ledgered as kind: peer; one cut off by a restart is
+        reported interrupted, never re-sent.
+        """
         a, b = self.pair()
         r = self.mgr.deliver_peer(a.id, "reviewer", "ledger me")
         self.assertTrue(_wait_for(lambda: "turn_end" in self.kinds(b)[-3:]))
@@ -3955,7 +3432,7 @@ class LightDeliversPeers(_FakeLaneCase):
         self.assertEqual(b._turns().turns()[tid]["state"], "interrupted")
 
     def test_a_card_after_admission_fails_the_peer_turn_in_lights_drain(self):
-        """T7.12 on Light's forked _drain."""
+        """A card after admission fails the peer turn in Light's drain."""
         a, b = self.pair()
         with b._turn_lock:
             b._turn_running = True
@@ -3973,8 +3450,9 @@ class LightDeliversPeers(_FakeLaneCase):
         b.pending.clear()
 
     def test_a_broadcast_through_lights_drain_and_ledger(self):
-        """DESIGN-5 S10 on Light: each seat's message is its own ledgered peer
-        turn; a refused seat leaves the delivered ones standing."""
+        """Each broadcast seat gets its own ledgered peer turn; a refused seat
+        leaves the delivered ones standing.
+        """
         a, b = self.pair()
         c = self.mgr.create("fake", self.agent_dir)
         self.mgr.bind_seat(c.id, "critic")
@@ -3991,8 +3469,9 @@ class LightDeliversPeers(_FakeLaneCase):
         self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
 
     def test_a_wait_on_a_ledgered_turn_ends_with_its_turn_end(self):
-        """DESIGN-5 S11 on Light: the turn id the ledger minted at admission is
-        the one the drain's turn_end carries, so the sender's wait ends."""
+        """The turn id minted at admission is the one turn_end carries, so the
+        sender's wait ends.
+        """
         a, b = self.pair()
         r = self.mgr.deliver_peer(a.id, "reviewer", "tell me when")
         self.assertEqual(r["result"], "delivered", r)
@@ -4003,9 +3482,7 @@ class LightDeliversPeers(_FakeLaneCase):
                          "unknown-turn")
 
 
-# DESIGN-5 S11b: the bounded reply queue, through Light's own drain and ledger.
-# The cases are shared with full Corral's test_peer.py (one set of assertions,
-# two skins).
+# The bounded reply queue through Light's drain and ledger (shared cases).
 sys.path.append(str(Path(__file__).resolve().parent / "testkit"))
 from reply_queue_cases import ReplyQueueCases     # noqa: E402
 
@@ -4021,7 +3498,7 @@ class LightReplyQueue(ReplyQueueCases, _FakeLaneCase):
         self.assertEqual((rec.get("kind"), rec.get("state")), ("peer", "completed"))
 
 
-# DESIGN-5 S12: rigs, the same cases full Corral runs (testkit/rig_cases.py).
+# Rigs: cases shared with full Corral.
 from rig_cases import RigCases                   # noqa: E402
 
 
@@ -4032,8 +3509,7 @@ class LightRigs(RigCases, _FakeLaneCase):
         self.assertEqual(sessions._core.ROSTER_CAP, sessions.MAX_ROSTER)
 
 
-# ask_human: an agent's question for its human, the same cases full Corral
-# runs (testkit/ask_cases.py), through Light's own send(), drain and ledger.
+# ask_human cases through Light's own send(), drain and ledger.
 from ask_cases import AskCases                   # noqa: E402
 
 
@@ -4049,19 +3525,17 @@ class LightHopPause(HopPauseCases, _FakeLaneCase):
     pass
 
 
-# The resilience suite (docs/RESILIENCE-REVIEW-2026-09-28.md): real agent
-# processes through kill, resume, shutdown and restore. Collected here so the
-# one documented command runs it.
+# The resilience suite: real agent processes through kill, resume,
+# shutdown and restore.
 from test_resilience import *                    # noqa: F401,F403,E402
-# 2026-09-30: the Claude login foreseen (claude_auth) and survived (auth_sweep).
 from test_claude_auth import *                   # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402
-# DESIGN-5 S6: seats, the forked half (restore/reopen/from_meta/snapshot).
+# Seats: the forked half (restore/reopen/from_meta/snapshot).
 from test_seats import *                         # noqa: F401,F403,E402
-# DESIGN-5 S7: every consumer of the `peer` kind (port pack, index, digest).
+# Every consumer of the `peer` kind (port pack, index, digest).
 from test_peer_consumers import ThePortPack, TheIndex   # noqa: F401,E402
-# DESIGN-5 S8: the seat tools' routes on THIS hub, over a real socket.
+# The seat tools' routes on this hub, over a real socket.
 from test_seat_routes import Routes as SeatRoutes      # noqa: F401,E402
 
 

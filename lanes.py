@@ -1,44 +1,11 @@
 #!/usr/bin/python3
-"""lanes — keep the vendor lanes current without breaking the wall.
+"""lanes — keep the vendor lanes current.
 
     corral-light lanes check [--job | --json]
     corral-light lanes update <lane> [--version V | --release NAME] [--json]
 
-WHY (DESIGN-6 Stage F, 2026-10-01)
-    Codex, Claude, Antigravity and Grok are first-party modules here, and
-    The operator's ruling is that they "must be kept up to date". Bumping a pin by
-    hand has gone wrong in the same way more than once: the adapter installed,
-    `doctor` said ok, and the first pane died (the macOS Antigravity build
-    rejected a Linux-only flag; doctor's line for that lane was a static
-    label, not a check). So an update is earned the way a pane earns trust:
-    the NEW adapter runs a real session on a private hub before any pin moves.
-
-WHAT ONE UPDATE DOES
-    1. Stage. npm lanes (codex, claude): the current package.json and lock are
-       copied to a scratch dir beside spike/node_modules, and
-       `npm install --prefix <scratch> <pkg>@<version> --save-exact` builds the
-       whole tree the pin change would produce. Antigravity: the named release
-       is fetched beside the runtime and its digest measured
-       (trust-on-first-download, as every row so far was pinned). Grok: none —
-       its own updater owns the install; this only checks and probes.
-    2. Probe, on a private hub (scratch state, a free loopback port, desktop
-       notifications muted) with the lane's override variable pointed at the
-       staged adapter: lane_probe's handshake must pass, one real prompt must
-       come back, and the model list must be read back from the pane.
-    3. Green: change exactly one pin (spike/package.json + lock, or the
-       installer's row), and swap the staged tree into place. Red: change
-       nothing, say why, and notify.
-
-WILL NOT
-    * Touch the live hub process or its panes. New panes pick up a new adapter
-      at spawn. (Already-running adapters keep their loaded code; one that
-      lazily loads a file after the swap reads the new tree — not observed.)
-    * Run `grok update`, or install anything for Grok.
-    * Commit. It prints the probe record for the commit body; the suites run
-      before that commit, by whoever makes it.
-    * Delete. The replaced tree goes to the Trash with a dated name.
-    * Guess an Antigravity release. Google publishes no index of them, so a
-      release is named with --release, or the answer is `unknown`.
+An update stages the new adapter, probes it with a real session on a private
+hub, and moves exactly one pin only if the probe passes.
 """
 import argparse
 import json
@@ -90,8 +57,7 @@ def lane_key(name):
 
 
 def _npm():
-    """npm by absolute path. A launchd job gets PATH=/usr/bin:/bin:/usr/sbin:
-    /sbin, where npm is not, and every check would then read `unknown`."""
+    """npm by absolute path; launchd's minimal PATH does not include it."""
     for c in (shutil.which("npm"), "/opt/homebrew/bin/npm", "/usr/local/bin/npm"):
         if c and os.access(c, os.X_OK):
             return c
@@ -151,8 +117,8 @@ def grok_check(run=_run):
 
 # ── staging ───────────────────────────────────────────────────────────────
 def stage_npm(root, lane, version, run=_run):
-    """The whole tree the pin change would produce, in a scratch dir beside
-    the live one (same filesystem, so the swap is a rename)."""
+    """Build the pinned tree in a scratch dir beside the live one (same
+    filesystem, so the swap is a rename)."""
     spike = root / "spike"
     scratch = Path(tempfile.mkdtemp(prefix=".lanes-stage-", dir=spike))
     try:
@@ -201,7 +167,7 @@ def stage_release(release, fetch=None):
     scratch = Path(tempfile.mkdtemp(prefix=".lanes-stage-", dir=inst.RUNTIME.parent))
     try:
         extract, digest = (fetch or inst.fetch)(new, scratch, None)
-    except Exception as e:                       # noqa: BLE001 — reported as red
+    except Exception as e:                       # noqa: BLE001
         shutil.rmtree(scratch, ignore_errors=True)
         raise Red(f"fetch {new['release']} failed: {e}")
     new["sha256"] = digest
@@ -224,10 +190,8 @@ def _free_port():
 
 
 def probe(root, lane, overrides):
-    """Handshake + one real prompt + model list, on a private hub that is
-    started here and stopped here (by the process group WE created, never by
-    a pattern that could also match the live hub). Returns the record dict;
-    record["ok"] says green."""
+    """Handshake + one real prompt + model list on a private hub, stopped by
+    its own process group so the live hub is never matched. Returns a record."""
     state = Path(tempfile.mkdtemp(prefix="corral-lanes-probe-"))
     cwd = state / "cwd"
     cwd.mkdir()
@@ -296,9 +260,8 @@ def _tail(path, n=300):
 
 
 def probe_client(lane, url, cwd):
-    """Runs INSIDE the probe's environment (a subprocess), so sessions,
-    lane_probe and consult all read the private hub's state, never the live
-    one. Prints one JSON record."""
+    """Run inside the probe's subprocess environment so all state is the
+    private hub's; returns one record."""
     import lane_probe
     import consult
     rec = {"handshake": False, "reply": "", "models": [], "model": None, "ok": False}
@@ -333,8 +296,8 @@ def probe_client(lane, url, cwd):
 
 # ── the swap ──────────────────────────────────────────────────────────────
 def swap_npm(root, scratch, label, trash=TRASH):
-    """The staged tree becomes spike/node_modules; package.json and the lock
-    follow. The replaced tree (or worktree symlink) goes to the Trash."""
+    """Swap the staged tree into spike/node_modules with its package.json and
+    lock; the replaced tree goes to the Trash."""
     spike = root / "spike"
     live = spike / "node_modules"
     trash.mkdir(parents=True, exist_ok=True)
@@ -490,10 +453,9 @@ def _head(url):
 
 
 def check_gemini(head=_head, today=None):
-    """Google publishes no index, so the newest build is found by asking for
-    it: HEAD `<date>_01_RC01` for each day after the pin, newest first. A
-    found build is `behind`; finding none is `unknown`, never `current` —
-    another _NN or _RCNN of a later day would not have been asked about."""
+    """No release index exists, so HEAD `<date>_01_RC01` for each day after
+    the pin, newest first. Found is `behind`; none found is `unknown`, never
+    `current` (other _NN/_RCNN builds are not probed)."""
     import install_antigravity_acp as inst
     row = inst.release_for()
     if row is None:
@@ -554,10 +516,8 @@ def check(root=ROOT, run=_run, head=_head, today=None):
 
 
 def edges(rows, prev):
-    """The notices one run owes: a lane that became behind (or whose latest
-    moved while behind), and a lane that went from behind to current.
-    Unknown is never a notice — it is in the FINDINGS line, and a flaky
-    network must not page anyone twice a day."""
+    """Notices for lanes that became behind (or whose latest moved while
+    behind) or returned to current; `unknown` never notifies."""
     out = []
     for r in rows:
         was = prev.get(r["lane"]) or {}
@@ -571,9 +531,8 @@ def edges(rows, prev):
 
 
 def run_job(rows, state_dir=None, notify_fn=None, now=None):
-    """Edge-triggered: notify once per edge, persist, and return the stdout
-    for runs.db — nothing at all when every lane is current and nothing
-    changed (CONVENTIONS: a FINDINGS line when there is something to say)."""
+    """Notify once per edge, persist state, and return job stdout (empty when
+    all lanes are current and nothing changed)."""
     path = Path(state_dir or STATE) / CHECK_STATE
     try:
         prev = json.loads(path.read_text())
@@ -606,7 +565,7 @@ def render_check_row(r):
 def _lane_arg(name):
     try:
         return lane_key(name)
-    except Red as e:                 # a typo is a usage error, not a red to notify
+    except Red as e:                 # a usage error, not a red to notify
         raise argparse.ArgumentTypeError(str(e))
 
 

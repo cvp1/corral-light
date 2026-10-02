@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""tomlmini (DESIGN-5 S12): the strict reader reads what Corral writes exactly
-as tomllib does, and refuses everything else rather than guessing.
+"""tomlmini reads what Corral writes exactly as tomllib does and refuses the
+rest.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
 """

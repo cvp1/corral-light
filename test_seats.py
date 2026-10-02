@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""A pane can have a name (DESIGN-5 S6, as amended by section 7.7).
+"""A pane can have a name (a seat).
 
-Corral Light's copy of full Corral's corral/test_seats.py: the core decides,
-but restore(), reopen(), from_meta() and snapshot() are forked per skin, so
-each skin proves its own. Light restores up to MAX_ROSTER, and a seat held by
-a pane past that cap is still held. `bind_seat` is a human verb behind the
-pairing cookie, unique among OPEN panes on disk. Collisions found at restore or reopen withhold the
-later pane's seat and rewrite nothing.
-
-Every case builds panes from meta.json files in a scratch state dir and
-restores them the way the hub does at boot -- no agent process is started.
+restore(), reopen(), from_meta() and snapshot() are forked per skin, so Light
+proves its own. Panes are built from meta.json files in a scratch state dir and
+restored as the hub does at boot; no agent process is started.
 
     python3 test_seats.py        (also collected by test_corral_light.py)
 """
@@ -74,8 +68,7 @@ class SeatCase(unittest.TestCase):
 
 class ItRoundTrips(SeatCase):
     def test_bind_survives_a_restart_and_unbind_clears_it(self):
-        """T6.1: through save_meta and from_meta, and a pre-seat meta loads
-        None rather than KeyError."""
+        """Through save_meta and from_meta; a pre-seat meta loads None, not KeyError."""
         write_meta(self.root, "p1")                       # no `seat` key at all
         self.restore()
         self.assertIsNone(self.mgr.panes["p1"].seat)
@@ -113,7 +106,7 @@ class ItRoundTrips(SeatCase):
 
 class OneOpenPanePerName(SeatCase):
     def test_a_second_live_pane_cannot_take_a_held_name(self):
-        """T6.3, live half: refused, and the refusal names the holder."""
+        """Refused, and the refusal names the holder."""
         write_meta(self.root, "aaa", title="the author")
         write_meta(self.root, "bbb")
         self.restore()
@@ -132,9 +125,9 @@ class OneOpenPanePerName(SeatCase):
         self.assertEqual(self.mgr.panes["aaa"].seat, "author")
 
     def test_two_metas_on_disk_the_later_is_withheld_and_nothing_is_rewritten(self):
-        """T6.3, disk half: two hubs over one state dir, a hand edit, a
-        restore from backup. The earlier-created keeps the name; the later
-        keeps it IN ITS META but is not addressable by it and says so."""
+        """The earlier-created keeps the name; the later keeps it in its meta but
+        is not addressable by it and says so.
+        """
         first = write_meta(self.root, "first", created="2026-09-29T09:00:00Z",
                            seat="reviewer")
         later = write_meta(self.root, "later", created="2026-09-29T12:00:00Z",
@@ -163,8 +156,9 @@ class OneOpenPanePerName(SeatCase):
         self.assertIs(self.mgr.seat("y"), self.mgr.panes["later"])
 
     def test_closing_a_pane_frees_its_name(self):
-        """T6.4: `closed: true` on disk holds nothing, and neither does a pane
-        closed through the manager."""
+        """`closed: true` on disk holds nothing, nor does a pane closed through the
+        manager.
+        """
         write_meta(self.root, "gone", seat="x", closed=True)
         write_meta(self.root, "live1")
         write_meta(self.root, "live2")
@@ -178,10 +172,9 @@ class OneOpenPanePerName(SeatCase):
 
 
 class ACloseIsAnnouncedAfterTheRosterDropsIt(SeatCase):
-    """DESIGN-6 S2c. Stopping a pane's client is what emits `closed`, and
-    every browser answers it with /api/state. The pane must already be off
-    the roster when that goes out, or a CLI/peer close leaves a ghost row in
-    every open tab (found live, S2)."""
+    """A pane is off the roster before `closed` goes out, or a CLI/peer close
+    leaves a ghost row in every open tab.
+    """
 
     class Client:
         """Emits `closed` from inside close(), as the adapter's exit path does."""
@@ -231,7 +224,7 @@ class ACloseIsAnnouncedAfterTheRosterDropsIt(SeatCase):
 
 class TheWholeStateDirIsTheNamespace(SeatCase):
     def test_bind_sees_a_meta_that_was_not_restored(self):
-        """T6.8. A meta that was not restored still holds its seat."""
+        """A meta that was not restored still holds its seat."""
         write_meta(self.root, "live")
         self.restore()
         write_meta(self.root, "ondisk", seat="reviewer")   # open, never restored
@@ -241,8 +234,9 @@ class TheWholeStateDirIsTheNamespace(SeatCase):
         self.assertIn("not open here", str(e.exception))
 
     def test_reopen_does_not_take_a_seat_an_open_pane_is_using(self):
-        """T6.7. The archived pane was created FIRST and still loses: the open
-        one is the one a peer is addressing right now."""
+        """The open pane keeps the seat even though the archived one was created
+        first: a peer is addressing it now.
+        """
         write_meta(self.root, "archived", created="1", seat="x", closed=True)
         write_meta(self.root, "open", created="2", seat="x")
         self.restore()
@@ -254,7 +248,7 @@ class TheWholeStateDirIsTheNamespace(SeatCase):
 
 class ASeatDoesNotTravel(SeatCase):
     def test_export_drops_it_and_import_lands_unaddressable(self):
-        """T6.10. A seat is an address on this host's wall."""
+        """A seat is an address on this host's wall."""
         import port
         write_meta(self.root, "src", seat="reviewer")
         bundle = port.export("src", state_dir=self.root)
@@ -267,8 +261,9 @@ class ASeatDoesNotTravel(SeatCase):
 
 
 class TheRouteIsHumanOnly(unittest.TestCase):
-    """T6.5, over a real socket: behind the cookie, and a bad pane id or a bad
-    name is a refusal with a reason, never a 500."""
+    """Over a real socket: behind the cookie, and a bad pane id or name is a
+    refusal with a reason, never a 500.
+    """
 
     @classmethod
     def setUpClass(cls):

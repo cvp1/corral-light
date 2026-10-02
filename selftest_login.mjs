@@ -1,4 +1,4 @@
-/* Sign in, in the browser (DESIGN-6 S4, T4.9 and the four doors).
+/* Sign in, in the browser: the composer, the button, and the four doors.
  *
  * Driven against the real functions in static/app.js -- composer(),
  * isLoginCommand(), startLogin(), signInButton(), loginLine() -- with a
@@ -76,7 +76,7 @@ const liveClaude = { id: 'p2', agent: 'claude', state: 'ready', deadCause: null,
 const codexDead = { id: 'p3', agent: 'codex', state: 'dead', deadCause: 'auth', commands: [] };
 const claudeOtherDeath = { id: 'p4', agent: 'claude', state: 'dead', deadCause: null, commands: [] };
 
-/* ── T4.9 the composer: a sign-in only where /login cannot mean anything else ── */
+/* ── the composer: a sign-in only where /login cannot mean anything else ── */
 {
   const b = browser([authDead]);
   const ta = await typeAndSend(b, authDead, '  /LOGIN ');

@@ -1,11 +1,9 @@
-"""ask_human -- an agent's question for its human -- as ONE set of cases both
-products run against their own skin's real Manager, send() and drain: full
-Corral's `test_peer.AskHuman` and Light's `test_corral_light.LightAskHuman`.
+"""ask_human cases shared by both products, run against each skin's real
+Manager, send() and drain.
 
 Mixed into a TestCase that provides `self.mgr` (a Manager with a `fake` lane
-registered, testkit/fake_acp_agent.py) and `self.agent_dir`. The route is
-driven through `peer_http` with a minted pane token -- the exact call each
-hub's pre-cookie branch makes.
+registered) and `self.agent_dir`. The route is driven through `peer_http` with
+a minted pane token, as each hub's pre-cookie branch does.
 
     A1 the token's pane gets the question: needs-you, the `question` event,
        the snapshot's `question`; a `pane` in the body is ignored
@@ -65,7 +63,6 @@ class AskCases:
     def _display(p):
         return p.snapshot(since=1 << 60)["display"]
 
-    # ── A1 ───────────────────────────────────────────────────────────────
     def test_A1_the_token_s_pane_asks_and_the_wall_reads_needs_you(self):
         a, b = self._pane(), self._pane()
         self.assertEqual(self._display(a), "your-turn")
@@ -83,7 +80,6 @@ class AskCases:
         # The agent's words, never a `user` turn: nothing was sent to a model.
         self.assertNotIn("user", [e["kind"] for e in a.events])
 
-    # ── A2 ───────────────────────────────────────────────────────────────
     def test_A2_unknown_token_and_bad_questions_are_refused_and_store_nothing(self):
         a = self._pane()
         status, _ = self.mgr.peer_http("POST", "/api/peer/ask", "nope",
@@ -100,7 +96,6 @@ class AskCases:
         self.assertEqual(out["result"], "raised")
         self.assertEqual(len(a.question["text"]), core.MAX_ASK_CHARS)
 
-    # ── A3 ───────────────────────────────────────────────────────────────
     def test_A3_a_second_ask_replaces_the_first(self):
         a = self._pane()
         self._ask(a, "first?")
@@ -112,7 +107,6 @@ class AskCases:
         self.assertEqual([e["text"] for e in ev], ["first?", "second?"])
         self.assertEqual(ev[1]["replaces"], first_at)
 
-    # ── A4 ───────────────────────────────────────────────────────────────
     def test_A4_a_human_send_clears_it(self):
         a = self._pane()
         self._ask(a, "which branch?")
@@ -126,7 +120,6 @@ class AskCases:
         self.assertTrue(wait_for(lambda: self._ends(a) == 1))
         self.assertEqual(self._display(a), "your-turn")
 
-    # ── A5 ───────────────────────────────────────────────────────────────
     def test_A5_a_peer_delivery_does_not_clear_it(self):
         a, b = self._pane("asker"), self._pane("peer")
         self._ask(a, "may I delete the branch?")
@@ -146,7 +139,6 @@ class AskCases:
         self.assertTrue(wait_for(lambda: self._ends(a) == 1))
         self.assertEqual(self._display(a), "needs-you")
 
-    # ── A6 ───────────────────────────────────────────────────────────────
     def test_A6_the_agent_dying_clears_it(self):
         a = self._pane()
         self._ask(a, "still there?")
@@ -168,7 +160,6 @@ class AskCases:
         self.assertEqual([c["reason"] for c in self._evs(a, "question_cleared")],
                          ["closed"])
 
-    # ── A7 ───────────────────────────────────────────────────────────────
     def test_A7_it_survives_a_restart_through_meta(self):
         a = self._pane()
         self._ask(a, "persist me?")
@@ -185,7 +176,6 @@ class AskCases:
         back = type(a).from_meta(dict(meta, question=None), self.mgr)
         self.assertIsNone(back.question)
 
-    # ── A8 ───────────────────────────────────────────────────────────────
     def test_A8_a_turn_a_peer_started_ends_idle_not_your_turn(self):
         a, b = self._pane("sender"), self._pane("target")
         r = self.mgr.deliver_peer(a.id, "target", "hello")

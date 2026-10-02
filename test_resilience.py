@@ -1,13 +1,8 @@
 #!/usr/bin/python3
-"""Resilience tests — the kill paths from docs/RESILIENCE-REVIEW-2026-09-28.md.
+"""Resilience tests: real agent processes (testkit/fake_acp_agent.py) driven
+through Pane/Manager kill, resume, shutdown and restore paths.
 
-Every test here drives a REAL agent process (testkit/fake_acp_agent.py) through
-the real Pane/Manager code: spawned, killed with SIGKILL, resumed, interrupted.
-A stub client cannot prove a kill path, because the thing under test is what
-happens when a process the hub does not control goes away.
-
-Collected by test_corral_light.py (`from test_resilience import *`), so the
-one command `python3 test_corral_light.py` runs these too.
+Collected by test_corral_light.py.
 """
 import json
 import os
@@ -75,7 +70,7 @@ class FakeLaneCase(unittest.TestCase):
 
 
 class ResumeFromDead(FakeLaneCase):
-    """P0-a' (Astra/Grok 2026-09-28): a pane whose agent died comes back."""
+    """A pane whose agent died comes back on resume."""
 
     def _kill_agent(self, pane):
         os.kill(pane.client.p.pid, signal.SIGKILL)
@@ -139,7 +134,7 @@ class ResumeFromDead(FakeLaneCase):
 
 
 class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
-    """P0-pid (Grok 2026-09-28): the pid is on disk, and restore() uses it."""
+    """The pid is on disk, and restore() uses it to reap orphans."""
 
     def setUp(self):
         super().setUp()
@@ -268,7 +263,7 @@ hub.serve("127.0.0.1", 0)
 
 
 class ShutdownWritesNotesNotPauses(FakeLaneCase):
-    """P0-b' (Astra/Grok 2026-09-28): SIGTERM names the interrupted turn."""
+    """SIGTERM writes a note naming the interrupted turn, not a pause."""
 
     def _busy_pane(self):
         p = self.mgr.create("fake", self.agent_dir)
@@ -341,7 +336,7 @@ class ShutdownWritesNotesNotPauses(FakeLaneCase):
 
 
 class TheObserverTickSurvivesABadPane(unittest.TestCase):
-    """Astra/Grok 2026-09-28: one snapshot() exception froze tick_age_s."""
+    """One snapshot() exception must not freeze the observer tick."""
 
     def test_tick_advances_past_a_raising_pane(self):
         import hub
@@ -365,7 +360,7 @@ class TheObserverTickSurvivesABadPane(unittest.TestCase):
 
 
 class SpawnIsBounded(unittest.TestCase):
-    """K7 (Astra/Grok 2026-09-28): one hung Popen froze every lane."""
+    """One hung Popen must not freeze every lane."""
 
     def test_a_stuck_spawn_raises_and_the_late_process_is_reaped(self):
         import acp
@@ -400,8 +395,9 @@ class CatalogWriteIsAtomic(FakeLaneCase):
 
 
 class ALostContextIsSaid(FakeLaneCase):
-    """K4 (Astra/Grok 2026-09-28): Ollama's "context lost" chunk arrived inside
-    session/load and was swallowed with the replay."""
+    """A "context lost" chunk inside session/load is surfaced, not swallowed
+    with the replay.
+    """
 
     def test_a_load_notice_survives_replay_suppression(self):
         self.sessions.AGENTS["fake"]["env"]["FAKE_ACP_NOTICE"] = "the model starts fresh"
@@ -434,7 +430,7 @@ class ALostContextIsSaid(FakeLaneCase):
 
 
 class TheTurnLedger(FakeLaneCase):
-    """P0-ledger (Astra 2026-09-28): accepted is durable before the ack."""
+    """An accepted turn is durable before the ack."""
 
     def setUp(self):
         super().setUp()
@@ -580,7 +576,7 @@ def stop_hub(pr):
 
 
 class TheWatcherPagesAndNeverRestarts(unittest.TestCase):
-    """P0-d' (Astra/Grok 2026-09-28)."""
+    """The watcher pages and never restarts the hub."""
 
     def setUp(self):
         import watch
@@ -669,7 +665,7 @@ class QuietHoursAndNoNotifier(unittest.TestCase):
 
 
 class UnseenNeedsYouNotifies(unittest.TestCase):
-    """P0-e' (Astra/Grok 2026-09-28): notify when nobody SAW it."""
+    """Notify when nobody saw a needs-you event."""
 
     def setUp(self):
         import hub

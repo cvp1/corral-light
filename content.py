@@ -1,40 +1,13 @@
 #!/usr/bin/python3
 """content — a searchable index of the markdown you point it at.
 
-WHY THIS IS NOT THE FULL CORRAL'S `library.py`
-    Upstream's Library is a ROOM: navigate to it, browse a corpus, read a
-    rendered page, then click "open agent here". That shape exists because
-    Corral has seven rooms and content needed somewhere to live. Light has one
-    room, so the room half — routing, page rendering, wikilink resolution,
-    backlinks, pinned and recent places — is navigation scaffolding for a
-    building with one floor.
+Returns titles, paths and plain-text snippets for search and attach; nothing
+is rendered as markup. Indexes the roots in `~/.config/corral-light/content.json`
+(or `~/notes` if absent):
 
-    So Light keeps the half that is actually load-bearing (the index) and
-    changes what it is FOR: not a place to go, but content reachable from the
-    composer. ⌘K, search, attach.
+    [{"key": "vault", "label": "notes", "root": "~/notes"}, ...]
 
-    The consequence worth naming: **nothing here is ever rendered in the
-    browser.** Upstream needs `mdview.py` — 217 lines of escape-everything,
-    emit-only-tags-we-spell-out — precisely because vault notes carry pasted
-    third-party content and Corral is an authed control surface (P20). By
-    never rendering a page, Light does not need that renderer, and the attack
-    surface it defends goes with it. This module returns titles, paths and
-    FTS-generated snippets; the snippet is the only file-derived text that
-    reaches the page, and the client inserts it as TEXT, never as markup.
-
-WHAT IT INDEXES
-    Whatever `~/.config/corral-light/content.json` names, or `~/notes` if that
-    file is absent and that directory exists. Never a hardcoded fleet corpus
-    list: this has to be useful on a box that has one directory of notes and
-    nothing else, and a config that ships pointing at five directories nobody
-    has is a feature that is broken on arrival.
-
-    Config: [{"key": "vault", "label": "notes", "root": "~/notes"}, ...]
-
-BOUNDS (P8)
-    Files per root, bytes per file, results per query, and terms per query are
-    all capped. The index is DERIVED and disposable — delete content.db and it
-    rebuilds; nothing here is a system of record.
+All walks and queries are bounded. content.db is derived and disposable.
 """
 import json
 import os
@@ -65,12 +38,7 @@ _fts = None                 # None = not probed yet; bool once known
 
 def roots():
     """[{key, label, root: Path}] — configured, or the ~/notes default.
-
-    Unreadable or malformed config is an EMPTY list plus an error, never a
-    silent fallback to the default: a typo in the config should not look
-    identical to having no config, or the operator spends the afternoon
-    wondering why their new root never appears.
-    """
+    A malformed config is an empty list plus an error, never the default."""
     if CONFIG.is_file():
         try:
             raw = json.loads(CONFIG.read_text(encoding="utf-8"))
@@ -96,7 +64,7 @@ def roots():
 
 def _iter_files(root):
     """Yield indexable files under root, pruning dot/skip dirs and symlinks
-    that escape it. Bounded (P8)."""
+    that escape it. Bounded."""
     if not root.is_dir():
         return
     try:
@@ -136,14 +104,8 @@ def _title_of(path, text):
 
 
 def _connect():
-    """Open the index, creating it. Probes FTS5 ONCE and remembers.
-
-    A missing FTS5 must degrade to a LIKE scan that SAYS it is one — not
-    silently get slower, and not take search down. Apple's system sqlite ships
-    FTS5 and so does Debian's, but "ships it here" is not evidence about the
-    box this ends up on, and finding out at query time on a laptop is how a
-    feature becomes 'search is broken'.
-    """
+    """Open the index, creating it. Probes FTS5 once; without it, search
+    falls back to a LIKE scan and says so."""
     global _fts
     STATE.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(DB)
@@ -222,23 +184,13 @@ def refresh(force=False):
 
 
 def _fts_query(q):
-    """User text is never FTS syntax: every term becomes a quoted prefix token.
-
-    Without this, a note titled `C++ (notes)` typed into the box is a syntax
-    error from sqlite rather than a search, and an apostrophe or a bare `*`
-    can make the query mean something the person did not type.
-    """
+    """User text is never FTS syntax: every term becomes a quoted prefix token."""
     terms = re.findall(r"[\w'-]+", q or "")[:8]
     return " ".join('"' + t.replace('"', "") + '"*' for t in terms if t)
 
 
 def _excerpt(body, q, width=240):
-    """A plain-text window around the first matching term. Never markup.
-
-    Used for the LIKE fallback, and as the text the client offers to quote
-    into a chat-only pane. Returned as TEXT; the client inserts it with
-    textContent, so an angle bracket in a note is an angle bracket.
-    """
+    """A plain-text window around the first matching term. Never markup."""
     terms = [t for t in re.findall(r"[\w'-]+", q or "") if t]
     lo = body.lower()
     at = min((lo.find(t.lower()) for t in terms if lo.find(t.lower()) >= 0),
@@ -276,9 +228,7 @@ def search(q, limit=25):
                      "rel": r[4], "snippet": " ".join((r[5] or "").split())}
                     for r in rows]
             return {"hits": hits, "error": ""}
-        # No FTS5. A LIKE scan over titles and bodies, ordered by title match
-        # first — and the caller is TOLD, so "search got worse" has a cause
-        # attached rather than being a mystery about a laptop.
+        # No FTS5: LIKE scan, title matches first, and report the fallback.
         like = f"%{q}%"
         rows = c.execute(
             "SELECT id, corpus, path, title, rel, body FROM pages"
@@ -299,11 +249,8 @@ def search(q, limit=25):
 
 def get(place_id):
     """One indexed file: its path, title, and a bounded body. None if gone.
-
-    The stored path is re-resolved against the live roots. Index-time
-    containment is not enough: replace a note with a symlink after indexing
-    and attach would hand an agent a path that now points outside the vault.
-    """
+    Re-checks containment against the live roots (a note may have become a
+    symlink since indexing)."""
     c = _connect()
     try:
         r = c.execute("SELECT id, corpus, path, title, rel, body FROM pages"
@@ -358,7 +305,7 @@ def status():
             "pages": total, "fts": bool(_fts), "error": err}
 
 
-if __name__ == "__main__":            # a CLI, so the index is inspectable
+if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "status":
         print(json.dumps(status(), indent=1), flush=True)

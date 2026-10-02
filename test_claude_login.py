@@ -1,22 +1,6 @@
 #!/usr/bin/env python3
-"""Sign in from Corral (DESIGN-6 S4): the launcher, its route, its judgement.
-
-  T4.1  no cookie -> 401; cross-origin -> 403; Serve, a forwarding header, or
-        a non-loopback peer -> refused with the command; loopback + paired ->
-        started, the launcher called ONCE with the fixed argv. Every refusal
-        also asserts the launcher was never called.
-  T4.2  a second start while running -> `running`, still one launch; a
-        closed window plus the cooldown -> a new start is allowed.
-  T4.3  headless -> refused with the command, launcher never called.
-  T4.4  a fake `claude` run through the REAL launcher path (real wrapper
-        script, real spawn, real exit file, real pgrep) exits 0 and advances
-        a fake credential -> `signed-in`, and the hub's auth_sweep runs once.
-  T4.5  a rotation alone, a non-zero exit, no advance, or a status that does
-        not say logged in -> never `signed-in`, auth_sweep never called.
-  T4.6  a CLI that outlives LOGIN_WATCH_S -> `gave-up`, nothing killed, and a
-        new start is refused while its process lives.
-  T4.7  the hub spawns with no pipes: it never holds the CLI's output.
-  T4.8  the hub tick is unaffected by a `claude auth status` that takes 3 s.
+"""Sign in from Corral: the login launcher, its hub route, and its judgement
+of when the login actually succeeded.
 
     python3 test_claude_login.py
 """
@@ -76,7 +60,7 @@ class Launcher(unittest.TestCase):
         self.L.exit_file.write_text(f"{code}\n", encoding="utf-8")
         return self.L.poll()
 
-    # T4.1 (the launcher half) -------------------------------------------
+    # The launcher ----------------------------------------------------------
     def test_a_local_start_launches_once_with_the_fixed_argv(self):
         r = self.L.start("browser (rail)", local=True)
         self.assertTrue(r["ok"])
@@ -107,7 +91,6 @@ class Launcher(unittest.TestCase):
         out = subprocess.run(["/bin/sh", "-n", str(self.L.script)], capture_output=True)
         self.assertEqual(out.returncode, 0, out.stderr)
 
-    # T4.2 ----------------------------------------------------------------
     def test_no_overlap_then_a_closed_window_plus_cooldown_allows_a_new_start(self):
         self.assertTrue(self.L.start("a", local=True)["ok"])
         again = self.L.start("b", local=True)
@@ -126,7 +109,6 @@ class Launcher(unittest.TestCase):
         self.assertTrue(self.L.start("d", local=True)["ok"])
         self.assertEqual(len(self.r.spawned), 2)
 
-    # T4.3 ----------------------------------------------------------------
     def test_headless_is_refused_with_the_command_and_launches_nothing(self):
         r = fake_login(self.tmp, find_terminal=lambda: None)
         out = r.login.start("a", local=True)
@@ -143,7 +125,6 @@ class Launcher(unittest.TestCase):
             self.assertEqual(claude_login.terminal("linux", {"DISPLAY": ":0"}),
                              ["/usr/bin/x-terminal-emulator", "-e"])
 
-    # T4.5 ----------------------------------------------------------------
     def test_success_needs_exit_zero_an_advance_and_logged_in(self):
         self.L.start("a", local=True)
         self.r.ref = 200.0
@@ -173,7 +154,6 @@ class Launcher(unittest.TestCase):
         self.assertEqual(self.finish(0), "check-status")
         self.assertEqual(self.r.success, 0)
 
-    # T4.6 ----------------------------------------------------------------
     def test_a_login_past_the_watch_gives_up_and_still_blocks_a_new_start(self):
         self.L.start("a", local=True)
         self.r.clock.t += claude_login.LOGIN_WATCH_S + 1
@@ -187,9 +167,9 @@ class Launcher(unittest.TestCase):
 
 
 class RealLauncherPath(unittest.TestCase):
-    """T4.4, T4.5 and T4.7 through the real wrapper, spawn, exit file and
-    pgrep. Only the window is stood in for: `/bin/sh` runs the wrapper where
-    Terminal would, so the test needs no display."""
+    """The real wrapper, spawn, exit file and pgrep; `/bin/sh` stands in for
+    Terminal, so no display is needed.
+    """
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="login-real-"))
@@ -258,7 +238,7 @@ class RealLauncherPath(unittest.TestCase):
 
 
 class Route(unittest.TestCase):
-    """T4.1 over a real socket, through hub.Handler."""
+    """The login route over a real socket, through hub.Handler."""
 
     @classmethod
     def setUpClass(cls):
@@ -369,8 +349,9 @@ class Tick(unittest.TestCase):
 
 
 class FindsTheCli(unittest.TestCase):
-    """F-LB3: a hub run as a service has launchd's PATH, which lacks
-    ~/.local/bin — where the vendor's native installer puts `claude`."""
+    """A hub run as a service has launchd's PATH, which lacks ~/.local/bin,
+    where the vendor's native installer puts `claude`.
+    """
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="login-bin-"))

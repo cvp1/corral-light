@@ -20,7 +20,7 @@
 #   corral-light panes | open | say | pending | ok | no | cancel | pause |
 #                resume | close | forget | reopen | rename | seat | config |
 #                attach | quote     the whole pane surface from a terminal
-#   corral-light rig save|up|list|rm <name>   saved seats (DESIGN-5 S12)
+#   corral-light rig save|up|list|rm <name>   saved seats
 #   corral-light lanes check [--job]   installed against latest per lane (read only;
 #                               --job = edge-triggered notices for a scheduler)
 #   corral-light lanes update <lane>   stage a lane's newer adapter, prove it on a
@@ -28,9 +28,7 @@
 #                               (cli.py --help; `say` answers permissions in
 #                               the same terminal and never cancels on a timer)
 #
-# /bin/bash, NOT /usr/bin/bash: this is meant to run on macOS (mac-host), which
-# has no /usr/bin/bash. The same shebang mistake shipped once in the full
-# Corral and only failed after a merge reached the Mac.
+# /bin/bash, not /usr/bin/bash: macOS has no /usr/bin/bash.
 set -euo pipefail
 D="$(cd "$(dirname "$0")" && pwd)"
 PY="${CORRAL_LIGHT_PYTHON:-python3}"
@@ -42,8 +40,7 @@ case "${1:-}" in
   diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;
   consult) shift; exec "$PY" "$D/consult.py" "$@" ;;
   watch)
-    # Two meanings, one word: with a pane id it follows that pane (cli.py);
-    # bare, or with --flags, it is the outside hub watcher (watch.py).
+    # With a pane id: follow that pane (cli.py); bare or --flags: hub watcher (watch.py).
     if [ $# -ge 2 ] && [[ "$2" != -* ]]; then exec "$PY" "$D/cli.py" "$@"; fi
     shift; exec "$PY" "$D/watch.py" "$@" ;;
   panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|seat|config|attach|quote|later|search|digest|port|rig)

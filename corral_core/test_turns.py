@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Turn identity in the core (DESIGN-5 S5).
-
-  T5.2  last_answer() stops at a `peer` event as it does at a `user` event, so
-        a reply to a peer message is never quoted as the answer to the human
-        turn before it.
-  and   the pieces both skins share: the id shape, the queued item that
-        carries it, and the bounded set of client-declared origins.
+"""Turn identity: last_answer() stops at peer events; shared id/queue/via pieces.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
 """
@@ -35,9 +29,7 @@ def pane_with(events):
 
 class LastAnswerStopsAtAPeer(unittest.TestCase):
     def test_the_reply_to_a_peer_is_not_the_answer_to_the_human(self):
-        """T5.2: `user, text, turn_end, peer, text, turn_end` -> the second
-        text only. Stopping at `user` alone stitched both answers together and
-        quoted them as one."""
+        """`user, text, turn_end, peer, text, turn_end` -> the second text only."""
         p = pane_with(ring("user", ("text", "answer to the human"), "turn_end",
                            "peer", ("text", "answer to the peer"), "turn_end"))
         self.assertEqual(p.last_answer(), ("answer to the peer", True))
@@ -59,8 +51,7 @@ class TheSharedPieces(unittest.TestCase):
         self.assertNotEqual(a, b)
 
     def test_a_queued_item_is_still_a_string(self):
-        """Every existing reader of `_queue` treats items as text: pause()
-        counts them, notes quote them, tests seed plain strings."""
+        """Queued items stay str so existing `_queue` readers keep working."""
         q = S.QueuedText("hello", "abc")
         self.assertIsInstance(q, str)
         self.assertEqual((q, q.turn), ("hello", "abc"))

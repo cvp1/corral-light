@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
-"""The seat tools' MCP server and the descriptor that offers it (DESIGN-5 S8).
-
-  T8.1  the server answers initialize and tools/list with exactly the seat
-        tools and their schemas; tools/call seat_send posts to the hub with
-        the token FROM ITS ENVIRONMENT, and only `seat` and `text` leave it.
-  T8.3  the descriptor carries the three env entries, a fresh token per spawn
-        (the previous one stops working), CORRAL_NATIVE_MCP=0 offers nothing,
-        and registry descriptors are passed through unchanged.
-  T8.6  it is named `corral-seats` -- never `acp`, and a registry entry that
-        takes the name is dropped rather than left beside the real one.
-  S10   seat_broadcast posts only `text`; the per-seat loop is the hub's.
-  T11.1 seat_wait returns `timed_out` at its bound (a fake clock), and a
-        bound outside 1..PEER_WAIT_MAX_S is refused, not clamped.
-  T11.2 a second wait while one is in flight is refused `wait-in-flight` --
-        in-process, and over real stdio, where the second call's answer
-        arrives BEFORE the first's.
-  T11.3 the hub's turn route: a `turn_end` with the matching id ends the
-        wait, a different id does not; a turn another pane sent is unknown.
-  S11   a poll that fails after the first ends the wait `interrupted`; a
-        paused/dead seat ends it `blocked`; no answer carries text.
-  and   the server is a real subprocess speaking line-delimited JSON-RPC.
+"""The seat tools' MCP server, the descriptor that offers it, and the hub side.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
 """
@@ -115,8 +95,7 @@ class TheServer(unittest.TestCase):
                                            "method": "notifications/initialized"}))
 
     def test_seat_send_posts_with_the_token_and_only_seat_and_text(self):
-        """T8.1 + the half of T8.2 this process owns: a `from` the caller
-        tries to pass never leaves."""
+        """Caller-supplied `from`/`pane` are not forwarded."""
         out, is_error = seat_mcp.call_tool(
             "seat_send", {"seat": "@reviewer", "text": "hi", "from": "the-operator",
                           "pane": "someone-else"}, env=self.env)
@@ -128,9 +107,7 @@ class TheServer(unittest.TestCase):
         self.assertEqual(body, {"seat": "reviewer", "text": "hi"})
 
     def test_seat_broadcast_posts_only_the_text(self):
-        """S10: one POST; the hub does the per-seat loop. Nothing but `text`
-        leaves -- a caller cannot hand the hub a list of seats, a source, or
-        a pane to leave out."""
+        """One POST carrying only `text`."""
         tools = {t["name"]: t for t in seat_mcp.TOOLS}
         b = tools["seat_broadcast"]
         self.assertEqual(b["inputSchema"]["required"], ["text"])
@@ -150,9 +127,7 @@ class TheServer(unittest.TestCase):
                          ("refused", "arguments", False))
 
     def test_ask_human_is_offered_and_tells_the_model_prose_raises_nothing(self):
-        """The tool exists because prose at the end of a turn is
-        indistinguishable from a pane that simply finished: the description
-        must say so, and say to END the turn after calling it."""
+        """The description says prose raises nothing and to end the turn."""
         a = {t["name"]: t for t in seat_mcp.TOOLS}["ask_human"]
         self.assertEqual(a["inputSchema"]["required"], ["question"])
         self.assertFalse(a["inputSchema"]["additionalProperties"])
@@ -163,8 +138,7 @@ class TheServer(unittest.TestCase):
         self.assertIn("prose alone", d.lower())
 
     def test_ask_human_posts_only_the_question_with_the_token(self):
-        """Only `question` leaves this process: a `pane` or `from` a caller
-        adds cannot aim the question at another pane -- the token decides."""
+        """Only `question` is forwarded; the token picks the pane."""
         out, is_error = seat_mcp.call_tool(
             "ask_human", {"question": "re-scope?", "pane": "other", "from": "op"},
             env=self.env)
@@ -175,8 +149,7 @@ class TheServer(unittest.TestCase):
         self.assertEqual(body, {"question": "re-scope?"})
 
     def test_ask_human_over_the_bound_is_refused_not_truncated(self):
-        """MAX_ASK_CHARS is a refusal, never a silent clip, and nothing is
-        sent: a clipped question could lose the one clause that matters."""
+        """Over MAX_ASK_CHARS is refused and nothing is sent."""
         for bad in ({}, {"question": 7}, {"question": "   "},
                     {"question": "x" * (seat_mcp.MAX_ASK_CHARS + 1)}):
             out, is_error = seat_mcp.call_tool("ask_human", bad, env=self.env)
@@ -204,8 +177,7 @@ class TheServer(unittest.TestCase):
         self.assertEqual(self.hub.calls, [])
 
     def test_a_refusal_is_not_an_mcp_error(self):
-        """A model told `isError` tends to retry. A refusal is the hub's
-        answer about another pane, returned as a normal result."""
+        """A refusal is returned with isError false."""
         with mock.patch.object(seat_mcp, "_hub",
                                return_value={"result": "refused", "reason": "busy"}):
             r = seat_mcp.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
@@ -354,8 +326,7 @@ class TheWait(unittest.TestCase):
         self.assertEqual(first["result"], "timed_out")
 
     def test_T11_3_only_the_matching_turn_end_ends_the_wait(self):
-        """The child's half: it keeps polling while the hub says the turn has
-        not ended, and stops the poll after it says it has."""
+        """Polls until the hub reports the turn ended, then stops."""
         answers = iter([False, False, True])
         self.hub.get_answer = lambda path: ({
             "result": "turn", "seat": "reviewer", "turn": "t1",
@@ -399,9 +370,7 @@ class TheWait(unittest.TestCase):
         self.assertEqual((out["result"], out["reason"]), ("refused", "unknown-seat"))
 
     def test_the_hub_going_away_mid_wait_is_interrupted(self):
-        """A restarted hub revokes every token (401) and is briefly not
-        listening at all; both end the wait `interrupted`, never a retry
-        loop and never `timed_out`."""
+        """A 401 or unreachable hub mid-wait ends it `interrupted`."""
         import socket
         with socket.socket() as sk:
             sk.bind(("127.0.0.1", 0))
@@ -434,7 +403,7 @@ class TheWait(unittest.TestCase):
 
 
 class ThePeerTurnRoute(unittest.TestCase):
-    """T11.3, the hub's half: ManagerBase.peer_turn over real event rings."""
+    """ManagerBase.peer_turn over real event rings."""
 
     def setUp(self):
         self.m = _Mgr()
@@ -538,7 +507,7 @@ class TheDescriptor(unittest.TestCase):
         return S.PaneBase._mcp_servers(pane)
 
     def test_three_env_entries_and_the_reserved_name(self):
-        """T8.3 + T8.6."""
+        """The descriptor has the three env entries and is named corral-seats."""
         d = self.servers(_Pane("p1"))[-1]
         self.assertEqual(d["name"], "corral-seats")
         self.assertNotEqual(d["name"], "acp")
@@ -552,7 +521,7 @@ class TheDescriptor(unittest.TestCase):
                       self.mgr.panes["p1"])
 
     def test_every_spawn_gets_a_fresh_token_and_the_old_one_dies(self):
-        """T8.3 + T8.5: two spawns, two tokens; the first is refused."""
+        """Two spawns, two tokens; the first is refused."""
         p = _Pane("p1")
         tok = lambda d: {e["name"]: e["value"] for e in d[-1]["env"]}["CORRAL_PANE_TOKEN"]
         t1 = tok(self.servers(p))
@@ -589,8 +558,7 @@ class TheDescriptor(unittest.TestCase):
 
 
 class TheHubsAnswer(unittest.TestCase):
-    """peer_http, the logic both hubs call: the token decides the sender, and
-    a body cannot say otherwise (T8.2)."""
+    """peer_http: the token decides the sender, never the body."""
 
     def setUp(self):
         self.mgr = _Mgr()
@@ -632,9 +600,8 @@ class TheHubsAnswer(unittest.TestCase):
 
 
 class TheCallerIsTheHubsOwnUser(unittest.TestCase):
-    """edge.local_peer_uid (DESIGN-5 S8, after the live finding that the Claude
-    adapter puts the pane token on a world-readable command line): the uid
-    that owns the CLIENT end of a loopback connection, from /proc/net/tcp."""
+    """edge.local_peer_uid: the uid owning the client end of a loopback
+    connection, from /proc/net/tcp."""
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "/proc/net/tcp is Linux")
     def test_a_real_loopback_connection_is_owned_by_this_user(self):

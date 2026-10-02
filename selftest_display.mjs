@@ -1,21 +1,6 @@
-/* Does the browser's display projection say the same thing the core does,
- * and does the tab title say it where the eye lands first?
- *
- * WHY THIS FILE EXISTS
- *   `display_state()` lives in corral_core/sessions.py. The browser cannot
- *   call it: it reduces events locally between polls, so at the moment a
- *   permission card arrives the server's `display` key is one poll stale --
- *   exactly when it matters most. So app.js MIRRORS the rule, and a mirror
- *   nobody pins is a fork waiting to happen.
- *
- *   The pin is ONE case table, ./corral_core/display_cases.json,
- *   asserted here against the JavaScript and in corral_core/
- *   test_display_state.py against the Python. Add a case there and both
- *   languages have to answer it.
- *
- *   The title is the other half. `document.title` was never set, so Corral as
- *   one tab among twenty said nothing about whether an agent was blocked on a
- *   human -- the one fact the whole wall exists to surface.
+/* The browser's display projection matches the core's (one shared case
+ * table, ./corral_core/display_cases.json, also asserted against the Python),
+ * and the tab title surfaces it.
  *
  * Run: node selftest_display.mjs   (exit 0 = pass)
  */
@@ -97,7 +82,7 @@ const onWire = (pane) => ({
   turnVia: pane.turn_via === undefined ? null : pane.turn_via,
 });
 
-/* T1.6 — projection parity. Every case in the table the python answers, the
+/* Projection parity: every case in the table the python answers, the
  * browser answers identically; including a raw `needs-you` with empty pending
  * and no gate hold, and `detached` distinct from a quiet `ready`. */
 const reached = new Set();
@@ -153,8 +138,7 @@ check(document.title === '1 need you · Corral',
       `one blocked pane among three answered ones gave "${document.title}"`);
 
 /* ask_human: an open question counts as needing you, and a turn another
- * pane's agent started does NOT count as your turn -- the two ways a pane
- * read "your turn" on 2026-09-30 when it was nothing of the kind. */
+ * pane's agent started does NOT count as your turn. */
 setTitle([pane('ready', { question: { text: 're-scope?' } }),
           pane('ready', { turnVia: 'peer' }), pane('ready', { turnVia: 'rig' })]);
 check(document.title === '1 need you · Corral',
@@ -172,7 +156,7 @@ setTitle(live);
 check(document.title === '2 your turn · Corral',
       `before the card: "${document.title}"`);
 live[0].pending.push('req-1');            // ev.kind === 'permission'
-live[0].state = 'needs-you';              // ...both lines, exactly as at 2615
+live[0].state = 'needs-you';              // ...both lines, as the reducer does
 setTitle(live);
 check(document.title === '1 need you · Corral',
       `the card landed and the title still said "${document.title}" — a `
@@ -203,7 +187,7 @@ check(/sub\.title = p\.state;/.test(src),
       'the roster row dropped the raw-state tooltip — the projection collapses '
     + 'six enum values into five words, and the record has to stay reachable');
 
-/* ── T1.7 the idle clock ───────────────────────────────────────────────── */
+/* ── the idle clock ──────────────────────────────────────────────────────── */
 /* A pane goes quiet and NOTHING else happens: no SSE event, no refresh. The
  * title must still stop claiming it is your turn, on the browser's own tick. */
 check(D.DISPLAY_TICK_MS === 60000,
@@ -244,8 +228,8 @@ check(/p\.idleS = 0; p\._idleAt = Date\.now\(\);/.test(src),
 check(/setInterval\(displayTick, DISPLAY_TICK_MS\)/.test(src),
       'nothing schedules displayTick — the clock exists and never runs');
 
-/* No read receipt in the projection: the hub has no source for one (DESIGN-5
- * section 7), and this browser keeps none either. */
+/* No read receipt in the projection: the hub has no source for one, and this
+ * browser keeps none either. */
 check(!/displayState\(p, unread\)|function displayState\(p, unread/.test(src),
       'displayState takes an `unread` again — a guess with the face of a fact');
 

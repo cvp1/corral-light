@@ -1,17 +1,13 @@
 /* The first ten minutes: an empty room that says what to do, and a shortcut
  * list that cannot lie.
  *
- *   T3.3  An empty roster renders the empty state; one pane removes it.
- *   T3.4  The `?` overlay lists EVERY binding the key handler's table holds,
- *         `?` toggles it, and Esc inside it closes the overlay only — it must
- *         never reach a pending permission card and refuse it.
+ *   An empty roster renders the empty state; one pane removes it.
+ *   The `?` overlay lists EVERY binding the key handler's table holds, `?`
+ *   toggles it, and Esc inside it closes the overlay only -- it must never
+ *   reach a pending permission card and refuse it.
  *
- * WHY ONE TABLE
- *   A help screen listing a shortcut the code has dropped is worse than no
- *   help screen, because it is believed. So the global key handler dispatches
- *   FROM `KEYS` and the overlay is BUILT FROM `KEYS`, and this test drives
- *   both against the same array rather than checking either against a list of
- *   its own.
+ * The key handler dispatches FROM `KEYS` and the overlay is built from `KEYS`,
+ * so this drives both against the same array.
  *
  * Run: node selftest_onboarding.mjs   (exit 0 = pass)
  */
@@ -98,7 +94,7 @@ for (const k of M.KEYS) {
         `the binding "${k.combo}" has no description`);
 }
 
-/* T3.4a — the overlay lists EVERY entry, and the table is what it reads. */
+/* The overlay lists EVERY entry, and the table is what it reads. */
 M.toggleKeys(true);
 check(NODES['#keysdlg'].open, '? did not open the overlay');
 const rows = NODES['#keys-body'].children;
@@ -119,11 +115,11 @@ for (const k of M.KEYS) {
         + `looking key that only works in the composer is a bug report`);
 }
 
-/* T3.4b — `?` toggles. */
+/* `?` toggles. */
 M.toggleKeys();
 check(!NODES['#keysdlg'].open, 'a second ? did not close the overlay');
 
-/* T3.4c — dispatch comes from the table, not from a parallel if-chain. */
+/* Dispatch comes from the table, not from a parallel if-chain. */
 const wire = src.slice(src.indexOf("document.addEventListener('keydown'"),
                        src.indexOf('const KEYS = ['));
 check(/for \(const k of KEYS\)/.test(wire),
@@ -142,7 +138,7 @@ const press = (init) => {
 check(press({ key: '?' }) !== null, 'pressing ? matched no binding');
 check(NODES['#keysdlg'].open, 'pressing ? did not open the overlay');
 
-/* T3.4d — Esc closes the overlay, and ONLY while the overlay is open.
+/* Esc closes the overlay, and ONLY while the overlay is open.
  * Esc on a pane refuses a pending permission card and interrupts a running
  * turn. A global Esc that swallowed the key would turn the help screen into
  * a way to deny a tool call, so the binding is conditional on `dlg.open` and
@@ -154,7 +150,7 @@ check(press({ key: 'Escape' }) === null,
       'Esc is swallowed globally even with the overlay closed — that is the '
     + 'key that refuses a permission card and interrupts a turn');
 
-/* T3.4e — ? must not fire while someone is typing a question mark. */
+/* ? must not fire while someone is typing a question mark. */
 NODES['#keysdlg'].open = false;
 for (const tag of ['INPUT', 'TEXTAREA', 'SELECT']) {
   const t = new Node(tag.toLowerCase());
@@ -173,8 +169,8 @@ NODES['#palette'].open = false;
 check(press({ key: 'K', ctrlKey: true }) !== null && NODES['#palette'].open,
       'Ctrl+K no longer opens the palette (uppercase K — shift or caps lock)');
 
-/* The dialog and the button the overlay needs exist in the shipped HTML —
- * the #pt-postnote lesson (S2): a mini-DOM invents whatever it is asked for. */
+/* The dialog and the button the overlay needs exist in the shipped HTML: a
+ * mini-DOM invents whatever it is asked for. */
 for (const id of ['keysdlg', 'keys-body', 'keysbtn'])
   check(new RegExp(`id="${id}"`).test(html),
         `index.html has no #${id} — the overlay would silently never open`);
@@ -182,16 +178,13 @@ check(/<div id="keys-body"[^>]*>\s*<\/div>/.test(html),
       'index.html hand-writes shortcut rows — they must come from KEYS, or '
     + 'the two lists drift');
 
-/* ── T3.3 the empty state ───────────────────────────────────────────────── */
+/* ── the empty state ─────────────────────────────────────────────────────── */
 /* Asserted on the real source: the block lives inside render(), which pulls
- * in the whole pane-reconciliation machinery, so driving it would test the
- * harness more than the product. The browser pass in LIVE.md is the proof it
- * appears; these are the properties that make it correct. */
+ * in the whole pane-reconciliation machinery. */
 const renderSrc = fn('render');
 const emptyFrom = renderSrc.indexOf('if (!shown.length)');
-/* Bounded at the rail block that follows: running to the end of render()
- * swept in `$('#needs').innerHTML = ''`, which belongs to the rail and made
- * the innerHTML check below fire on code it was not about. */
+/* Bounded at the rail block that follows, so the innerHTML check does not
+ * fire on the rail's code. */
 const emptyBlock = renderSrc.slice(emptyFrom, renderSrc.indexOf('// THE rail.',
                                                                 emptyFrom));
 check(emptyFrom > 0 && emptyBlock.length > 300 && emptyBlock.length < 3000,

@@ -27,9 +27,7 @@
 
   <aside class="rail left">
     <div class="brand">Corral <span class="lightmark">light</span></div>
-    <!-- The quick button is the dialog's own defaults with the dialog skipped:
-         the first live agent, the last directory, the remembered posture,
-         model/effort left to the agent. Same as opening New and pressing Start. -->
+    <!-- Quick start: the New dialog's defaults, without the dialog. -->
     <div class="newrow">
       <button class="new" id="new">＋ New conversation</button>
       <button class="newquick" id="new-quick" type="button"
@@ -52,10 +50,6 @@
       <div class="themes" id="themes"></div></div>
   </aside>
 
-  <!-- No room nav. Light is one room; a tab bar with a single tab is chrome
-       that teaches the wrong shape. The full Corral's Today / Mail / Fleet /
-       Delegates / FinOps / Library live on linux-host, where their sources
-       are. -->
   <main class="center">
     <div id="grid" class="grid"></div>
   </main>
@@ -68,9 +62,7 @@
   </nav>
 
   <aside id="rrail" class="rail right">
-    <!-- Collapsed, the rail becomes this strip. It is a strip and not
-         `display:none` on purpose: whatever is waiting still shows its count
-         here, so folding the rail buys screen space and never buys silence. -->
+    <!-- Collapsed rail strip; still shows the waiting count. -->
     <button class="railtab" id="railtab" title="Needs you">
       <span class="railtabnum" id="railtabnum"></span>
       <span class="railtabtxt">needs you</span>
@@ -84,26 +76,18 @@
 <dialog id="newdlg">
   <form method="dialog" class="dlg">
     <h2>New conversation</h2>
-    <!-- A role presets lane / effort / posture and puts its instructions in
-         the composer (roles.py). Never authority; nothing is sent by it. -->
+    <!-- A role presets lane / effort / posture and fills the composer; it sends nothing. -->
     <label>Role<select id="f-role"><option value="">None</option></select></label>
-    <!-- Rigs… (DESIGN-5 S12): the seated panes saved by name, brought back
-         with one click. It opens its own dialog; New is not needed for it. -->
+    <!-- Rigs: seated panes saved by name. -->
     <button type="button" class="btn" id="rigsbtn">Rigs…</button>
     <p class="hint" id="rolehint"></p>
     <label>Agent<select id="f-agent"></select></label>
-    <!-- DESIGN-6 S4: a lane refused for a lapsed login offers Sign in here,
-         because a disabled option cannot be clicked. -->
+    <!-- Sign-in link for a lane refused for a lapsed login (a disabled option cannot be clicked). -->
     <p class="hint" id="signinrow"></p>
-    <!-- Shown only when the chosen agent is a GROUP. Light ships one group, so
-         this stays hidden — it is kept because the picker code that fills and
-         reads it is shared with the grouped case, and a field the script
-         writes to but the document lacks fails silently. -->
+    <!-- Shown only for a GROUP agent; the shared picker code writes to it. -->
     <label id="hostrow" class="hide">Host<select id="f-host"></select></label>
     <p class="hint" id="hosthint"></p>
-    <!-- A datalist, not a <select>: these are SUGGESTIONS. Any path on this
-         host is a valid place to open a conversation, and a dropdown would
-         quietly turn a helpful list into the only allowed answers. -->
+    <!-- A datalist, not a <select>: suggestions only; any path is valid. -->
     <label>Directory<input id="f-cwd" spellcheck="false" list="cwdlist"
                            autocomplete="off"></label>
     <datalist id="cwdlist"></datalist>
@@ -119,17 +103,14 @@
       </select>
     </label>
     <p class="hint" id="posturehint"></p>
-    <!-- Later (later.py): with a time set, Start ARMS the conversation instead
-         of opening it now, and the prompt is what it will be asked. -->
+    <!-- With a time set, Start arms the conversation instead of opening it. -->
     <details id="f-later"><summary>Later…</summary>
       <label>Start at<input id="f-when" type="datetime-local"></label>
       <label>Repeat<select id="f-repeat"><option value="">once</option>
         <option value="daily">daily</option><option value="weekly">weekly</option></select></label>
       <label>Ask<textarea id="f-prompt" rows="3" placeholder="what it will be asked"></textarea></label>
     </details>
-    <!-- ⚡ preset: Start with this ticked saves agent / directory / model /
-         effort / posture as what the ⚡ quick button starts. Right-click ⚡
-         opens this dialog with it already ticked. -->
+    <!-- Saves these fields as what the ⚡ quick button starts. -->
     <label class="checkrow"><input type="checkbox" id="f-quick">
       Make these the ⚡ defaults</label>
     <p class="hint" id="quickhint"></p>
@@ -140,11 +121,7 @@
   </form>
 </dialog>
 
-<!-- Rigs… (DESIGN-5 S12). A rig is $CORRAL_LIGHT_STATE/rigs/<name>.toml: seat,
-     lane, directory, posture, role -- never a prompt unless hand-written.
-     Up checks the WHOLE rig before it starts anything; then each seat gets
-     exactly one outcome line, rendered by the server (corral_core/rigs.py),
-     shown here as text. Nothing rolls back. -->
+<!-- Rigs: Up validates the whole rig first, then reports one outcome per seat. Nothing rolls back. -->
 <dialog id="rigdlg">
   <form method="dialog" class="dlg">
     <h2>Rigs</h2>
@@ -166,8 +143,7 @@
   </form>
 </dialog>
 
-<!-- Port (port.py): carry this conversation's TRANSCRIPT to another lane.
-     The preview is the exact text that will be sent; Send is bound to its sha. -->
+<!-- Port: carry this conversation's transcript to another lane. Send is bound to the preview's sha. -->
 <dialog id="portdlg">
   <form method="dialog" class="dlg">
     <h2>Carry this conversation to…</h2>
@@ -182,10 +158,7 @@
   </form>
 </dialog>
 
-<!-- Built by toggleKeys() from the KEYS table in app.js — the same table the
-     global key handler dispatches from, so this list cannot advertise a
-     shortcut that does nothing. Empty here on purpose; a hand-written copy is
-     exactly the drift it exists to prevent. -->
+<!-- Filled by toggleKeys() from the KEYS table in app.js. -->
 <dialog id="keysdlg">
   <form method="dialog" class="dlg">
     <h2>Keyboard</h2>
@@ -194,9 +167,7 @@
   </form>
 </dialog>
 
-<!-- A seat (DESIGN-5 S6): a name the operator gives a pane so other panes can
-     address it. `pattern` is the server's grammar, so the browser refuses a
-     bad name before it is posted; the server refuses it again regardless. -->
+<!-- Seat: a name other panes can address. `pattern` mirrors the server's grammar. -->
 <dialog id="seatdlg">
   <form method="dialog" class="dlg">
     <h2>Seat</h2>

@@ -1,15 +1,12 @@
-/* A message from another pane renders as what it is (DESIGN-5 S7).
+/* A message from another pane renders as what it is.
  *
- *   T7.6   a `peer` event renders its OWN block: class `peer`, `from @author`
- *          visible, the body as text (a `<script>` stays characters), and a
- *          tooltip that says the sender label is not proof of origin (7.9);
- *          a `user` event still renders as the human bubble.
- *   T7.18  the event reducer sets `busy` on `peer` exactly as on `user` --
- *          otherwise the roster and tab title say "your turn" for the whole
- *          of a peer-driven turn while the server says busy.
+ *   a `peer` event renders its OWN block: class `peer`, `from @author`
+ *   visible, the body as text (a `<script>` stays characters), and a tooltip
+ *   that says the sender label is not proof of origin; a `user` event still
+ *   renders as the human bubble.
+ *   the event reducer sets `busy` on `peer` exactly as on `user`.
  *
- * renderLog as a whole pulls in the entire transcript machinery; this runs
- * the REAL `case` blocks and the REAL reducer slice, cut from app.js by their
+ * Runs the real `case` blocks and reducer slice, cut from app.js by their
  * labels, against the smallest environment they touch.
  *
  * Run: node selftest_peer.mjs   (exit 0 = pass)
@@ -62,7 +59,7 @@ function render(kind, d) {
   return log;
 }
 
-/* ── T7.6 ─────────────────────────────────────────────────────────────── */
+/* ── peer block ──────────────────────────────────────────────────────────── */
 const hostile = '<script>alert(1)</script> and <b>bold</b>';
 const log = render('peer', { from_seat: 'author', from_pane: 'aaaaaaaaaaaa',
                              to_seat: 'reviewer', hop: 1, text: hostile });
@@ -94,7 +91,7 @@ check(failed.children[0] && failed.children[0].textContent.includes('card-pendin
 check(render('peer_result', { turn: 't', delivered: true }).children.length === 0,
       'a successful peer_result printed a line');
 
-// DESIGN-5 S11b: the reply queue's record, on both sides, as text.
+// The reply queue's record, on both sides, as text.
 const qTo = render('peer_queue', { status: 'queued', side: 'to', from_seat: 'reviewer' });
 check(qTo.children[0] && qTo.children[0].textContent === 'message from @reviewer: queued until this turn ends',
       `the waiter's queued line reads "${qTo.children[0] && qTo.children[0].textContent}"`);
@@ -110,7 +107,7 @@ check(render('peer_queue', { status: 'delivered', side: 'to' }).children.length 
 check(render('peer_queue', { status: 'delivered', side: 'from', to_seat: 'a' }).children[0]
       .textContent === 'message to @a: delivered', "the sender never learns it was delivered");
 
-/* ── T7.18 the reducer ────────────────────────────────────────────────── */
+/* ── the reducer ───────────────────────────────────────────────────────── */
 const a = src.indexOf("    if (ev.kind === 'permission') { p.pending.push(d.requestId);");
 const b = src.indexOf("    if (ev.kind === 'renamed')", a);
 if (a < 0 || b < 0) throw new Error('the reducer is not where this test expects it');

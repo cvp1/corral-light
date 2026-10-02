@@ -1,21 +1,7 @@
-/* ask_human renders as what it is: the agent asking its human.
- *
- *   the banner   an open question renders a banner with the asker and the
- *                full text, as TEXT (markup stays characters); no question,
- *                no banner
- *   the roster   the row carries a one-line `asks: …` preview, cut at
- *                ASK_PREVIEW_CHARS with the full text on the tooltip
- *   transcript   a `question` event is its own block -- never the human
- *                bubble, never a system line; `question_cleared` says why
- *   reducer      `question` opens it, `question_cleared` closes it, `user`
- *                records its via (null for a typed turn), `peer` records
- *                `peer` -- so the display mirror sees what the core sees
- *   wiring       updatePane fills the banner slot, the roster row appends
- *                the preview (a deleted call site with the function left in
- *                place would pass every check above)
- *
- * The real functions and case blocks are cut from app.js and run against a
- * DOM that cannot parse (the selftest_peer.mjs pattern).
+/* ask_human renders as the agent asking its human: the banner, the roster
+ * preview, the transcript block, the reducer, and the wiring that calls them.
+ * The real functions are cut from app.js and run against a DOM that cannot
+ * parse.
  *
  * Run: node selftest_ask.mjs   (exit 0 = pass)
  */
@@ -83,7 +69,7 @@ check(Q.questionBanner({ question: null }) === null, 'a banner with no question'
 check(Q.questionBanner({}) === null, 'a banner on a pane that never asked');
 
 /* The HUB's loop pause (source hop-limit) is the hub's words: never "the
- * agent asks you", never "@seat asks" (P20). */
+ * agent asks you", never "@seat asks" */
 const hub = Q.questionBanner({ seat: 'reviewer',
   question: { text: 'Loop paused — Refused: @reviewer → @author', source: 'hop-limit' } });
 check(hub.textContent.includes('Corral paused this loop'), `hub banner: "${hub.textContent}"`);

@@ -1,64 +1,10 @@
 #!/usr/bin/env python3
-"""corral-seats — the MCP server a pane's agent uses to reach other panes.
+"""corral-seats — the stdio MCP server a pane's agent uses to reach other panes.
 
-DESIGN-5 S8 (S10, S11), plus ask_human. Five tools, nothing else:
-
-    seat_list()              -> who can be addressed: [{seat, display, lane,
-                                tool}] -- no titles, no transcripts
-    seat_send(seat, text)    -> the hub's answer, verbatim: delivered (with a
-                                turn id) | refused (with the reason) | failed
-                                | queued (S11b: held for a waiter's next turn)
-    seat_broadcast(text)     -> one seat_send per OTHER seated pane, each with
-                                its own answer; one refusal unsends nothing
-    seat_wait(seat, turn|until, timeout_s)
-                             -> block HERE, bounded, until a turn this pane
-                                sent has ended or the seat shows a state:
-                                {result, state, turn_ended} -- never text
-    ask_human(question)      -> raise ONE open question on THIS pane for its
-                                human: the roster reads needs-you and shows
-                                it until a human sends the pane a turn. A
-                                second ask replaces the first.
-
-Stdlib JSON-RPC over stdio, one message per line -- the same three methods
-Corral's registry proxy speaks (initialize, tools/list, tools/call). The hub
-appends this server to every eligible pane at session/new and session/load;
-the adapter (Claude Code, Codex, ...) starts it as a child and hands its
-tools to the model.
-
-WHO IS SENDING
-    The HUB decides, not this process and not the model. The adapter starts
-    this server with three environment entries the hub put in the descriptor:
-    CC_RUNBOOK_SESSION (the pane id, a label), CORRAL_PANE_TOKEN and
-    CORRAL_HUB_URL. Every call carries the token in X-Corral-Pane-Token; the
-    hub maps it to the pane it minted it for and uses THAT pane as the
-    sender. A `from` a caller puts anywhere is ignored. The token is minted
-    fresh at every spawn and lives only in the hub's memory and in this
-    process's environment -- never in meta.json, never on disk.
-
-WHAT THE TOKEN IS NOT (the honest threat statement, DESIGN-5 section 7.9)
-    It is a LABEL for the supported path, not a secret. It sits in this
-    process's environment, and -- measured live 2026-09-29 -- the Claude
-    adapter also puts it on the `claude` process's COMMAND LINE, which any
-    local user can read with `ps` on a host whose /proc is not hidepid. So the
-    hub does not trust the token alone: on Linux it looks up who opened the
-    calling socket (/proc/net/tcp) and refuses any caller that is not the
-    hub's own UNIX user. What remains is the documented boundary: any process
-    running AS THAT USER can send as a pane -- and an agent with a shell
-    (Codex and Grok were measured running one without a permission card) can
-    already type into any pane through `corral consult send`. This path adds
-    provenance and a gate on the route that is SUPPOSED to be used, not a
-    principal those processes cannot forge.
-
-BOUNDS
-    Every hub call has a timeout; a response is capped; the tool text a model
-    sees is capped. Nothing here retries: `refused` is an answer, not an error.
-    A wait is bounded (PEER_WAIT_MAX_S), polls at PEER_WAIT_POLL_S, and at most
-    one is in flight per process -- one process per pane spawn, so one per
-    source pane. The hub is only ever asked a question it answers at once; a
-    poll that fails after the first one (the hub restarted, which also revokes
-    this process's token) ends the wait `interrupted`, never a silent retry.
-
-    python3 seat_mcp.py            (started by an adapter, not by hand)
+Tools: seat_list, seat_send, seat_broadcast, seat_wait, ask_human. Every hub
+call carries CORRAL_PANE_TOKEN; the hub, not the caller, decides the sender.
+The token is a label, not a secret: any process running as the hub's user can
+send as a pane. All hub calls, responses and waits are bounded; no retries.
 """
 import json
 import os
@@ -70,22 +16,19 @@ import urllib.parse
 import urllib.request
 
 HUB_TIMEOUT_S = 15
-PEER_WAIT_S = 120                 # seat_wait's default bound (DESIGN-5 S11)
+PEER_WAIT_S = 120                 # seat_wait's default bound
 PEER_WAIT_MAX_S = 600             # the most a caller may ask for; more is refused
 PEER_WAIT_POLL_S = 1.0            # one read of the hub per second while waiting
 WAIT_UNTIL = ("your-turn", "idle", "needs-you", "dead")
-# Neither changes by itself: a human must resume a paused pane or restart a
-# dead one, so waiting on through either is waiting on nothing.
+# States only a human can change; waiting through them is pointless.
 WAIT_BLOCKED = ("paused", "dead")
 _WAIT_LOCK = threading.Lock()     # one wait in flight per process
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_ASK_CHARS = 2000              # one question for a human; more is REFUSED
 TOKEN_HEADER = "X-Corral-Pane-Token"
-PROTOCOL = "2024-11-05"           # what Corral's registry proxy speaks today
+PROTOCOL = "2024-11-05"
 
-# Said to the model verbatim (DESIGN-5 S8). The one sentence that decides
-# whether an agent treats a refusal as a wall or as a reason to hammer: it is
-# the hub's answer about another pane's state, not a fault in this call.
+# Shown to the model so a refusal is not treated as a retryable error.
 REFUSAL_GUIDANCE = (
     "`refused` means the other seat is busy, waiting on its human, or not "
     "allowed to receive this; it is not an error to retry — call `seat_list` "
@@ -236,8 +179,7 @@ def _hub(method, path, body=None, env=None, timeout=HUB_TIMEOUT_S):
 
 def _wait_args(args):
     """-> (seat, turn, until, timeout_s, None) or a refusal dict as the last
-    item. Out of range is REFUSED, not clamped: a model that asked for an
-    hour and silently got ten minutes would read the timeout as the answer."""
+    item. Out-of-range timeouts are refused, not clamped."""
     seat, turn, until = args.get("seat"), args.get("turn"), args.get("until")
     timeout = args.get("timeout_s", PEER_WAIT_S)
 
@@ -261,9 +203,8 @@ def _wait_args(args):
 
 
 def seat_wait(args, env=None, clock=time.monotonic, sleep=time.sleep):
-    """-> (result_dict, is_error). Blocks THIS process, never the hub: each
-    poll is one immediate read (/api/peer/turn with a turn, /api/peer/seats
-    with a state). Bounded by `timeout_s`; one at a time per process."""
+    """-> (result_dict, is_error). Polls the hub until the turn ends or the
+    seat reaches a state; bounded by `timeout_s`, one at a time per process."""
     seat, turn, until, timeout, refusal = _wait_args(args)
     if refusal:
         return refusal, False
@@ -348,8 +289,7 @@ class _Answered(Exception):
 
 
 def call_tool(name, args, env=None):
-    """-> (result_dict, is_error). A refusal is NOT an error: it is the hub's
-    answer, and a model told "error" tends to retry."""
+    """-> (result_dict, is_error). A refusal is not an error."""
     args = args if isinstance(args, dict) else {}
     try:
         if name == "seat_list":
@@ -360,8 +300,7 @@ def call_tool(name, args, env=None):
                 return {"result": "refused", "reason": "arguments",
                         "why": "seat_send needs a `seat` and a `text`, both "
                                "strings"}, False
-            # Only these two keys leave this process: whatever else a caller
-            # passed -- a `from`, a pane id -- never reaches the hub.
+            # Forward only seat and text; caller-supplied sender fields drop.
             return _hub("POST", "/api/peer/send",
                         {"seat": seat.lstrip("@"), "text": text}, env=env), False
         if name == "seat_broadcast":
@@ -383,8 +322,6 @@ def call_tool(name, args, env=None):
                         "why": f"the question is {len(q)} characters; the "
                                f"limit is {MAX_ASK_CHARS}. Shorten it -- it "
                                f"was not sent"}, False
-            # Only the question leaves this process: the token decides
-            # WHICH pane is asking, never a field the caller supplies.
             return _hub("POST", "/api/peer/ask", {"question": q}, env=env), False
     except HubError as e:
         return {"result": "failed", "reason": "hub", "why": str(e)}, True
@@ -428,12 +365,8 @@ def _reply(msg):
 
 
 def main():
-    """Read requests in order. A tools/call runs on its own thread so a
-    seat_wait blocking here does not stop this process from answering the
-    next call -- a second wait is then REFUSED `wait-in-flight`, rather than
-    queued behind the first. At end of input the calls still running are
-    answered before this process exits; every call is bounded, so every
-    thread ends."""
+    """Serve stdin; each tools/call runs on its own thread so a blocking
+    seat_wait does not stall other calls. Joins running calls at EOF."""
     calls = []
     for line in sys.stdin:
         line = line.strip()

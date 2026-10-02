@@ -1,10 +1,5 @@
-"""DESIGN-5 S11b: the reply queue's bounds are named constants, say what the
-brief says, and are stated to the model and in the README.
-
-The behaviour (queued / delivered / queue-full / expired / dropped / refused
-at delivery / one lock) is driven through real agent processes on both skins'
-drains by testkit/reply_queue_cases.py -- full Corral's test_peer.ReplyQueue
-and Light's test_corral_light.LightReplyQueue.
+"""The reply queue's bounds are named constants, stated to the model and in
+the README. Behaviour is covered by testkit/reply_queue_cases.py.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
 """

@@ -1,20 +1,16 @@
-/* THEMES. These are distinct MATERIAL systems, not tints of the same page
-   (the original seven are listed here; the calm set of four follows below). Each semantic text/accent variable is measured against its own
-   panel by selftest_corral.py; the weakest ratios after the 2026-08-24
-   rendered pass are laundry 5.10, dusk 5.11, nocturne 6.51, umber 5.99,
-   slate 6.08, ink 6.32, parchment 5.86 (all above the 4.5:1 floor).
+/* THEMES: distinct material palettes. Every text/accent variable clears 4.5:1
+   against its panel.
 
      laundry    cool linen, French blue, softened sage
      dusk       low-contrast twilight blue with apricot light
      nocturne   cinematic indigo, violet bloom, cyan and rose
-     umber      espresso and copper -- warm without making every plane orange
-     slate      crisp steel blue-grey, the operational dark theme
+     umber      espresso and copper
+     slate      crisp steel blue-grey
      ink        near-black graphite with restrained spectral accents
      parchment  warm editorial paper, walnut, navy and olive
 
-   --wash-* owns ambient canvas light; --brand-* owns the app mark. Keeping
-   them separate from semantic status colours prevents a theme's danger or
-   needs-you colour from accidentally becoming its decorative identity. */
+   --wash-* is ambient canvas light and --brand-* the app mark, kept separate from
+   the semantic status colours. */
 [data-theme="umber"]{
   --ground:#1d1510; --panel:#2c2019; --raise:#3b2b21; --line:#523a2b; --line2:#73513a;
   --ink:#f8f0e8; --dim:#dbc8b7; --faint:#b39b86;
@@ -50,10 +46,7 @@
   --wash-a:#587fc2; --wash-b:#8064b5;
   --brand-a:#8cc8ff; --brand-b:#a78bfa; --brand-c:#f07f9a; --shadow-rgb:0 0 0;
 }
-/* Accents follow the image, not the usual role-colour habit: the brand red is
-   the loudest thing in that hero, so it takes --gold (needs-you) rather than
-   --rust (dead), which drops to a muted rose. A palette with no amber in it
-   should not grow one just because the variable is named gold. */
+/* Here the brand red takes --gold (needs-you); --rust (dead) drops to a muted rose. */
 [data-theme="nocturne"]{
   --ground:#080c17; --panel:#151c31; --raise:#242e4a; --line:#313e67; --line2:#52618f;
   --ink:#f4f5ff; --dim:#c9d0ec; --faint:#9faace;
@@ -68,10 +61,8 @@
   --wash-a:#c49455; --wash-b:#5f7da5;
   --brand-a:#243b61; --brand-b:#a4652d; --brand-c:#d2a85f; --shadow-rgb:62 48 30;
 }
-/* CALM SET (2026-10-01). Four soothing palettes: low-chroma accents, soft
-   grounds, no saturated alarms -- even --rust and --gold stay muted. Every
-   text/accent variable clears 4.5:1 against ground, panel AND raise; weakest
-   pairs: sagebrush 4.62, fog 4.64, tidepool 5.23, mesa 5.05.
+/* CALM SET: low-chroma accents, soft grounds, muted --rust and --gold. Every
+   text/accent variable clears 4.5:1 against ground, panel and raise.
 
      sagebrush  pale sage linen, moss green, warm clay
      fog        blue-grey morning mist with soft lavender
@@ -105,13 +96,9 @@
   --wash-a:#8a7aa8; --wash-b:#b88a6f;
   --brand-a:#c9b8e0; --brand-b:#d9a78a; --brand-c:#aebf98; --shadow-rgb:10 8 12;
 }
-/* CALM SET II (2026-10-01). Adapted from Omarchy's quieter bundled themes
-   (basecamp/omarchy themes/), mapped onto Corral's variables. Source hues kept;
-   any text/accent under 4.5:1 on ground, panel OR raise was nudged in
-   lightness only (hue and saturation held). Weakest pairs: everforest 4.56,
-   kanagawa 4.68, nord 4.56, ethereal 6.33, rosedawn 4.55, flexoki 4.65.
-   Loud source reds (Kanagawa peach-red, Ethereal #ED5B5A) were swapped for
-   their softer siblings so these stay calm.
+/* CALM SET II: adapted from Omarchy's quieter bundled themes. Source hues kept;
+   lightness nudged where needed to clear 4.5:1 on ground, panel and raise, and
+   loud reds swapped for softer siblings.
 
      everforest  warm forest grey, moss, ember orange
      kanagawa    sumi ink, wave blue, lantern yellow
@@ -173,21 +160,13 @@ html,body{margin:0;height:100%;background:var(--ground);color:var(--ink);
   font-family:var(--sans);font-size:14.5px;overflow:hidden}
 button,input,select,textarea{font:inherit;color:inherit}
 button{background:none;border:none;cursor:pointer}
-/* Keyboard focus was invisible on every button in the app (panel 3/3,
-   2026-08-24). --ember is already the focus color on inputs. */
+/* Visible keyboard focus; --ember is already the focus colour on inputs. */
 button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 ::-webkit-scrollbar{width:9px;height:9px}
-/* `--line2` measures ~2.5:1 against `--panel`/`--ground` on Ink (the
-   default theme) -- overlay-scrollbar engines already hide the thumb until
-   hover, so at that contrast it reads as no scrollbar at all rather than a
-   dim one. Worst on `.perm pre`: a diff you can't see you haven't finished
-   scrolling is a consent surface lying to you (P17). `--faint` is tuned for
-   legibility against panel/ground already; reuse it here on every theme. */
+/* --faint, not --line2: --line2 is too low-contrast to read as a scrollbar. */
 ::-webkit-scrollbar-thumb{background:var(--faint);border-radius:5px}
 ::-webkit-scrollbar-track{background:var(--raise)}
-/* Standard scrollbar spec (Firefox and any non-WebKit engine): the three
-   rules above are WebKit-only and silently do nothing elsewhere, so a pane
-   that scrolls fine shows no visible scrollbar at all on those browsers. */
+/* Standard scrollbar properties for non-WebKit engines. */
 *{scrollbar-width:thin;scrollbar-color:var(--faint) var(--raise)}
 .hide{display:none !important}
 
@@ -210,10 +189,8 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .rail.left{border-right:1px solid var(--line)}
 .rail.right{border-left:1px solid var(--line)}
 
-/* Folded needs-you rail. A 34px strip, NOT display:none — the count stays
-   visible and turns hot when an agent is actually blocked, so folding buys
-   screen space and never buys silence. (The <1100px rule below once did the
-   display:none version and took every permission off the page with it.) */
+/* Folded needs-you rail: a 34px strip, never display:none, so the count stays
+   visible and turns hot when an agent is blocked. */
 .app.railshut{grid-template-columns:230px 1fr 34px}
 .railtab{display:none}
 .rail.right.shut{padding:0;align-items:center;overflow:hidden}
@@ -277,10 +254,8 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .rit.needs-you .dot{background:var(--gold);animation:pulse .9s infinite}
 .rit.dead .dot{background:var(--rust)}
 .rit.detached .dot{background:var(--line2)}
-/* The display projection (DESIGN-5 S1): five words, one colour each, and they
-   come AFTER the raw-state rules above so they win where the two differ --
-   `ready` and `d-idle` are the same pane, and idle is the one the eye should
-   skip. The raw classes stay because a dozen other rules key on them. */
+/* Display states, after the raw-state rules so they win where the two differ.
+   The raw classes stay because other rules key on them. */
 .rit.d-your-turn .dot{background:var(--sage);animation:none}
 .rit.d-working .dot{background:var(--dusk);animation:pulse 1.4s infinite}
 .rit.d-needs-you .dot{background:var(--gold);animation:pulse .9s infinite}
@@ -288,8 +263,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .rit.d-idle .dot{background:var(--line2);animation:none}
 .rit.d-idle{opacity:.72}
 .rit.d-idle .s{color:var(--faint)}
-/* paused: restored, not running — only a human resume brings it back. Hollow
-   dot, full opacity: it is waiting on YOU, just not urgently. */
+/* paused: restored, not running; only a human resume brings it back. */
 .rit.d-paused .dot{background:transparent;border:1px solid var(--line2);animation:none}
 .pane.detached{opacity:.9}
 .minchip.detached .d{background:var(--line2)}
@@ -320,22 +294,13 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 /* ── grid ── */
 .grid{display:grid;gap:12px;padding:12px;overflow:auto;min-height:0;flex:1;
   grid-template-columns:repeat(auto-fit,minmax(430px,1fr));align-content:start}
-/* One-pane mode: let the pane fill the grid's real, measured height instead
-   of relying on `.pane`'s own vh-based cap (below) reproducing it -- that
-   cap predates the rooms bar and status bar and now overshoots by ~60px,
-   so the grid's own `overflow:auto` ALSO painted a scrollbar next to the
-   transcript's. Found independently by both reviewers, 2026-08-23. */
+/* One-pane mode: fill the grid's measured height so only the transcript scrolls. */
 .grid.one{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr);align-content:stretch}
 .grid.one .pane{height:100%}
-/* One row, always: the "great big huge blobs" (the operator, 2026-08-24) were the
-   wrap as much as the width — chips scroll horizontally like browser tabs
-   instead of stacking rows above the working panes. Each chip is a small
-   header (roster radius, roster-width ellipsis cap), not a sentence pill;
-   full title + state live in the tooltip/aria-label. Panel-adjudicated:
-   reviews/2026-08-24-ui-polish-panel/synthesis.md. */
+/* Minimized chips: one row that scrolls horizontally like browser tabs; full
+   title and state live in the tooltip/aria-label. */
 .minbar{grid-column:1/-1;display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto;padding:2px 2px 6px}
-/* Uniform tabs (the operator, 2026-08-30): every chip is the same fixed size, like
-   browser tabs — a chip's width must not leak the length of its title. */
+/* Uniform fixed-size tabs, so a chip's width never depends on its title. */
 .minchip{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid var(--line);
   border-radius:8px;padding:3px 10px;font-size:11.5px;cursor:pointer;color:var(--dim);
   flex:0 0 190px;width:190px;min-width:0;height:26px;box-sizing:border-box}
@@ -344,8 +309,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip:hover{border-color:var(--ember);color:var(--ink)}
 .minchip .mt{flex:1;text-align:left}
 .minchip .d{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
-/* The one visible pane owns the whole grid — say so on the pane itself, not
-   by implication from an empty grid. Same pill idiom as posture/ctx. */
+/* Mark the pane that owns the whole grid. */
 .pane.solo .ph::before{content:'⛶ full';font-family:var(--mono);font-size:10.5px;
   text-transform:uppercase;letter-spacing:.7px;border:1px solid var(--line2);
   border-radius:20px;padding:2px 7px;color:var(--sage);flex:none}
@@ -354,7 +318,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip.busy .d{background:var(--dusk);animation:pulse 1.4s infinite}
 .minchip.ready .d{background:var(--sage)}
 .minchip.dead .d{background:var(--rust)}
-/* Same five, on a minimized chip. After the raw rules, for the same reason. */
+/* Display states on a minimized chip, after the raw rules for the same reason. */
 .minchip.d-needs-you{border-color:var(--gold);color:var(--ink)}
 .minchip.d-needs-you .d{background:var(--gold);animation:pulse .9s infinite}
 .minchip.d-working .d{background:var(--dusk);animation:pulse 1.4s infinite}
@@ -364,13 +328,10 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip.d-idle{opacity:.78}
 .minchip.d-paused .d{background:transparent;border:1px solid var(--line2);animation:none}
 .empty{grid-column:1/-1;display:grid;place-items:center;height:70vh;text-align:center;color:var(--dim);
-  /* Rows packed in the middle, not spread over 70vh: with three lines the
-     first-run state read as three unrelated fragments (S3 live pass). */
+  /* Rows packed in the middle so the first-run lines read as one group. */
   align-content:center;row-gap:6px}
 .empty h2{font-family:var(--serif);font-size:24px;color:var(--ink);margin:0 0 8px;font-weight:400}
-/* The first-run empty state: one thing to press, one way to get around, and
-   where the transcripts live. Generous spacing because this is the whole
-   screen, not a footnote under a wall of panes. */
+/* First-run empty state. */
 .empty .emptygo{margin:4px 0 14px;padding:9px 16px;font-size:13px}
 .empty .emptyline{font-size:12.5px;line-height:1.9}
 .empty .emptyline.dim{color:var(--faint);margin-top:6px}
@@ -390,8 +351,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .keyscombo{font-family:var(--mono);font-size:11.5px;color:var(--ink);
   white-space:nowrap;text-align:right}
 .keyswhat{font-size:12.5px;color:var(--dim)}
-/* The scope sits under its description rather than in a third column: most
-   rows have none, and an empty column reads as a missing value. */
+/* The scope sits under its description rather than in a mostly empty column. */
 .keyswhere{grid-column:2;font-size:11px;color:var(--faint);margin-top:-5px}
 
 /* pane */
@@ -410,12 +370,9 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .ph .pill.cfg:hover{color:var(--ink);border-color:var(--ember)}
 .ph .pill.strict{color:var(--sage);border-color:color-mix(in srgb, var(--sage) 55%, var(--line2))}
 .ph .pill.auto{color:var(--rust);border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
-/* An honest "we do not know": deliberately drab, so it never reads as a
-   safety assurance the way a coloured posture pill does. */
+/* Unknown posture: deliberately drab so it never reads as a safety assurance. */
 .ph .pill.unknown{color:var(--faint);border-color:var(--line);border-style:dashed}
-/* The pane's own state pill — the same five words as the roster and the tab
-   title. Quiet by default; only needs-you is allowed to shout, because a pill
-   that always shouts is wallpaper. */
+/* The pane's state pill: quiet by default; only needs-you stands out. */
 .ph .pill.st{color:var(--dim)}
 .ph .pill.st.d-needs-you{color:var(--gold);
   border-color:color-mix(in srgb, var(--gold) 55%, var(--line2))}
@@ -434,10 +391,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .log{flex:1;overflow-y:auto;overflow-x:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
 .msg{font-size:13.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .msg.user{color:var(--dusk);border-left:2px solid var(--line2);padding-left:10px}
-/* Claude's tool titles are short ("Read", "Terminal"); Codex/ChatGPT's are
-   often the full unspaced command or path, which had nothing to wrap on and
-   pushed `.log` into unwanted horizontal scroll -- part of "scroll bars and
-   chat GPT" as one complaint, 2026-08-23 bugbash panel. */
+/* Some agents' tool titles are long unspaced commands or paths; let them wrap. */
 .tool{font-family:var(--mono);font-size:12.5px;color:var(--dim);background:var(--raise);
   border:1px solid var(--line);border-radius:6px;padding:7px 10px;
   overflow-wrap:anywhere;word-break:break-word}
@@ -525,8 +479,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .msg.md table{border-collapse:collapse;font-size:12.5px}
 .msg.md th,.msg.md td{border:1px solid var(--line);padding:4px 9px;text-align:left}
 .msg.md th{background:var(--raise);font-weight:600}
-/* The same card, in the narrower rail. It stays fully readable — a consent
-   surface that hides what it is approving is worse than no surface. */
+/* The same card in the narrower rail; it stays fully readable. */
 .ncard .perm{margin:8px 0 6px;padding:9px 10px;border-radius:6px}
 .ncard .perm pre{font-size:11px;max-height:150px}
 .ncard .perm .h{font-size:12px}
@@ -534,8 +487,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 
 .composer{border-top:1px solid var(--line);padding:9px;display:flex;gap:8px;background:var(--raise);
   position:relative}
-/* Slash-command completer. Anchored to the composer, opening UPWARD: a pane's
-   composer sits at its bottom edge, so a downward list would render off it. */
+/* Slash-command completer, opening upward from the composer at the pane's bottom edge. */
 .ac{position:absolute;left:9px;right:9px;bottom:calc(100% - 1px);z-index:20;
   background:var(--panel);border:1px solid var(--line2);border-radius:8px;
   box-shadow:0 -8px 24px rgba(0,0,0,.35);overflow:hidden;max-height:250px;overflow-y:auto}
@@ -554,9 +506,8 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .composer .send:hover{color:var(--ink);border-color:var(--ember)}
 
 /* ── terminal panes (host:<box> shell lanes) ──
-   A shell is a transcript of commands and raw output, not a conversation
-   (The operator, 2026-08-24): monospace throughout, no bubbles, no message gap —
-   the prompt glyph is what separates one command from the next. */
+   Monospace throughout, no bubbles, no message gap; the prompt glyph separates
+   commands. */
 .pane.term .log{font-family:var(--mono);font-size:12.5px;line-height:1.5;
   gap:0;background:var(--ground)}
 .pane.term .tcmd{white-space:pre-wrap;word-break:break-word;color:var(--ink);
@@ -585,10 +536,8 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .sect{font-family:var(--mono);font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;
   color:var(--faint);padding:12px 2px 6px;border-top:1px solid var(--line);margin-top:6px}
 .facts{margin-top:7px}
-/* Fleet ROOM cards only (not the needs-you rail, whose .facts buttons are
-   actionables and stay loud): the same verbs repeat on every card, so the
-   base chrome goes ghost (labels stay — no icon-only, no hover-reveal:
-   this is a phone PWA). .go/.on variants keep their loud borders. */
+/* Fleet room cards only (not the needs-you rail): base chrome goes ghost since
+   the same verbs repeat on every card. Labels stay; .go/.on keep loud borders. */
 #fleet-objects .facts .fbtn:not(.go):not(.on){border-color:transparent;color:var(--faint)}
 #fleet-objects .facts .fbtn:not(.go):not(.on):hover{border-color:var(--line2);background:var(--raise);color:var(--ink)}
 .fbtn{font-size:11.5px;padding:3px 10px;border:1px solid var(--line2);border-radius:6px;
@@ -600,11 +549,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .calm{color:var(--faint);font-size:12.5px;padding:8px 8px;line-height:1.6}
 
 /* dialog */
-/* No max-height meant a tall dialog (New Conversation with ChatGPT: model
-   list + effort + posture hint + the optional later-box) could exceed a
-   short window with `body{overflow:hidden}` -- clipped, with no scrollbar
-   anywhere and the Start button unreachable. Confirmed independently by
-   both reviewers, 2026-08-23 bugbash panel. */
+/* Cap dialog height so tall dialogs scroll instead of clipping Start. */
 dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line2);border-radius:var(--r);
   padding:0;max-width:480px;width:92%;max-height:calc(100vh - 32px);overflow:auto}
 dialog::backdrop{background:rgba(0,0,0,.62)}
@@ -637,25 +582,20 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .toast.show{opacity:1;transform:none}
 .toast.bad{border-color:var(--rust);color:#e6b3ab}
 
-/* Narrow: shrink the rail, never delete it. `display:none` here removed every
-   permission and every fleet card from the page — the one thing that must not
-   be possible to miss, silently gone because the window was 1080px wide. */
+/* Narrow: shrink the rail, never hide it, so permissions stay on the page. */
 @media(max-width:1100px){.app{grid-template-columns:170px 1fr 240px}
   .rail.right{padding:9px 8px}.ncard .perm pre{max-height:110px}}
 @media(max-width:820px){.app{grid-template-columns:1fr}.rail.left{display:none}
   .rail.right{position:fixed;right:0;top:0;bottom:0;width:290px;z-index:40;
     box-shadow:-10px 0 30px rgba(0,0,0,.4)}
-  /* Folded, the overlay must shrink to the strip too — otherwise it stays a
-     290px pane of nothing sitting on top of the transcript. */
+  /* Folded, the overlay shrinks to the strip too. */
   .rail.right.shut{width:34px;box-shadow:none}}
 
-/* Scheduled queue in the roster. Deliberately quieter than a live pane — it is
-   work that has not started, and must never compete with work that has. */
+/* Scheduled queue in the roster: quieter than a live pane. */
 .rit.sched{opacity:.85}
 .rit.sched .dot{background:var(--dusk);box-shadow:none;
   border:1px solid var(--line2);background:transparent}
-/* A job that did not run is not queued work — it is a fault sitting where the
-   queue is, and it stays until dismissed. */
+/* A job that did not run is a fault, shown until dismissed. */
 .rit.sched.failed{opacity:1;border-left:2px solid var(--rust)}
 .rit.sched.failed .dot{border-color:var(--rust)}
 .rit .s.err{color:var(--rust)}
@@ -664,7 +604,7 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .laterbox.hide{display:none}
 .dlg .when{margin-top:2px}
 
-/* ── the Library (rooms, Phase 0) ── */
+/* ── the Library ── */
 .stage{flex:1;overflow-y:auto;min-height:0}
 .libhome{max-width:760px;margin:0 auto;padding:26px 28px}
 .libq{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:8px;
@@ -754,8 +694,7 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
   color:var(--faint);margin-bottom:4px;cursor:pointer}
 .perm .why.dig{font-size:10.5px;color:var(--faint);letter-spacing:.03em}
 
-/* ── status bar (DESIGN-2 Phase 1) — a fixed strip under the whole app,
-   never a per-room thing: hosts/delegates/mail/relay are estate-wide facts */
+/* ── status bar: a fixed strip under the whole app ── */
 .app{height:calc(100vh - 25px)}
 .statusbar{position:fixed;left:0;right:0;bottom:0;height:25px;z-index:30;
   display:flex;align-items:center;gap:16px;padding:0 14px;overflow:hidden;
@@ -770,8 +709,7 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .page h2.ptitle{font-family:var(--serif);font-weight:400;font-size:24px;margin:0 0 14px}
 .psec{margin:22px 0}
 .psec .lab{padding:0 0 8px}
-/* The banner rendered as one crammed prose line; it's really a set of
-   glances — chips make each one land on its own (the operator, 2026-08-30). */
+/* The banner as a set of chips, one per glance. */
 .today-chips{display:flex;flex-wrap:wrap;gap:7px;margin:2px 0 8px}
 .chip{font-size:12.5px;color:var(--dim);background:var(--panel);
   border:1px solid var(--line);border-radius:20px;padding:4px 12px;line-height:1.5}
@@ -793,14 +731,12 @@ details.tsec>.abody{padding:0 2px 14px}
 .today-row:hover{background:var(--panel)}
 .today-row .t{flex:1;font-size:12.5px}
 .today-row .s{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
-/* A real failure vs a plain "finished" line looked identical but for the
-   word "failed —" (the operator, 2026-08-24). */
+/* A failed row, distinct from a plain "finished" one. */
 .today-row.dead .t{color:var(--rust)}
 .today-row.calm{cursor:default;color:var(--faint)}
 .today-row.calm:hover{background:none}
-/* The plain-language reason under a failed row — sibling to .today-row,
-   not nested in its flex layout, so the shared baseline-row markup (briefs/
-   decisions dates) is untouched. */
+/* The plain-language reason under a failed row: a sibling to .today-row, not
+   nested in its flex layout. */
 .today-sub{font-family:var(--mono);font-size:10.5px;color:var(--faint);
   padding:0 2px 7px;margin-top:-5px}
 .today-cols{display:grid;grid-template-columns:1fr 1fr;gap:24px}
@@ -830,16 +766,15 @@ details.tsec>.abody{padding:0 2px 14px}
   border-radius:6px;padding:9px 11px;margin-top:8px;color:var(--sage);user-select:all;
   white-space:pre-wrap;word-break:break-all}
 
-/* Fleet room (object cards reuse .delrow; .boxcard retired 2026-08-24 with
-   the seam reshape — nothing renders it) */
+/* Fleet room (object cards reuse .delrow) */
 .jobrow{display:flex;justify-content:space-between;padding:7px 2px;font-size:12.5px;
   border-bottom:1px solid var(--line)}
 .jobrow .ok{color:var(--sage)} .jobrow .bad{color:var(--rust)} .jobrow .unk{color:var(--faint)}
-/* a mailbox task carried on the host card it targets (panel phase 2) */
+/* a mailbox task carried on the host card it targets */
 .ftask{margin-top:7px;padding:7px 0 0 10px;border-left:2px solid var(--line2)}
 .ftask .facts{margin-top:4px}
 
-/* Delegates room (CONTROL-PLANE.md Phase C) */
+/* Delegates room */
 .delrow{display:flex;flex-direction:column;gap:4px;padding:10px 12px;background:var(--panel);
   border:1px solid var(--line);border-radius:8px;margin-bottom:8px}
 .delrow .dhead{display:flex;align-items:center;gap:10px;font-size:12.5px}
@@ -850,9 +785,8 @@ details.tsec>.abody{padding:0 2px 14px}
 .delrow .dnm{flex:1;min-width:0;font-weight:600}
 .delrow .ip{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
 .delrow .dsub{font-family:var(--mono);font-size:11.5px;color:var(--faint);line-height:1.5}
-/* Section footnote: the descriptive clause a .lab used to carry inline —
-   visible (never a tooltip: touch has no hover), quiet. (.fnote is taken —
-   it's the rail-card footer class.) */
+/* Section footnote: visible (touch has no hover) and quiet. (.fnote is the
+   rail-card footer class.) */
 .secnote{font-family:var(--mono);font-size:10.5px;color:var(--faint);padding:0 18px 6px}
 
 /* Ask-about-selection floating button over an article */
@@ -864,9 +798,8 @@ details.tsec>.abody{padding:0 2px 14px}
 /* Recent places, roster */
 .rit.place .dot{background:transparent;border:1px solid var(--line2)}
 
-/* Copy & find, the herdr manner. Selection is a first-class thing in a
- * transcript: it copies itself on release, it pauses the log's repaint while
- * it lives (the chip below says so), and find paints every match. */
+/* Copy & find: copy on release, the log holds still while a selection lives
+ * (the chip says so), and find paints every match. */
 .log ::selection{background:color-mix(in srgb, var(--dusk) 42%, transparent)}
 .pane.selhold{position:relative}
 .pane.selhold::after{content:'⏸ paused while you select';position:absolute;top:44px;right:10px;
@@ -891,8 +824,7 @@ details.tsec>.abody{padding:0 2px 14px}
 ::highlight(find){background-color:color-mix(in srgb, var(--gold) 45%, transparent)}
 ::highlight(findcur){background-color:var(--ember);color:var(--ground)}
 
-/* The Docket (asks.py): an ask card carries the exact artifact an answer
- * would authorize, bounded, and a yes that looks like a commitment. */
+/* The Docket: an ask card shows the exact artifact an answer would authorize. */
 .ncard.ask{border-left-color:var(--dusk)}
 .ncard.ask .why{font-size:12.5px;color:var(--dim);margin:6px 0}
 .ncard.ask .artifact{font-family:var(--mono);font-size:11.5px;background:var(--ground);
@@ -903,9 +835,8 @@ details.tsec>.abody{padding:0 2px 14px}
 .ncard.ask .fbtn.yes:hover{background:var(--sage);color:var(--ground)}
 .ncard.ask .fnote{color:var(--gold)}
 
-/* FinOps (phase 1, 2026-08-24): reported figures only. The chart is inline
- * SVG stacked bars — geometry may stack, but no summed figure is printed
- * anywhere in this room except the goals evaluator's own verbatim line. */
+/* FinOps: reported figures only. Inline SVG stacked bars; no summed figure is
+ * printed except the goals evaluator's own line. */
 .finhero{display:flex;align-items:center;gap:12px;margin:4px 0 6px}
 .finbig{font-family:var(--serif);font-size:24px}
 .finchart{width:100%;height:auto;display:block;background:var(--panel);
@@ -927,12 +858,9 @@ details.tsec>.abody{padding:0 2px 14px}
 .finbarfill.sub{background:var(--dusk)}
 .finbarfill.bal{background:var(--sage)}
 
-/* ── Studio surface, 2026-08-24 ────────────────────────────────────────
-   The information architecture stays put; this is the finish layer. The
-   work surface now has three readable depths (canvas / material / raised),
-   text uses display type only for true titles, and the active room reads as
-   location rather than another bordered control. All permission, provenance,
-   cost and state text remains visible. */
+/* ── Studio surface ──────────────────────────────────────────────────────
+   The finish layer: three surface depths (canvas / material / raised), display
+   type only for true titles, and the active room shown as location. */
 :root{
   --display:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;
   --shadow-sm:0 1px 2px rgb(var(--shadow-rgb) / .18),0 8px 24px rgb(var(--shadow-rgb) / .09);
@@ -1073,13 +1001,9 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
   .search-trigger span{display:none}
 }
 @media(max-width:820px){
-  /* `.app.railshut` was more specific than the old mobile `.app` rule and
-     kept a phantom 230px sidebar column after the sidebar was hidden. That
-     reduced a 500px viewport to a 224px stage and crushed Fleet card heads. */
+  /* Include .railshut so its desktop column template does not leak onto mobile. */
   .app,.app.railshut{grid-template-columns:minmax(0,1fr)}
-  /* The roster stays gone, but its footer's appearance control moves into
-     the phone chrome. Previously the whole rail was display:none, making a
-     saved theme permanent until the viewport became desktop-sized again. */
+  /* On phones the roster hides but its footer's appearance control stays. */
   .rail.left{display:block;position:fixed;left:auto;right:42px;top:7px;width:auto;height:auto;
     z-index:55;min-height:0;border:0;box-shadow:none;background:none;backdrop-filter:none}
   .rail.left > :not(.foot){display:none}
@@ -1114,11 +1038,9 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
   .grid{padding-top:58px}
 }
 
-/* UI session stage (SPIKE — browser_ui.py). Everything is scoped under
-   .uistage: `.stage` and `.stagebar` already exist and are used by other
-   rooms, so unscoped rules here would silently restyle them. The iframe needs
-   an explicit flex column parent — .stage is a flex CHILD with no intrinsic
-   height, so a percentage height on the iframe collapses to zero. */
+/* UI session stage (browser_ui.py). Scoped under .uistage because .stage and
+   .stagebar are shared with other rooms. The iframe needs a flex column parent:
+   .stage has no intrinsic height, so a percentage height would collapse. */
 .stage.uistage{display:flex;flex-direction:column;overflow:hidden}
 .uistage .uibar{display:flex;align-items:center;gap:8px;padding:6px 10px;
                 border-bottom:1px solid var(--line);background:var(--panel)}
@@ -1132,17 +1054,8 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
   background:var(--raise);color:var(--ink);border:1px solid var(--line);border-radius:6px}
 
 /* ── Corral Light ────────────────────────────────────────────────────────
- * This stylesheet is the full Corral's, unchanged, so the two surfaces stay
- * one design language and a fix to either can be carried across by eye. It
- * therefore still carries rules for rooms, the status bar, the palette, the
- * Library, and the fleet cards — surfaces this build does not render. That is
- * deliberate: pruning CSS by grepping the markup is how a rule that only
- * applies in a state you did not reproduce gets deleted, and the cost of the
- * dead bytes is a few KB over localhost.
- *
- * Only the mark below is new: the build has to be identifiable at a glance,
- * because the two are otherwise pixel-identical and answering a permission
- * prompt in the wrong one is a real mistake to be able to make.
+ * Shared with the full Corral, so it still carries rules for surfaces this
+ * build does not render. The mark below makes the build identifiable at a glance.
  */
 .brand .lightmark{
   font-family:var(--sans);
@@ -1158,15 +1071,10 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 }
 
 /* ── palette: attach, not browse ─────────────────────────────────────────
- * Most of the palette's chrome (.paldlg/.palres/.palrow/.pill.corp) is the
- * full Corral's, unchanged, so the two surfaces still look like one product.
- * These are the parts Light's palette needs and the room-based one did not:
- * it carries a snippet and a per-row hint, because a row here does something
- * (attaches a note to a conversation) rather than navigating somewhere.
+ * Light-only additions to the shared palette chrome: a snippet and a per-row hint.
  */
 .search-trigger{
-  /* In the left rail under New, not in a room nav — Light has no room nav.
-     Same width as the button above it so the two read as one control group. */
+  /* In the left rail under New, the same width as the button above it. */
   width:calc(100% - 28px);margin:0 14px 12px;justify-content:space-between;
 }
 .palrow{align-items:flex-start}
@@ -1181,9 +1089,7 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
   font-family:var(--mono);font-size:10px;color:var(--faint);white-space:nowrap;
 }
 .palrow.on .palhint{color:var(--dim)}
-/* An index problem is a NOTE, not a result and not a silent degrade: FTS5
-   missing on a box means ranking quietly got worse, and that has to be
-   readable rather than inferred from results feeling off. */
+/* An index problem shows as a note, not a silent degrade. */
 .palnote{
   font-size:11.5px;color:var(--gold);padding:6px 8px;margin-bottom:4px;
   border-left:2px solid var(--gold);background:var(--raise);border-radius:0 6px 6px 0;
@@ -1193,19 +1099,19 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 .porttext{max-height:45vh;overflow:auto;white-space:pre-wrap;word-break:break-word;
   font-size:12px;background:var(--bg2, rgba(127,127,127,.08));padding:8px;border-radius:6px}
 
-/* A turn a script sent (DESIGN-5 S5): same bubble, a small mark saying so. */
+/* A turn a script sent: same bubble, with a small mark. */
 .msg.user .viatag{font-family:var(--mono);font-size:10px;letter-spacing:.6px;
   text-transform:uppercase;color:var(--faint);margin-right:8px}
 
-/* seats (DESIGN-5 S6) */
+/* seats */
 .ph .pill.seat{cursor:pointer;color:var(--ink);border-color:var(--line2);text-transform:none;letter-spacing:0}
 .ph .pill.seat:hover{border-color:var(--ember)}
 .ph .pill.seat.withheld{color:var(--faint);border-style:dashed}
 .ph .x.seatadd{opacity:.55}
 .ph .x.seatadd:hover{opacity:1}
 
-/* a message from another pane's agent (DESIGN-5 S7) -- visibly NOT the
-   operator's bubble: left-aligned, outlined, its sender on its own line */
+/* a message from another pane's agent: visibly NOT the operator's bubble
+   (left-aligned, outlined, sender on its own line) */
 .msg.peer{border:1px dashed var(--line2);background:transparent;border-radius:8px;
   padding:8px 11px;margin:8px 0;max-width:92%}
 .msg.peer .peerfrom{font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;
@@ -1214,10 +1120,8 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 .msg.peer .peerclaim{font-family:var(--mono);font-size:10.5px;color:var(--ember);
   margin-top:6px;word-break:break-word}
 
-/* ask_human: an agent's open question for its human. Gold like every other
-   needs-you signal; the banner sits between the header and the transcript
-   so it is on screen whatever the scroll position. The AGENT's words: solid
-   gold rule on the left, never the human bubble's fill. */
+/* ask_human: an agent's open question. Gold like every needs-you signal, with
+   a solid gold rule, never the human bubble's fill. */
 .qbanner{margin:6px 10px 0;padding:8px 10px;border:1px solid var(--gold);
   border-left-width:4px;border-radius:8px;background:transparent}
 .qbanner .qwho,.msg.question .qwho{font-family:var(--mono);font-size:10.5px;
@@ -1241,7 +1145,7 @@ dialog::backdrop{background:rgba(2,5,10,.68);backdrop-filter:blur(5px)}
 .newquick:hover{color:var(--ink);border-color:color-mix(in srgb,var(--dusk) 74%,var(--line));transform:translateY(-1px)}
 .dlg label.checkrow{flex-direction:row;align-items:center;gap:8px;cursor:pointer}
 
-/* Rigs… (DESIGN-5 S12): one row per rig, one row per seat outcome. */
+/* Rigs: one row per rig, one row per seat outcome. */
 .riglist,.rigout{display:flex;flex-direction:column;gap:6px;margin:8px 0}
 .rigrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
 .rigrow .t{font-family:var(--mono)}

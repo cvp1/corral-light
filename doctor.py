@@ -1,20 +1,6 @@
 #!/usr/bin/env python3
 """corral-light doctor — which lanes can start here, and what to do about it.
 
-WHY THIS IS A MODULE AND NOT FOUR LINES OF BASH
-    `doctor` used to be a python -c inside the `corral-light` shell script. It
-    printed a lane list, and for the two npm-installed adapters it printed
-    `not installed: <path>/spike/node_modules/.bin/claude-agent-acp` -- a true
-    sentence with the wrong reading. The path looks like a broken install; it
-    is actually the one SETUP STEP the README never mentioned. A first-time
-    reader clones, runs doctor, sees the flagship lane refuse with a missing
-    file, and has nothing telling them `npm install` is what produces it.
-
-    A verb that diagnoses is worth testing, and a python -c in a case
-    statement cannot be. This file is the same output plus the next action,
-    and `test_corral_light.py` runs it against a copy of the tree with
-    `spike/node_modules` removed.
-
     python3 doctor.py
 """
 from __future__ import annotations
@@ -24,22 +10,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-# The npm package that produces the two vendor adapters. `spike/` has its own
-# package.json; this is the step between `git clone` and a working Claude or
-# ChatGPT lane, and it is gitignored so no clone ever arrives with it.
+# The gitignored npm package that provides the Claude and ChatGPT adapters.
 NPM_DIR = "spike"
 NPM_MARKER = "node_modules"
 
 
 def npm_problem(root=None):
-    """The missing `npm install`, named, or None.
-
-    Checked by the DIRECTORY rather than by either adapter's path: both the
-    Claude and the ChatGPT lane come out of it, so one line covers both, and
-    a half-finished install (the directory there, one adapter missing) is a
-    different problem that the lane's own `not installed: <path>` already
-    states accurately.
-    """
+    """The missing `npm install`, named, or None. Checks the directory; a
+    partial install is reported by the lane itself."""
     spike = Path(root or HERE) / NPM_DIR
     if (spike / NPM_MARKER).exists():
         return None
@@ -71,8 +49,7 @@ def report(root=None, agents=None):
     npm = npm_problem(root)
     if npm:
         notes.append(npm)
-    # The env note every lane carries identically (an ambient vendor key that
-    # is being ignored). Read off the first lane, as it always was.
+    # The env note is identical across lanes; read it off the first.
     env = (agents[0].get("envNote") if agents else None)
     if env:
         notes.append(env)

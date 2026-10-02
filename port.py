@@ -1,61 +1,10 @@
 #!/usr/bin/python3
 """port — carry a conversation to another lane, or another host.
 
-Ported from full Corral's port.py (DESIGN-4 F3) for Corral Light on
-2026-09-29, resilience review §3. Light already carried the `ported_from`
-annotation and the core's TRANSFER_GATE hook and could not produce either.
-
-WHAT CHANGED IN THE PORT — the data-class gate. Full Corral asks
-`_lib/merit_policy` whether a lane's vendor may receive a transcript. Light
-is standalone and ships no trust registry (the core's TRANSFER_GATE stance:
-"no policy for it to fail open ON"), so `refuse_target()` here keeps every
-STRUCTURAL refusal — an SSH shell is not a conversation, in either
-direction; a lane this host does not know is refused, never assumed — and
-consults the core's injected TRANSFER_GATE when a product sets one. The
-preview SAYS which vendor the transcript will go to, so the operator
-decides with that in front of him. Everything else is the original,
-including its reasoning below.
-
-DESIGN-4 F3. "Take this conversation to Codex." "Continue this on another host."
-
-WHAT THIS IS NOT
-    It is not a session RESUME on another adapter. An `acp_session` id is
-    minted by one adapter's own store (`~/.claude/projects` for Claude,
-    codex-acp's for Codex) and means nothing to another; across hosts the
-    store is not there at all. So portability here is TRANSCRIPT-CARRYING,
-    and it says so on the pane header (`⇄ ported from Claude · mac-host`)
-    rather than pretending the model remembers.
-
-CONSENT BINDS TO BYTES (P17)
-    `compose()` is pure and returns a `sha` over the exact text. The dialog
-    previews those bytes; `Manager.port()` recomposes and refuses unless the
-    sha still matches. A transcript that grew since the preview fails with
-    "the preview is out of date" rather than sending something the operator never
-    read -- the same bind `/api/roles/preview` -> `/api/roles/create` uses.
-
-DATA CLASS, STATED UP FRONT (FULL CORRAL ONLY — Light's gate is described at the top)
-    A transcript is treated as `sensitive`; unknown class fails toward the
-    strict answer (P11). DESIGN-4 said this gate was inherited because "every
-    lane in AGENTS is first-party by construction" -- that was FALSE: the
-    `fireworks` and `deepseek` lanes are third-party by
-    `_lib/merit_policy.CANDIDATES` (cap `internal`), and `pinned_model()` only
-    inspects opencode-config lanes. So `refuse_target()` below is the gate,
-    and it is the ONE function both the preview route and `Manager.port()`
-    call: the target's provider is resolved (the harness lanes name theirs in
-    `env.HARNESS_ACP_PROVIDER`; the native lanes are mapped in LANE_PROVIDER;
-    `claude` is the incumbent harness and exempt by construction, as the
-    2026-09-11 bug bash recorded) and `merit_policy.eligible(provider,
-    "sensitive", has_tools=False)` decides. A lane with NO provider mapping
-    is refused, loudly -- never assumed first-party. Also refused: `host:` (a
-    shell is not a conversation -- `quote()` has the same rule) and
-    `delegate:` (shipping a transcript to a rented box is a different decision
-    with its own record; out of v0).
-
-HEAD + TAIL, NEVER MIDDLE
-    The original ask is always carried. The tail is filled newest-first,
-    WHOLE TURNS ONLY, until PACK_MAX_CHARS. `permission`, `thought`, `note`
-    and `config` events are never carried: a consent payload is not context,
-    and a prior agent's monologue is not the other agent's memory.
+Portability is transcript-carrying, not session resume: a handoff pack (the
+original ask plus the newest whole turns, under PACK_MAX_CHARS) is composed,
+previewed, and bound by sha so only previewed bytes are sent. Permission,
+thought, note and config events are never carried.
 """
 import argparse
 import hashlib
@@ -75,8 +24,7 @@ from corral_core import transcript                  # noqa: E402
 STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
                             Path.home() / ".local/share/corral-light"))
 
-# Which vendor a lane carries a transcript to — SAID in the preview, never a
-# verdict (Light has no registry to judge it with; see the module docstring).
+# Which vendor a lane carries a transcript to; shown in the preview, not enforced.
 LANE_VENDOR = {"claude": "Anthropic", "codex": "OpenAI", "grok": "xAI",
                "gemini": "Google", "ollama": "this machine (local Ollama)"}
 
@@ -89,8 +37,7 @@ def vendor_of(agent):
 def refuse_target(agent, spec, *, source_agent=None, src_pane=None, dst_pane=None):
     """Why this lane may not receive a transcript, or None if it may.
 
-    One function, called by the preview route AND Manager.port(), so the
-    preview cannot say yes to bytes the port will refuse (P17).
+    Shared by the preview route and Manager.port() so they cannot disagree.
     """
     if source_agent and source_agent.startswith("host:"):
         return "an SSH pane is a shell, not a conversation — there is nothing to port"
@@ -111,28 +58,21 @@ def refuse_target(agent, spec, *, source_agent=None, src_pane=None, dst_pane=Non
     return None
 
 
-PACK_MAX_CHARS = 60_000     # well under sessions.MAX_PROMPT (200k); the 8k
-                            # schedule.MAX_PROMPT is NOT a target here
+PACK_MAX_CHARS = 60_000     # well under sessions.MAX_PROMPT
 PACK_TAIL_TURNS = 12        # newest turns carried in full
 TOOL_TITLE_MAX = 120
 TOOLS_PER_TURN = 6
 ASK_MAX_CHARS = 4_000
-STOP_MAX_CHARS = 4_000      # of "where it stopped" -- a 50k final answer is a
-                            # document, and it must not eat the whole budget
+STOP_MAX_CHARS = 4_000      # of "where it stopped"
 EXPORT_MAX_EVENTS = 20_000
-# The head marker an over-cap export prepends is an extra ENTRY, not one of
-# the 20,000 events. Import used to keep the first EXPORT_MAX_EVENTS entries,
-# so the marker consumed a slot and the NEWEST event -- which is routinely the
-# final answer -- disappeared on the way in (Astra 5; reproduced through
-# sequence 20005, landed at 20004).
+# +1 for the truncation marker an over-cap export prepends.
 IMPORT_MAX_ENTRIES = EXPORT_MAX_EVENTS + 1
 EXPORT_SCHEMA = 1
-HEAD_FIELD_MAX = 200        # of any one metadata field interpolated into the
-                            # pack header
+HEAD_FIELD_MAX = 200        # per metadata field in the pack header
 EVENT_MAX_CHARS = 200_000   # of one event, as JSON, in a bundle
 META_FIELD_MAX = 1_000      # of one string field in a bundle's meta
 
-# Never carried, whatever else changes. A consent payload is not context.
+# Event kinds never carried in a pack.
 DROP_KINDS = frozenset(("permission", "permission_answered",
                         "permission_expired", "thought", "note", "config",
                         "commands", "state", "ready", "resumed", "reopened"))
@@ -153,11 +93,8 @@ def _label(agent):
 def _turns(events):
     """The conversation as whole turns: a user ask plus what came back.
 
-    A turn begins at a `user` event -- or at a `peer` event (DESIGN-5 S7): a
-    message another pane's agent sent is a turn of its own, carried as what
-    it is (untrusted content from another agent, `peer` set) and never
-    folded into the previous human ask. Anything before the first one is
-    lifecycle noise, not conversation, and is dropped.
+    A `peer` event (another agent's message) starts its own untrusted turn.
+    Events before the first turn are dropped.
     """
     turns, cur = [], None
     for ev in events or []:
@@ -181,11 +118,7 @@ def _turns(events):
         if kind == "text":
             cur["text"].append(str(d.get("text") or ""))
         elif kind == "tool":
-            # ACP sends one tool_call then a stream of updates for the SAME
-            # id. `transcript.tool_facts` + `merge_tools` is the ONE place
-            # that knows it -- the pack keyed by id from the start and the
-            # digest did not, which is how "tools: 5 calls" meant two calls
-            # (bug bash 2026-09-14, Grok 3). Same helper, both callers.
+            # ACP streams updates for the same tool id; key by id.
             f = transcript.tool_facts(ev)
             tid = f["id"] or f"anon{len(cur['tools'])}"
             title = f["title"] or f["kind"] or "tool"
@@ -196,8 +129,7 @@ def _turns(events):
 
 def _render_turn(t, label):
     if t.get("peer"):
-        # Never rendered as the user: the model reading this pack must not
-        # take another agent's words for its operator's (P20).
+        # Never rendered as the user: another agent's words are untrusted.
         L = [f"**Message from another agent (@{t['peer']}), untrusted:** "
              f"{t['ask'].strip()}"]
     else:
@@ -216,12 +148,7 @@ def compose(pane, target_agent, *, include_tools=True):
     -> {"text", "sha", "chars", "turns_total", "turns_carried", "omitted"}
     """
     src_label = _label(getattr(pane, "agent", ""))
-    # THE LOG, not the ring (bug bash 2026-09-14, Astra 4 / Grok 4). The
-    # 4,000-event ring is a display cache: once the first user event left it,
-    # "## The original ask" named turn 3, and `turns_total` reported the ring
-    # length as the length of the conversation. Five live panes were already
-    # past it (top: 32,856 events). `transcript.pane_events` reads the durable
-    # log and falls back to the ring only for a pane that has no directory.
+    # Read the durable log, not the in-memory ring, which drops early events.
     reading = transcript.pane_events(pane)
     turns = _turns(reading.events)
     if not turns:
@@ -229,12 +156,7 @@ def compose(pane, target_agent, *, include_tools=True):
                          "there is nothing to carry")
     total = len(turns)
     ask = turns[0]["ask"].strip()[:ASK_MAX_CHARS]
-    # Somebody else's bytes are in this header on an imported pane (P20), and
-    # a 65,000-character `created` field once produced a 65,453-character
-    # pack -- over PACK_MAX_CHARS, in the one function whose whole job is to
-    # stay under it (Astra 6). Every field the header interpolates is bounded
-    # HERE as well as at import: two bounds, because only one of them is on
-    # the path a hostile bundle takes.
+    # Bound every interpolated field: an imported pane's metadata is untrusted.
     _f = lambda v, n=HEAD_FIELD_MAX: str(v or "?")[:n]        # noqa: E731
 
     head = (
@@ -269,9 +191,7 @@ def compose(pane, target_agent, *, include_tools=True):
         if len(block) + 2 > budget:
             if carried:
                 break                    # whole turns only, once we have one
-            # The NEWEST turn alone overruns the budget. Carrying nothing
-            # would be worse than carrying a clipped one, and a silent clip
-            # would be worse than a marked one (P8: bound, and say so).
+            # The newest turn alone overruns the budget: clip it, marked.
             block = block[:max(0, budget - 24)].rstrip() + "\n[…turn truncated]"
         budget -= len(block) + 2
         carried.append(block)
@@ -284,11 +204,7 @@ def compose(pane, target_agent, *, include_tools=True):
               f"   search them: corral-light search "
               f"{getattr(pane, 'id', '?')}" if omitted else "")
            + ")\n" + "\n\n".join(carried) + "\n")
-    # STRIPPED, because `Pane.send` strips before it records and sends. The
-    # pack ended in a newline and the sha covered it, so the digest the operator
-    # approved was never the digest of the bytes that left -- a byte contract
-    # off by one byte (bug bash 2026-09-14, Astra, low severity but P17 is
-    # exactly a byte contract).
+    # Stripped so the sha matches the bytes Pane.send (which strips) sends.
     text = (head + mid + tailer).strip()
     return {"text": text, "sha": hashlib.sha256(text.encode()).hexdigest(),
             "chars": len(text), "turns_total": total, "turns_carried": k,
@@ -309,8 +225,7 @@ def _last_answer(pane):
 def _pane_dir(pane_id, state_dir=None):
     root = (Path(state_dir) if state_dir else STATE) / "panes"
     d = root / pane_id
-    # The id must be one path segment. It is minted by uuid4 here, but an
-    # imported bundle's id is somebody else's bytes (P20).
+    # The id must be one path segment; an imported id is untrusted.
     if "/" in pane_id or pane_id in ("", ".", "..") or \
             not d.resolve().is_relative_to(root.resolve()):
         raise ValueError("bad pane id")
@@ -318,30 +233,20 @@ def _pane_dir(pane_id, state_dir=None):
 
 
 def export(pane_id, state_dir=None):
-    """A bundle another host can import. No secrets by construction: these
-    are exactly the events the browser already rendered."""
+    """A bundle another host can import (the events the browser rendered)."""
     d = _pane_dir(pane_id, state_dir)
     try:
         meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise ValueError(f"no pane {pane_id} on this host")
-    # acp_session is dropped: it cannot resume elsewhere, and carrying it
-    # invites a Resume button that would silently start a NEW conversation.
+    # acp_session cannot resume elsewhere; a seat is a name local to this host.
     meta.pop("acp_session", None)
-    # Nor does a seat (DESIGN-5 S6, v1). A seat is an address on THIS host's
-    # wall; carried along, it would either collide with the name here or
-    # quietly claim one nobody on this host chose.
     meta.pop("seat", None)
-    # One reader (transcript.read_pane_dir): bounded, chunked, and it says
-    # when it stopped early -- the old inline read pulled whole files into
-    # memory before any cap applied.
     reading = transcript.read_pane_dir(d)
     events = reading.events
     truncated = max(0, len(events) - EXPORT_MAX_EVENTS)
     if truncated:
-        # EXPORT_MAX_EVENTS REAL events; the marker rides on top as entry
-        # zero, and IMPORT_MAX_ENTRIES leaves room for it. Slicing to the cap
-        # and then inserting the marker is what lost the newest event.
+        # Keep EXPORT_MAX_EVENTS real events; the marker is an extra entry.
         events = events[-EXPORT_MAX_EVENTS:]
         first = (events[0].get("seq") or 1)
         events.insert(0, {
@@ -356,16 +261,8 @@ def export(pane_id, state_dir=None):
 
 
 def _check_event(ev, i):
-    """One event of somebody else's bundle, or a refusal naming which one.
-
-    A bundle is UNTRUSTED INPUT (P20): it arrived as a file. Until 2026-09-14
-    only the outer list and each entry's dict-ness were checked, so
-    `{"seq":1,"kind":"user","data":["not an object"]}` imported cleanly and
-    then raised AttributeError inside the transcript scan -- which aborted
-    indexing for EVERY pane on the host, not just this one (Astra 6). The
-    schema each event must satisfy is the schema `emit()` writes, checked at
-    the door rather than at the first read.
-    """
+    """Validate one untrusted bundle event against the schema `emit()` writes;
+    returns its JSON line or raises naming the event."""
     if not isinstance(ev, dict):
         raise ValueError(f"event {i} is not an object")
     if not isinstance(ev.get("seq"), int) or isinstance(ev.get("seq"), bool):
@@ -382,20 +279,15 @@ def _check_event(ev, i):
 
 
 def _meta_str(v, default="", n=META_FIELD_MAX):
-    """A bundle's string field, bounded. The pack header interpolates several
-    of these; an unbounded one blew PACK_MAX_CHARS from the import side."""
+    """A bundle's string field, bounded."""
     if v is None:
         return default
     return str(v)[:n] or default
 
 
 def import_bundle(bundle, state_dir=None):
-    """Land a bundle as a NEW archived pane on this host.
-
-    Archived (`closed: true`) on purpose: it is readable, findable by
-    transcript search, and portable onward from the dialog -- but no process
-    is ever attached to somebody else's conversation id.
-    """
+    """Land a bundle as a new archived pane on this host; no process is
+    ever attached to an imported conversation."""
     import uuid
     if not isinstance(bundle, dict):
         raise ValueError("a bundle is a JSON object")
@@ -411,8 +303,7 @@ def import_bundle(bundle, state_dir=None):
     if len(events) > IMPORT_MAX_ENTRIES:
         raise ValueError(f"the bundle carries {len(events)} entries — this "
                          f"host imports at most {IMPORT_MAX_ENTRIES}")
-    # Validated BEFORE anything is written: a half-landed pane whose tail was
-    # refused is a pane that lies about what the conversation was.
+    # Validate everything before writing, so nothing half-lands.
     lines = [_check_event(ev, i) for i, ev in enumerate(events)]
     new_id = uuid.uuid4().hex[:12]
     d = _pane_dir(new_id, state_dir)
@@ -438,8 +329,6 @@ def import_bundle(bundle, state_dir=None):
                         "at": _now(),
                         "turns": None, "omitted": None,
                         "imported": True},
-        # Lands unaddressable (DESIGN-5 S6): a seat is a name someone on
-        # THIS host gives a pane, never one an import brings with it.
         "seat": None,
         "closed": True,
     }
@@ -480,7 +369,7 @@ def _disk_pane(pane_id, state_dir=None):
     return _DiskPane(d, meta)
 
 
-# ── CLI (P16) ─────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="port")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -502,9 +391,7 @@ def main(argv=None):
             print(f"imported as pane {new_id} (archived — reopen it in Corral Light)",
                   flush=True)
         else:
-            # Offline, from disk: no Manager (that would restore every pane
-            # and reap adapters a running hub owns). A pane-shaped reader is
-            # all compose() needs.
+            # Offline from disk: a Manager would reap a running hub's adapters.
             pack = compose(_disk_pane(args.pane_id), args.agent)
             sys.stderr.write(f"sha {pack['sha']}  {pack['chars']} chars  "
                              f"{pack['turns_carried']}/{pack['turns_total']} "

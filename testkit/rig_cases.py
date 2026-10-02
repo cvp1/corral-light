@@ -1,18 +1,13 @@
-"""DESIGN-5 S12 -- rigs -- as ONE set of cases both products run against their
-own skin's real Manager: full Corral's `test_rigs.Rigs` and Light's
-`test_corral_light.LightRigs`.
+"""Rig cases shared by both products, run against each skin's real Manager.
 
 Mixed into a TestCase that provides `self.mgr` (a Manager with a `fake` lane
-registered, testkit/fake_acp_agent.py) and `self.agent_dir`.
+registered) and `self.agent_dir`.
 
-    T12.1 every preflight refusal, and `create` never called (a stub manager's
-          call log), with every reason returned rather than the first
-    T12.2 each outcome from a constructed state: resumed, rebuilt (a lane that
-          refuses session/load), started-fresh, fresh-primed (the prompt went
-          through send(), via rig), withheld, not-restored (the cap, and a seat
-          held on disk only), failed -- and nothing rolls back
-    T12.3 `save` then `up` on an empty hub reproduces the seats with the same
-          names, cwds and lanes; save refuses to overwrite
+    preflight  every refusal, `create` never called, every reason returned
+    outcomes   resumed, rebuilt, started-fresh, fresh-primed (through send(),
+               via rig), withheld, not-restored, failed; nothing rolls back
+    save / up  `save` then `up` on an empty hub reproduces the seats; save
+               refuses to overwrite
 """
 import json
 import shutil
@@ -85,7 +80,7 @@ class RigCases:
         self.assertEqual(mgr.calls, [], "preflight touched the manager")
         return ar.exception.reasons
 
-    # ── T12.1 ────────────────────────────────────────────────────────────
+    # ── preflight ────────────────────────────────────────────────────────
     def test_every_preflight_refusal_starts_nothing(self):
         s = _uniq("s")
         cases = {
@@ -155,7 +150,7 @@ class RigCases:
             with self.assertRaises(ValueError):
                 rigs.save(StubManager(), bad)
 
-    # ── T12.2 ────────────────────────────────────────────────────────────
+    # ── outcomes ─────────────────────────────────────────────────────────
     def _seated(self, seat, **kw):
         p = self.mgr.create("fake", self.agent_dir, **kw)
         self.assertEqual(p.state, "ready", p.error)
@@ -297,7 +292,7 @@ class RigCases:
         self.assertIn("switched off", out["outcomes"][1]["why"])
         self.assertEqual({p.seat for p in self.mgr.panes.values()} & {a, b, c}, {a, c})
 
-    # ── T12.3 ────────────────────────────────────────────────────────────
+    # ── save / up ────────────────────────────────────────────────────────
     def test_save_then_up_on_an_empty_hub_reproduces_the_seats(self):
         a, b = _uniq("a"), _uniq("b")
         pa = self._seated(a)

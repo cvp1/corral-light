@@ -2,36 +2,9 @@
 """sessions — Corral Light's session manager: spawn agents, hold state, persist
 events.
 
-This is the Live-tab half of linux-host's `corral/sessions.py`, forked for
-mac-host on 2026-08-31. Everything the fleet made true on ranch — delegate
-boxes, ssh-shell lanes, the scheduler, the AI-OS slash-command router, the
-vault-backed memory reader — is GONE, not disabled: a light build that carries
-dead branches is the heavy build with a smaller menu. What remains is the part
-that makes a multi-model workspace: one process per pane, one ordered event
-stream per pane, and pending permission requests as real backpressure on a
-real process.
-
-WHAT IS AND IS NOT STORED HERE
-------------------------------
-ACP already owns conversation identity: `session/list` returns
-{sessionId, cwd, title, updatedAt} with auto-generated titles, and advertises
-resume/fork/close/delete. So Corral does NOT keep a second registry of
-conversations — that would be one-home-per-fact violated with an independent
-writer, and it would drift the moment the agent renames a thread.
-
-What Corral does own, because nothing else does:
-  - which agent process is running right now, and whether it is actually alive
-  - the ordered event stream per pane, so a browser reload replays instead of
-    losing the conversation
-  - pending permission requests, which are backpressure on a live process
-
-PERMISSION POSTURE IS OURS. Every Claude Code pane launches under a
-CLAUDE_CONFIG_DIR Corral writes. Measured on ranch: inheriting the host's
-ambient `defaultMode: auto` made the agent act with zero prompts, which would
-render a pane with no approvals at all. Posture is a visible per-pane
-property, never an inherited global — and for a lane Corral cannot impose it
-on, the pane SAYS so rather than displaying a safety property nobody
-established.
+Corral stores only what ACP does not: which agent process is live, the ordered
+event stream per pane, and pending permission requests. Each pane's permission
+posture is set by Corral, never inherited from the host's ambient config.
 """
 import hashlib
 import json
@@ -52,17 +25,10 @@ import ledger
 import mcp
 
 ROOT = Path(__file__).resolve().parent
-# Deliberately NOT ~/.local/share/corral. If the full Corral is ever installed
-# on the same machine, two hubs sharing one state dir would share panes, the
-# pairing key, and the catalog — and each would restore the other's panes with
-# lanes it does not have. A separate name is what keeps "light" a second
-# product rather than a corrupting second writer.
+# Separate from the full Corral's state dir so two hubs never share panes or keys.
 STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
                             Path.home() / ".local/share/corral-light"))
-# Optional: a node install that is not on PATH. On ranch this pointed at
-# hermes' bundled node; on a Mac, node is normally on PATH already, so an
-# absent directory must cost nothing (an empty entry in PATH is harmless, but
-# a WRONG one shadows the real node).
+# Optional node install not on PATH; ignored when absent.
 _NODE_BIN = Path(os.environ.get("CORRAL_NODE_BIN",
                                 Path.home() / ".hermes" / "node" / "bin"))
 NODE_BIN = _NODE_BIN if _NODE_BIN.is_dir() else None
@@ -70,18 +36,8 @@ ADAPTER = Path(os.environ.get("CORRAL_CLAUDE_ADAPTER",
                               ROOT / "spike" / "node_modules" / ".bin" / "claude-agent-acp"))
 
 # ── the shared core ───────────────────────────────────────────────────────
-# Pane and Manager behaviour that was byte-for-byte identical in this file and
-# its larger sibling's now has ONE home: `corral_core/sessions.py`. The classes
-# below subclass it and override only what this product genuinely does
-# differently (the seed/`~/aios` packaging, the macOS credential
-# and posture checks, the Ollama lane).
-#
-# The bounds come back by name so the rest of this file — and every importer
-# that reads `sessions.MAX_PANES` — is unchanged by the move. They are
-# re-exported rather than re-declared: two spellings of one bound is how the
-# bound stops being one.
-#
-# `corral_core` is a package in this tree, so a plain import finds it.
+# Pane/Manager behaviour shared with the full Corral lives in corral_core;
+# bounds are re-exported by name for importers of this module.
 from corral_core import sessions as _core                        # noqa: E402
 
 DEFAULT_POSTURE = _core.DEFAULT_POSTURE
@@ -100,67 +56,27 @@ _now = _core._now
 _CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
 
 
-# The queued-prompt type is the core's since DESIGN-5 S5; the old name stays
-# so nothing that imported it from here breaks.
+# Re-exported for importers of the old name.
 _QueuedText = _core.QueuedText
 TURN_VIAS = _core.TURN_VIAS
 
-MAX_ROSTER = MAX_PANES * 5      # ALL panes tracked, live or detached. MAX_PANES
-                                 # only counts live ones, so repeated
-                                 # create-then-pause never tripped it: every
-                                 # detached pane stays in Manager.panes forever,
-                                 # each holding an open transcript handle. This
-                                 # is the cap on the roster itself.
+MAX_ROSTER = MAX_PANES * 5      # cap on all panes, live or detached
 MAX_PROMPT = 200_000
-                               # backlog without bound; past this, auto-refuse
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 STALL_S = 300                  # busy with nothing emitted for this long = suspect
-PARKED_PREVIEW_CHARS = 120     # of each parked message quoted in the note: enough
-                               # to recognise what you typed, short enough that
-                               # four of them stay one readable transcript line
+PARKED_PREVIEW_CHARS = 120     # chars of each parked message quoted in a note
 
-# Permission postures Corral offers, mapped to Claude Code's own modes. The
-# descriptions are the AGENT's, read off session/new's configOptions:
-#   auto        "Use a model classifier to approve/deny permission prompts"
-#   default     "Standard behavior, prompts for dangerous operations"
-#   acceptEdits "Auto-accept file edit operations"
-# What a pane inherits from ~/.claude by symlink. These are things Claude Code
-# READS: capability and context, authored outside Corral, so a link stays
-# current where a copy would fossilise at pane creation.
+# Config a pane inherits from ~/.claude by symlink (stays current, unlike a copy).
 LINKED_CONFIG = ("skills", "agents", "commands", "plugins", "prompts", "CLAUDE.md")
 
-# What a pane does NOT inherit from settings.json.
-#   permissions — replaced by the pane's own posture; owning that is the whole
-#                 reason Corral keeps a config dir at all.
-#   hooks       — auto-run code. Wiring hooks into a new surface is
-#                 self-modification and needs to be asked for in so many words.
-#                 Skills and subagents are inert until invoked; hooks are not.
-#   statusLine  — a terminal affordance. ACP has no status line, so this would
-#                 only spawn a subprocess with nowhere to render.
+# settings.json keys a pane does not inherit: permissions (the pane's posture
+# owns it), hooks (auto-run code), statusLine (no ACP surface).
 SETTINGS_DROPPED = ("permissions", "hooks", "statusLine")
 
 
-# The same three postures as ACP `mode` config-option values. Corral has two
-# ways to impose a posture and until now used only the first:
-#
-#   1. settings.json inside a private CLAUDE_CONFIG_DIR (POSTURES, above) —
-#      which on macOS moves Claude Code's Keychain service name and breaks
-#      auth outright. See darwin_keychain_blocks_isolation().
-#   2. session/set_config_option on the LIVE session — the same wire call that
-#      already sets model and effort.
-#
-# (2) needs no config dir, so the Keychain never enters into it, and it is not
-# platform-conditional. Measured on mac-host, 2026-09-01: the Claude adapter's
-# session/new advertises
-#     mode -> currentValue "default",
-#             options [auto, default, acceptEdits, plan, dontAsk,
-#                      bypassPermissions]
-# The values below are that list's, not ours. Read the mapping in that
-# direction: `strict` is Corral's name for the agent's `default`.
-#
-# A posture with no mode here is NOT silently defaulted — _apply_posture
-# leaves the session alone and says so in the pane. Guessing a permission
-# mode is the one guess this file must never make.
+# Corral postures mapped to the agent's ACP `mode` values, set live via
+# session/set_config_option (no config dir, so no macOS Keychain issue).
+# A posture with no entry is left unset and reported, never guessed.
 POSTURE_MODE = {
     "strict": "default",       # prompt on dangerous operations
     "edits":  "acceptEdits",   # auto-accept edits, prompt the rest
@@ -175,13 +91,8 @@ NATIVE_ANTIGRAVITY_HELPER = NATIVE_ANTIGRAVITY_BIN.with_name("localharness_exter
 
 
 # --- Catalog probes: a lane's model list WITHOUT starting a pane ------------
-# The new-pane dialog reads the remembered catalog (CATALOG on disk), which is
-# only written once a pane of that agent has completed session/new. For an
-# agent that has never run on this host that entry does not exist, so the model
-# dropdown correctly renders its "never seen this agent" empty state. A probe
-# fills it in from the lane's OWN catalog — never a hardcoded list, and never a
-# model the pane would then refuse. A pane's real session/new response still
-# overwrites whatever was seeded, so the live agent remains the authority.
+# Seeds the new-pane dialog's model list from the lane's own catalog;
+# a pane's real session/new still overwrites it.
 def _probe_ollama():
     """(values, default) for the local Ollama lane, or None. Never raises."""
     try:
@@ -200,45 +111,19 @@ AGENTS = {
         "argv": [str(ADAPTER)],
         "requires": (str(ADAPTER),),
         "posture_via_config_dir": True,
-        # ...and, unlike the config dir, this one works on macOS. When both are
-        # available the ACP mode wins: it is the mechanism whose success is
-        # ACKED on the wire, so the pane can report the posture it actually got
-        # instead of the one it hoped a settings.json would produce.
+        # Preferred over the config dir: the mode is acked on the wire.
         "posture_via_acp_mode": True,
         "tools": True,
-        # A LIVE handshake, not a guess at where a vendor keeps its secret.
-        # This lane cannot be credential-file-checked portably (macOS Claude
-        # Code can keep its login in the Keychain), and its model/effort lists
-        # exist nowhere but a completed session/new — so one real handshake
-        # answers "does this work here" and "what does it offer" at once.
+        # A live handshake: checks the lane works and reads its model/effort lists.
         "catalog_probe": lambda: __import__("lane_probe").catalog_probe("claude"),
         "probe_config": lambda a: __import__("lane_probe").full_config(a),
         "live_probe": True,
-        # The handshake above cannot see a LAPSED login: session/new succeeds
-        # without a token and auth only surfaces at the first prompt. The
-        # credential itself says when the refresh token expires, so the
-        # picker asks it too (claude_auth; mac-host 2026-09-30, 05:41).
+        # Detects a lapsed login, which session/new alone cannot see.
         "auth_status": lambda: __import__("claude_auth").status(),
-        # (Formerly a KNOWN GAP: every other lane refused at pick time on a
-        # missing credential and this one could not check cheaply without
-        # risking the opposite lie, because on macOS the credential lives in
-        # the Keychain where an absent file proves nothing. claude_auth reads
-        # the Keychain itself — timestamps only — so the lane now refuses a
-        # lapsed login and warns ahead of one. What it still cannot see is a
-        # token revoked EARLY; that one surfaces at the first prompt, in
-        # English, and Manager.auth_sweep resumes the pane after the next
-        # sign-in.)
     },
     "codex": {
-        # ChatGPT via OpenAI's codex, over the ACP-org adapter
-        # (@agentclientprotocol/codex-acp — same org as the Claude adapter,
-        # pinned EXACT in spike/package.json because it tracks codex's
-        # unversioned app-server protocol). The launcher owns the two
-        # properties that matter: a dedicated CODEX_HOME (inheriting ~/.codex
-        # would chat with whatever that config points at, wearing a ChatGPT
-        # label) and auth inside the CLI's own state — no key in argv, env, or
-        # logs. Approvals arrive as session/request_permission and land in the
-        # rail; INITIAL_AGENT_MODE=agent keeps escalations visible there.
+        # ChatGPT via codex-acp; the launcher uses a dedicated CODEX_HOME and keeps
+        # auth inside the CLI's own state.
         "label": "ChatGPT (Codex)",
         "argv": [sys.executable, str(ROOT / "codex_launcher.py")],
         "posture_via_config_dir": False,
@@ -246,8 +131,7 @@ AGENTS = {
         "needs": "needs ChatGPT login (device-auth) — see codex_launcher.py",
     },
     "grok": {
-        # The vendor's own ACP stdio mode, launched directly. The Grok CLI owns
-        # auth; the credential never enters argv, env, or logs.
+        # Grok CLI's own ACP stdio mode; the CLI owns auth.
         "label": "Grok",
         "argv": [sys.executable, str(GROK_LAUNCHER)],
         "requires": (str(GROK_LAUNCHER),),
@@ -256,22 +140,11 @@ AGENTS = {
         "needs": "needs Grok CLI authentication",
     },
     "gemini": {
-        # Google's registered antigravity-acp binary speaks ACP itself: its
-        # session identity, model catalog, tool calls, permission requests and
-        # cancellation flow arrive unmodified. Do not seed the catalog through
-        # `agy models`: it is a different API and can promise model ids the
-        # native server will reject, so the first real session/new is the
-        # authority. Install/verify the pinned release with
-        # `python3 install_antigravity_acp.py --install` / `--check`.
+        # Native antigravity-acp server. Do not seed the catalog from `agy models`:
+        # it can list ids the server rejects. Install/verify via install_antigravity_acp.py.
         "label": "Antigravity (Gemini)",
         "argv": [sys.executable, str(NATIVE_ANTIGRAVITY_LAUNCHER)],
-        # The lane's own approval mode, applied at session/new the way Codex's
-        # launcher sets INITIAL_AGENT_MODE and Claude's posture sets
-        # defaultMode. The vendor advertises default/auto_edit/yolo and starts
-        # in `default`, so every tool call raised a card. auto_edit is the
-        # auto-mode ANALOGUE: the VENDOR still enforces it and still escalates
-        # what it considers dangerous -- this is deliberately not Corral
-        # auto-answering cards.
+        # The lane's own approval mode, applied at session/new; the vendor enforces it.
         "default_config": {"mode": "yolo"},
         "requires": (str(NATIVE_ANTIGRAVITY_LAUNCHER),
                      str(NATIVE_ANTIGRAVITY_BIN),
@@ -281,22 +154,14 @@ AGENTS = {
         "needs": "official Google native ACP — authenticated by Antigravity OAuth",
     },
     "ollama": {
-        # The sovereign lane, and the reason Corral Light is worth running at
-        # all when the WAN is down: ollama_acp.py speaks ACP over stdio against
-        # a local Ollama. CHAT ONLY — it has no tools and therefore raises no
-        # permission requests, which is stated on the lane rather than left for
-        # the operator to discover. A lane that silently had no rail would be
-        # indistinguishable from a rail that stopped working.
+        # Local Ollama over ACP: chat only, no tools, no permission rail.
         "label": "Local (Ollama) — chat only",
         "argv": ["/usr/bin/env", "python3", str(OLLAMA_ACP)],
         "requires": (str(OLLAMA_ACP),),
         "posture_via_config_dir": False,
-        # The one lane that cannot read a file for itself. Attaching a note to
-        # a pane here has to QUOTE it, because handing a path to an agent with
-        # no filesystem is a dead end that looks like a working feature.
+        # No filesystem access: attached notes must be quoted inline.
         "tools": False,
-        # ollama_acp.py reads no `mcpServers`: the seat tools are not offered,
-        # so a pane here can receive a peer message but not send one (S8).
+        # No mcpServers support: can receive peer messages but not send them.
         "mcp": False,
         "needs": "answers from the local Ollama — no key, works offline; "
                  "chat only, no tools and no permission rail",
@@ -306,28 +171,12 @@ AGENTS = {
 
 
 # --- Host shell lanes: one SSH SHELL pane per configured host ---------------
-# The operator, 2026-09-01: "add the SSH tabs back so we can manage remote hosts via
-# the complete UI". Ported from ranch's corral/sessions.py, with ONE change
-# that matters: ranch generates these from the lightsail estate inventory, and
-# Light has no estate (fleet.py, estate.py and lightsail are all banned from
-# this tree by test_no_heavy_corral_module_is_imported). So the inventory here
-# is a hand-written file and nothing else.
-#
-# ssh_acp.py holds one persistent `ssh ... bash` on the host and runs exactly
-# what the operator types — no LLM, no permission rail, because the typed command IS
-# the approved artifact (PRINCIPLES 17). This lane is a human keyboard surface
-# only; it must never be handed to an agent as a tool.
-#
-# NOT auto-enumerated from ~/.ssh/config, deliberately. That file's Host
-# entries include things that are not shell hosts at all (`github.com` is in
-# The operator's today), and a picker offering a lane that cannot open a shell is the
-# same button-that-lies available_agents() exists to prevent. Naming the hosts
-# costs one file, once.
+# Hosts come from a hand-written JSON file, not ~/.ssh/config (which lists
+# non-shell hosts). ssh_acp.py runs exactly what the user types: no LLM, no
+# permission rail. Never hand this lane to an agent as a tool.
 SSH_ADAPTER = ROOT / "ssh_acp.py"
-# [{"name": ..., "ip": ..., "user": ..., "key": ...}] — `ip` may be a plain
-# ~/.ssh/config alias, in which case user/key can be omitted and ssh's own
-# config answers. Or [{"name": ..., "connect": "<command whose stdin is a
-# bash>"}] for a local test lane.
+# [{"name", "ip", "user", "key"}] (`ip` may be an ssh_config alias), or
+# [{"name", "connect": "<command whose stdin is a bash>"}] for a local test lane.
 EXTRA_SSH_HOSTS = Path(os.environ.get(
     "CORRAL_LIGHT_SSH_HOSTS",
     str(Path.home() / ".config/corral-light/ssh-hosts.json")))
@@ -365,10 +214,7 @@ def _live_ssh_hosts():
 def refresh_host_lanes():
     """(Re)build one `host:<name>` shell lane per configured host.
 
-    Add/update, NEVER delete: a host removed from the file must still render
-    its existing pane's transcript, so the lane is tombstoned with a reason
-    rather than dropped (the same contract restore() relies on at
-    sessions.py's dead-stub path).
+    Removed hosts are tombstoned, not dropped, so existing transcripts still render.
     """
     current = {}
     for h in _live_ssh_hosts():
@@ -378,9 +224,7 @@ def refresh_host_lanes():
                 "argv": h["argv"],
                 "requires": (str(SSH_ADAPTER),),
                 "posture_via_config_dir": False,
-                # No tools, so no permission rail — and it says so, for the
-                # same reason the ollama lane does: a pane with an empty rail
-                # must be distinguishable from a rail that broke.
+                # No tools, so no permission rail.
                 "tools": False,
                 "needs": h.get("needs", "")}
         if h.get("env"):
@@ -400,25 +244,15 @@ MAX_CWD_SUGGESTIONS = 24
 
 
 def default_cwd():
-    """Where a new conversation starts when nothing else is remembered.
-
-    If Seed is installed, that folder is ~/aios — the one workspace this
-    window looks at. Home always exists, so it remains the fallback when
-    Seed has not been installed yet. Existence-checked: a missing ~/aios
-    must not become the default, or the first pane would refuse to start.
-    """
+    """Default cwd for a new conversation: ~/aios if present, else home."""
     aios = Path.home() / "aios"
     return aios if aios.is_dir() else Path.home()
 
 
 def cwd_suggestions(recent=()):
-    """Real directories worth opening a conversation in, best first.
+    """Existing directories to suggest as a cwd, best first.
 
-    Ordered by how likely it is to be what you meant: where conversations are
-    already open, then checkouts (a `.git` is the strongest signal a directory
-    is a place you work), then the usual containers under home. Bounded (P8),
-    deduped, and existence-checked — a suggestion list that offers a directory
-    that is not there would be the picker lying in miniature.
+    Open panes' dirs, then checkouts, then common containers under home; bounded.
     """
     out, seen = [], set()
 
@@ -446,8 +280,7 @@ def cwd_suggestions(recent=()):
             containers.append(d)
     for d in containers:
         add(d)
-    # One level inside each container, checkouts first. Not recursive: a deep
-    # walk of a home directory is slow, unbounded, and mostly noise.
+    # One level inside each container, checkouts first; not recursive.
     for d in containers:
         try:
             children = sorted(x for x in d.iterdir()
@@ -469,92 +302,32 @@ def cwd_suggestions(recent=()):
 def seed_config_dir(d, posture):
     """A config dir Corral owns, carrying THIS pane's posture.
 
-    ONLY the permission policy is meant to be ours. Everything else must
-    be the config the operator actually uses, and the first cut got that wrong:
-    an isolated dir holding nothing but credentials meant a pane had none
-    of his 27 personal skills, none of his subagents or plugins, and not
-    even ~/.claude/CLAUDE.md — so the whole prompt stack was absent from
-    every conversation. The operator: "skills don't work in corral."
-
-    Measured 2026-08-01, `claude -p` under each config dir:
-      bare dir              -> 11 built-in skills, "NO CONTEXT"
-      dir + skills/CLAUDE.md -> 38 skills, and it knows the ranch's name
-
-    Capability directories are SYMLINKED, not copied: 27 skills copied per
-    pane go stale the moment he edits one, and this dir is created fresh
-    for every pane.
-
-    Credentials AND ~/.claude.json are seeded from the real config so no
-    second login is needed and the account's full entitlements apply. Both
-    files are copied, never read into memory or logged. ~/.claude.json
-    stays a COPY on purpose where the rest are links — Claude Code writes
-    to it continuously, and several panes writing through to his real one
-    is a corruption race for no gain.
-
-    .claude.json is not optional. Measured 2026-08-01: a config dir holding
-    only credentials offered ['default','opus[1m]','sonnet','haiku'] --
-    Fable was MISSING -- while the same dir plus ~/.claude.json offered
-    claude-fable-5[1m] as well. The operator noticed before I did ("why is fable
-    not in the list"). Whatever entitlement state the model list is derived
-    from lives in that file, so an isolated config dir that omits it
-    silently downgrades which models the account can reach.
-    Returns the directory, or None when this host keeps its Claude credential
-    somewhere a file copy cannot reach (see below) — in which case the caller
-    must let the agent use the user's own ~/.claude and stop claiming a
-    posture it did not impose.
+    Links capability dirs from ~/.claude and copies ~/.claude.json (needed for
+    model entitlements). Returns None if no usable credential can be carried.
     """
     d = Path(d)
     real = Path.home() / ".claude"
     if darwin_keychain_blocks_isolation():
         return None            # platform fact, not a credential-content one
     d.mkdir(parents=True, exist_ok=True)
-    # Locked to the owner. Never proven as THE cause of anything, but cheap,
-    # strictly safer than the umask-default mode plain mkdir leaves (measured
-    # 2026-08-31: 0o775 on this host — group AND world read/execute on a
-    # directory built to carry a copied OAuth token), and the kind of thing a
-    # security-conscious CLI can reasonably refuse to trust a credential
-    # inside of, the way ssh refuses a loose ~/.ssh. Applied every call, not
-    # only on creation, so a directory made before this line existed still
-    # gets fixed the next time a pane using it starts or resumes.
+    # Owner-only: the dir carries a credential. Applied on every call.
     try:
         d.chmod(0o700)
     except OSError:
         pass
-    # THE CREDENTIAL DECIDES WHETHER A PRIVATE DIR IS POSSIBLE AT ALL.
-    #
-    # Measured on mac-host, 2026-08-31: a pane died with `Authentication
-    # required` on session/prompt while `claude` worked fine in a terminal on
-    # the same machine. On macOS Claude Code can keep its OAuth in the
-    # Keychain rather than in ~/.claude/.credentials.json — so there is no
-    # file to copy, the private dir is created with no credential in it, and
-    # the agent under CLAUDE_CONFIG_DIR cannot authenticate. The pane was
-    # broken by the very directory that exists to give it a posture.
-    #
-    # So: seed if we can, and if we cannot, say so and let the caller fall
-    # back to the user's own config. Losing the per-pane posture is a real
-    # cost and it is the SMALLER one — a pane that cannot run has no posture
-    # either. What must never happen is the third option: run under the
-    # private dir anyway and let the operator find out at the first prompt.
+    # Without a usable credential a private dir cannot authenticate; return None
+    # so the caller falls back to the user's own config.
     cred_dst = d / ".credentials.json"
     cred_src = real / ".credentials.json"
-    # A LINK, NOT A COPY (2026-09-30; why: `corral_core.sessions`, "one
-    # login, shared"). The copy was re-synced by mtime on every seed after
-    # mac-host, 2026-08-31, found a frozen copy failing `Authentication
-    # required` — but a RUNNING pane is not re-seeded, so its copy still went
-    # stale the moment any other holder refreshed. A link cannot go stale.
-    #
-    # CARRIES A TOKEN still decides whether a private dir is possible at all:
-    # a metadata-only stub (macOS Keychain-backed accounts) authenticates
-    # nothing, linked or copied.
+    # Link, not copy: a copy goes stale when another holder refreshes the token.
+    # A metadata-only stub (Keychain-backed account) authenticates nothing.
     if usable_credential(cred_src):
         if not _core.link_shared_credential(cred_src, cred_dst) and not (
                 cred_dst.is_symlink() or cred_dst.is_file()):
             return None
     elif not (cred_dst.is_symlink() or cred_dst.is_file()):
         return None                 # nothing usable, and nothing to fall back on
-    # else: the source looked unusable just now (e.g. mid-rewrite) but a link
-    # (or a copy from before links) already exists — keep it rather than
-    # discard it on a transient bad read.
+    # else: keep an existing link through a transient bad read of the source.
     src = Path.home() / ".claude.json"
     if src.is_file() and not (d / src.name).is_file():
         try:
@@ -582,10 +355,8 @@ def seed_config_dir(d, posture):
     except (OSError, ValueError):
         base = {}
     merged = {k: v for k, v in base.items() if k not in SETTINGS_DROPPED}
-    # Deny is his; allow is not. A host `Bash(*)` allow in ~/.claude would
-    # otherwise ride into a pane labelled strict and never hit the rail —
-    # the posture lie on every host where Corral can impose a config dir.
-    # Empty allow, keep deny, then overlay defaultMode from POSTURES.
+    # Keep the host's deny rules, drop its allow rules (a host allow would bypass
+    # a strict posture), then overlay defaultMode from POSTURES.
     host_perm = base.get("permissions") or {}
     perm = {"allow": [], "deny": list(host_perm.get("deny") or [])}
     perm.update(POSTURES[posture])
@@ -594,89 +365,39 @@ def seed_config_dir(d, posture):
     return d
 
 
-# Ambient vendor credentials and parent-session variables never reach a pane.
-# The strip list, the picker note and the opt-in hatch live in the core
-# (`corral_core/sessions.py`, "ambient credentials never reach a pane") since
-# 2026-09-09 so full Corral cannot fork them again; the history — the operator on
-# mac-host, 2026-08-31, verified login, /usage showing token statistics, then
-# `Authentication required` — is told there. This product's hatch keeps the
-# name it shipped and documented with: CORRAL_LIGHT_ALLOW_VENDOR_ENV=1.
+# Ambient vendor credentials never reach a pane; the strip list lives in
+# corral_core. Opt-out: CORRAL_LIGHT_ALLOW_VENDOR_ENV=1.
 STRIP_ENV_PREFIXES = _core.STRIP_ENV_PREFIXES
 vendor_env_present = _core.vendor_env_present
 strip_prefixes = _core.strip_prefixes
 
 
 def spawn_env(spec, config_dir=None):
-    """The environment ONE agent process launches under.
-
-    One home, because there are two spawn sites (start and resume) and keeping
-    them in sync by hand is how a pane comes up on the wrong provider from
-    whichever site someone forgot.
-    """
+    """The environment one agent process launches under (start and resume)."""
     env = {}
     if NODE_BIN:
         env["PATH"] = f"{NODE_BIN}:{os.environ.get('PATH', '')}"
     env.update(spec.get("env") or {})
-    # config_dir None = seed_config_dir() could not carry a credential into a
-    # private directory on this host, so the agent runs under the user's own
-    # ~/.claude. The pane then reports postureEnforced: false and wears the
-    # `agent-set` pill, because whatever the host's ambient defaultMode is, is
-    # what you get — and claiming a posture nobody imposed is the one failure
-    # this whole mechanism exists to prevent.
+    # None: no private dir is possible, so the agent uses ~/.claude and the pane
+    # reports postureEnforced: false.
     if spec["posture_via_config_dir"] and config_dir is not None:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     return env
 
 
 def darwin_keychain_blocks_isolation():
-    """True when this platform's Claude Code makes per-pane isolation via
-    CLAUDE_CONFIG_DIR structurally unworkable, independent of what this repo
-    does with .credentials.json.
+    """True when per-pane CLAUDE_CONFIG_DIR isolation cannot work on this platform.
 
-    READ FROM THE VENDOR'S OWN SOURCE, not inferred — the fifth and last
-    theory in a long chain of wrong ones, this time settled by looking:
-
-        spike/node_modules/@anthropic-ai/claude-agent-sdk/cli.js
-        function Kg(A=""){
-          let q=O8();
-          let Y = !process.env.CLAUDE_CONFIG_DIR ? "" :
-                  `-${sha256(q).digest('hex').substring(0,8)}`;
-          return `Claude Code${D4().OAUTH_FILE_SUFFIX}${A}${Y}`
-        }
-
-    That is the macOS Keychain service-name generator this SDK uses with
-    `security find-generic-password`. Simply setting CLAUDE_CONFIG_DIR — to
-    ANY value — switches the lookup to a suffixed service name that no
-    interactive `claude login` has ever provisioned, because that login only
-    ever runs with the variable unset. A byte-identical, correctly-
-    permissioned copy of .credentials.json in the isolated directory does not
-    rescue this: it was never a credential-CONTENT problem, which is exactly
-    why the two content-focused fixes before this one (empty-token check,
-    stale-copy resync) measurably did nothing on mac-host, 2026-08-31 — the
-    positive control that found this proved the token was real and identical
-    on both sides, and it still failed only with CLAUDE_CONFIG_DIR set.
-
-    So: give up the per-pane posture on this platform, the same fallback
-    already used when no credential can be found at all. Provisioning a
-    matching Keychain entry per pane is possible in principle but means
-    Corral writing OAuth tokens into the OS Keychain under synthetic
-    identities — a materially bigger, riskier change than anything else here,
-    and a decision for the operator, not a silent code change.
+    On macOS, setting CLAUDE_CONFIG_DIR suffixes the Keychain service name the
+    SDK looks up, so the existing login is not found.
     """
     return sys.platform == "darwin"
 
 
 def usable_credential(path):
-    """Does this credentials file actually carry a token we could copy?
+    """Does this credentials file carry a non-empty access/refresh token?
 
-    Presence of the FILE proves nothing: a metadata-only stub (macOS, where
-    the secret is in the Keychain) parses fine, copies fine, and authenticates
-    nothing. Looks for a non-empty accessToken or refreshToken anywhere in the
-    document, at any nesting depth, because the vendor's key names are theirs
-    to change and a shape assertion would be one more guess.
-
-    Reads only to test for presence — no secret value is bound to a name,
-    returned, or logged.
+    Searches any nesting depth; never returns or logs the value.
     """
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -700,16 +421,8 @@ def usable_credential(path):
 
 
 def posture_enforceable(spec):
-    """Can Corral actually impose a posture on this lane, on THIS host?
-
-    Only if a private config dir can be given a working credential — which is
-    a question about the credential's CONTENT, not about a path existing.
-    """
-    # The ACP route asks nothing of the filesystem or the Keychain: if the lane
-    # speaks session/set_config_option, the posture is imposable here. This is
-    # still a claim about the LANE, made before any handshake; the pane itself
-    # reports what it actually got (Pane.posture_enforced), which is the value
-    # the UI trusts once a pane exists.
+    """Can Corral impose a posture on this lane on this host?"""
+    # ACP mode needs no config dir; the live pane reports what it actually got.
     if spec.get("posture_via_acp_mode"):
         return True
     if not spec.get("posture_via_config_dir"):
@@ -720,13 +433,7 @@ def posture_enforceable(spec):
 
 
 def _skill_commands(agent):
-    """The local skill/command catalog, for the composer's `/` completion.
-
-    Read off disk, never hardcoded: ACP's `available_commands_update` replaces
-    and augments this after session/new, and Claude and Grok will not advertise
-    the same set. This is only what makes the composer useful BEFORE that
-    notification arrives (or if it never does).
-    """
+    """Local skill/command catalog for `/` completion before the agent advertises its own."""
     out = {}
     roots = (Path.home() / ".claude" / "skills", Path.home() / ".claude" / "commands")
     for root in roots:
@@ -749,21 +456,8 @@ def _skill_commands(agent):
 
 
 # --- Picker grouping --------------------------------------------------------
-# The operator, 2026-08-31: "consolidate the SSH connections under one main SSH tab and
-# then break it out into each individual session if we choose SSH."
-#
-# Light shipped with one family and a note that a second "costs a dict entry,
-# not a UI change". 2026-09-01 collected on that: the `ssh` family below is the
-# whole picker cost of the host lanes. Two ways to belong, because the families
-# are named differently — the generated lanes carry a key PREFIX (`host:`),
-# while the agent lanes are hand-written keys with nothing in common but their
-# kind. Explicit `keys` wins over `prefix` so a future `host:`-prefixed agent
-# could be reassigned by name without renaming its lane.
-#
-# Order here is the order the picker shows, and `agents` stays first: it is the
-# overwhelmingly common case, and the dialog preselects this group's first live
-# member so opening it and pressing Start still starts Claude with no extra
-# clicks. Grouping reorganises the menu; it must not tax the default.
+# Picker families. A lane joins by explicit `keys` (wins) or key `prefix`.
+# Order is display order; `agents` stays first so its first live lane is preselected.
 AGENT_GROUPS = {
     "agents": {
         "label": "Agents",
@@ -777,17 +471,14 @@ AGENT_GROUPS = {
                 "with no agent and no permission rail",
     },
 }
-# Configure the core BEFORE any pane exists: the shared methods read AGENTS,
-# AGENT_GROUPS and STATE from the core's namespace, which is the one place the
-# two products legitimately differ. Doing it at import, loudly, is the point —
-# a missing roster must not surface as a confusing AttributeError on a click.
 def _rig_role(role_id, agent, posture):
-    """A rig seat's `role` (DESIGN-5 S12), resolved by this product's roles.py."""
+    """A rig seat's `role`, resolved by this product's roles.py."""
     import roles                                        # noqa: WPS433
     from corral_core import rigs as _rigs
     return _rigs.resolve_with(roles, role_id, agent, posture)
 
 
+# Configure the core at import, before any pane exists.
 _core.configure(AGENTS=AGENTS, AGENT_GROUPS=AGENT_GROUPS, STATE=STATE,
                 ALLOW_VENDOR_ENV_VAR="CORRAL_LIGHT_ALLOW_VENDOR_ENV",
                 ROLE_RESOLVER=_rig_role, ROSTER_CAP=MAX_ROSTER)
@@ -803,32 +494,17 @@ agent_groups = _core.agent_groups
 
 
 def available_agents():
-    """Only offer what actually exists on this host — an agent picker listing a
-    binary that isn't installed is a button that lies."""
-    # Re-read the host file on every render, not once at import: adding a host
-    # is editing a JSON file, and needing to restart the hub to see it is the
-    # kind of friction that gets a feature abandoned.
+    """The picker's lane list: only what can actually run on this host."""
+    # Re-read the host file on every render so new hosts appear without a restart.
     refresh_host_lanes()
     out = []
-    # Reported on every lane rather than logged once at boot: this changes
-    # which IDENTITY an agent runs as, and the place that matters is the
-    # picker the operator is reading when they choose one.
+    # Reported on every lane so the operator sees it when choosing.
     stripped = vendor_env_present()
     for key, spec in AGENTS.items():
         exe = Path(spec["argv"][0])
-        # argv[0] alone can lie for interpreter-launched lanes: python3 exists
-        # whether or not the adapter script does. `requires` names the rest of
-        # what the lane needs on disk.
+        # `requires` covers files beyond argv[0] (e.g. the script an interpreter runs).
         missing = [p for p in spec.get("requires", ()) if not Path(p).exists()]
-        # grok resolves its binary at call time (PATH, AIOS_GROK_BIN, or the
-        # CLI's default install dirs), so a static argv[0] check cannot answer
-        # "is it installed" for this lane. And installed is not the question
-        # anyway: this asked only resolve_grok(), which documents itself as
-        # returning a path "without probing auth", so a host with the CLI
-        # present but never signed in reported the lane AVAILABLE and the pane
-        # died on its first prompt with `Authentication required` (mac-host,
-        # 2026-08-31). Ask the launcher for the whole answer, as codex and
-        # ollama already do.
+        # grok: the launcher checks binary and auth; argv[0] alone cannot.
         if key == "grok":
             from grok_launcher import unavailable_reason
             reason = unavailable_reason()
@@ -837,9 +513,7 @@ def available_agents():
                         "postureEnforced": bool(spec["posture_via_config_dir"]),
                         "tools": bool(spec.get("tools"))})
             continue
-        # codex availability is adapter-present AND logged-in, both resolved at
-        # call time by its launcher — refuse in the picker with the exact login
-        # command, not with a pane that dies at session/new.
+        # codex: adapter present AND logged in, resolved by its launcher.
         if key == "codex":
             from codex_launcher import unavailable_reason
             reason = unavailable_reason()
@@ -848,10 +522,7 @@ def available_agents():
                         "postureEnforced": bool(spec["posture_via_config_dir"]),
                         "tools": bool(spec.get("tools"))})
             continue
-        # ollama needs a RUNNING SERVER, not just a file on disk: the adapter
-        # is always present, so the generic exists() check below would call the
-        # lane available with Ollama stopped and hand over a pane that dies on
-        # its first prompt. Same argument as codex above, different dependency.
+        # ollama needs a running server, not just the adapter on disk.
         if key == "ollama":
             reason = f"not installed: {missing[0]}" if missing else None
             if reason is None:
@@ -863,23 +534,8 @@ def available_agents():
                         "postureEnforced": bool(spec["posture_via_config_dir"]),
                         "tools": bool(spec.get("tools"))})
             continue
-        # The Antigravity runtime is a PINNED LINUX x86-64 binary. Files
-        # existing on disk is the wrong question for it: a Linux .par sitting
-        # in ~/.local/lib on a Mac satisfies `requires` perfectly and the pane
-        # then dies at exec. The installer refuses to put it there, but a hand
-        # copy or a synced home directory can, so the picker asks the platform
-        # too rather than trusting the filesystem alone.
-        # PLATFORM BEFORE FILES, and the order is the whole point. This read
-        # `and not missing`, so on a Mac — where the files are missing and
-        # always will be — the generic branch below won instead and reported
-        # "not installed: …/agy_acp_server.par". That is a true sentence that
-        # tells a lie: it invites an install of a pinned Linux x86-64 binary
-        # onto a machine that cannot execute it, and installing it is exactly
-        # what install_antigravity_acp refuses to do. On mac-host the honest
-        # answer is not "missing", it is "this host cannot run it".
-        # Then, with the files present, the sign-in method: the server
-        # handshakes fine without one and refuses session/new, so a lane
-        # judged on files alone reads ok and dies on its first prompt.
+        # Antigravity is a pinned Linux x86-64 binary: check the platform before files,
+        # then the sign-in method (the server handshakes without one but refuses session/new).
         if key == "gemini":
             from install_antigravity_acp import auth_problem, platform_problem
             problem = platform_problem() or (None if missing else auth_problem())
@@ -890,27 +546,21 @@ def available_agents():
                             "postureEnforced": False,
                             "tools": bool(spec.get("tools"))})
                 continue
-        # A lane that declares live_probe is judged by a REAL handshake, not
-        # by files on disk. That is the only portable way to answer "will this
-        # authenticate here" for a vendor whose credential store we must not
-        # guess at — and it is the same call that fills the model/effort
-        # pickers, so the honest answer and the useful one arrive together.
-        # Cached (lane_probe.CACHE_S), so this is not a process per render.
+        # live_probe lanes are judged by a real (cached) handshake, which also fills
+        # the model/effort pickers.
         if spec.get("live_probe") and not missing:
             import lane_probe
             r = lane_probe.probe(key)
             ok, why = bool(r["ok"]), r["error"] or spec.get("needs", "")
-            # A handshake that passed with a login that has lapsed is the
-            # green light that lies: the pane dies at its first prompt with
-            # `Authentication required` (2026-09-30). The credential's own
-            # expiry overrides — refuse with the remedy, or warn ahead of it.
+            # A lapsed login passes the handshake but fails at the first prompt; the
+            # credential's expiry overrides.
             auth = spec.get("auth_status")
             sign_in = False
             if ok and auth:
                 a = auth() or {}
                 if a.get("ok") is False:
                     ok, why = False, a.get("why") or why
-                    sign_in = True     # the picker offers Sign in (DESIGN-6 S4)
+                    sign_in = True     # the picker offers Sign in
                 elif a.get("why"):
                     why = a["why"]
             out.append({"key": key, "label": spec["label"],
@@ -927,19 +577,14 @@ def available_agents():
         else:
             ok, why = True, spec.get("needs", "")
         out.append({"key": key, "label": spec["label"], "available": ok, "why": why,
-                    # So the dialog can stop OFFERING a posture it cannot set.
-                    # Asks the HOST, not just the lane: on a machine whose
-                    # Claude credential lives outside a file, the private
-                    # config dir cannot be used and the posture is the user's
-                    # ambient one whatever this dialog says.
+                    # Asks the host, not just the lane, whether a posture can be set.
                     "postureEnforced": posture_enforceable(spec),
                     "tools": bool(spec.get("tools"))})
     if stripped:
         note = _core.vendor_env_note(stripped)
         for item in out:
             item["envNote"] = note
-    # One pass over every append site above, so a lane added later cannot miss
-    # its group by being appended somewhere this was forgotten.
+    # Group every lane in one pass after all appends.
     for item in out:
         gid = _group_of(item["key"])
         if gid:
@@ -955,14 +600,7 @@ class Pane(_core.PaneBase):
 
 
     def _init_runtime(self):
-        """Every field that is NOT persisted — the live half of a pane.
-
-        ONE home for it, because there are three ways a Pane comes into being
-        (__init__, from_meta's __new__, and the selftest's hand-built stub) and
-        each one that sets these itself is a copy that drifts. It has drifted
-        twice already: `commands` was added to __init__ and not to from_meta,
-        which made /api/state 500 for EVERY pane after a restart.
-        """
+        """Initialise every non-persisted field; shared by all construction paths."""
         self.error = None
         self.dead_cause = None            # "auth" when the login killed it
         self.dead_login = None            # the login (refresh expiry) it died under
@@ -971,19 +609,12 @@ class Pane(_core.PaneBase):
         self.client = None
         self.usage = {}
         self.config = {}          # {id: {value, label, options}} straight from ACP
-        # Start with the local skill files; ACP may replace/augment this after
-        # session/new, but the composer must be useful even if that notification
-        # is missing or delayed.
-        # A few lightweight restore/selftest paths construct Pane via __new__
-        # before attaching metadata; default their catalog to Claude's local
-        # skills until the real agent identity is available.
+        # Local skills until the agent advertises its own commands.
         self.commands = _skill_commands(getattr(self, "agent", "claude"))
         self.model = None
         self.effort = None
-        # What Corral actually IMPOSED on this pane, not what the lane can do
-        # in principle. Starts as the lane-level claim so a pane that has not
-        # handshaked yet reads the same as the dialog that opened it, and is
-        # replaced by the measured result the moment _apply_posture runs.
+        # What Corral actually imposed; starts as the lane-level claim and is
+        # replaced by _apply_posture's result.
         self.posture_enforced = posture_enforceable(
             AGENTS.get(getattr(self, "agent", "claude"), {}))
         self._seq = 0             # monotonic for the life of the pane
@@ -991,11 +622,8 @@ class Pane(_core.PaneBase):
         self._turn_running = False
         self._in_flight = None    # the prompt _drain popped and is running now
         self._turn_lock = threading.Lock()
-        # Bumped every time self.client is replaced (pause, resume). A _drain
-        # thread captures its generation before calling the blocking
-        # client.prompt(); if the generation has since moved on when prompt()
-        # returns, this thread's client is not the pane's live one anymore and
-        # it must touch NOTHING shared. See _drain(), pause(), resume().
+        # Bumped whenever self.client is replaced; a _drain thread whose generation
+        # has moved on must touch nothing shared.
         self._generation = 0
         self._expect_exit = False  # we are the ones killing it; not a fault
         self._since_rotate_check = 0
@@ -1008,21 +636,12 @@ class Pane(_core.PaneBase):
 
     @classmethod
     def from_meta(cls, meta, mgr):
-        """Rebuild a pane from disk WITHOUT starting an agent.
-
-        It comes back `detached`: the transcript is there and the row is in the
-        roster exactly as it was left, but no process is running. Spawning N
-        agents at boot would be slow, expensive, and mostly wasted -- most
-        panes will not be touched. resume() attaches on demand, and sending a
-        message attaches implicitly.
-        """
+        """Rebuild a pane from disk in `detached` state, without starting an agent."""
         p = cls.__new__(cls)
         p.id = meta["id"]
         p.agent = meta.get("agent") or "claude"   # null in old metas = claude
         if p.agent not in AGENTS:
-            # A pane whose lane no longer exists on this build. snapshot()
-            # reads AGENTS[agent] directly, so register a dead stub rather
-            # than KeyError the whole of /api/state.
+            # Lane gone from this build: register a dead stub so snapshot() can't KeyError.
             AGENTS[p.agent] = {
                 "label": p.agent, "argv": ["/nonexistent"],
                 "posture_via_config_dir": False,
@@ -1033,12 +652,8 @@ class Pane(_core.PaneBase):
         p.mgr = mgr
         p.title_locked = bool(meta.get("title_locked"))
         stored_title = meta.get("title")
-        # A pre-fix pane's stored title IS the "CC" collision (see
-        # _default_title) if it's un-renamed and literally the bare
-        # directory name on a non-Claude agent -- that's not a name the operator
-        # chose, it's the old bug frozen to disk. Migrate it on restore
-        # rather than leave every already-open Grok/Codex/SSH pane reading
-        # "CC" until individually renamed by hand.
+        # Migrate an un-renamed non-Claude title equal to the bare cwd name (an old
+        # default-title collision).
         stale_collision = (stored_title and not p.title_locked and
                           p.agent != "claude" and stored_title == Path(p.cwd).name)
         p.title = (None if stale_collision else stored_title) or \
@@ -1050,40 +665,27 @@ class Pane(_core.PaneBase):
         p.acp_session = meta.get("acp_session")
         p.want_model = meta.get("want_model")
         p.want_effort = meta.get("want_effort")
-        # Light does not ship porting, but it must not ERASE the annotation
-        # either: `ported_from` is in the core's META_KEYS, so save_meta()
-        # writes whatever the attribute holds -- and with nothing restoring it
-        # that is None. A pane carried Full -> Light -> Full came back with
-        # its provenance silently blanked (bug bash 2026-09-14, Astra; the
-        # cross-tree test exempts this key from its equality assertion, which
-        # is why nothing caught it).
+        # Unused by Light, but restored so save_meta() does not erase it.
         p.ported_from = meta.get("ported_from")
-        # Same hole for `ephemeral`: Light never sets it, but a Corral seat
-        # resumed here and saved again must still be one Corral will reap.
+        # Restored so a Corral seat resumed here stays reapable.
         p.ephemeral = bool(meta.get("ephemeral"))
-        # Absent in every pre-DESIGN-5 meta; None = unaddressable, which is the
-        # right answer for those (S6). Read with .get, like ported_from.
+        # None = unaddressable.
         p.seat = meta.get("seat")
         p.question = _core.PaneBase.restore_question(meta)   # ask_human
         p.seat_withheld = False
-        # Roles are Light's since 2026-09-29 (roles.py). Restored for the same
-        # reason as `ported_from`: META_KEYS persists them, so a restore that
-        # dropped them blanked them on the next save.
+        # Restored so the next save does not blank them.
         p.role = meta.get("role")
         p.role_sha = meta.get("role_sha")
         p.role_delivery = meta.get("role_delivery")
-        # The previous hub's adapter, if restore() found it still running it
-        # has already been reaped by now (Manager.restore); either way this
-        # pane has no process of its own yet, so nothing is recorded.
+        # No process of its own yet.
         p.pid = p.pgid = p.pid_start = None
         p._init_runtime()
         p.state = "detached"
         p.dir = STATE / "panes" / p.id
         p.dir.mkdir(parents=True, exist_ok=True)
         p.events = p._read_events()
-        # Resume the counter past everything on disk, or a restored pane would
-        # re-issue sequence numbers the browser already holds and its new
-        # events would be discarded as duplicates.
+        # Resume the seq counter past what is on disk, or the browser would drop new
+        # events as duplicates.
         p._seq = max((e.get("seq", 0) for e in p.events), default=0)
         p._rotate_log()
         p._log = (p.dir / "events.jsonl").open("a", encoding="utf-8")
@@ -1094,31 +696,14 @@ class Pane(_core.PaneBase):
 
 
 
-    # RESUMABLE FROM `dead`, not only `detached` (resilience review
-    # 2026-09-28, P0-a'; both rival arms, Astra and Grok, 2026-09-28). A pane
-    # whose adapter crashed or whose vendor cut the session used to have no
-    # way back but dismiss -> Archived -> reopen -> resume, four clicks you
-    # had to already know; full Corral fixed the same gap on 2026-09-04
-    # (corral/sessions.py resume). Grok's review is why this is more than the
-    # one-line predicate change: resume() overwrote self.client without
-    # closing the old one, and agent_exit leaves `_queue` in place, so the
-    # next send would have DRAINED the dead attachment's stale type-ahead
-    # into the new process — prompts the operator may no longer mean, sent
-    # without being shown. So: close the old client first, PARK the queue
-    # (never drain it) and say in the transcript exactly what was parked.
-    # A `close()`d pane is popped out of the roster entirely, so any `dead`
-    # pane still here died on its own and is safe to reattach to the same
-    # acp_session exactly like a detached one.
+    # A `dead` pane is resumable too (closed panes leave the roster). Resume
+    # closes the old client and parks, never drains, any stale type-ahead.
     RESUMABLE = ("detached", "dead")
 
     def _park_stale_queue(self):
         """Drop a dead attachment's type-ahead and name every message dropped.
 
-        Never re-sent: the process that would have run them is gone, and a
-        prompt typed minutes ago into a pane that then crashed is not
-        consent to run it against a fresh process now (P17). The text goes
-        into a `note` so nothing the operator typed silently disappears; he
-        can copy it back into the composer if he still wants it.
+        Never re-sent to the new process; quoted in a `note` so nothing disappears.
         """
         with self._turn_lock:
             parked, self._queue = list(self._queue), []
@@ -1139,21 +724,15 @@ class Pane(_core.PaneBase):
         return parked
 
     def resume(self):
-        """Attach a fresh agent process to this pane's existing conversation.
-
-        From `detached` (paused, or restored after a restart) or from `dead`
-        (the agent exited on its own). See RESUMABLE above.
-        """
+        """Attach a fresh agent process to this pane's conversation (from detached or dead)."""
         if self.state not in self.RESUMABLE:
             raise ValueError(f"pane is {self.state}, not detached or dead")
         if not self.acp_session:
             raise ValueError("this pane has no agent session to resume")
         prior = self.state
         if prior == "dead":
-            # Close the crashed client BEFORE anything else, so its reader
-            # thread's late agent_exit cannot land on the new attachment (the
-            # generation fence in _bind() is the second half of that), and
-            # its process group is reaped rather than orphaned.
+            # Close the crashed client first so its late agent_exit can't hit the new
+            # attachment, and its process group is reaped.
             self._expect_exit = True
             self._reap_failed_client()
             self._park_stale_queue()
@@ -1182,24 +761,15 @@ class Pane(_core.PaneBase):
                                               self._mcp_servers())
             finally:
                 self._replaying = False
-            # A lane that must say something about the load itself (Ollama:
-            # "the model starts fresh") says it in the result's `_meta`, AFTER
-            # replay suppression has ended — its in-band chunk is swallowed
-            # with the replay (Astra/Grok 2026-09-28, K4).
+            # A lane's load notice arrives in `_meta`, since in-band chunks are
+            # suppressed with the replay.
             notice = (((r or {}).get("_meta") or {}).get("corral/notice"))
             if isinstance(notice, str) and notice.strip():
                 self.emit("note", {"text": notice.strip()[:500],
                                    "contextLost": bool(((r or {}).get("_meta") or {})
                                                        .get("corral/contextLost"))})
             self._absorb_config((r or {}).get("configOptions") or [])
-            # session/load hands back a session at the AGENT's defaults, not
-            # the ones this pane was started with. Without this the posture
-            # (and the queued model/effort a detached pane accepted — the
-            # "attach path already applies" set_config promised and no code
-            # kept) silently reverted on every pause/resume: the pill kept
-            # saying `auto` because self.posture never changed, while the live
-            # session had gone back to prompting. Found 2026-09-01 chasing why
-            # auto mode did not stick.
+            # session/load returns the agent's defaults; re-impose posture, model, effort.
             self._apply_wants()
             self.state = "ready"
             self.emit("resumed", {"model": self.model, "effort": self.effort,
@@ -1210,9 +780,7 @@ class Pane(_core.PaneBase):
             self._reap_failed_client()      # same leak as start(); see there
             self._dead(f"could not resume: {e}")
         except Exception:
-            # Reservation marked us `starting` (counts as live). A spawn that
-            # never happened must not keep the slot — and a pane that was
-            # dead goes back to dead, not to a `detached` it never was.
+            # Release the `starting` reservation; a dead pane returns to dead.
             if self.state == "starting":
                 self.state = prior
             raise
@@ -1223,11 +791,7 @@ class Pane(_core.PaneBase):
 
 
     def _turns(self):
-        """This pane's turn ledger (ledger.py), created on first use.
-
-        Lazy because panes come into being three ways (and test stubs a
-        fourth) and only the ones with a directory can keep one.
-        """
+        """This pane's turn ledger, created lazily (only panes with a dir keep one)."""
         lg = getattr(self, "_ledger", None)
         if lg is None:
             d = getattr(self, "dir", None)
@@ -1236,12 +800,7 @@ class Pane(_core.PaneBase):
         return lg
 
     def _close_open_turns(self, why):
-        """Mark the in-flight turn and every queued one `interrupted`.
-
-        Called where a pane stops running work on purpose or loses it —
-        pause, close, a hub shutdown — so the ledger never leaves a turn
-        looking like it might still be running (P0-ledger).
-        """
+        """Mark the in-flight turn and every queued one `interrupted`."""
         with self._turn_lock:
             items = ([getattr(self, "_in_flight", None)]
                      + list(getattr(self, "_queue", [])))
@@ -1260,16 +819,9 @@ class Pane(_core.PaneBase):
         return super().stop()
 
     def shutdown_note(self, why):
-        """ONE transcript note naming what a hub exit is about to cut off.
+        """Write one note naming the in-flight and queued prompts a hub exit cuts off.
 
-        Resilience review v2, P0-b' (Astra and Grok 2026-09-28): the first
-        plan persisted the queue and then called pause() — but pause()
-        CLEARS the queue, and the prompt actually running had already been
-        popped out of it, so that design lost the one message that mattered
-        and duplicated `user` events already on disk. This only writes: it
-        names the in-flight prompt and every still-queued one, and changes
-        nothing else. Returns the note's text, or None when the pane had
-        nothing in flight.
+        Changes nothing else. Returns the note text, or None if nothing was pending.
         """
         with self._turn_lock:
             running = getattr(self, "_in_flight", None)
@@ -1294,12 +846,8 @@ class Pane(_core.PaneBase):
         return text
 
     def _record_pid(self):
-        """Persist the adapter's pid/pgid/start time the moment it exists.
-
-        BEFORE the handshake, not after: initialize + session/load can take
-        up to HANDSHAKE_TIMEOUT, and a hub that dies in that window leaves
-        exactly the orphan this record exists to find (Grok 2026-09-28).
-        """
+        """Persist the adapter's pid/pgid/start time before the handshake, so a
+        hub crash mid-handshake still leaves a record of the orphan."""
         c = self.client
         self.pid = getattr(getattr(c, "p", None), "pid", None)
         self.pgid = getattr(c, "pgid", None)
@@ -1307,16 +855,7 @@ class Pane(_core.PaneBase):
         self.save_meta()
 
     def _bind(self, gen):
-        """The callbacks for ONE attachment, fenced by its generation.
-
-        Resuming a dead pane closes the old client and starts a new one
-        (Grok 2026-09-28, P0-a'). The old client's reader thread reports its
-        exit ASYNCHRONOUSLY — it can land after the new client is up and
-        `_expect_exit` has been reset to False, and would then flip the
-        freshly resumed pane back to `dead` and clear its permissions. Every
-        event from an attachment that is no longer the pane's current one is
-        dropped here; the pane already said what happened to it.
-        """
+        """Callbacks for one attachment; events from a superseded one are dropped."""
         def on_event(kind, data):
             if gen != self._generation:
                 return
@@ -1334,16 +873,8 @@ class Pane(_core.PaneBase):
         if kind == "agent_message_chunk":
             self.emit("text", {"text": (data.get("content") or {}).get("text", "")})
         elif kind == "agent_thought_chunk":
-            # Rendered only behind the pane's "every step" eye (app.js), the
-            # same latch that reveals tool calls — quiet by default, native-
-            # Claude gray italic when asked. Emitting (vs the old drop) is
-            # what makes the choice the viewer's instead of the server's.
-            # COALESCED, not per-fragment (2026-08-30 panel, 3/3 arms): ACP
-            # streams thought as many small chunks, and one ring event per
-            # chunk let a hidden monologue evict user/permission rows from
-            # the client's capped slice and fire an SSE tick per fragment.
-            # Buffer here; _flush_thought emits ONE event when any other
-            # event kind arrives (bounded: a turn always ends in one).
+            # Coalesced: buffered here and emitted once by _flush_thought when any other
+            # event arrives, so thought fragments cannot flood the event ring.
             self._thought_acc = (getattr(self, "_thought_acc", "") or "") + \
                 (data.get("content") or {}).get("text", "")
         elif kind in ("tool_call", "tool_call_update"):
@@ -1353,18 +884,11 @@ class Pane(_core.PaneBase):
                 "content": (data.get("content") or [])[:6],
                 "locations": (data.get("locations") or [])[:8]})
         elif kind == "stall_notice":
-            # The agent has been quiet a long time. This used to KILL the turn;
-            # now it only says so, because a clock cannot tell a wedged agent
-            # from a slow one and killing took the operator's live work with it. The
-            # pane stays attached and keeps waiting; snapshot() will show it
-            # `uncertain`, and pause/stop are his to press.
+            # Informational only: a clock can't tell a wedged agent from a slow one.
             self.emit("note", {"text": data.get("text") or "no output for a "
                                        "while — still attached and waiting"})
         elif kind == "permission_expired":
-            # The request is finished whether or not a human touched it. Drop
-            # it from `pending` so the rail stops offering an approval that
-            # can no longer be delivered, and record WHY in the transcript —
-            # a card that silently disappears is its own kind of lie.
+            # Drop the expired request from `pending` and record why in the transcript.
             rid = data.get("requestId")
             if self.pending.pop(rid, None) is not None:
                 self.emit("permission_expired",
@@ -1373,12 +897,7 @@ class Pane(_core.PaneBase):
             if self.state == "needs-you" and not self.pending:
                 self.state = "ready"
         elif kind == "available_commands_update":
-            # The agent tells us its own command list -- 70 of them, names and
-            # descriptions, sent unprompted right after session/new. Corral
-            # dropped it, so the composer could not complete a skill and the operator
-            # had to already know the name to use one. Never a hardcoded list:
-            # this arrives again whenever the agent's skills change, and Grok
-            # and Claude will not advertise the same set.
+            # The agent's own command list, merged over the local skill catalog.
             advertised = [{"name": c.get("name"), "description":
                            (c.get("description") or "")[:160]}
                           for c in (data.get("availableCommands") or [])
@@ -1396,11 +915,7 @@ class Pane(_core.PaneBase):
         elif kind == "usage_update":
             self.usage = data
         elif kind == "agent_exit":
-            # A pause KILLS the process on purpose, and the reader thread
-            # reports that exit asynchronously — so `pause()` set `detached`
-            # and this handler raced in behind it with `dead`. Which one won
-            # depended on thread timing, which meant a pane the operator
-            # deliberately parked could come back reading as a crash.
+            # A deliberate kill (pause) reports its exit asynchronously; ignore it.
             if self._expect_exit:
                 return
             self.state = "dead"
@@ -1414,16 +929,10 @@ class Pane(_core.PaneBase):
                 self._dead(data.get("reason"))
 
     def _dead(self, reason):
-        """The one way a pane records that its agent stopped on its own.
+        """Record that the agent stopped on its own.
 
-        Four sites used to write `state, error = "dead", <reason>` and emit
-        the same dict by hand; the reason reached the operator as whatever
-        the wire said. For a lapsed Claude login that was a JSON-RPC error
-        code (`-32000 Authentication required`) — true, and useless. Here the
-        reason is classified once (claude_auth): an auth death carries the
-        remedy in English, a `cause` the rail and the sweep can act on, and
-        the login it died under, so auth_sweep resumes it only after a NEW
-        sign-in and never in a loop against the same dead credential.
+        Auth deaths carry a plain-English remedy, a `cause`, and the login they
+        died under, so auth_sweep resumes them only after a new sign-in.
         """
         cause = "auth" if claude_auth.is_auth_error(reason) else None
         self.state = "dead"
@@ -1450,19 +959,8 @@ class Pane(_core.PaneBase):
             self.acp_session = new.get("sessionId")
             self._absorb_config(new.get("configOptions") or [])
             if self.agent == "grok" and not self.config.get("model"):
-                # Grok's ACP session reports configOptions: null -- never a
-                # real offer, so _absorb_config left self.config empty and
-                # remember_catalog (inside it) correctly persisted nothing.
-                # Sets display state directly, with zero options, so it can
-                # never render as a PICKER the operator or the new-pane dialog could
-                # choose from. It still has to reach remember_catalog below,
-                # though: the dialog's fillCfg reads entry.value (not just
-                # entry.options) to show Grok's real model as a plain
-                # informational line instead of a disabled dropdown -- found
-                # 2026-08-23, live-tested with a real Grok turn: without this
-                # call catalog.json's grok entry stays `{}` forever, no
-                # matter how many turns run, and the dialog never leaves its
-                # "never seen this agent" empty state.
+                # Grok reports configOptions: null. Record its model as display-only (no
+                # options, so never a picker) and persist it so the dialog can show it.
                 from grok_launcher import resolve_default_model, resolve_grok
                 grok_bin = resolve_grok()
                 model = resolve_default_model(grok_bin) if grok_bin else None
@@ -1480,11 +978,8 @@ class Pane(_core.PaneBase):
                 "agentInfo": info.get("agentInfo", {})})
             self.save_meta()
         except acp.AgentError as e:
-            # The spawn may have SUCCEEDED and only the handshake failed —
-            # initialize() timing out, session/new refused. Marking the pane
-            # dead while self.client still held a live process orphaned the
-            # whole group, invisibly, until reboot (Gemini adversarial review
-            # 2026-08-31, finding 4). close() tolerates an already-dead group.
+            # The handshake can fail after a successful spawn; reap the process group
+            # rather than orphan it.
             self._reap_failed_client()
             self._dead(str(e))
         return self
@@ -1493,13 +988,7 @@ class Pane(_core.PaneBase):
 
 
     def _apply_wants(self):
-        """Re-impose everything Corral chose for this pane on a FRESH session.
-
-        Called from BOTH spawn sites (start and resume) because a new agent
-        process begins at the vendor's defaults every time, and keeping the
-        two in sync by hand is how a resumed pane comes back on the wrong
-        model — or, worse, the wrong permission posture.
-        """
+        """Re-impose this pane's posture, model and effort on a fresh session."""
         self._apply_lane_defaults()
         for cid, want in (("model", self.want_model), ("effort", self.want_effort)):
             if want and want != "default":
@@ -1510,11 +999,8 @@ class Pane(_core.PaneBase):
                 except acp.AgentError as e:
                     self.emit("note", {"text": f"could not set {cid}={want}: {e}"})
                     continue
-                # An ACK IS NOT ADOPTION. This adapter accepts a model name
-                # with any suffix after a separator and silently resolves it to
-                # the base model ("opusplan" -> "opus[1m]"), so a pane could
-                # run for an hour on a model nobody chose while the pill agreed
-                # with the request. Read what came back; say so when it differs.
+                # An ack is not adoption: the adapter may silently resolve to a different
+                # model. Report when the echoed value differs.
                 got = (self.config.get(cid) or {}).get("value")
                 if got != want:
                     self.emit("note", {"text": f"asked for {cid}={want}; "
@@ -1525,17 +1011,12 @@ class Pane(_core.PaneBase):
     def _apply_posture(self):
         """Set this pane's permission posture on the live session.
 
-        Returns whether the posture is now REALLY in force — measured from the
-        agent's own echoed configOptions, never assumed from the fact that a
-        request was sent. Every exit that is not an ack returns False and
-        leaves a note in the pane, so `postureEnforced` can never be the
-        safety property this whole mechanism exists to stop Corral asserting
-        without evidence.
+        Returns True only when the agent's echoed config confirms it; otherwise
+        leaves a note in the pane and returns False.
         """
         spec = AGENTS[self.agent]
         if not spec.get("posture_via_acp_mode"):
-            # Config-dir lanes: the posture was imposed (or not) at spawn, by
-            # the presence of CLAUDE_CONFIG_DIR in spawn_env. Nothing to send.
+            # Config-dir lanes: the posture was set (or not) at spawn.
             return posture_enforceable(spec)
         want = POSTURE_MODE.get(self.posture)
         cfg = self.config.get("mode") or {}
@@ -1567,30 +1048,17 @@ class Pane(_core.PaneBase):
                 return False
         got = (self.config.get("mode") or {}).get("value")
         if got != want:
-            # An ack that did not take. Reporting this as enforced is exactly
-            # the lie postureEnforced exists to prevent.
+            # The ack did not take.
             self.emit("note", {"text": f"asked {label} for permission mode "
                                        f"{want!r}; it reports {got!r}"})
             return False
         return True
 
-    # Values no lane default may ever carry, whatever a spec says. yolo is the
-    # vendor's skip-everything mode; auto-mode parity does not mean that, and a
-    # default is exactly where it would go unnoticed.
-    # Held {"mode": {"yolo"}} for part of 2026-09-19; out the same day because
-    # The operator chose it by name ("choose yolo") after auto_edit was measured to
-    # still card every shell execute. A guard the operator has overruled by
-    # name is theatre; the decision file is the honest record.
-    # decisions/antigravity-yolo-default-2026-09-19.md
+    # Values no lane default may carry, per config id.
     FORBIDDEN_DEFAULTS = {}
 
     def _apply_lane_defaults(self):
-        """Apply this lane's default approval mode, if the agent offers it.
-
-        Validated against what the agent ADVERTISED in session/new, so a lane
-        that does not offer it is left alone rather than sent a setting it
-        will reject. Never silent: applied or refused, it says so on the pane.
-        """
+        """Apply this lane's default config if the agent advertised it; note either way."""
         for cid, value in (AGENTS[self.agent].get("default_config") or {}).items():
             if value in self.FORBIDDEN_DEFAULTS.get(cid, set()):
                 self.emit("note", {"text": f"refusing lane default {cid}={value} "
@@ -1616,22 +1084,10 @@ class Pane(_core.PaneBase):
                                            f"{cid}={value}: {e}"})
 
     def set_config(self, config_id, value):
-        # `mode` joined 2026-09-19 (the operator: "fix anti-gravity so that it
-        # follows the auto mode that Claude and Codex both follow. I'm tired
-        # of all the permission prompts"). It is the lane's OWN approval-mode
-        # option -- Antigravity's default / auto_edit / yolo -- validated
-        # below against exactly what the agent advertised, so a lane that
-        # offers no such option still refuses. Ported from the CC corral,
-        # where it landed 2026-09-03; this repo never had it, so on this host
-        # there was no way to turn the prompts off at all.
+        # `mode` is the lane's own approval-mode option, validated like the rest.
         if config_id not in ("model", "effort", "fast", "mode"):
             raise ValueError(f"{config_id!r} is not settable from here")
-        # No advertised options at all -- e.g. Grok's ACP session reports
-        # configOptions: null -- is a REFUSAL, not an unfiltered value to
-        # forward. Letting it through used to reach the live agent and come
-        # back as a raw "Method not found" AgentError instead of this clean
-        # message (the failure the operator hit once the stale catalog offered
-        # effort levels the vendor CLI has never supported).
+        # No advertised options (e.g. Grok's null configOptions) is a refusal.
         cfg = self.config.get(config_id) or {}
         allowed = {o["value"] for o in cfg.get("options", [])}
         if not allowed:
@@ -1641,12 +1097,7 @@ class Pane(_core.PaneBase):
             raise ValueError(f"{value!r} is not offered for {config_id}; "
                              f"the agent lists {sorted(allowed)}")
         if self.client is None:
-            # Detached (paused): the config survives from the live session but
-            # there is no wire to speak on, and self.client.set_config here
-            # was an AttributeError dressed as a 500 (Gemini adversarial
-            # review 2026-08-31, finding 6). Model/effort are preferences the
-            # attach path already applies — the want_ loop in _attach — so
-            # store the choice, persist it, and let resume make it real.
+            # Detached: store model/effort as preferences applied on resume.
             if config_id not in ("model", "effort"):
                 raise ValueError(f"{config_id!r} needs a running agent — "
                                  f"resume this pane first")
@@ -1657,9 +1108,7 @@ class Pane(_core.PaneBase):
             self.emit("config", {"model": self.model, "effort": self.effort,
                                  "config": self.config})
             return self.config.get(config_id)
-        # Forward under the ADAPTER's own id (`realId`) -- Corral's "effort"
-        # is a display alias, and the wire call has to speak the vendor's
-        # vocabulary (e.g. Codex's `reasoning_effort`), not ours.
+        # Forward under the adapter's own id (`realId`); Corral's names are aliases.
         r = self.client.set_config(self.acp_session, cfg.get("realId", config_id), value)
         self._absorb_config((r or {}).get("configOptions") or [])
         self.emit("config", {"model": self.model, "effort": self.effort,
@@ -1670,12 +1119,10 @@ class Pane(_core.PaneBase):
         return seed_config_dir(self.dir / "config", self.posture)
 
     def send(self, text, via=None):
-        # `via` first: a script that declared an origin nobody allows is
-        # refused before anything is resumed, titled or queued.
+        # Validate `via` before anything is resumed, titled or queued.
         via = _core.check_via(via)
-        # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
-        # stopped means "bring it back", exactly as it does for a paused one.
-        # resume() parks — never sends — whatever was queued when it died.
+        # Typing into a paused or dead pane resumes it; resume() parks, never sends,
+        # a dead pane's old queue.
         if self.state in self.RESUMABLE:
             if not (text or "").strip():
                 raise ValueError("empty prompt")
@@ -1691,43 +1138,20 @@ class Pane(_core.PaneBase):
             raise ValueError("empty prompt")
         if len(text) > MAX_PROMPT:
             raise ValueError(f"prompt exceeds {MAX_PROMPT} chars")
-        # First prompt names the conversation -- what you ASKED tells you more
-        # than a generic default. Compares against the computed DEFAULT, not
-        # "has a user event ever appeared in self.events": that ring is
-        # bounded (MAX_EVENTS), so on a long-running pane the original first
-        # prompt eventually rotates out, and the old any(...) scan silently
-        # went blind and re-fired on the operator's NEXT message -- overwriting a
-        # meaningful title with whatever he happened to type at turn 4,001.
+        # The first prompt names the conversation. Compare against the default title,
+        # not the (bounded) event ring.
         if not self.title_locked and self.title == self._default_title(self.agent, self.cwd):
             first = " ".join(text.split())[:42]
             self.title = first + ("…" if len(" ".join(text.split())) > 42 else "")
             self.save_meta()      # or a restart restores the generic name back
-        # Light intercepts NOTHING. The full Corral answered a handful of
-        # AI-OS slash commands itself (/recall, /brief, …) before the agent saw
-        # them; those capabilities do not exist on this build, and a command
-        # that silently falls through to the model as a raw prompt is worse
-        # than one that was never offered — the operator reads a plausible
-        # answer and thinks a capability ran. So every keystroke goes to the
-        # agent, and `/` completion offers only what the agent itself
-        # advertises (see _skill_commands and available_commands_update).
-        # ONE TURN AT A TIME, per pane. send() used to spawn a thread per call
-        # with no lock, so two fast messages produced overlapping
-        # session/prompt RPCs on one ACP session: interleaved output, racing
-        # turn_end/ready transitions, and a pane reporting `ready` while a
-        # request was still in flight. Parallelism belongs ACROSS panes.
-        #
-        # A queue rather than a refusal, because typing ahead while an agent
-        # works is normal and the message should still land — it just lands in
-        # order. Bounded, so a stuck turn cannot accumulate forever.
+        # Light intercepts nothing: every message goes to the agent.
+        # One turn at a time per pane; extra messages queue in order, bounded.
         with self._turn_lock:
             if len(self._queue) >= MAX_QUEUED_TURNS:
                 raise ValueError(
                     f"{MAX_QUEUED_TURNS} messages already waiting on this pane "
                     f"— it is still working through them")
-            # DURABLE BEFORE ACKNOWLEDGED (P0-ledger, Astra 2026-09-28). The
-            # hub answers ok the moment this returns, so the acceptance has to
-            # be on disk (fsynced) first; if it cannot be, the send is refused
-            # rather than acknowledged with nothing behind it.
+            # Durable before acknowledged: refuse the send if the turn can't be fsynced.
             try:
                 tid = self._turns().accept(text)
             except OSError as e:
@@ -1742,22 +1166,10 @@ class Pane(_core.PaneBase):
             self.emit("user", user)
             self._note_turn(via)     # a human turn answers an open question
             if text == "/clear":
-                # The SDK special-cases this literal text: it resets ITS OWN
-                # context and emits a `conversation_reset` notification that
-                # the vendored ACP adapter drops on the wire (acp-agent.js,
-                # "the client owns its own transcript view" -- Corral IS that
-                # client, and until now did nothing with the ownership). Still
-                # queue the real turn above so the agent's memory actually
-                # clears; this marker just tells every renderer (this pane's
-                # own replay, every connected browser) to fold everything up
-                # to and including it out of view -- the same "gone" feel as
-                # a real terminal's clear. Nothing is deleted: events.jsonl on
-                # disk is untouched, so the fold is reversible via the
-                # existing "load earlier" affordance, never a silent loss
-                # (PRINCIPLES 18).
+                # The SDK resets its own context on `/clear`, but the adapter drops the
+                # notification; this marker folds earlier events out of view (nothing deleted).
                 self.emit("cleared", {})
-            # The queue-and-drain half is shared with peer delivery (DESIGN-5
-            # S7); everything ABOVE this line is what makes it the human's.
+            # Queue-and-drain is shared with peer delivery.
             self._dispatch(_QueuedText(text, tid))
             return tid
 
@@ -1765,32 +1177,20 @@ class Pane(_core.PaneBase):
         """Run queued prompts strictly in order until the pane is empty."""
         while True:
             with self._turn_lock:
-                # `self.client` is read INSIDE the lock and used from a local:
-                # pause() sets it to None from another thread, and
-                # `self.client.prompt(...)` would then raise AttributeError —
-                # which this loop did not catch, so the drain thread died with
-                # `_turn_running` still True. After that the pane accepted
-                # every message and ran none of them, silently, forever.
+                # Read the client inside the lock: pause() can set it to None concurrently.
                 client = self.client
                 gen = self._generation
-                # The turn a reply was held behind has just ended (or none
-                # has run yet): re-admit it in THIS acquisition (S11b).
+                # Re-admit replies held behind the turn that just ended.
                 self._release_held_peers_locked()
                 if not self._queue or self.state == "dead" or client is None:
                     self._turn_running = False
                     return
                 text = self._queue.pop(0)
-                # A PEER message is admitted only onto a pane with no card, but
-                # _on_permission does not take this lock: re-check at the last
-                # moment before prompt(), and fail the peer turn rather than run
-                # it under the human's nose (DESIGN-5 section 7.3).
+                # Re-check for a pending card: a peer turn never runs while one is open.
                 if getattr(text, "peer", False) and self.pending:
                     self._peer_withdrawn(text, "card-pending")
                     continue
-                # The popped prompt exists nowhere else until turn_end: not in
-                # the queue, and in the transcript only as a `user` event.
-                # A shutdown note has to NAME it (Grok 2026-09-28, K3), so it
-                # is kept here for exactly as long as it is in flight.
+                # Kept while in flight so a shutdown note can name it.
                 self._in_flight = text
             lg = self._turns()
             tid = getattr(text, "turn", None)
@@ -1800,17 +1200,7 @@ class Pane(_core.PaneBase):
             except acp.AgentError as e:
                 with self._turn_lock:
                     if self._generation != gen:
-                        # pause()/resume() replaced this attachment while
-                        # prompt() was blocked. That newer generation already
-                        # owns _turn_running, _queue and self.state; a stale
-                        # thread mutating any of them would be this dead
-                        # client's failure overwriting a LIVE one nobody asked
-                        # about. Measured failure mode: pause() sets
-                        # `detached`, an immediate resume/send starts a new
-                        # client and thread, the OLD prompt() then wakes with
-                        # AgentError and this handler clobbered the resumed
-                        # pane back to `dead`. gpt-5.6-sol, third-pass review,
-                        # finding 4.
+                        # A newer attachment owns the pane state now; touch nothing.
                         return
                     # Do not silently swallow what was still waiting.
                     lost, self._queue = self._queue, []
@@ -1825,26 +1215,15 @@ class Pane(_core.PaneBase):
                     lg.mark(getattr(t, "turn", None), "interrupted",
                             why="the agent stopped before it was sent",
                             was="accepted")
-                # Since 2026-08-31 a prompt carries NO deadline, so the only
-                # way to reach here is the agent process actually dying or its
-                # stdin closing — never a clock deciding the operator's session is
-                # over. close() is then a harmless no-op on an already-dead
-                # group, and it stays because it is the one thing that reaps a
-                # half-dead group's survivors. (It was added 2026-08-23, when a
-                # TIMED-OUT pane kept streaming tool/text events to its own log
-                # for minutes after Corral had told the operator the agent stopped —
-                # the orphan that bug left behind. That timeout is gone now;
-                # the reaping is still right.)
+                # Prompts have no deadline, so the agent died or closed stdin. close()
+                # reaps any surviving members of the process group.
                 client.close()
                 self._drop_held_peers("dead")
                 self._dead(str(e) + (
                     f" ({dropped} queued message(s) were not sent)" if dropped else ""))
                 return
             except Exception as e:              # noqa: BLE001
-                # Anything else is a bug in us, and a bug that kills this
-                # thread quietly is the worst outcome available: the pane keeps
-                # taking messages and stops running them. Fail LOUDLY in the
-                # transcript and leave the pane usable.
+                # A bug in us: fail loudly in the transcript and keep the pane usable.
                 with self._turn_lock:
                     if self._generation != gen:
                         return
@@ -1852,8 +1231,7 @@ class Pane(_core.PaneBase):
                     dropped = len(lost)
                     self._turn_running = False
                     self._in_flight = None
-                # A bug in US around the turn: whether the agent ran it is
-                # not known, so it is `uncertain` — and never replayed.
+                # Unknown whether the agent ran it: `uncertain`, never replayed.
                 lg.mark(tid, "uncertain", why=f"{type(e).__name__}: {e}")
                 for t in lost:
                     lg.mark(getattr(t, "turn", None), "interrupted",
@@ -1885,35 +1263,14 @@ class Pane(_core.PaneBase):
         valid = {o.get("optionId") for o in req.get("options") or []}
         if option_id not in valid:
             raise ValueError(f"invalid option {option_id!r}; expected one of {sorted(valid)}")
-        # Refuse to GRANT what was never displayable, at the server too. The UI
-        # withholds the allow buttons, but a control that only exists in the
-        # browser is a suggestion — the gate has to be where the authority is.
-        # From the PENDING record, which lives exactly as long as the authority
-        # it guards. Reading it out of the bounded event ring meant a request
-        # that outlived MAX_EVENTS became approvable (see _on_permission).
+        # Enforce the display gate server-side, from the pending record (which lives
+        # exactly as long as the authority it guards).
         rec = req.get("_gate") or {}
         kind = next((str(o.get("kind", "")) for o in req.get("options") or []
                      if o.get("optionId") == option_id), "")
-        # The digest is the bind, not a label. requestId + optionId names
-        # WHICH prompt; the digest names WHAT bytes were on screen. Without
-        # this check an approval proves only that someone holding the cookie
-        # knew the id — which is not P17.
-        #
-        # It gates GRANTING only. Refusal is the fail-closed default and can
-        # never be the harmful direction, so nothing is protected by making it
-        # hard — and a great deal is broken. The operator, 2026-08-31, on the pane
-        # that was committing this very change: "It says the digest on this
-        # approval does not match the bytes on the command." His browser was
-        # holding an app.js from before the digest shipped, so it posted no
-        # digest at all; with refusal gated too, EVERY button on the card
-        # failed and the agent sat blocked until he killed the pane. A gate
-        # that can withhold approval but cannot deliver a refusal is not a
-        # consent gate, it is a deadlock with a security story attached. Same
-        # shape as the oversize rule below, which already got this right.
-        #
-        # Which option refuses is decided HERE, from the agent's own declared
-        # `kind`, never from anything the client asserts — a stale client is
-        # exactly the case this clause exists for, so it gets no say in it.
+        # The digest binds an approval to the bytes shown. It gates granting only:
+        # refusing must always work, even from a stale client. Which option refuses
+        # comes from the agent's declared `kind`, never from the client.
         shown = rec.get("digest") or ""
         granting = not kind.startswith("reject")
         if granting and (not shown or digest != shown):
@@ -1927,9 +1284,8 @@ class Pane(_core.PaneBase):
                 "this request was too large to display, so it cannot be "
                 "approved here — only refused. An approval proves only what "
                 "you could see.")
-        # Pop BEFORE waking the agent. Two concurrent POSTs used to both
-        # pass the option check; last writer to the waiter won. If the
-        # wake itself fails, put the record back so the card stays answerable.
+        # Pop before waking the agent so concurrent answers can't both win;
+        # restore the record if the wake fails.
         with self._lock:
             if request_id not in self.pending:
                 raise ValueError("no such pending permission (already answered?)")
@@ -1942,8 +1298,7 @@ class Pane(_core.PaneBase):
             raise
         if self.state != "dead":
             self.state = "needs-you" if self.pending else "busy"
-        # Bind the answer to the exact bytes that were on screen. Without the
-        # digest the record says only WHICH option was chosen, not what for.
+        # Bind the answer to the exact bytes that were on screen.
         self.emit("permission_answered", {"requestId": request_id,
                                           "optionId": option_id, "kind": kind,
                                           "digest": rec.get("digest"),
@@ -1952,13 +1307,7 @@ class Pane(_core.PaneBase):
 
 
     def set_minimized(self, flag):
-        """Minimizing hides the PANE, never the pane's state.
-
-        The roster keeps showing it, live, including a permission it is blocked
-        on -- otherwise minimizing would be a way to make an agent wait forever
-        while the UI looks calm, which is the dust-gathering failure wearing a
-        new hat.
-        """
+        """Hide the pane; the roster still shows its live state and pending permissions."""
         self.minimized = bool(flag)
         self.save_meta()
         self.mgr.broadcast_layout(self)
@@ -1969,49 +1318,29 @@ class Pane(_core.PaneBase):
 
 
     def snapshot(self, since=0):
-        # Ask the OS, not our own bookkeeping. `client.alive` only flips when
-        # stdout closes or a write fails, so an adapter that wedged with its
-        # pipe open still read `ready`. poll() is the ground truth, and where
-        # the two disagree we say `uncertain` rather than pick the flattering
-        # one — a status that lies is worse than a status that admits doubt.
+        # Ask the OS (poll()), not `client.alive`; when they disagree, say `uncertain`.
         alive = bool(self.client and self.client.alive)
         idle = time.time() - getattr(self, "last_activity", time.time())
         state_override = None
         if alive:
             try:
                 if self.client.p.poll() is not None:
-                    # The process is GONE. `client.alive` merely had not
-                    # noticed yet. This used to be reported as `uncertain`,
-                    # which was wrong in the direction that matters: there is
-                    # nothing uncertain about an exited process, and dressing a
-                    # corpse as "maybe" is the flattering answer.
+                    # The process has exited; `client.alive` just hasn't noticed.
                     alive = False
                     if self.state != "detached" and not self._expect_exit:
                         state_override = "dead"
                 elif self.state == "uncertain" and idle <= STALL_S:
                     state_override = "busy"     # it started talking again
                 elif self.state == "busy" and idle > STALL_S:
-                    # Alive, mid-turn, and nothing has come out of it for
-                    # minutes. THIS is the uncertain case — the wedged adapter
-                    # holding its pipe open, which the old check reported as a
-                    # healthy `busy` indefinitely because poll() was still None.
+                    # Alive and mid-turn but silent for STALL_S: possibly wedged.
                     state_override = "uncertain"
             except Exception:                       # noqa: BLE001
                 pass
         if state_override and state_override != self.state:
             self.state = state_override
-            # Tell the glass. This mutation used to be silent: the attention
-            # tick would mark a wedged pane `uncertain` (or a corpse `dead`)
-            # and no SSE event carried it, so the browser kept the pulsing
-            # `busy` dot until a manual reload — defeating the observability
-            # the state exists to provide (Gemini adversarial review
-            # 2026-08-31). activity=False: see emit().
+            # Broadcast the change so browsers update. activity=False: see emit().
             self.emit("state", {"state": state_override}, activity=False)
-        # Liveness from the PROCESS, not from our own bookkeeping — a manager
-        # that believes its own state field reports a corpse as running.
-        # `detached` is exempt: it means "restored from disk, deliberately not
-        # running yet", which is a legitimate not-alive state. Folding it into
-        # `dead` made every restored pane look like a crash.
+        # Liveness from the process; `detached` (deliberately not running) is not dead.
         state = (self.state if alive or self.state in
                  ("dead", "detached", "uncertain") else "dead")
         return {
@@ -2020,61 +1349,34 @@ class Pane(_core.PaneBase):
             "order": self.order, "pinned": self.pinned,
             "model": self.model, "effort": self.effort, "config": self.config,
             "commands": self.commands,
-            # How long since ANYTHING came out of this pane. "busy" is a
-            # pulsing dot with no evidence behind it; this is the evidence.
+            # Seconds since anything came out of this pane.
             "idleS": int(idle),
             "cwd": self.cwd, "posture": self.posture, "title": self.title,
-            # Whether Corral actually IMPOSED that posture on THIS pane —
-            # measured, once the pane has handshaked: either the agent acked
-            # the `mode` config option (see _apply_posture) or the lane was
-            # driven through a CLAUDE_CONFIG_DIR. `oc acp` runs under its own
-            # policy and reports false. The dialog once offered
-            # strict/edits/auto for every agent and the pill displayed the
-            # choice regardless, so a Grok pane could read `strict` while
-            # nothing had made it strict — a UI asserting a safety property it
-            # never established.
+            # Whether Corral actually imposed the posture on this pane (measured).
             "postureEnforced": self.posture_enforced,
             # Whether this lane can read a file itself — what attaching a note
             # to it means (a reference, or a quoted excerpt).
             "tools": bool(AGENTS[self.agent].get("tools")),
-            # Whether the ADAPTER enforces a fail-closed permission rail of its
-            # own, even though Corral cannot set the posture MODE on this lane.
-            # `postureEnforced: false` alone cannot tell "the vendor decides"
-            # from "our own adapter asks before every write" — two very
-            # different promises that wore the same `agent-set` pill. No lane
-            # in this product sets it today; the key exists so the pill asks
-            # the lane rather than hardcoding a list of lane names.
+            # Whether the adapter enforces its own fail-closed permission rail, distinct
+            # from postureEnforced. No lane sets it today.
             "rail": bool(AGENTS[self.agent].get("rail")),
             "state": state, "error": self.error, "created": self.created,
-            # The triage projection over `state` — one opinion, computed in the
-            # core and rendered (never re-derived) by the roster, the chips,
-            # the pane header and the tab title. `state` above stays the
-            # record and stays on the tooltip. `unread` is False here because
-            # the hub cannot know what a particular human has already read.
+            # Triage projection over `state`, computed once in the core.
             "display": _core.display_state(self, state=state)["state"],
             "pending": list(self.pending.keys()),
-            # The pane's address for other panes (DESIGN-5 S6). A WITHHELD
-            # seat is not served -- another open pane was there first -- but
-            # it is shown for what it is, so the operator can see why a peer
-            # cannot reach this one.
+            # The pane's address for other panes; a withheld seat is shown, not served.
             "seat": None if self.seat_withheld else self.seat,
             "seatWithheld": self.seat if self.seat_withheld else None,
-            # The agent's open ask_human question ({text, at, turn}) or None.
-            # The agent's words: every surface renders it as the agent asking,
-            # never as the human (P20). `turnVia` is where the latest turn
-            # came from (None = the human) -- the browser's display mirror
-            # reads it the way display_state does.
+            # The agent's open ask_human question ({text, at, turn}) or None; `turnVia`
+            # is the latest turn's origin (None = the human).
             "question": self.question,
             "turnVia": self.turn_via,
-            # Whether ↻ / typing can bring this pane back: a conversation id
-            # to load. A pane that died before session/new has none.
+            # Resumable only with an ACP session id to load.
             "resumable": bool(getattr(self, "acp_session", None)),
-            # "auth" when a lapsed login killed it: the rail says so in
-            # words, and auth_sweep brings it back after the next sign-in.
+            # "auth" when a lapsed login killed it.
             "deadCause": getattr(self, "dead_cause", None),
             "role": getattr(self, "role", None),
-            # A transcript carried here from another lane (port.py) — the
-            # header says so, so nobody mistakes it for the model's memory.
+            # Set when the transcript was carried from another lane (port.py).
             "portedFrom": getattr(self, "ported_from", None),
             "usage": self.usage, "alive": alive,
             "events": [e for e in self.events if e["seq"] > since],
@@ -2083,70 +1385,17 @@ class Pane(_core.PaneBase):
 
 
 # --- Known aliases the live handshake does not enumerate --------------------
-# `session/new`'s configOptions lists Claude Code's model PRESETS, but the CLI
-# recognises at least one alias it does not advertise there: the operator, 2026-09-01,
-# "add Opus Plan ... it's the same as /model opusplan". Verified live before
-# adding, the same way every other claim in this file is: `set_config(model,
-# "opusplan")` is accepted (configOptions echoes back cleanly), while
-# `set_config(model, "total-garbage-xyz")` is refused with `Invalid value for
-# config option model: total-garbage-xyz`. So this is a confirmed vendor
-# alias, not Corral guessing at a model id it hopes exists.
-#
-# Layered on in remember_catalog rather than at any one probe site, because
-# that is the SINGLE place every write to the catalog passes through (a fresh
-# box's seed_catalogs probe, a live session/new, a set_config ack). Adding it
-# anywhere else would have the option vanish the moment a real Claude session
-# overwrote the catalog with the vendor's own shorter list — remember_catalog's
-# own docstring is explicit that every write "has to overwrite whatever was
-# remembered before".
-#
-# If the CLI ever drops this alias, spawn() already fails loudly on it: an
-# AgentError from set_config lands as a "could not set model=opusplan: …" note
-# in the pane, same as any other rejected value — never a silent wrong model.
-# WITHDRAWN 2026-09-01: "opusplan" was here, and it was never real.
-#
-# The operator: "we are still missing opus plan ... when started in that mode we
-# default to opus5". Measured against the live adapter, which is what the
-# entry above should have been:
-#
-#     set_config(model, "opusplan")              -> accepted, echoes "opus[1m]"
-#     set_config(model, "opus-plan")             -> accepted, echoes "opus[1m]"
-#     set_config(model, "opus-total-garbage-xyz")-> accepted, echoes "opus[1m]"
-#     set_config(model, "opus!!!")               -> accepted, echoes "opus[1m]"
-#     set_config(model, "sonnet-garbage")        -> accepted, echoes "sonnet"
-#     set_config(model, "opusXYZ")               -> REFUSED
-#     set_config(model, "plan")                  -> REFUSED
-#
-# The adapter matches a model name up to a separator and drops the rest, so
-# "opusplan" resolves to plain Opus and Plan Mode never happens. The original
-# check reasoned "garbage is refused, opusplan is accepted, therefore it is a
-# vendor alias" — but its garbage (`total-garbage-xyz`) began with no model
-# name, so it could only ever prove the refusal path existed. `opus!!!` is the
-# control that had to be run: acceptance here proves nothing about
-# recognition.
-#
-# The pane header made this visible and got blamed for it. The dialog offers
-# catalog + these extras; the header cycles p.config, straight from the live
-# agent. So the invented option appeared in one control and not the other,
-# which is the mechanism working correctly: the agent never advertised it.
-#
-# What Corral CAN offer instead is the `plan` value of the `mode` config
-# option — real Plan Mode, advertised by the agent. It is not the same thing
-# (opusplan also swaps the model per phase, which nothing here exposes), so it
-# is the operator's call, not a silent substitution.
-#
-# Anything added here must survive the `opus!!!` control first.
+# Model ids added to the advertised catalog in remember_catalog. Empty: the
+# adapter accepts `<model><sep><anything>` (even "opus!!!") and echoes the base
+# model, while "opusXYZ" is refused; acceptance does not prove an alias is real.
 MODEL_EXTRAS = {}
 
 
 
 def _clear_pid_record(pane_dir):
-    """Null the pid fields in a meta.json, touching NOTHING else in it.
+    """Null the pid fields in a meta.json, touching nothing else (atomic).
 
-    Not save_meta(): that rewrites every META key from the pane's attributes,
-    and Light does not restore the role annotations a full-Corral pane may
-    carry — a boot-time save would blank them (the same class of loss as the
-    2026-09-14 `ported_from` bug). Atomic, like save_meta.
+    Not save_meta(), which would blank keys Light does not restore.
     """
     f = Path(pane_dir) / "meta.json"
     try:
@@ -2161,17 +1410,10 @@ def _clear_pid_record(pane_dir):
 
 
 class Manager(_core.ManagerBase):
-    """Panes, plus the agent's own config CATALOG.
+    """Panes, plus a cached copy of each agent's config catalog.
 
-    The catalog is remembered on disk because the new-conversation dialog needs
-    the model/effort option lists BEFORE any pane exists -- it used to scrape
-    them off a live pane, so with nothing running (i.e. every fresh start) the
-    pickers offered only "Default" and the operator could not choose a model for his
-    first conversation. The operator: "now model and effort does not work."
-
-    Still never hardcoded: this is the agent's own list, cached. Each new pane
-    refreshes it, so a model appearing or disappearing upstream propagates on
-    the next session rather than being frozen.
+    Cached on disk so the new-conversation dialog has model/effort options
+    before any pane exists; every new session refreshes it.
     """
 
     def __init__(self):
@@ -2185,32 +1427,18 @@ class Manager(_core.ManagerBase):
         self.mcp = mcp.Registry()
         self.catalog = self._load_catalog()
         self.restore()
-        # Off the constructor's thread: a probe is a network call, and Corral
-        # must finish starting whether or not a vendor answers. Results land in
-        # the same catalog the dialog reads, so a seeded list appears on the
-        # next state() poll rather than blocking the UI on boot.
+        # Probe in the background so startup never waits on a vendor.
         threading.Thread(target=self.seed_catalogs, daemon=True).start()
 
 
     # ── the Claude login, watched ────────────────────────────────────────
-    AUTO_RESUME_MAX = 8        # panes brought back per sweep; bounded (P8)
+    AUTO_RESUME_MAX = 8        # panes brought back per sweep
 
     def auth_sweep(self, now=None, notify_fn=None):
-        """Edge-triggered watch on the Claude login (claude_auth.status).
+        """Edge-triggered watch on the Claude login, run from the hub's observe tick.
 
-        Runs from the hub's observe tick. Two edges, each acted on once:
-
-          * a NEW sign-in (the credential's refresh expiry moved) — every pane
-            that died of `Authentication required` under the OLD login is
-            resumed on its own conversation, and told so. Only across that
-            edge: resuming against the same dead credential would churn a
-            process every tick and die again at the first prompt.
-          * the login expired, or is inside WARN_H of expiring — one desktop
-            notification with the remedy, once per (state, expiry), so the
-            steady state is silent (P: edge-trigger).
-
-        Never raises; the tick must survive a Keychain that will not answer.
-        Returns what it did, for tests and for `doctor`.
+        On a new sign-in, resume panes that died of auth under the old login; on
+        expiry or near-expiry, notify once per (state, expiry). Never raises.
         """
         acted = {"resumed": [], "failed": [], "notified": None}
         try:
@@ -2252,7 +1480,7 @@ class Manager(_core.ManagerBase):
 
     def port_preview(self, from_id, to_agent):
         """The exact pack a port would send, its sha, and who receives it.
-        Refusals are the same function Manager.port() applies (P17)."""
+        Refusals are the same function Manager.port() applies."""
         import port as port_mod
         src = self.get(from_id)
         why = port_mod.refuse_target(to_agent, AGENTS.get(to_agent),
@@ -2265,13 +1493,10 @@ class Manager(_core.ManagerBase):
         return pack
 
     def port(self, from_id, to_agent, *, sha, cwd=None, posture=None):
-        """Carry a conversation to another lane (full Corral's DESIGN-4 F3).
+        """Carry a conversation's transcript to a new pane on another lane.
 
-        NOT a resume: an acp_session belongs to one adapter's store, so what
-        moves is the TRANSCRIPT, and the new pane's `ported_from` says so.
-        `sha` must match the pack recomposed here — a transcript that grew
-        since the preview refuses rather than sending unread bytes (P17).
-        Delivery is its own fact: a pane can exist and the pack not arrive.
+        `sha` must match the freshly recomposed pack, so a transcript that grew
+        since the preview is refused. Delivery is reported separately.
         """
         import socket
         import port as port_mod
@@ -2298,11 +1523,9 @@ class Manager(_core.ManagerBase):
         return {"pane": pane, "delivered": True, "error": None}
 
     def shutdown_notes(self, why):
-        """Write a shutdown note on every pane that has work in flight.
+        """Write a shutdown note on every pane with work in flight; returns the count.
 
-        Called from the hub's signal handler, on the MAIN thread (P0-b').
-        Bounded by the roster; every pane is tried even if one fails, and
-        the count is returned for the exit line.
+        Called from the hub's signal handler; one failure never stops the rest.
         """
         n = 0
         for p in list(self.panes.values()):
@@ -2315,14 +1538,9 @@ class Manager(_core.ManagerBase):
         return n
 
     def seed_catalogs(self):
-        """Fill in the model list for lanes that can enumerate without a pane.
+        """Seed model lists for never-seen lanes via their catalog probes.
 
-        Only for an agent we have NEVER seen options from: a remembered list
-        came from a real session and is better evidence than a probe, and an
-        agent that truthfully offers no choice (grok) must keep its empty list
-        rather than have one invented for it. Best-effort throughout — every
-        failure leaves the honest "never seen this agent" empty state, which is
-        exactly what the dialog already renders correctly.
+        A list remembered from a real session wins; failures leave the empty state.
         """
         for agent, spec in list(AGENTS.items()):
             probe = spec.get("catalog_probe")
@@ -2344,10 +1562,7 @@ class Manager(_core.ManagerBase):
                 "value": default if default in values else values[0],
                 "options": [{"value": v, "name": v, "description": ""}
                             for v in values]}}
-            # A handshake probe already holds the agent's WHOLE configOptions
-            # response, and effort is the other half of what a fresh box's
-            # dialog is missing. Fold it in rather than throwing it away and
-            # leaving Effort disabled until the first real session.
+            # Also fold in effort and other options from the probe's full configOptions.
             if spec.get("probe_config"):
                 try:
                     seeded.update({k: v for k, v in
@@ -2360,26 +1575,10 @@ class Manager(_core.ManagerBase):
 
 
     def remember_catalog(self, agent, config):
-        """Record what THIS agent offers RIGHT NOW. Keyed by agent, since
-        opencode and gemini will not offer Claude's models.
+        """Record what this agent offers right now, keyed by agent.
 
-        Every caller passes a live ACP response (new_session_full,
-        load_session, or a set_config ack) — never a "haven't checked yet"
-        placeholder. So an empty config is not missing data to skip; it is
-        the agent truthfully reporting it offers nothing, and has to
-        overwrite whatever was remembered before. Skipping the write here
-        is how grok's catalog entry survived the 2026-08-13 transport switch
-        from oc/opencode (real model+effort options) to the vendor CLI
-        (configOptions: null) with its old, wrong options still served to
-        the new-pane dialog — a stale catalog offering effort levels the
-        live transport rejects with "Method not found".
-
-        Keeps `value` alongside `options` now: Grok reports a real model with
-        an EMPTY options list (one fixed choice, not a picker), and dropping
-        `value` along with the (correctly) dropped empty list left the dialog
-        unable to tell "never seen this agent" from "seen it, it offers no
-        choice" — both rendered as the same disabled dropdown. A key with a
-        value but no options still survives the filter below.
+        Always a live ACP response, so an empty config overwrites (the agent offers
+        nothing). Keeps `value` without options so a fixed model still displays.
         """
         self.catalog[agent] = {k: {"name": v.get("name"), "options": v.get("options", []),
                                    "value": v.get("value")}
@@ -2390,11 +1589,7 @@ class Manager(_core.ManagerBase):
             have = {o.get("value") for o in model["options"]}
             model["options"] += [e for e in MODEL_EXTRAS.get(agent, ())
                                  if e["value"] not in have]
-        # Atomic and serialized (K9; Astra 2026-09-28: "serialize writers as
-        # well as replacing atomically"). write_text truncated in place, so a
-        # crash mid-write — or two panes handshaking at once — left a partial
-        # catalog.json that _load_catalog reads as {} and the dialog's model
-        # lists vanished until the next handshake. Same shape as save_meta.
+        # Atomic and serialized: a partial catalog.json would read as {}.
         with _CATALOG_LOCK:
             try:
                 CATALOG.parent.mkdir(parents=True, exist_ok=True)
@@ -2420,24 +1615,15 @@ class Manager(_core.ManagerBase):
         exe = Path(spec["argv"][0])
         if not exe.exists():
             raise ValueError(f"{spec['label']} is not installed at {exe}")
-        # `requires` too, not just argv[0]. Four of the five lanes here launch
-        # through an interpreter, so argv[0] is `python3` and exists on any
-        # host — the check above passes for a lane whose adapter or vendor
-        # binary is absent, and the refusal then arrives as a dead pane instead
-        # of a sentence in the dialog. available_agents() already greys these
-        # out; this is the same answer at the point that acts on it.
+        # Check `requires` too: interpreter-launched lanes always have argv[0].
         missing = [p for p in spec.get("requires", ()) if not Path(p).exists()]
         if missing:
             raise ValueError(f"{spec['label']} is not installed: {missing[0]}")
         cwd = Path(cwd).expanduser()
         if not cwd.is_dir():
             raise ValueError(f"not a directory: {cwd}")
-        # Reserve the slot under the lock, and REGISTER before starting.
-        # Unlocked, two simultaneous /api/session/new calls both read a count
-        # under the cap and both proceed. And starting first meant Pane.start()
-        # broadcast `ready` for a pane the manager did not yet contain, so
-        # another open browser refreshed, still could not find it, and sat
-        # stale until something unrelated woke it up.
+        # Reserve the slot under the lock and register before start(), so the cap
+        # holds under concurrency and `ready` never names an unknown pane.
         with self._lock:
             live = [p for p in self.panes.values()
                     if p.state not in ("dead", "detached")]
@@ -2448,9 +1634,7 @@ class Manager(_core.ManagerBase):
                     f"{MAX_ROSTER} panes are already on the roster, live or "
                     f"detached — close or forget one before starting another")
             pane = Pane(agent, cwd, posture, self, model, effort)
-            # A role is an ANNOTATION (roles.py): which preset started this
-            # conversation and the digest of its bytes at that moment. Set
-            # before start() so the first save_meta carries it.
+            # Role annotation (roles.py), set before start() so the first save carries it.
             if role:
                 pane.role, pane.role_sha, pane.role_delivery = role, role_sha, "preamble"
             self.panes[pane.id] = pane
@@ -2464,19 +1648,8 @@ class Manager(_core.ManagerBase):
     def restore(self):
         """Bring back up to MAX_ROSTER panes that were not deliberately closed.
 
-        The operator: "I would like to be able to close the local window and open it
-        again and have all my tabs there the way I left them." Closing the
-        BROWSER always worked -- the panes lived in server memory. Restarting
-        the SERVER did not, and deploying is how that kept happening to him.
-
-        Restored panes come back `detached`: title, order, minimize state and
-        the transcript's bounded recent tail are as left (see _read_events --
-        it never reads a rotated events.jsonl.1, so a conversation past
-        MAX_LOG_BYTES or MAX_EVENTS has already lost its earlier turns before
-        restore ever runs), with no agent process running until one is wanted.
-        MAX_PANES is the live-process cap, applied on resume. The roster
-        cap is MAX_ROSTER; slicing restore at MAX_PANES dropped conversations
-        13+ on every hub bounce.
+        Restored panes are `detached` (no process until wanted); MAX_PANES caps
+        live processes on resume.
         """
         root = STATE / "panes"
         if not root.is_dir():
@@ -2485,9 +1658,7 @@ class Manager(_core.ManagerBase):
         try:
             dirs = list(root.iterdir())
         except OSError as e:
-            # Loud, and left for the outside watcher to page on: a hub that
-            # cannot list its own panes must not come up looking empty
-            # (Astra/Grok 2026-09-28, K8). The raise still stops the boot.
+            # Loud: a hub that cannot list its panes must not come up looking empty.
             print(f"corral-light: cannot read {root}: {e}", file=sys.stderr,
                   flush=True)
             try:
@@ -2505,9 +1676,7 @@ class Manager(_core.ManagerBase):
                 if not isinstance(m, dict):
                     raise ValueError("not an object")
             except (OSError, ValueError) as e:
-                # Counted and said, never silently skipped (Astra 2026-09-28,
-                # K8: "restore() is not loud"). It lands in notRestored, which
-                # the roster already renders.
+                # Counted into notRestored, never silently skipped.
                 unreadable += 1
                 print(f"corral-light: pane {d.name} not restored — "
                       f"meta.json unreadable: {e}", file=sys.stderr, flush=True)
@@ -2518,9 +1687,7 @@ class Manager(_core.ManagerBase):
             if m.get("closed") or not m.get("id"):
                 continue
             metas.append(m)
-        # Reap BEFORE any pane object exists, and therefore before anything
-        # can run session/load against a conversation an orphaned adapter
-        # from the previous hub still holds (Grok 2026-09-28, missed kill).
+        # Reap the previous hub's orphaned adapters before any session/load.
         reaped = acp.reap_orphans(orphans) if orphans else {}
         self.orphans = {k: v for k, v in reaped.items()}
         for key, outcome in reaped.items():
@@ -2529,11 +1696,7 @@ class Manager(_core.ManagerBase):
         metas.sort(key=lambda m: (0 if m.get("pinned") else 1,
                                   m.get("order") if m.get("order") is not None else 10_000,
                                   m.get("created") or ""))
-        # The HEAD of that sort, not the tail. `metas[-MAX_PANES:]` took the
-        # far end — so once more than MAX_PANES panes were saved, the panes
-        # dropped on restart were exactly the pinned and earliest-ordered ones.
-        # Pinning made a pane MORE likely to disappear. Positive control
-        # (2026-08-01): 15 metas, 2 pinned; the old slice kept neither.
+        # Keep the head of the sort (pinned and earliest-ordered first).
         skipped = max(0, len(metas) - MAX_ROSTER)
         for m in metas[:MAX_ROSTER]:
             try:
@@ -2544,9 +1707,7 @@ class Manager(_core.ManagerBase):
                       f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
                 continue
             self.panes[m["id"]] = p
-            # P0-ledger: a turn the previous hub accepted or dispatched and
-            # never closed was cut off by that hub's exit. Say so, once, and
-            # never re-send it (Astra 2026-09-28).
+            # Turns the previous hub left open were cut off: say so once, never re-send.
             try:
                 cut = p._turns().recover()
             except Exception:                # noqa: BLE001
@@ -2554,8 +1715,7 @@ class Manager(_core.ManagerBase):
             if cut:
                 def _show(r):
                     t = r.get("text") or ""
-                    # A cut-off PEER message says so: re-sending it is not the
-                    # operator re-asking their own question (DESIGN-5 S7).
+                    # Label cut-off peer messages as such.
                     return ("a message from another pane, " if r.get("kind") == "peer"
                             else "") + repr(t[:PARKED_PREVIEW_CHARS] +
                                             ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
@@ -2573,28 +1733,22 @@ class Manager(_core.ManagerBase):
                                         "agent to it"})
             if m.get("pgid") or m.get("pid"):
                 _clear_pid_record(p.dir)     # the previous hub's process is handled
-        # Two open metas naming one seat (DESIGN-5 S6): the earlier-created
-        # keeps it, the later is withheld and says so. No file is rewritten.
+        # Two open metas naming one seat: the earlier-created one keeps it.
         self._withhold_colliding_seats(metas)
-        # A reply the previous hub was holding for a waiter (S11b) lived in
-        # its memory only: record it dropped on both sides, never re-send it.
+        # Replies the previous hub held in memory are recorded dropped, never re-sent.
         self._peer_queue_orphans()
         self.not_restored = skipped + unreadable   # said out loud, not dropped
 
     def _reserve_live(self, pane):
-        """Refuse to attach a process when MAX_PANES live ones already exist.
-
-        create() already checked this; resume() and send()-on-detached did not,
-        so pause-then-type was a cap bypass. Mark the pane `starting` under
-        the lock so a concurrent resume cannot also slip through.
-        """
+        """Refuse to attach a process when MAX_PANES live ones exist; marks the
+        pane `starting` under the lock so concurrent resumes cannot both pass."""
         with self._lock:
             live = [p for p in self.panes.values()
                     if p is not pane and p.state not in ("dead", "detached")]
             if len(live) >= MAX_PANES:
                 raise ValueError(
                     f"{MAX_PANES} live panes is the cap — close or pause one first")
-            if pane.state in ("detached", "dead"):   # dead: P0-a', 2026-09-28
+            if pane.state in ("detached", "dead"):
                 pane.state = "starting"
 
 
@@ -2635,14 +1789,7 @@ class Manager(_core.ManagerBase):
 
 
     def reorder(self, ids):
-        """Set an explicit order from a list of pane ids.
-
-        Panes rendered in creation order, which is not an ordering system —
-        The operator's whole complaint about terminals was that you cannot arrange
-        running work. Unknown ids are ignored rather than rejected: the client
-        may be a moment stale, and a drag should not fail because a pane closed
-        while the mouse was down.
-        """
+        """Set an explicit order from a list of pane ids; unknown ids are ignored."""
         if not isinstance(ids, list):
             raise ValueError("reorder needs a list of pane ids")
         seen = 0
@@ -2666,12 +1813,9 @@ class Manager(_core.ManagerBase):
         return p.pinned
 
     def broadcast_layout(self, pane):
-        """Tell every browser about a persisted layout mutation.
+        """Tell every browser about a persisted layout change.
 
-        Layout is shared UI state rather than transcript history, so it gets a
-        lightweight event that does not consume the pane's event ring or alter
-        its per-pane sequence. The browser handles this event before normal
-        transcript sequence deduplication.
+        A lightweight event outside the pane's event ring and sequence.
         """
         self.broadcast({"seq": 0, "at": _now(), "pane": pane.id,
                         "kind": "layout", "data": {
@@ -2689,55 +1833,24 @@ class Manager(_core.ManagerBase):
 
     def state(self, since=None):
         since = since or {}
-        # list() first — the GIL-atomic copy hub.py's attention loop already
-        # uses. Iterating the live dict spans Python-level snapshot() calls,
-        # and another HTTP thread creating or closing a pane mid-iteration
-        # raises RuntimeError and 500s /api/state.
+        # Copy with list(): another thread may add or remove panes mid-iteration.
         return {"panes": [p.snapshot(since.get(p.id, 0)) for p in list(self.panes.values())],
                 "agents": available_agents(),
-                # The Claude login's own expiry, for the rail's early warning
-                # (claude_auth; cached, one `security` read a minute at most).
+                # The Claude login's expiry, for the rail's early warning (cached).
                 "claudeAuth": claude_auth.status(),
-                # Ships WITH `agents`, not beside it: the per-lane `group` tag
-                # is meaningless without the definitions that name and order the
-                # groups. They were briefly served from local.py instead — a
-                # different consumer entirely — so the browser tagged every lane
-                # with a group it had no label for (found live, 2026-08-31).
+                # Group definitions ship with `agents`, whose `group` tags reference them.
                 "agentGroups": agent_groups(),
                 "postures": sorted(POSTURES),
-                # Where a new conversation starts, when nothing else is
-                # remembered. Prefer ~/aios when Seed is installed (that
-                # folder is the workspace); otherwise home, which always
-                # exists. The BROWSER used to carry this as a literal
-                # ('/home/USER/Github/CC'), inherited from the full Corral —
-                # which on any other machine is a directory that does not
-                # exist, so the first thing a new install did was refuse to
-                # start a pane. The host knows its own home; the client should
-                # not be guessing at it.
+                # Default cwd, decided by the host (see default_cwd).
                 "defaultCwd": str(default_cwd()),
-                # Where transcripts live on THIS machine. The empty state says
-                # it, because "is my conversation going to someone's cloud?"
-                # is the first question a self-hosted agent workspace has to
-                # answer and an empty room answers it badly. From the host,
-                # never guessed by the browser -- the same lesson as
-                # defaultCwd above, which shipped as a hardcoded path from
-                # another machine.
+                # Where transcripts live on this machine, shown in the empty state.
                 "dataDir": str(STATE),
-                # Somewhere to START from. The field was free text with one
-                # default, so choosing a directory meant knowing and typing an
-                # absolute path — on a new machine, the one thing you do not
-                # have to hand (the operator, mac-host, 2026-08-31: "I can't seem to
-                # pick the directory I want to start in"). These are REAL
-                # directories on this host, offered as a datalist so the field
-                # stays typeable: nothing here is a restriction on where a
-                # conversation may open.
+                # Real directories on this host, offered as a datalist; the field stays free text.
                 "cwdSuggestions": cwd_suggestions(
                     [p.cwd for p in list(self.panes.values())]),
                 "catalog": self.catalog,
                 "archived": self.archived(),
-                # Panes the cap kept from being restored. They are still on
-                # disk and invisible in the product, which is fine only if the
-                # product SAYS so — an unannounced drop reads as a deletion.
+                # Panes the roster cap kept from being restored; surfaced, not hidden.
                 "notRestored": self.not_restored,
                 # Scheduled prompts (schedule.py) — what will start on its own.
                 "schedule": (self.schedule.list()

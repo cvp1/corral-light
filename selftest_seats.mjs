@@ -1,4 +1,4 @@
-/* A seat is visible on the pane and findable from ⌘K (DESIGN-5 S6, T6.6).
+/* A seat is visible on the pane and findable from ⌘K.
  *
  * The header shows `@reviewer`; a withheld seat is shown AS withheld, never
  * as if it were an address; an unseated pane offers a way to name it. ⌘K
@@ -97,9 +97,8 @@ check(pat && pat[1].replace(/\\\\/g, '\\') === '[a-z][a-z0-9\\-]{0,31}',
 check(/value="unbind"[^>]*formnovalidate|formnovalidate[^>]*value="unbind"/.test(html),
       'Remove would be blocked by the pattern check on an old, now-invalid name');
 check(/wireSeat\(\);/.test(src), 'nothing wires the seat dialog');
-/* Enter must BIND. The form's default button is its first submit button,
- * Cancel, so without this handler Enter in the name box silently cancelled --
- * found only in a real browser. */
+/* Enter must BIND: the form's default button is its first submit button,
+ * Cancel, so without this handler Enter in the name box cancels. */
 const ws = fn('wireSeat');
 check(/e\.key !== 'Enter'/.test(ws) && /reportValidity\(\)\) dlg\.close\('ok'\)/.test(ws),
       'Enter in the seat name box no longer binds (it would hit Cancel, the default button)');

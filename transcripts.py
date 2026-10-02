@@ -1,64 +1,12 @@
 #!/usr/bin/python3
-"""transcripts — full-text search across every pane's log, and a MECHANICAL
+"""transcripts — full-text search across every pane's log, and a mechanical
 digest of what the agents did in a window.
 
-Ported from full Corral's transcripts.py (DESIGN-4 F2) for Corral Light on
-2026-09-29, resilience review §3: Light's ⌘K searched notes, not its own
-conversations, so "what did Codex say about the cookie yesterday" was a grep.
-Port changes, and only these: the shared `corral_core.transcript` reader, the
-index under CORRAL_LIGHT_STATE (never the full Corral's state), a Python
-whose sqlite lacks FTS5 degrades to a typed error instead of a crash, and the
-digest drops its full-Corral Docket tail (close.py is fleet state Light does
-not have). Everything below the next heading is the original's reasoning.
+The index is a derived, disposable SQLite FTS5 DB at
+$CORRAL_LIGHT_STATE/transcripts.db, diffed by mtime/offset and rebuilt if
+unreadable. Permission events are stored with an empty body (countable, never
+findable); `thought` is not stored. The digest counts index rows; no model.
 
-DESIGN-4 F2. Two halves, one store:
-
-    search()   every pane's transcript -- live, detached AND archived -- from
-               the palette and the CLI. A closed conversation's words are on
-               disk and were unfindable; that is a deletion nobody asked for.
-    digest()   what happened in the last N hours, computed FROM EVENTS.
-               No model is in the loop, and that is deliberate: the 2026-08-23
-               three-model panel killed LLM deltas for close records ("hiding
-               the exact bytes the operator needs"). `close.py digest` is arithmetic
-               over records and this is arithmetic over events. If the operator wants
-               prose from a digest, he quotes it into a pane -- composition,
-               not dispatch.
-
-THE INDEX IS DERIVED AND DISPOSABLE
-    Same posture as `library.py`: SQLite FTS5, mtime/offset-diffed, throttled,
-    its own DB at $CORRAL_LIGHT_STATE/transcripts.db. Delete it and the next refresh
-    rebuilds it. A corrupt DB self-heals by rebuilding rather than locking
-    (P5) -- said once on stderr, not on every query.
-
-    A SEPARATE database from the Library's on purpose: that one is read-only
-    by construction over DOCUMENTS the operator and the fleet wrote; this one is over
-    Corral's own logs, which rotate, get closed, and are appended to by live
-    processes. One file, two lifecycles, is how a rebuild of one loses the
-    other.
-
-WHAT IS INDEXED, AND THE ONE COLUMN DESIGN-4 DID NOT NAME
-    Searchable bodies: `user`, `text`, `tool` (title + the head of its result),
-    `note`, `dead`. NOT searchable: `thought` (monologue, and the operator hides it by
-    default) and `permission*` -- a consent payload is not search material.
-
-    But the digest has to be able to SAY "3 asked · 2 answered · 1 expired",
-    and every number it prints must be a count over rows this index holds
-    rather than a second read of the log that could disagree with search().
-    So permission events are stored with an EMPTY body: countable, never
-    findable. `thought` is not stored at all -- nothing counts it.
-
-    `meta UNINDEXED` is the one column DESIGN-4's schema sketch did not list.
-    It carries a tool call's `locations[].path` list, which is where "edited 5
-    files" comes from. Same argument: the digest's numbers come out of the
-    index or they are a different measurement wearing the same face.
-
-BOUNDS (P8), every one a named constant
-    ROW_MAX_CHARS per row, PANE_MAX_ROWS newest rows per pane (older rows are
-    dropped from the INDEX, never from disk, and search() names the pane in
-    `partial` so a bounded answer never passes as a complete one),
-    DIGEST_MAX_PANES, DIGEST_MAX_HOURS, REFRESH_S.
-
-CLI (P16):
     python3 transcripts.py search "route refused" --limit 20
     python3 transcripts.py digest --hours 24
     python3 transcripts.py refresh --force
@@ -79,25 +27,22 @@ if str(HERE) not in sys.path:
 
 from corral_core import transcript                  # noqa: E402
 
-# Light's own state dir, bound the same way sessions.STATE is. NOT the full
-# Corral's: two products must never read each other's panes.
+# Bound the same way sessions.STATE is.
 STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
                             Path.home() / ".local/share/corral-light"))
 
-REFRESH_S = 60                  # at most one scan a minute (library.py's rule)
+REFRESH_S = 60                  # at most one scan a minute
 ROW_MAX_CHARS = 8000            # per indexed row; head kept, tail marked …
 PANE_MAX_ROWS = 20000           # newest rows per pane held in the INDEX
 TOOL_BODY_CHARS = 2000          # of a tool call's result text
 DIGEST_MAX_PANES = 40
-DIGEST_MAX_HOURS = 24 * 7       # same window close.py clamps to
+DIGEST_MAX_HOURS = 24 * 7
 DIGEST_ASK_CHARS = 120
 DIGEST_MAX_FILES = 8
 SEARCH_MAX_LIMIT = 200
 SNIPPET_TOKENS = 14
 
-# Bodies that are searchable.
-# `peer` (DESIGN-5 S7): a message another pane's agent sent is findable by what
-# it said, like a human's ask -- and counted apart from one (digest).
+# Bodies that are searchable (`peer` = another pane's agent's message).
 BODY_KINDS = ("user", "peer", "text", "tool", "note", "dead")
 # Stored with an EMPTY body: countable by the digest, never findable by text.
 FACT_KINDS = ("permission", "permission_answered", "permission_expired")
@@ -116,15 +61,7 @@ def _panes_dir(state_dir=None):
     return (Path(state_dir) if state_dir else STATE) / "panes"
 
 
-# Bumped when what a ROW MEANS changes -- not when the SQL schema changes.
-# v2 (2026-09-14): a turn's streamed text chunks are one row, and a tool row's
-# meta is a JSON record (id, kind, status, paths) instead of a bare path list.
-# Rows written by v1 are shaped right and MEAN something else, which is the
-# kind of drift nothing would ever notice; the index is derived and
-# disposable, so the honest migration is to throw it away and re-read the
-# logs (P5).
-# v4 (DESIGN-5 S7): `peer` rows exist. A v3 index would silently miss every
-# peer message, so it is rebuilt rather than trusted.
+# Bump when what a row means changes; a mismatched index is dropped and rebuilt.
 INDEX_VERSION = 4
 
 
@@ -146,11 +83,8 @@ def _connect(state_dir=None):
         c.commit()
         global _last_refresh
         _last_refresh = 0.0
-    # tail_rowid/tail_off: the row holding a text run that was still growing
-    # when the last pass ended, and the byte offset it starts at. The run is
-    # indexed IMMEDIATELY (a live pane's newest answer has to be findable) and
-    # REPLACED on the next pass, whole, by rowid -- which is O(1), unlike
-    # finding it again through an UNINDEXED column.
+    # tail_rowid/tail_off: the still-growing text run indexed last pass and its
+    # byte offset; replaced whole by rowid on the next pass.
     c.execute("""CREATE TABLE IF NOT EXISTS panes(
         id TEXT PRIMARY KEY, title TEXT, agent TEXT, cwd TEXT, created TEXT,
         closed INT, gen TEXT, offset INT, partial INT,
@@ -166,12 +100,8 @@ class NoFts5(RuntimeError):
 
 
 def _db(state_dir=None):
-    """Open the index, rebuilding it from scratch if it is unreadable.
-
-    Self-heal over lock (P5): a half-written FTS5 file is derived data, so the
-    cheap correct move is to throw it away. Said ONCE on stderr -- a line on
-    every query is how a real fault becomes background noise (P7).
-    """
+    """Open the index, rebuilding it from scratch if it is unreadable
+    (reported once on stderr)."""
     global _rebuilt_said
     try:
         return _connect(state_dir)
@@ -220,11 +150,7 @@ def _row_for(ev):
         f = transcript.tool_facts(ev) or {}
         head = " ".join(str(x) for x in (d.get("title"), d.get("kind")) if x)
         body = (head + "\n" + "\n".join(texts)[:TOOL_BODY_CHARS]).strip()
-        # The IDENTITY of the call travels with the row, not just its paths.
-        # The digest counted rows and called them calls; ACP sends one call
-        # and a stream of updates for the same id, so its headline number was
-        # inflated ~5x against what the eye counts in the pane (Grok 3). A
-        # count the operator cannot reproduce is worse than no count.
+        # Carry the call id so the digest can fold ACP update rows into one call.
         meta = json.dumps({"id": f.get("id") or "", "kind": f.get("kind") or "",
                            "status": f.get("status") or "",
                            "paths": [_clip(x) for x in (f.get("paths") or [])[:8]]})
@@ -235,20 +161,9 @@ def _row_for(ev):
 def _rows(pane_id, events, offsets=None, hold_tail=False):
     """(rows, rewind_offset) — index rows for `events`.
 
-    ADJACENT TEXT EVENTS ARE ONE ROW. ACP streams an answer as many
-    `agent_message_chunk`s; indexing each as its own FTS row means a phrase
-    that spans two chunks matches neither ("route " + "refused" renders as
-    "route refused" and `route refused` found nothing -- Astra 8). FTS needs
-    both terms in ONE row, so a turn's chunks are joined the way the reader
-    sees them. The row carries the FIRST chunk's seq, which is the seq the UI
-    already scrolls to.
-
-    `rewind` is the byte offset of a run that is still OPEN -- the last event
-    read was text, so the next refresh may extend it. The run is indexed now
-    (a live pane's newest answer must be findable immediately) and the caller
-    re-reads from `rewind` next pass, replacing that one row so the finished
-    run is one row, whole, exactly once. A closed pane's log cannot grow, so
-    `hold_tail` is False for it and nothing is re-read.
+    Adjacent text chunks join into one row (so phrases spanning chunks match),
+    keyed by the first chunk's seq. With `hold_tail`, `rewind` is the offset of
+    a trailing open text run that the next pass re-reads and replaces.
     """
     rows, rewind = [], None
     run = None                      # [seq, at, [texts], offset]
@@ -264,7 +179,7 @@ def _rows(pane_id, events, offsets=None, hold_tail=False):
     for i, ev in enumerate(events):
         kind = ev.get("kind")
         if kind not in KEEP_KINDS:
-            continue                # thought &c never reach the index at all
+            continue
         seq = ev.get("seq") or 0
         at = ev.get("at") or ""
         off = offsets[i] if offsets and i < len(offsets) else None
@@ -284,7 +199,7 @@ def _rows(pane_id, events, offsets=None, hold_tail=False):
                      kind, meta, body))
     if run is not None:
         if hold_tail and run[3] is not None:
-            rewind = run[3]         # …and re-read from here next pass
+            rewind = run[3]         # re-read from here next pass
         flush()
     return rows, rewind
 
@@ -303,9 +218,8 @@ def _insert(c, rows):
 
 
 def _trim(c, pane_id):
-    """Hold at most PANE_MAX_ROWS newest rows for one pane. Returns whether
-    anything was dropped -- which search() reports, because a bounded answer
-    that does not say it is bounded reads exactly like a complete one."""
+    """Hold at most PANE_MAX_ROWS newest rows for one pane; returns whether
+    anything was dropped (search() reports it as partial)."""
     n = c.execute("SELECT COUNT(*) FROM ev_fts WHERE pane=?",
                   (pane_id,)).fetchone()[0]
     if n <= PANE_MAX_ROWS:
@@ -316,28 +230,14 @@ def _trim(c, pane_id):
     return True
 
 
-#: A pane directory with no `meta.json` AT ALL. Not the same thing as a
-#: meta.json that cannot be trusted, and the difference decides whether the
-#: conversation is findable (2026-09-15, P2: 28 such dirs on linux-host).
+#: A pane directory with no `meta.json` at all (distinct from an unreadable one).
 _META_MISSING = object()
 
 
 def _meta_of(d):
-    """The pane's meta, or a marker saying WHICH kind of nothing it is.
-
-    Three outcomes, deliberately distinct:
-
-      * a dict with an `id` — an ordinary pane.
-      * `_META_MISSING` — no `meta.json` on disk. These predate `save_meta`
-        or are crash leftovers, and their `events.jsonl` is still a real
-        conversation the operator had. Indexing them under their id is strictly
-        better than a search that answers "no matches" about words that are
-        demonstrably on his disk (P1: a clean answer you cannot substantiate
-        is worse than an ugly one).
-      * `{}` — `meta.json` exists and cannot be trusted: broken JSON, not a
-        dict, no `id`, or unreadable. THAT is what `skipped` now means, and
-        only that: a directory the index genuinely could not read.
-    """
+    """The pane's meta dict; `_META_MISSING` if there is no meta.json (the
+    log is still indexed under its id); `{}` if meta.json is unreadable or
+    invalid (the pane is skipped)."""
     try:
         raw = (d / "meta.json").read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -352,8 +252,7 @@ def _meta_of(d):
 
 
 def _scan(c, state_dir=None):
-    """One pass over every pane directory. Counted, so the throttle can be
-    measured rather than asserted about."""
+    """One pass over every pane directory (calls counted for tests)."""
     _scan.calls += 1
     root = _panes_dir(state_dir)
     panes, rows, skipped = 0, 0, []
@@ -369,18 +268,13 @@ def _scan(c, state_dir=None):
         cur = d / "events.jsonl"
         metaless = m is _META_MISSING
         if metaless:
-            # INDEXED, never dropped and never deleted (the operator, 2026-09-15).
-            # A log with no meta still answers "what did I say about X"; the
-            # only things lost are the title and the agent, so it gets its id
-            # for a title and "?" for the agent, and every hit carries
-            # `metaless` so the surface can say which it is rather than
-            # implying a title it does not have.
+            # Index under its id with agent "?"; hits carry `metaless`.
             if not cur.is_file():
-                skipped.append(pane_id)  # no meta AND no log: not a pane dir
+                skipped.append(pane_id)  # no meta and no log
                 continue
             m = {"id": pane_id, "title": pane_id, "agent": "?", "closed": True}
         elif not m.get("id"):
-            skipped.append(pane_id)      # a meta that cannot be read; say so
+            skipped.append(pane_id)      # unreadable meta
             continue
         try:
             st = cur.stat()
@@ -399,17 +293,8 @@ def _scan(c, state_dir=None):
         prev_tail = (prev[4] if prev else None)
         gained, tail_rowid = 0, None
         if prev is None or rotated:
-            # Full (re)index. Rotation moved events.jsonl -> .1 under us, so
-            # the old generation still holds turns nobody should lose; read it
-            # FIRST so rowid order stays chronological (the trim drops oldest).
-            #
-            # WHOLE, not a head. The old read stopped at 32 MiB and threw the
-            # rest of `.1` away, while the core rotates at 64 MiB: a marker in
-            # a 36 MB log was searchable before rotation and gone after, with
-            # the bytes still on disk (Astra 7). transcript.read_file is
-            # chunked and bounded per PASS, not per prefix, and a line too
-            # long to be an event is skipped instead of stalling the offset at
-            # 0 forever.
+            # Full (re)index. Read the rotated `.1` log first so rowid order
+            # stays chronological (the trim drops oldest).
             c.execute("DELETE FROM ev_fts WHERE pane=?", (pane_id,))
             partial = False
             old = d / "events.jsonl.1"
@@ -432,8 +317,7 @@ def _scan(c, state_dir=None):
                 tail_rowid = prev_tail
             else:
                 if prev_tail is not None:
-                    # The open run is about to be re-read whole; its partial
-                    # row goes now, so the turn is never in the index twice.
+                    # Drop the open run's row; it is re-read whole below.
                     c.execute("DELETE FROM ev_fts WHERE rowid=?", (prev_tail,))
                 r = transcript.read_file(cur, prev_off)
                 made, rewind = _rows(pane_id, r.events, r.offsets,
@@ -445,12 +329,7 @@ def _scan(c, state_dir=None):
                     gained += _insert(c, made)
                 off = rewind if rewind is not None else r.offset
         rows += gained
-        # ONLY a pane that gained rows can have crossed the cap. `_trim`'s
-        # COUNT(*) filters on an UNINDEXED FTS column, so it scans the table
-        # once per pane -- and it ran for every pane on every refresh: Astra
-        # measured 28.6 SECONDS to refresh 300 panes with ZERO new events.
-        # The bound is unchanged; what is gone is asking a quiet pane whether
-        # it grew (P7: a no-op pass does no work and says nothing).
+        # Only a pane that gained rows can cross the cap; _trim is a table scan.
         if gained and _trim(c, pane_id):
             partial = True
         c.execute(
@@ -460,18 +339,12 @@ def _scan(c, state_dir=None):
              1 if m.get("closed") else 0, gen_now, off,
              1 if partial else 0, tail_rowid, off, 1 if metaless else 0))
         panes += 1
-    # A pane directory the operator deleted must leave the index too (P23: eviction
-    # is accretion's other half), or search keeps answering out of a
-    # conversation that no longer exists.
+    # Evict panes whose directories are gone.
     live = {d.name for d in root.iterdir() if d.is_dir()}
     for gone in set(have) - live:
         c.execute("DELETE FROM ev_fts WHERE pane=?", (gone,))
         c.execute("DELETE FROM panes WHERE id=?", (gone,))
-    # PERSISTED, because search() answers from the index and the refresh that
-    # found these may have been the throttled one an hour ago. A pane dir the
-    # index cannot read is a conversation that is not in ANY answer, and until
-    # 2026-09-14 only a CLI `refresh` ever printed it -- 28 such dirs on this
-    # host, unfindable and unnamed, with nothing to say so (Grok 2).
+    # Persist skipped dirs so a throttled search() can still report them.
     c.execute("INSERT OR REPLACE INTO index_meta VALUES('skipped',?)",
               (json.dumps(skipped[:200]),))
     return {"panes": panes, "rows": rows, "skipped": skipped}
@@ -513,28 +386,16 @@ def refresh(force=False, state_dir=None):
 
 # ── search ────────────────────────────────────────────────────────────────
 def _fts_quote(q):
-    """User text is never FTS syntax: every term is a quoted prefix token.
-    Lifted from library.py deliberately -- the two indexes are separate and a
-    shared helper across them would couple two lifecycles for four lines."""
+    """User text is never FTS syntax: every term is a quoted prefix token."""
     terms = re.findall(r"[\w'-]+", q or "")[:8]
     return " ".join('"' + t.replace('"', "") + '"*' for t in terms if t)
 
 
 def search(q, limit=30, since=None, pane=None, agent=None, state_dir=None):
-    """{"hits": [...], "partial": [...], "skipped": [...]} — never a bare list.
+    """{"hits": [...], "partial": [...], "skipped": [...]}.
 
-    `partial` names every pane whose index was trimmed at PANE_MAX_ROWS;
-    `skipped` names every pane directory the last scan could not read at all —
-    a broken or unreadable `meta.json`, and ONLY that since 2026-09-15. A dir
-    with a log and no meta at all is indexed under its id and its hits carry
-    `metaless: true`; it is a conversation, not a read error.
-    BOTH ARE UNCONDITIONAL. `partial` used to be filtered to panes that also
-    had a hit, so a search for a word that lives ONLY in trimmed rows returned
-    `{hits: [], partial: []}` -- "no matches", which is the one answer that
-    was not true (bug bash 2026-09-14: Astra 9, Grok 2; two live panes are
-    already past the 20,000-row cap). An empty-and-silent result is the
-    dangerous shape; incompleteness travels with the answer or it does not
-    exist.
+    `partial` (panes trimmed at PANE_MAX_ROWS) and `skipped` (pane dirs with
+    unreadable meta) are always returned, whether or not anything matched.
     """
     try:
         refresh(state_dir=state_dir)
@@ -544,12 +405,7 @@ def search(q, limit=30, since=None, pane=None, agent=None, state_dir=None):
     match = _fts_quote(q)
     c = _db(state_dir)
     if _last_refresh == 0.0:
-        # _db() found the file unreadable and threw it away, and it does that
-        # by zeroing the throttle. Without this the query that TRIGGERED the
-        # rebuild runs against the empty replacement and answers "no matches"
-        # -- the same silence as a real empty result (Astra 9, third case:
-        # her repro corrupts the DB right after a refresh, when the throttle
-        # would otherwise skip the scan).
+        # _db() just rebuilt an unreadable index; repopulate before querying.
         c.close()
         refresh(force=True, state_dir=state_dir)
         c = _db(state_dir)
@@ -564,7 +420,7 @@ def search(q, limit=30, since=None, pane=None, agent=None, state_dir=None):
         if not isinstance(skipped, list):
             skipped = []
         if not match:
-            # An empty query is not an error and is certainly not everything.
+            # An empty query matches nothing.
             return {"hits": [], "partial": partial, "skipped": skipped}
         where = ["ev_fts MATCH ?"]
         args = [match]
@@ -586,17 +442,13 @@ def search(q, limit=30, since=None, pane=None, agent=None, state_dir=None):
             f" WHERE {' AND '.join(where)}"
             " ORDER BY f.at DESC LIMIT ?", args).fetchall()
     except sqlite3.DatabaseError:
-        # Degrade to "no answer", loudly typed, never a 500 up the stack.
+        # Degrade to a typed error, never a 500.
         return {"hits": [], "partial": [], "skipped": [],
                 "error": "index unreadable"}
     finally:
         c.close()
     hits = []
     for pid, seq, at, kind, snip, title, ag, closed, metaless in rows:
-        # `metaless` travels WITH the hit, because the title is then the pane
-        # id and the agent is "?" -- a surface that shows those without saying
-        # why is inventing a conversation that looks badly named instead of
-        # one whose meta.json is gone.
         hits.append({"pane": pid, "title": title or pid, "agent": ag or "?",
                      "closed": bool(closed), "seq": int(seq or 0),
                      "at": at or "", "kind": kind or "", "snippet": snip or "",
@@ -613,13 +465,10 @@ def _since_iso(hours):
 
 
 def digest(hours, state_dir=None, live=None):
-    """Mechanical what-the-agents-did, as markdown. No model summarizes
-    anything; every number is a count over rows this index holds.
+    """Mechanical what-the-agents-did, as markdown, counted from index rows.
 
-    `live` is the set of pane ids with a process attached RIGHT NOW, which
-    only the running hub knows. Without it a non-closed pane reads `detached`
-    -- the honest answer from disk alone, since a restored pane is detached
-    until somebody resumes it.
+    `live` is the set of pane ids with a process attached (known only to the
+    hub); other non-closed panes read `detached`.
     """
     try:
         refresh(state_dir=state_dir)
@@ -650,13 +499,7 @@ def digest(hours, state_dir=None, live=None):
             d["turns"] += 1
             d["asks"].append((body or "").strip())
         elif kind == "tool":
-            # Collected, not counted. One ACP tool call is one row plus a
-            # stream of update rows for the same id, and a `read` names its
-            # file exactly the way an `edit` does -- so counting rows here
-            # reported five calls for two, and "edited untouched.py" for a
-            # file nothing wrote (bug bash: Grok 3, Astra 11). The fold is
-            # `transcript.merge_tools` / `edited_paths`, the same identity the
-            # handoff pack uses.
+            # Collected, then folded by call id via transcript.merge_tools.
             try:
                 f = json.loads(meta) if meta else None
             except ValueError:
@@ -670,9 +513,7 @@ def digest(hours, state_dir=None, live=None):
                 d["toolrows"].append({"id": "", "title": "", "kind": "",
                                       "status": "", "paths": []})
         elif kind == "peer":
-            # Counted APART from the human's turns: "3 turns" that were really
-            # one ask and two messages from another agent would misreport who
-            # drove this pane (DESIGN-5 S7, T7.8).
+            # Counted apart from the human's turns.
             d["peers"] += 1
         elif kind == "permission":
             d["perm"] += 1
@@ -731,7 +572,7 @@ def digest(hours, state_dir=None, live=None):
     return "\n".join(L) + "\n"
 
 
-# ── CLI (P16) ─────────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="transcripts")
     sub = ap.add_subparsers(dest="cmd", required=True)

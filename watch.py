@@ -3,27 +3,10 @@
 
     corral-light watch [--url URL] [--stale SECONDS] [--json]
 
-WHY IT EXISTS (P21: a monitor cannot certify its own liveness)
-    The hub's observer tick is exposed as /health `tick_age_s` precisely so
-    that something OUTSIDE the hub can judge it. Nothing did. This is that
-    something, run by a user timer every ten minutes (README, "Watching the
-    hub").
-
-WHY IT NEVER RESTARTS (resilience review v2, P0-d'; Astra and Grok 2026-09-28)
-    The first plan restarted the unit on a stale tick. Both rival reviews
-    killed that: a restart IS kill path K1 — every live pane's agent dies with
-    the hub — and a stale tick is more often one bad pane than a dead hub
-    (the tick used to freeze on one pane's exception). A watchdog that can
-    take twelve healthy conversations down to "fix" one number is a second
-    outage. So it PAGES: it writes STATE/DEAD with the reason and shows a
-    desktop notification (notify.py; quiet 21:00–05:00, no network). Whether
-    to restart is the operator's call, made with the reason in front of him.
-
-EDGE-TRIGGERED (P7)
-    A notification fires when the verdict CHANGES (a new or different reason
-    in DEAD), not every ten minutes while the hub stays down. When the hub is
-    healthy again, DEAD is removed and one line says so. A no-op run prints
-    nothing.
+Judges /health and its `tick_age_s` from outside the hub. On failure it
+writes STATE/DEAD and shows a desktop notification, only when the reason
+changes; it never restarts the hub, since that kills every live pane's agent.
+When healthy again, DEAD is removed.
 
 Exit: 0 healthy, 2 paged (DEAD written), 3 bad arguments.
 """
@@ -45,11 +28,8 @@ STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
                             Path.home() / ".local/share/corral-light"))
 DEFAULT_URL = os.environ.get("CORRAL_LIGHT_URL") or \
     f"http://127.0.0.1:{os.environ.get('CORRAL_LIGHT_PORT', '8098')}"
-PROBE_TIMEOUT_S = 10        # /health is a dict of counters; ten seconds of
-                            # silence is a hub that is not answering anyone
-TICK_STALE_S = 120          # the observer ticks every 5 s (hub.TICK_S); two
-                            # minutes is 24 missed ticks — not a slow loop, a
-                            # stopped one — and still well inside one timer period
+PROBE_TIMEOUT_S = 10
+TICK_STALE_S = 120          # the observer ticks every 5 s (hub.TICK_S)
 BOOT_GRACE_S = 60           # tick_age_s is -1 until the first tick; after this
                             # long since the hub wrote its pidfile, -1 is a fault
 
