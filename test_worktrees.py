@@ -649,6 +649,76 @@ class TheVerify(CreateCase):
         self.assertEqual(cm.exception.reason, "missing")
 
 
+class TheSummary(CreateCase):
+
+    def objects(self):
+        return sum(len(f) for _, _, f in os.walk(self.repo / ".git" / "objects"))
+
+    def test_T_SUM_1_zero_changes(self):
+        s = wt.summary(self.make())
+        self.assertEqual((s["files"], s["added"], s["deleted"], s["untracked"]), (0, 0, 0, []))
+
+    def test_T_SUM_2_modify_add_delete_are_counted(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("a\nmore\n")              # +1
+        (p / "b.txt").write_text("b1\nb2\n")
+        wt.git(["add", "b.txt"], cwd=p)                     # staged new file: +2
+        wt.git(["commit", "-qm", "b"], cwd=p)               # committed by the agent: still counted vs base
+        (p / "b.txt").unlink()                              # and deleted again
+        s = wt.summary(e)
+        self.assertEqual(s["files"], 1)
+        self.assertEqual((s["added"], s["deleted"]), (1, 0))
+        (p / "a.txt").unlink()
+        s = wt.summary(e)
+        self.assertEqual((s["files"], s["added"], s["deleted"]), (1, 0, 1))
+
+    def test_T_SUM_3_untracked_files_are_counted_with_sizes(self):
+        e = self.make()
+        (Path(e["path"]) / "new.txt").write_text("12345")
+        s = wt.summary(e)
+        self.assertEqual(s["untracked"], [{"path": "new.txt", "size": 5}])
+        self.assertEqual(s["files"], 1)
+
+    def test_T_SUM_4_no_objects_are_written(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "big.bin").write_bytes(os.urandom(10 << 20))
+        (p / "a.txt").write_text("edited\n")
+        before = self.objects()
+        for _ in range(20):
+            wt.summary(e)
+        self.assertEqual(self.objects(), before)
+
+    def test_T_SUM_5_the_real_index_is_byte_identical(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("edited\n")
+        idx = Path(wt.git(["rev-parse", "--path-format=absolute", "--git-path", "index"],
+                          cwd=p).text.strip())
+        before = (idx.read_bytes(), idx.stat().st_mtime_ns)
+        wt.summary(e)
+        self.assertEqual((idx.read_bytes(), idx.stat().st_mtime_ns), before)
+
+    def test_T_SUM_6_an_edit_changes_the_digest_even_when_totals_do_not(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("x\n")
+        d1 = wt.summary(e)["digest"]
+        (p / "a.txt").write_text("y\n")                     # same numstat: 1 added, 1 deleted
+        st = (p / "a.txt").stat()
+        os.utime(p / "a.txt", ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        s2 = wt.summary(e)
+        self.assertEqual((s2["added"], s2["deleted"]), (1, 1))
+        self.assertNotEqual(s2["digest"], d1)
+
+    def test_binary_files_are_named_and_counted(self):
+        e = self.make()
+        (Path(e["path"]) / "a.txt").write_bytes(b"\0\1\2")
+        s = wt.summary(e)
+        self.assertEqual(s["binary"], ["a.txt"])
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
