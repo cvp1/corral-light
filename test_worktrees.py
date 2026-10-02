@@ -1085,6 +1085,173 @@ class TheCommit(CreateCase):
         self.assertTrue(lock.exists())
 
 
+class PubCase(CreateCase):
+
+    def setUp(self):
+        super().setUp()
+        self.remote = self.tmp / "remote.git"
+        wt.git(["init", "-q", "--bare", str(self.remote)], cwd=self.tmp)
+        wt.git(["remote", "add", "origin", str(self.remote)], cwd=self.repo)
+        wt.git(["push", "-q", "origin", "main"], cwd=self.repo)
+        self.e = self.make()
+        self.p = Path(self.e["path"])
+        (self.p / "a.txt").write_text("published\n")
+        snap = wt.snapshot(self.e)
+        self.oid = wt.commit_tree(self.e, snap["tree"], snap["index_id"], "feat",
+                                  expect_head=snap["head"], registry=self.reg)["commit"]
+        self.tree = snap["tree"]
+        self.url = str(self.remote)
+
+    def push(self, **kw):
+        args = dict(remote="origin", push_url=self.url, oid=self.oid, reviewed_tree=self.tree,
+                    registry=self.reg)
+        args.update(kw)
+        return wt.push(self.e, **args)
+
+    def remote_ref(self, ref):
+        r = wt.git(["ls-remote", self.url, ref], cwd=self.tmp).text.split()
+        return r[0] if r else None
+
+
+class ThePush(PubCase):
+
+    def test_T_PUB_1_push_creates_the_branch_at_the_exact_oid(self):
+        r = self.push()
+        self.assertEqual(r["pushed"], self.oid)
+        self.assertEqual(self.remote_ref("refs/heads/corral/fix-login"), self.oid)
+        pub = self.reg.read(self.e["id"])["published"]
+        self.assertEqual((pub["oid"], pub["url"], pub["ref"]),
+                         (self.oid, self.url, "refs/heads/corral/fix-login"))
+
+    def test_T_PUB_2_a_changed_remote_url_refuses(self):
+        other = self.tmp / "other.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", str(other)], cwd=self.repo)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "remote_changed")
+        self.assertIsNone(self.remote_ref("refs/heads/corral/fix-login"))
+
+    def test_T_PUB_3_uncommitted_changes_refuse(self):
+        (self.p / "a.txt").write_text("not committed\n")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "uncommitted")
+
+    def test_T_PUB_3b_a_head_that_is_not_the_reviewed_tree_refuses(self):
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(reviewed_tree="0" * 40)
+        self.assertEqual(cm.exception.reason, "changed")
+
+    def test_T_PUB_4_a_diverged_remote_branch_is_never_forced(self):
+        self.push()
+        (self.p / "a.txt").write_text("second\n")
+        snap = wt.snapshot(self.e)
+        second = wt.commit_tree(self.e, snap["tree"], snap["index_id"], "second",
+                                expect_head=snap["head"], registry=self.reg)["commit"]
+        # someone else rewrites the remote branch to an unrelated commit
+        other = wt.git(["commit-tree", snap["tree"], "-p", self.e["base_sha"]], cwd=self.p,
+                       input=b"theirs\n").text.strip()
+        wt.git(["push", "-q", "--force", self.url, f"{other}:refs/heads/corral/fix-login"], cwd=self.p)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(oid=second, reviewed_tree=snap["tree"])
+        self.assertEqual(cm.exception.reason, "non_ff")
+        self.assertEqual(self.remote_ref("refs/heads/corral/fix-login"), other)
+
+    def test_T_PUB_9_a_tag_of_the_same_name_does_not_receive_the_push(self):
+        wt.git(["push", "-q", self.url, f"{self.e['base_sha']}:refs/tags/corral/fix-login"], cwd=self.p)
+        self.push()
+        self.assertEqual(self.remote_ref("refs/tags/corral/fix-login"), self.e["base_sha"])
+        self.assertEqual(self.remote_ref("refs/heads/corral/fix-login"), self.oid)
+
+    def test_T_PUB_11_effective_push_urls(self):
+        pushto = self.tmp / "pushto.git"
+        wt.git(["init", "-q", "--bare", str(pushto)], cwd=self.tmp)
+        wt.git(["config", "remote.origin.pushurl", str(pushto)], cwd=self.repo)
+        self.assertEqual(wt.push_urls(self.e, "origin"), [str(pushto)])
+        with self.assertRaises(wt.Refused):
+            self.push()                                    # confirmed the fetch URL
+        self.push(push_url=str(pushto))
+        self.assertIsNone(self.remote_ref("refs/heads/corral/fix-login"))
+        wt.git(["config", "--unset", "remote.origin.pushurl"], cwd=self.repo)
+        wt.git(["config", f"url.{pushto}.pushInsteadOf", self.url], cwd=self.repo)
+        self.assertEqual(wt.push_urls(self.e, "origin"), [str(pushto)])
+        wt.git(["config", "--unset", f"url.{pushto}.pushInsteadOf"], cwd=self.repo)
+        wt.git(["config", "--add", "remote.origin.pushurl", self.url], cwd=self.repo)
+        wt.git(["config", "--add", "remote.origin.pushurl", str(pushto)], cwd=self.repo)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertIn("2 push URLs", cm.exception.detail)
+
+
+class ThePullRequest(PubCase):
+
+    def stub_gh(self, signed_in=True):
+        state = self.tmp / "gh-state"
+        state.mkdir(exist_ok=True)
+        body = f"""
+echo "$@" >> {state}/argv
+env | grep -q '^GH_PROMPT_DISABLED=1$' || {{ echo noenv >> {state}/argv; }}
+case "$1 $2" in
+  "auth status") {'exit 0' if signed_in else 'echo "not logged in" >&2; exit 1'} ;;
+  "pr list") cat {state}/pr 2>/dev/null || echo "[]" ;;
+  "pr create") cat > {state}/body; echo '[{{"url":"https://github.com/o/r/pull/7"}}]' > {state}/pr;
+               echo https://github.com/o/r/pull/7 ;;
+esac
+"""
+        stub = self.stub_git(body)
+        return stub, state
+
+    def pr(self, gh, **kw):
+        args = dict(title="Fix login", body="body", repo="o/r", registry=self.reg)
+        args.update(kw)
+        with mock.patch.object(wt, "GH_BIN", gh):
+            return wt.open_pr(self.e, **args)
+
+    def test_github_repo_from_urls(self):
+        for u in ("https://github.com/o/r.git", "git@github.com:o/r.git",
+                  "ssh://git@github.com/o/r", "https://github.com/o/r"):
+            self.assertEqual(wt.github_repo(u), "o/r", u)
+        self.assertIsNone(wt.github_repo("/local/path.git"))
+
+    def test_T_PUB_5_no_gh_gives_a_compare_url(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/o/r.git"], cwd=self.repo)
+        r = self.pr(str(self.tmp / "no-such-gh"))
+        self.assertEqual(r["compare_url"],
+                         "https://github.com/o/r/compare/main...corral/fix-login?expand=1")
+        self.assertIsNone(r["pr_url"])
+
+    def test_T_PUB_6_gh_signed_out_names_the_fix(self):
+        gh, _ = self.stub_gh(signed_in=False)
+        with self.assertRaises(wt.Refused) as cm:
+            self.pr(gh)
+        self.assertIn("gh auth login", cm.exception.detail)
+
+    def test_T_PUB_7_success_is_stored_and_a_second_call_finds_the_same_pr(self):
+        gh, state = self.stub_gh()
+        r = self.pr(gh)
+        self.assertEqual(r["pr_url"], "https://github.com/o/r/pull/7")
+        self.assertEqual(self.reg.read(self.e["id"])["published"]["pr_url"], r["pr_url"])
+        r2 = self.pr(gh)
+        self.assertEqual(r2["pr_url"], r["pr_url"])
+        self.assertEqual((state / "argv").read_text().count("pr create"), 1)
+
+    def test_T_PUB_8_text_reaches_gh_literally(self):
+        gh, state = self.stub_gh()
+        marker = self.tmp / "x"
+        self.pr(gh, title=f"$(touch {marker})", body=f"`touch {marker}`")
+        self.assertFalse(marker.exists())
+        self.assertIn(f"$(touch {marker})", (state / "argv").read_text())
+        self.assertEqual((state / "body").read_text(), f"`touch {marker}`")
+
+    def test_T_PUB_10_the_confirmed_repo_is_passed_and_prompts_are_off(self):
+        gh, state = self.stub_gh()
+        self.pr(gh, repo="parent/r")
+        argv = (state / "argv").read_text()
+        self.assertIn("pr create --repo parent/r --head corral/fix-login --base main", argv)
+        self.assertNotIn("noenv", argv)
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)

@@ -172,7 +172,13 @@ def git(args, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OU
     while streaming. On timeout the whole process group is killed and
     GitTimeout raised. With check=True a non-zero rc raises GitError.
     """
-    cmd = [GIT_BIN, *args]
+    return _run([GIT_BIN, *args], cwd, timeout, check, max_out, env_extra, input,
+                optional_locks_off)
+
+
+def _run(cmd, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OUT,
+         env_extra=None, input=None, optional_locks_off=False):
+    """The process runner behind git() (and gh): see git()."""
     proc = subprocess.Popen(
         cmd, cwd=str(cwd), env=git_env(env_extra, optional_locks_off),
         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -1142,3 +1148,132 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
                                      "resolve it with `corral-light worktrees`")
         registry.update(entry["id"], last_commit=new)
         return {"commit": new, "noop": False, "recovery_refs": recovery}
+
+
+# ── publish (D7) ──────────────────────────────────────────────────────────────
+
+PUSH_TIMEOUT_S = 120
+GH_BIN = os.environ.get("CORRAL_TEST_GH") or "gh"
+_GITHUB_RE = re.compile(r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)"
+                        r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+
+
+def push_urls(entry, remote):
+    """Where `git push <remote>` would really go: pushurl and pushInsteadOf applied."""
+    r = git(["remote", "get-url", "--push", "--all", "--", remote], cwd=entry["path"])
+    return [u for u in r.text.splitlines() if u]
+
+
+def github_repo(url):
+    """"owner/name" for a GitHub remote URL, else None."""
+    m = _GITHUB_RE.match(url or "")
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
+    """Push the reviewed commit to refs/heads/corral/<slug> at the confirmed URL. Never forced.
+
+    Refuses: a dirty worktree, a branch tip other than `oid`, a HEAD tree
+    other than the last reviewed one, a remote whose effective push URL is
+    not the one confirmed (or that has more than one). Pushes to the URL,
+    not the remote name, with a fully qualified refspec so a tag of the same
+    name cannot match. Failure causes are read from stderr (a non-fast-forward
+    rejection is rc 1). Pre-push hooks still run.
+    """
+    registry = registry or Registry()
+    p = entry["path"]
+    v = verify(entry)
+    if v["oid"] != oid:
+        raise Refused("identity", f"the branch is at {v['oid'][:12]}, not the reviewed {oid[:12]}")
+    if git(["rev-parse", oid + "^{tree}"], cwd=p).text.strip() != reviewed_tree:
+        raise Refused("changed", "the commit is not the tree you reviewed; open review again")
+    st = git(["status", "--porcelain=v1", "-z", "--untracked-files=normal"], cwd=p)
+    if st.out.strip(b"\0"):
+        raise Refused("uncommitted", "the worktree has changes that are not committed; "
+                                     "commit or discard them first")
+    urls = push_urls(entry, remote)
+    if len(urls) != 1:
+        raise Refused("remote_changed", f"{remote} has {len(urls)} push URLs; "
+                                        "publishing needs exactly one")
+    if urls[0] != push_url:
+        raise Refused("remote_changed", f"{remote} now pushes to {urls[0]}, not the "
+                                        f"{push_url} you confirmed")
+    ref = entry["branch"]
+    op = registry.begin_op(entry["id"], "push", url=push_url, ref=ref, oid=oid)
+    _crash_point("push:before")
+    r = git(["push", "--porcelain", "--", push_url, f"{oid}:{ref}"], cwd=p, check=False,
+            timeout=PUSH_TIMEOUT_S)
+    _crash_point("push:after")
+    if r.rc != 0:
+        registry.set_op(entry["id"], op, state="done", stage="refused")
+        both = r.text + r.err_text
+        if "non-fast-forward" in both or "fetch first" in both or "[rejected]" in both:
+            raise Refused("non_ff", "the remote branch has commits this one does not; "
+                                    "it was not overwritten")
+        raise GitError(["git", "push"], r.rc, r.err_text)
+    there = git(["ls-remote", "--", push_url, ref], cwd=p, timeout=PUSH_TIMEOUT_S).text.split()
+    ok = bool(there) and there[0] == oid
+    registry.set_op(entry["id"], op, state="done" if ok else "unknown", stage="done")
+    if not ok:
+        raise Refused("unknown", "the push ran but the remote does not show the commit")
+    prev = registry.read(entry["id"]).get("published") or {}
+    registry.update(entry["id"], published=dict(prev, url=push_url, ref=ref, oid=oid, at=_now()))
+    return {"pushed": oid, "url": push_url, "ref": ref}
+
+
+def _gh(args, cwd, input=None):
+    try:
+        return _run([GH_BIN, *args], cwd, timeout=PUSH_TIMEOUT_S, check=False, input=input)
+    except FileNotFoundError:
+        return None
+
+
+def open_pr(entry, title, body, repo, registry=None, remote="origin"):
+    """Open (or find) the pull request for this branch on the confirmed `repo`.
+
+    Without gh, returns a compare URL for GitHub remotes. Idempotent: an
+    open PR for the head is returned, never duplicated. Text goes to gh as
+    argv and stdin, never through a shell; prompts are off and --repo is
+    always explicit, so gh never chooses between a fork and its parent.
+    """
+    registry = registry or Registry()
+    p = entry["path"]
+    branch = entry["branch"][len("refs/heads/"):]
+    base = entry["base_ref"][len("refs/heads/"):]
+    urls = push_urls(entry, remote)
+    origin_repo = github_repo(urls[0]) if len(urls) == 1 else None
+    head = branch
+    if origin_repo and origin_repo != repo:
+        head = f"{origin_repo.split('/')[0]}:{branch}"     # a fork's branch into its parent
+    auth = _gh(["auth", "status"], p)
+    if auth is None:
+        if not origin_repo:
+            raise Refused("no_gh", "gh is not installed and this remote is not on GitHub")
+        return {"pr_url": None, "compare_url":
+                f"https://github.com/{repo}/compare/{base}...{head}?expand=1"}
+    if auth.rc != 0:
+        raise Refused("gh_signed_out", "gh is signed out; run `gh auth login` in a terminal, "
+                                       "then publish again")
+    found = _gh(["pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+                 "--json", "url"], p)
+    url = None
+    if found is not None and found.rc == 0:
+        try:
+            listed = json.loads(found.text or "[]")
+            url = listed[0]["url"] if listed else None
+        except (ValueError, KeyError, IndexError, TypeError):
+            url = None
+    if not url:
+        op = registry.begin_op(entry["id"], "pr", repo=repo, head=head)
+        _crash_point("pr:before")
+        made = _gh(["pr", "create", "--repo", repo, "--head", head, "--base", base,
+                    "--title", title, "--body-file", "-"], p, input=(body or "").encode())
+        if made is None or made.rc != 0:
+            registry.set_op(entry["id"], op, state="done", stage="failed")
+            raise GitError(["gh", "pr", "create"], made.rc if made else None,
+                           made.err_text if made else "gh vanished")
+        url = (made.text.strip().splitlines() or [""])[-1]
+        registry.set_op(entry["id"], op, state="done", stage="done", url=url)
+    prev = registry.read(entry["id"]).get("published") or {}
+    registry.update(entry["id"], published=dict(prev, pr_url=url))
+    return {"pr_url": url, "compare_url": None}
