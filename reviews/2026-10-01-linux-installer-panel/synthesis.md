@@ -120,11 +120,16 @@ On a fresh Ubuntu 24.04 desktop VM, one person, under an hour:
 6. `bash ~/tools/corral-light/install.sh --uninstall`: unit, drop-in and timer
    gone, no orphan processes; sign-ins and user files intact.
 
-What was actually run by the author before this synthesis: the full installer
-in an isolated fake HOME with stubbed `crontab`, four times (first run, re-run,
-first run of 1.1.0, piped first run of 1.1.3), with the hub on port 8099 and
-the pre-approved code claimed once; `test_install_sh.py` (20 checks, including
-the piped invocation and an injected failure); `test_launch.py`; the full
-Corral Light suite. Not run: the systemd service, cron, mesh/hooks, and any
-vendor sign-in, because the only machine available is the author's live
-system. Items 1, 2, 5 and 6 of the gate are therefore still open.
+What was actually run by the author before this synthesis: the installer in
+an isolated fake HOME with a stubbed `crontab` and a stripped PATH, six times
+across versions 1.0.0 to 1.1.4, the last three the published way (the script
+on bash's stdin), as a first run and as a re-run, with the hub on port 8099
+and the pre-approved pairing code claimed once each time (a second claim
+reports `expired`); `test_install_sh.py` (22 checks, including the piped
+invocation, an injected mid-run failure, root and non-Linux refusals, and a
+dry uninstall against stubbed systemctl); `test_launch.py`; the full Corral
+Light suite (500 tests, 3 skipped, all green). Not run: the systemd user
+service, cron, the memory mesh and hooks, Antigravity's 1.5 GB download, and
+any vendor sign-in, because the only machine available is the author's live
+system and those steps are not HOME-scoped. Gate items 1, 2, 5 and 6 above are
+therefore still open and need a fresh Ubuntu 24.04 VM.
