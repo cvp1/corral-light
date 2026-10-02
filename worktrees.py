@@ -1440,3 +1440,174 @@ def is_integrated(entry):
     if not tip:
         return False
     return git(["merge-base", "--is-ancestor", tip, entry["base_ref"]], cwd=c, check=False).rc == 0
+
+
+# ── reconcile and restart resolution (F8, D13) ────────────────────────────────
+
+def _registered(common_dir):
+    """Realpaths git lists as worktrees of `common_dir`, or None if the repo is gone."""
+    if not os.path.isdir(common_dir):
+        return None
+    r = git(["worktree", "list", "--porcelain", "-z"], cwd=common_dir, check=False)
+    if r.rc != 0:
+        return None
+    return {os.path.realpath(f[len(b"worktree "):].decode("utf-8", "surrogateescape"))
+            for f in r.out.split(b"\0") if f.startswith(b"worktree ")}
+
+
+def _ref(entry, ref):
+    return git(["rev-parse", "--verify", "-q", ref], cwd=entry["common_dir"],
+               check=False).text.strip() or None
+
+
+def resolve_op(entry, op, registry):
+    """Settle an op left in `intent` by a crash, by CHECKING its postcondition.
+
+    Never assumes rollback. A commit resumes from its journalled stage with
+    the stored OIDs (no second commit). Anything that does not fit becomes
+    `unknown`, which blocks further actions until resolved from the CLI.
+    Returns a note for the user.
+    """
+    wid, kind, tmp = entry["id"], op.get("op"), registry_dir() / "tmp"
+    done = lambda **f: registry.set_op(wid, op["op_id"], state="done", **f)  # noqa: E731
+    unknown = lambda why: (registry.set_op(wid, op["op_id"], state="unknown"), why)[1]  # noqa: E731
+    if kind == "commit":
+        tip, new, old = _ref(entry, entry["branch"]), op.get("new"), op.get("expect_old")
+        p = entry["path"]
+        if op.get("stage") == "prepared" and tip == old and new:
+            if git(["update-ref", entry["branch"], new, old], cwd=p, check=False).rc != 0:
+                return unknown("commit interrupted; the branch moved meanwhile, outcome unknown")
+            registry.set_op(wid, op["op_id"], stage="ref_moved")
+            tip = new
+        if tip == new and new:
+            idx = _index_path(p)
+            if _tree_of_index(p, Path(idx).read_bytes(), tmp) != op.get("tree"):
+                _wait_lock_gone(idx)
+                _reconcile_index(p, new, tmp)
+            if _tree_of_index(p, Path(idx).read_bytes(), tmp) == op.get("tree"):
+                done(stage="done")
+                registry.update(wid, last_commit=new)
+                return "commit interrupted by a restart; finished it (outcome checked after restart)"
+        return unknown("commit interrupted; branch and journal disagree, outcome unknown")
+    if kind == "push":
+        there = git(["ls-remote", "--", op["url"], op["ref"]], cwd=entry["common_dir"],
+                    check=False, timeout=PUSH_TIMEOUT_S).text.split()
+        if there and there[0] == op.get("oid"):
+            done(stage="done")
+            prev = registry.read(wid).get("published") or {}
+            registry.update(wid, published=dict(prev, url=op["url"], ref=op["ref"], oid=op["oid"], at=_now()))
+            return "push interrupted by a restart; the remote has it (outcome checked after restart)"
+        done(stage="not_done")
+        return "push interrupted by a restart; the remote does not have it, so it did not happen"
+    if kind == "pr":
+        found = _gh(["pr", "list", "--repo", op.get("repo", ""), "--head",
+                     entry["branch"][len("refs/heads/"):], "--state", "open", "--json", "url"],
+                    entry["common_dir"])
+        try:
+            listed = json.loads(found.text) if found and found.rc == 0 else None
+        except ValueError:
+            listed = None
+        if listed:
+            done(stage="done", url=listed[0].get("url"))
+            prev = registry.read(wid).get("published") or {}
+            registry.update(wid, published=dict(prev, pr_url=listed[0].get("url")))
+            return "pull request creation interrupted; found it (outcome checked after restart)"
+        if listed == []:
+            done(stage="not_done")
+            return "pull request creation interrupted; none exists, so it did not happen"
+        return unknown("pull request creation interrupted; could not ask gh, outcome unknown")
+    if kind in ("discard", "restore"):
+        reg = _registered(entry["common_dir"]) or set()
+        src, dst = os.path.realpath(op["src"]), os.path.realpath(op["dst"])
+        if dst in reg and os.path.isdir(dst):
+            done(stage="done")
+            registry.update(wid, phase="trashed" if kind == "discard" else "active",
+                            trash_path=op["dst"] if kind == "discard" else None)
+            return f"{kind} interrupted by a restart; it completed (outcome checked after restart)"
+        if src in reg and os.path.isdir(src):
+            done(stage="not_done")
+            return f"{kind} interrupted by a restart; nothing moved"
+        return unknown(f"{kind} interrupted; the worktree is at neither place, outcome unknown")
+    if kind == "purge":
+        if not os.path.lexists(op.get("path", "")):
+            done(stage="done")
+            registry.update(wid, phase="purged", trash_path=None)
+            return "purge interrupted by a restart; the files are gone (outcome checked)"
+        done(stage="not_done")
+        return "purge interrupted by a restart; nothing was deleted"
+    return unknown(f"unknown op {kind!r}")
+
+
+def reconcile(registry=None):
+    """Compare the registry with git and the disk after a restart. Repairs nothing.
+
+    Finishes or flags `intent` entries, resolves journalled ops, marks
+    missing/tampered worktrees (each reported once, when its phase changes),
+    reports deleted branches, and lists unknown dirs under the root as
+    orphans. Never prunes, deletes or edits git state beyond finishing a
+    journalled op. Returns notes: [{"id", "kind", "note", "path"?}].
+    """
+    registry = registry or Registry()
+    notes = []
+    note = lambda e, kind, text, **x: notes.append(dict(id=e["id"] if e else None, kind=kind,  # noqa: E731
+                                                       note=text, **x))
+    entries = registry.all()
+    by_repo = {}
+    for e in entries:
+        by_repo.setdefault(e.get("common_dir"), []).append(e)
+    known = set()
+    for common, group in by_repo.items():
+        reg = _registered(common) if common else None
+        for e in group:
+            for k in ("path", "trash_path"):
+                if e.get(k):
+                    known.add(os.path.realpath(e[k]))
+            phase = e.get("phase")
+            if phase in ("purged", "missing", "tampered"):
+                continue
+            if reg is None:
+                registry.update(e["id"], phase="missing", error="the repository is gone")
+                note(e, "missing", f"{e['repo_top']} is gone; {e['branch']} cannot be checked")
+                continue
+            for op in [o for o in e.get("ops") or [] if o.get("state") == "intent"]:
+                note(e, "op", resolve_op(e, op, registry))
+            e = registry.read(e["id"])
+            if e["phase"] == "intent":
+                if os.path.realpath(e["path"]) in reg:
+                    try:
+                        verify(e)
+                        registry.update(e["id"], phase="active")
+                        continue
+                    except IdentityError:
+                        pass
+                registry.update(e["id"], phase="missing", error="creation did not finish")
+                note(e, "missing", f"creating {e['branch']} did not finish before a restart")
+                continue
+            if e["phase"] == "active":
+                if not _ref(e, e["branch"]):
+                    note(e, "branch", f"the branch {e['branch'][len('refs/heads/'):]} was deleted outside Corral")
+                    continue
+                try:
+                    verify(e)
+                except IdentityError as err:
+                    phase = "tampered" if err.reason == "tampered" else "missing"
+                    if err.reason == "identity":
+                        note(e, "identity", str(err))
+                        continue
+                    registry.update(e["id"], phase=phase, error=str(err))
+                    note(e, phase, str(err))
+            elif e["phase"] == "trashed":
+                t = e.get("trash_path")
+                if not t or os.path.realpath(t) not in reg or not os.path.isdir(t):
+                    registry.update(e["id"], phase="missing", error="the trashed copy is gone")
+                    note(e, "missing", f"the trashed copy of {e['branch']} is gone")
+    root = worktree_root()
+    if root.is_dir():
+        for rd in sorted(root.iterdir()):
+            if not rd.is_dir() or rd.is_symlink():
+                continue
+            for child in sorted(rd.iterdir()):
+                if os.path.realpath(child) not in known:
+                    note(None, "orphan", f"{child} is under the worktree root but in no registry entry",
+                         path=str(child))
+    return notes
