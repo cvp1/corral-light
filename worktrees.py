@@ -21,6 +21,7 @@ WHAT THIS MODULE NEVER DOES
 
 Stdlib only.
 """
+import base64
 import contextlib
 import hashlib
 import fcntl
@@ -29,6 +30,7 @@ import os
 import re
 import secrets
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -325,8 +327,7 @@ def atomic_write_json(path, obj):
             os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)                 # our own temp file, never anything else
+        _unlink_own_temp(tmp)              # our own temp file, never anything else
         raise
     _fsync_dir(path.parent)
 
@@ -818,3 +819,181 @@ def summary(entry):
     return {"files": files + len(untracked), "added": added, "deleted": deleted,
             "binary": binary, "untracked": untracked, "digest": h.hexdigest()[:16],
             "truncated": num.truncated or other.truncated}
+
+
+# ── snapshot and diff (F4, N4) ────────────────────────────────────────────────
+
+SNAPSHOT_TIMEOUT_S = 60
+SNAP_UNTRACKED_MAX = 512 << 10     # untracked files larger than this are named, not added
+BLOB_MAX = 512 << 10               # files larger than this are listed without hunks
+DIFF_FILE_MAX = 256 << 10          # patch bytes per file
+DIFF_TOTAL_MAX = 1536 << 10        # patch bytes per response (JSON stays under 2 MiB)
+DIFF_MAX_PATCHED_FILES = 400
+IGNORED_SAMPLE = 20
+REVIEW_REF = "refs/corral/review/"
+
+
+def _unlink_own_temp(path):
+    """Remove a temp file THIS module created. The only unlink in worktrees.py."""
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+
+
+@contextlib.contextmanager
+def _temp_index(tmp_dir, content):
+    """A private copy of an index, removed afterwards; the real one is never touched."""
+    Path(tmp_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, path = tempfile.mkstemp(prefix=".corral-index-", dir=str(tmp_dir))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+        yield path
+    finally:
+        _unlink_own_temp(path)
+
+
+def _index_path(p):
+    return git(["rev-parse", "--path-format=absolute", "--git-path", "index"], cwd=p).text.strip()
+
+
+def _split_z(out):
+    return [os.fsdecode(f) for f in out.split(b"\0") if f]
+
+
+def _names(p, args):
+    return _split_z(git(args, cwd=p, optional_locks_off=True, max_out=64 << 20).out)
+
+
+def snapshot(entry, tmp_dir=None):
+    """Freeze what the user is about to review as an immutable tree OID.
+
+    Copies the worktree's real index (so force-added and intent-to-add
+    entries survive), runs `add -A` and `write-tree` on the copy, and pins
+    the tree with refs/corral/review/<id> so gc cannot collect it. Untracked
+    files over 512 KiB are named in `too_big`, not added. Ignored files are
+    counted and sampled, never added. Records the real index's identity and
+    any path whose staged content differs from its working file.
+    Never: touches the real index, or rebuilds on a timer.
+    """
+    verify(entry)
+    p = entry["path"]
+    with repo_lock(entry):
+        idx = _index_path(p)
+        try:
+            real = Path(idx).read_bytes()
+        except FileNotFoundError:
+            real = b""
+        head = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=p).text.strip()
+        too_big = []
+        for path in _names(p, ["ls-files", "--others", "--exclude-standard", "-z"]):
+            try:
+                st = os.lstat(os.path.join(p, path))
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size > SNAP_UNTRACKED_MAX:
+                too_big.append({"path": path, "size": st.st_size})
+        specs = [b"."] + [b":(exclude,literal)" + os.fsencode(b["path"]) for b in too_big]
+        with _temp_index(tmp_dir or registry_dir() / "tmp", real) as tmp:
+            env = {"GIT_INDEX_FILE": tmp}
+            git(["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], cwd=p,
+                env_extra=env, input=b"\0".join(specs) + b"\0", timeout=SNAPSHOT_TIMEOUT_S)
+            tree = git(["write-tree"], cwd=p, env_extra=env, timeout=SNAPSHOT_TIMEOUT_S).text.strip()
+        staged = set(_names(p, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD", "--"]))
+        unstaged = set(_names(p, ["diff", "--name-only", "-z", "--no-renames", "--"]))
+        ignored = _names(p, ["ls-files", "--others", "--ignored", "--exclude-standard",
+                             "--directory", "-z"])
+        pin = git(["commit-tree", tree, "-p", head], cwd=p,
+                  input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
+        git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
+    return {"tree": tree, "head": head, "base_sha": entry["base_sha"],
+            "index_id": hashlib.sha256(real).hexdigest(),
+            "staged_differs": sorted(staged & unstaged), "too_big": too_big,
+            "ignored": {"count": len(ignored), "sample": ignored[:IGNORED_SAMPLE]}}
+
+
+def _path_fields(raw):
+    """JSON-safe path fields: `path`, plus `path_b64` when the bytes are not UTF-8."""
+    try:
+        return {"path": raw.decode("utf-8")}
+    except UnicodeDecodeError:
+        return {"path": raw.decode("utf-8", "replace"),
+                "path_b64": base64.b64encode(raw).decode()}
+
+
+def _diff_tree_args(*extra):
+    # `-c` must come before the subcommand: after it, `diff-tree -c` means combined diff.
+    return ["-c", "diff.renameLimit=1000", "diff-tree", "-r", "-z", "-M",
+            "--no-textconv", "--no-ext-diff", *extra]
+
+
+def diff(entry, tree):
+    """The reviewed tree against the base, as a file list with capped unified patches.
+
+    Every changed file is listed; hunks are omitted for binaries, files over
+    512 KiB, and anything past the per-file or per-response caps (then
+    `truncated` is set). Symlinks show as symlink changes and are never
+    followed. Textconv, external diff, colour and prefix config are ignored.
+    """
+    p = entry["path"]
+    base = entry["base_sha"]
+    raw = git(_diff_tree_args("--raw", base, tree), cwd=p, max_out=64 << 20)
+    fields = raw.out.split(b"\0")
+    recs, i = [], 0
+    while i < len(fields) and fields[i]:
+        meta = fields[i].decode("ascii").lstrip(":").split()
+        old_mode, new_mode, old_sha, new_sha, status = meta[:5]
+        if status[0] in "RC":
+            old_raw, new_raw = fields[i + 1], fields[i + 2]
+            i += 3
+        else:
+            old_raw = new_raw = fields[i + 1]
+            i += 2
+        recs.append({"status": status[0], "old_mode": old_mode, "new_mode": new_mode,
+                     "old_sha": old_sha, "new_sha": new_sha, "old_raw": old_raw, "new_raw": new_raw})
+    num = git(_diff_tree_args("--numstat", base, tree), cwd=p, max_out=64 << 20).out.split(b"\0")
+    stats, j = {}, 0
+    while j < len(num) and num[j]:
+        a, d, rest = num[j].split(b"\t", 2)
+        if rest == b"":                      # rename: old and new follow as fields
+            key, j = num[j + 2], j + 3
+        else:
+            key, j = rest, j + 1
+        stats[key] = (a, d)
+    shas = sorted({s for r in recs for s in (r["old_sha"], r["new_sha"]) if set(s) != {"0"}})
+    sizes = {}
+    if shas:
+        bc = git(["cat-file", "--batch-check=%(objectname) %(objectsize)"], cwd=p,
+                 input=("\n".join(shas) + "\n").encode())
+        for line in bc.text.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                sizes[parts[0]] = int(parts[1])
+    files, budget, patched, truncated = [], DIFF_TOTAL_MAX, 0, False
+    for r in recs:
+        a, d = stats.get(r["new_raw"], (b"0", b"0"))
+        binary = a == b"-"
+        size = max(sizes.get(r["old_sha"], 0), sizes.get(r["new_sha"], 0))
+        f = dict(_path_fields(r["new_raw"]), status=r["status"],
+                 old_path=_path_fields(r["old_raw"])["path"] if r["status"] in "RC" else None,
+                 add=None if binary else int(a), **{"del": None if binary else int(d)},
+                 binary=binary, too_big=size > BLOB_MAX,
+                 symlink="120000" in (r["old_mode"], r["new_mode"]),
+                 mode_change=(r["old_mode"] != r["new_mode"] and r["status"] == "M"),
+                 patch=None)
+        if not binary and not f["too_big"]:
+            if budget <= 0 or patched >= DIFF_MAX_PATCHED_FILES:
+                truncated = True
+            else:
+                spec = {os.fsdecode(b":(literal)" + r["old_raw"]), os.fsdecode(b":(literal)" + r["new_raw"])}
+                args = [a for a in _diff_tree_args("-p", "--no-color", "--src-prefix=a/",
+                                                    "--dst-prefix=b/", base, tree, "--",
+                                                    *sorted(spec)) if a != "-z"]
+                pr = git(args, cwd=p, max_out=min(DIFF_FILE_MAX, budget))
+                patched += 1
+                if pr.truncated:
+                    truncated = True
+                else:
+                    f["patch"] = pr.out.decode("utf-8", "replace")
+                    budget -= len(pr.out)
+        files.append(f)
+    return {"base": base, "tree": tree, "files": files, "truncated": truncated}
