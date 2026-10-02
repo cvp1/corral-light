@@ -2,11 +2,118 @@
 
 **The window for AIOS.**
 
-A local workspace for the AI coding assistants you already run, side by side, with one permission rail. The floor underneath — schedule, vault, run log, memory — is [AI-OS Seed](https://github.com/cvp1/ai-os-seed). Two repos, one folder.
+A local workspace for the AI coding assistants you already pay for — Claude,
+ChatGPT, Grok, Gemini — side by side in one browser tab, with one permission
+rail: every file write and every command is shown to you before it runs. The
+floor underneath — schedule, vault, run log, memory — is
+[AI-OS Seed](https://github.com/cvp1/ai-os-seed). Two repos, one folder.
 
-## Install
+Nothing leaves your computer except what each assistant sends to its own
+vendor, on the account you signed into. No API keys. No cloud in the middle.
 
-You already have Claude Code. Python 3.9+.
+---
+
+## Install on Linux — one line
+
+Open a terminal and paste this:
+
+```
+curl -fsSL https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash
+```
+
+That is the whole install. About five minutes on a normal connection (twenty
+with Gemini, which is a 1.5 GB download). When it finishes, your browser is
+open on Corral Light, already signed in to it, and you can start typing.
+
+**What you need**
+
+| | |
+|---|---|
+| Computer | Linux on x86-64 or arm64 — Ubuntu, Debian, Fedora, Arch, openSUSE, Alpine. A desktop, so a browser can open. |
+| Accounts | At least one of: Claude (Pro or Max), ChatGPT (Plus, Pro or Team), Grok (SuperGrok or X Premium), a Google account for Gemini. The installer asks you to sign in to each one you chose; you can skip any of them and come back later. |
+| Disk | About 600 MB; 2.1 GB with Gemini. |
+| Your password | Only if a basic tool is missing (`git`, `python3`, `curl`, `cron`). The installer names what it will install and runs your distro's own package manager, nothing else. |
+
+**What the installer does, in order**
+
+| Step | What it checks, then does |
+|---|---|
+| 1 | Confirms Linux, your CPU, a desktop and an internet connection. Refuses to run as root. |
+| 2 | Installs any missing base tools with your package manager, after showing you the command. |
+| 3 | Clones this repo to `~/tools/corral-light` and AI-OS Seed to `~/tools/ai-os-seed`, each at a pinned version. Puts the `corral-light` command on your PATH. |
+| 4 | Downloads a private copy of Node.js (checksum verified) into `~/.local/share/corral-light/node`. Your system's Node, if any, is not touched. |
+| 5 | Installs the Claude and ChatGPT adapters from the lock file (`npm ci`). |
+| 6 | Installs Claude Code (Anthropic's own installer), the Grok CLI (pinned, into a private prefix) and the Antigravity runtime for Gemini (pinned, checksum verified). |
+| 7 | Installs AI-OS Seed into `~/aios`, runs its selftests and its demo job through the real run logger, writes your `CLAUDE.md` through Seed's stage-then-approve gate, starts the memory mesh, offers to wire the memory hooks (one yes/no), and syncs the scheduler to cron. Then runs Seed's post-install audit. |
+| 8 | Installs Corral Light as a **user** service (systemd), starts it, enables it to survive logout, and enables the watchdog timer. Waits until the hub answers. |
+| 9 | Offers each assistant's own sign-in, one at a time. Each opens your browser (or prints a device code if there is no display). |
+| 10 | Opens Corral Light in your browser, already paired (`corral-light launch`). |
+| 11 | Writes a receipt and prints `corral-light doctor`. |
+
+Every step checks before it changes anything, so **running the same line
+again is safe**: it updates what moved and repairs what is missing, and never
+installs twice. Everything it prints also goes to
+`~/.local/share/corral-light/install.log`.
+
+**Choosing what to install**
+
+The one-liner installs all four assistants. To choose, download the script
+and pass options:
+
+```
+curl -fsSLO https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh
+bash install.sh --lanes claude,grok          # just these two
+bash install.sh --workspace ~/work/aios      # Seed somewhere other than ~/aios
+bash install.sh --skip-logins                # sign in later (see below)
+bash install.sh --yes                        # no questions
+bash install.sh --help                       # every option, and every version it pins
+```
+
+**If something goes wrong**
+
+The installer stops at the step that failed, says what it was, and points at
+the log. Fix what it names and run the same line again. After that:
+
+```
+corral-light doctor              # which assistants are ready, and why not
+corral-light diagnose claude     # one full conversation, with every error shown
+journalctl --user -u corral-light -n 50   # the hub's own log
+```
+
+**Updating** — run the install line again. **Removing it** — `bash install.sh --uninstall`
+asks before each thing it removes; your sign-ins and your files are never
+part of it.
+
+### Your first five minutes
+
+1. The browser tab that opened is **the wall**. Click **New**, pick an
+   assistant, choose a folder (the default is `~/aios`), and type.
+2. When an assistant wants to write a file or run a command, the pane pauses
+   and shows you exactly what — bytes and a digest. **Approve** or **Refuse**.
+   Nothing happens until you do.
+3. Open a terminal, run `cd ~/aios && claude`, and type `/status`. That is
+   the floor answering: every scheduled job, its last run, and anything that
+   has gone quiet.
+4. Closed the tab? `corral-light launch` opens it again, paired. The hub keeps
+   running in the background; `systemctl --user status corral-light` shows it.
+
+### Signing in later
+
+Each assistant signs in with its own tool, as you, and keeps its own
+credential. Corral Light never sees a password or a token.
+
+| Assistant | Command |
+|---|---|
+| Claude | `claude auth login` |
+| Grok | `grok login` (or `grok login --device-auth` with no display) |
+| ChatGPT | `CODEX_HOME=~/.config/corral-light/codex-home ~/tools/corral-light/spike/node_modules/.bin/codex login` |
+| Gemini | Open a Gemini conversation on the wall; the Google sign-in opens the first time. |
+
+`corral-light doctor` tells you which ones are done.
+
+### Install by hand (any Linux, or macOS)
+
+You already have Claude Code. Python 3.9+. Node.js 20+.
 
 One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is a second brain.
 
@@ -21,14 +128,26 @@ One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is
    `spike/node_modules/` is gitignored — so no clone arrives with them. Skip
    this step and those two lanes report `not installed: …/spike/node_modules/.bin/claude-agent-acp`,
    which reads like a broken install rather than a step you have not run yet.
-   `doctor` names the step if the directory is missing. Needs Node.js.
+   `doctor` names the step if the directory is missing.
    The other three lanes (Grok, Antigravity, Ollama) resolve their programs
    outside this tree and are unaffected.
-   Open http://127.0.0.1:8098, then in another terminal `./corral-light pair <code>` with the code on screen.
+   Then either `./corral-light launch` (opens the browser, paired), or open
+   http://127.0.0.1:8098 and in another terminal run `./corral-light pair <code>`
+   with the code on screen.
 3. New Claude conversation. Working directory = `~/aios`.
 4. Done when `/status` answers.
 
 The server runs in the foreground. Data lives at `~/.local/share/corral-light` — not in `~/aios`, and not in this clone. `doctor` lists the assistants that are ready and explains what is missing for the others.
+
+---
+
+## Reference
+
+- [Supported assistants](#supported-assistants) · [Keeping them current](#keeping-the-assistants-current)
+- [Search and attach files](#search-and-attach-files) · [Passing work between assistants](#passing-work-between-assistants)
+- [Seats](#seats-panes-that-can-message-each-other) · [Asking the human](#asking-the-human) · [Rigs](#rigs-bring-your-seats-back-with-one-verb)
+- [Security](#security) · [Configuration](#configuration) · [Run in the background](#run-in-the-background) · [Watching the hub](#watching-the-hub)
+- [From the command line](#from-the-command-line) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
 ## Supported assistants
 
@@ -290,7 +409,7 @@ tailscale serve --bg 8098                       # https://<machine>.<tailnet>.ts
 CORRAL_TAILSCALE_LOGIN=you@example.com ./corral-light serve
 ```
 
-With `CORRAL_TAILSCALE_LOGIN` set, a request that arrives through Serve must carry that tailnet identity (Serve stamps it and strips any forged copy); proxied traffic with no identity — Funnel, a tagged device — is refused; requests on the machine itself are unchanged. The session cookie is marked `Secure` when it is minted through Serve, and an open event stream re-checks its cookie every 30 seconds and closes itself when the cookie expires. Pairing still needs a shell on the machine — that is the point. What this does not do: separate the approval authority from the assistant's own UNIX user; anything running as you can still pair itself. (`corral_core/edge.py`, contract in `corral_core/test_edge.py`.)
+With `CORRAL_TAILSCALE_LOGIN` set, a request that arrives through Serve must carry that tailnet identity (Serve stamps it and strips any forged copy); proxied traffic with no identity — Funnel, a tagged device — is refused; requests on the machine itself are unchanged. The session cookie is marked `Secure` when it is minted through Serve, and an open event stream re-checks its cookie every 30 seconds and closes itself when the cookie expires. Pairing still needs a shell on the machine — that is the point. `corral-light launch` is the same proof in one step: it mints a code, approves it as the account that owns the hub, and opens `/#pair=<code>` in the local browser — in the fragment, so the code is never sent in a request; the page claims it once (single use, five minutes) and removes it from the address bar. A browser on another machine still needs `corral-light pair`. What this does not do: separate the approval authority from the assistant's own UNIX user; anything running as you can still pair itself. (`corral_core/edge.py`, contract in `corral_core/test_edge.py`.)
 
 When an assistant asks to write a file or run a command, Corral Light pauses it and shows the exact request, byte count, and SHA-256 digest. Requests too large to display cannot be approved. The browser cannot bypass this check because the server enforces it.
 
@@ -381,6 +500,7 @@ The hub itself also notifies you — on a permission request or an agent that st
 Everything the browser does with a pane, a terminal can do too, on every lane — the commands talk to the running server exactly as the browser does, so a pane opened here appears on the wall and keeps its permission rail:
 
 ```
+./corral-light launch                              # open the wall in your browser, already paired
 ./corral-light panes                               # list panes: state, lane, model, waiting cards
 ./corral-light open --lane grok --cwd ~/src/app    # prints the new pane's id
 ./corral-light say <pane> "review the diff"        # sends, streams the reply
