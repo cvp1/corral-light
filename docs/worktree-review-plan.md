@@ -292,9 +292,9 @@ All behind cookie and same-origin checks. User errors raise `ValueError`
 
 | Route | Body / query | Returns |
 |---|---|---|
-| `GET /api/session/worktree/probe?cwd=` | | probe dict + `lane_ok` map |
+| `GET /api/session/worktree/probe?cwd=` | | `{probe, laneRefusals}`: probe dict (no `common_dir`) + lane → reason or null |
 | `POST /api/session/new` | existing + `worktree: true` | as today; snapshot has `worktree` |
-| `POST /api/session/worktree/snapshot` | `{pane}` | `{tree, head, files:[{path, old_path, status, add, del, binary, too_big, hunks}], ignored:{count, sample}, summary, merge_check?}` |
+| `POST /api/session/worktree/snapshot` | `{pane}` | `{tree, head, head_tree, remotes, files:[{path, old_path, status, add, del, binary, too_big, hunks}], ignored:{count, sample}, summary, merge_check?}` |
 | `POST /api/session/worktree/commit` | `{pane, tree, head, index_id, message}` | `{ok, commit}`; 409 `busy`, `changed`, `identity` |
 | `POST /api/session/worktree/publish` | `{pane, oid, remote, push_url, pr:{repo, title, body}|null}` | `{ok, pushed, pr_url | compare_url}`; 409 `remote_changed`, `uncommitted`, `non_ff` |
 | `POST /api/session/worktree/discard` | `{pane, tree, confirm?}` | `{ok, recovery_ref, trash_path}` |
@@ -328,6 +328,20 @@ Snapshot is a POST because it writes objects and holds the pane.
 - **SSE.** One line mirrors `worktree` events into `p.worktree.summary`.
 - `parseUnified` is a pure function for the Node selftest. Text goes through
   `textContent` only.
+- **Settled in WS4.** Commit is offered when the reviewed tree differs from
+  `head_tree`, Push when they match and the branch is past its base. An
+  untracked file left out for size blocks Push by name (the hub's
+  `uncommitted` check counts it), with "move it out or add it to .gitignore".
+  On screens under 820 px review cards count on the folded rail tab but do
+  not pop the rail open over the pane; wider screens are unchanged. A
+  discarded pill is styled as an end state, not a fault.
+- **Visual results (WS4, isolated hub, fake lane).** T-VIS-1 pill at 1600,
+  1100 and 420 px: one line, ellipsized. T-VIS-2/3 review side by side at
+  1600 px, full-screen with the list above the diff at 420 px. T-VIS-4 a
+  5,000-line file: 5,020 rows, about 0.9 s from click to painted, snapshot
+  included. T-VIS-5 lowest contrast over add, del, context, line numbers,
+  hunk headers, notes and banners: ink 6.32, parchment 4.98 (add lines),
+  nocturne 6.51.
 
 ### 2.6 Agent realities (Phase 0 decides; nothing here is assumed)
 

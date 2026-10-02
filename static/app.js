@@ -849,7 +849,8 @@ function headSignature(p) {
           p.seat, p.seatWithheld, p.posture, p.postureEnforced,
           (cfg.model || {}).value, (cfg.effort || {}).value, u.size, u.used,
           S.detail.has(p.id) ? 1 : 0, FIND.pane === p.id ? 1 : 0,
-          p.portedFrom ? JSON.stringify(p.portedFrom) : '', p.cwd].join('|');
+          p.portedFrom ? JSON.stringify(p.portedFrom) : '', p.cwd,
+          JSON.stringify(wtPillModel(p.worktree)), JSON.stringify(paneMeta(p))].join('|');
 }
 
 function updatePane(rec, p) {
@@ -1036,7 +1037,17 @@ function paneHead(p) {
     pill.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
     h.appendChild(pill);
   }
-  h.appendChild(el('span', 'meta', `${p.label} · ` + p.cwd.replace(/^\/(home|Users)\/[^/]+/, '~')));
+  const pm = paneMeta(p);
+  const meta = el('span', 'meta', pm.text);
+  if (pm.title) meta.title = pm.title;
+  h.appendChild(meta);
+  const wp = wtPillModel(p.worktree);        // own branch: opens review
+  if (wp) {
+    const b = el('button', wp.cls, wp.text);
+    b.type = 'button'; b.title = wp.title;
+    b.onclick = () => openReview(p);
+    h.appendChild(b);
+  }
   // Detail mode persists per pane, so the button says when it is on.
   const on = S.detail.has(p.id);
   const eye = el('button', 'eye' + (on ? ' on' : ''), on ? '☰ every step' : '☰');
@@ -1073,6 +1084,481 @@ function paneHead(p) {
   h.appendChild(x);
   return h;
 }
+
+/* ── own branches ────────────────────────────────────────────────────────
+ * A pane on its own git worktree and branch (docs/worktree-review-plan.md
+ * §2.5): the New dialog's row, the header pill, the review dialog and the
+ * rail card. Everything here builds nodes with el()/textContent; nothing in
+ * this block parses HTML (T-UI-8). */
+const WT_KEY = 'corral.ownBranch';         // repo top -> the checkbox, last time
+const WT_SEEN_KEY = 'corral.wtSeen';       // pane id -> summary digest last reviewed
+function shortSha(s) { return String(s || '').slice(0, 7); }
+function homeTilde(s) {                   // anywhere in the text: warnings embed paths
+  return String(s || '').replace(/(^|[\s'"(])\/(?:home|Users)\/[^/\s'"]+/g, '$1~');
+}
+function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+function wtStore(key) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+function wtRemembered(top) { return wtStore(WT_KEY)[top] === true; }
+function wtRemember(top, on) {
+  const m = wtStore(WT_KEY);
+  if (on) m[top] = true; else delete m[top];
+  localStorage.setItem(WT_KEY, JSON.stringify(m));
+}
+function wtSeen() { return wtStore(WT_SEEN_KEY); }
+function wtMarkSeen(id, summary) {
+  if (!summary || !summary.digest) return;
+  const m = wtSeen();
+  m[id] = summary.digest;
+  localStorage.setItem(WT_SEEN_KEY, JSON.stringify(m));
+}
+
+/* What the New dialog's own-branch row shows. Hidden outside a repo and for a
+ * lane that cannot take an own branch; a refused repo shows its reasons where
+ * the checkbox would be. */
+function wtRowModel(probe, laneRefusal, remembered) {
+  if (!probe || !probe.inside || laneRefusal) return { show: false };
+  const refusals = probe.refusals || [];
+  if (refusals.length) return { show: true, checkbox: false, refusal: refusals.join(' · '),
+                                warnings: [] };
+  const branch = String(probe.branch || '').replace(/^refs\/heads\//, '');
+  const from = probe.detached ? `a detached HEAD @ ${shortSha(probe.head)}`
+                              : `${branch || 'HEAD'} @ ${shortSha(probe.head)}`;
+  return { show: true, checkbox: true, checked: !!remembered, top: probe.top,
+           cut: `cut from ${from}`, warnings: (probe.warnings || []).map(homeTilde) };
+}
+
+/* The body's `worktree` key: sent only when the box is checked AND visible,
+ * and only for the folder and lane the probe answered about. */
+function wtSubmit(model, checked, cwd, agent) {
+  if (!checked || !model || !model.show || !model.checkbox) return {};
+  if (model.cwd !== cwd || model.agent !== agent)
+    return { error: 'the folder or lane changed after it was checked for an own branch; ' +
+                    'open New again' };
+  return { worktree: true };
+}
+
+const WTP = { t: null, seq: 0 };
+function wtProbeSoon(dlg, ms) {
+  clearTimeout(WTP.t);
+  WTP.t = setTimeout(() => wtProbe(dlg), ms);
+}
+async function wtProbe(dlg) {
+  const cwd = $('#f-cwd').value.trim();
+  const agent = dlg._chosenAgent ? dlg._chosenAgent() : '';
+  const seq = ++WTP.seq;
+  let d = null;
+  if (cwd) {
+    try { d = await api('/api/session/worktree/probe?cwd=' + encodeURIComponent(cwd)); }
+    catch { d = null; }
+  }
+  if (seq !== WTP.seq) return;              // a newer probe was asked for
+  const lanes = (d && d.laneRefusals) || {};
+  const pr = d && d.probe;
+  const m = wtRowModel(pr, agent in lanes ? lanes[agent] : 'unknown lane',
+                       !!(pr && pr.top && wtRemembered(pr.top)));
+  m.cwd = cwd; m.agent = agent;
+  dlg._wt = m;
+  paintWtRow(m);
+}
+function paintWtRow(m) {
+  const row = $('#wtrow');
+  if (!row) return;
+  row.classList.toggle('hide', !m.show);
+  $('#wt-check').classList.toggle('hide', !m.checkbox);
+  $('#f-wt').checked = !!m.checked;
+  $('#wt-cut').textContent = m.cut || '';
+  const hint = $('#wthint');
+  hint.textContent = m.refusal ? 'Own branch unavailable: ' + m.refusal
+                               : (m.warnings || []).join(' ');
+  hint.classList.toggle('err', !!m.refusal);
+}
+
+/* The header pill: `⎇ fix-login · 4 files +120 −8`. */
+function wtPillModel(w) {
+  if (!w) return null;
+  const name = String(w.branch || '').replace(/^corral\//, '') || '(branch)';
+  const s = w.summary;
+  let text = '⎇ ' + name;
+  if (w.phase === 'trashed') text += ' · discarded';
+  else if (w.phase !== 'active') text += ' · ' + (w.phase || 'unknown');
+  else if (s) text += s.files ? ` · ${s.files} file${s.files === 1 ? '' : 's'} +${s.added} −${s.deleted}`
+                              : ' · no changes';
+  const odd = w.phase !== 'active' && w.phase !== 'trashed';
+  const gone = w.phase === 'trashed';    // discarded on purpose: an end state, not a fault
+  const cls = 'pill wt' + ((w.blocked && !gone) || odd ? ' warn' : '') + (gone ? ' gone' : '');
+  const title = [`own branch ${w.branch || ''}, cut from ${w.base || 'its base'} @ ${shortSha(w.baseSha)}`,
+                 `worktree: ${w.path || '?'}`, w.blocked || '',
+                 w.phase === 'active' ? 'click, or press r on the focused pane, to review' : '']
+    .filter(Boolean).join('\n');
+  return { text, cls, title };
+}
+
+/* `.meta`: the repo the user chose, not the worktree it runs in (tooltip). */
+function paneMeta(p) {
+  const w = p.worktree;
+  if (!w || !w.repo) return { text: `${p.label} · ` + homeTilde(p.cwd), title: '' };
+  const sub = w.subdir ? '/' + w.subdir : '';
+  return { text: `${p.label} · ` + homeTilde(w.repo + sub),
+           title: `running on its own branch in ${w.path}${sub}` };
+}
+function paneDir(p) {
+  const w = p.worktree;
+  return String((w && w.repo) || p.cwd || '').split('/').pop();
+}
+
+/* A worktree pane whose turn it is, with changes the user has not reviewed. */
+function wtRailCards(panes, seen) {
+  return panes.filter(p => {
+    const w = p.worktree, s = w && w.summary;
+    return !!(w && w.phase === 'active' && s && s.files > 0 &&
+              displayState(p) === 'your-turn' && s.digest !== seen[p.id]);
+  });
+}
+
+/* `r` opens review: no modifier, not in a text field, not over a dialog. */
+function reviewKey(e, target, dialogOpen) {
+  return e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey &&
+         !isTypingTarget(e.target) && !!target && !dialogOpen;
+}
+function anyDialogOpen() { return !!document.querySelector('dialog[open]'); }
+function reviewTarget() {
+  const p = S.panes.get(S.focus);
+  return p && p.worktree && p.worktree.phase === 'active' ? p : null;
+}
+
+/* One file's unified patch as hunks of numbered lines. Pure (Node selftest). */
+function parseUnified(patch) {
+  const out = { head: [], hunks: [], binary: false, rename: null, mode: null };
+  if (patch == null) return out;
+  const rows = String(patch).split('\n');
+  if (rows.length && rows[rows.length - 1] === '') rows.pop();
+  let h = null, o = 0, n = 0, from = null;
+  for (const raw of rows) {
+    const cr = raw.endsWith('\r');
+    const line = cr ? raw.slice(0, -1) : raw;
+    const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@ ?(.*)$/.exec(line);
+    if (m) {
+      o = +m[1]; n = +m[2];
+      h = { header: line, oldStart: o, newStart: n, context: m[3].trim(), lines: [] };
+      out.hunks.push(h);
+      continue;
+    }
+    if (!h) {                               // the file header, before any hunk
+      out.head.push(line);
+      let x;
+      if (/^Binary files .* differ$/.test(line) || line === 'GIT binary patch') out.binary = true;
+      else if ((x = /^rename from[ ](.*)$/.exec(line))) from = x[1];
+      else if ((x = /^rename to[ ](.*)$/.exec(line))) out.rename = { from, to: x[1] };
+      else if ((x = /^old mode[ ](\d+)$/.exec(line))) out.mode = { old: x[1], new: null };
+      else if ((x = /^new mode[ ](\d+)$/.exec(line)) && out.mode) out.mode.new = x[1];
+      continue;
+    }
+    const c = line[0];
+    if (c === '+') h.lines.push({ t: 'add', text: line.slice(1), old: null, new: n++, cr });
+    else if (c === '-') h.lines.push({ t: 'del', text: line.slice(1), old: o++, new: null, cr });
+    else if (c === '\\') h.lines.push({ t: 'nonl', text: line.slice(2), old: null, new: null, cr: false });
+    else h.lines.push({ t: 'ctx', text: line.slice(1), old: o++, new: n++, cr });
+  }
+  return out;
+}
+
+/* Which review buttons work, and why not when they do not. */
+function reviewActions(snap, o) {
+  const no = why => ({ ok: false, why });
+  const yes = { ok: true, why: '' };
+  if (!snap) {
+    const w = no('waiting for the snapshot');
+    return { commit: w, publish: w, discard: w, copy: w, refresh: yes };
+  }
+  if (o.busy) {
+    const w = no('another action is running');
+    return { commit: w, publish: w, discard: w, copy: w, refresh: w };
+  }
+  const uncommitted = snap.tree !== snap.head_tree;
+  const ahead = snap.head !== snap.base_sha;
+  const commit = !uncommitted ? no('nothing to commit: the reviewed files match the last commit')
+               : !String(o.message || '').trim() ? no('write a commit message first') : yes;
+  const remote = (snap.remotes || [])[o.remote || 0];
+  const urls = remote ? remote.pushUrls || [] : [];
+  // Left out for size, yet still untracked work: the hub refuses to push past it.
+  const big = (snap.too_big || []).map(b => b.path);
+  const them = big.length === 1 ? 'it' : 'them';
+  const publish = uncommitted ? no('commit first: Push sends commits, not uncommitted files')
+                : big.length ? no(`${big.slice(0, 3).join(', ')}${big.length > 3 ? ' and more' : ''} ` +
+                                  `${big.length === 1 ? 'is' : 'are'} untracked and too large to ` +
+                                  `commit; move ${them} out or add ${them} to .gitignore first`)
+                : !ahead ? no('nothing to push: this branch has no commits past its base')
+                : !remote ? no('this repo has no remote to push to')
+                : urls.length !== 1 ? no(`${remote.name} has ${urls.length} push URLs; publishing needs exactly one`)
+                : yes;
+  const copy = ahead ? yes : no('nothing to merge yet: commit first');
+  return { commit, publish, discard: yes, copy, refresh: yes };
+}
+
+/* Request bodies, from the snapshot on screen: the server refuses if the
+ * files moved since (409 `changed`), so what is posted is what was shown. */
+function commitBody(pane, snap, message) {
+  return { pane, tree: snap.tree, head: snap.head, index_id: snap.index_id, message };
+}
+function publishBody(pane, snap, remote, pr) {
+  return { pane, oid: snap.head, tree: snap.tree, remote: remote.name,
+           push_url: remote.pushUrls[0], pr: pr || null };
+}
+function discardBody(pane, snap) { return { pane, tree: snap.tree }; }
+function mergeCommand(w) { return `git -C ${shq(w.repo)} merge --no-ff ${shq(w.branch)}`; }
+
+/* Run one action: busy while it runs; a 409 re-freezes the snapshot and keeps
+ * the server's reason on screen; anything else is shown as it came. */
+async function reviewRun(R, ops) {
+  R.busy = true; ops.paint();
+  try {
+    const r = await ops.call();
+    R.reason = '';
+    await ops.after(r);
+  } catch (e) {
+    const why = (e.body && e.body.error) || e.message;
+    if (e.status === 409) await ops.reload();
+    R.reason = e.status === 409 ? `${why} (refreshed: the review now shows the current files)` : why;
+  } finally {
+    R.busy = false; ops.paint();
+  }
+}
+
+function reviewBanners(snap) {
+  const out = [];
+  const n = (snap.ignored || {}).count || 0;
+  if (n) out.push(`${n} ignored file${n === 1 ? ' is' : 's are'} not in this review; ` +
+                  `Discard keeps ${n === 1 ? 'it' : 'them'} in trash.`);
+  const big = snap.too_big || [];
+  if (big.length) out.push('Left out for size, untracked and over 512 KiB: ' +
+    big.slice(0, 5).map(b => b.path).join(', ') +
+    (big.length > 5 ? ` and ${big.length - 5} more` : '') + '. Commit leaves them out too.');
+  const diff = snap.diff || {};
+  const bin = (diff.files || []).filter(f => f.binary).length;
+  if (bin) out.push(`${bin} binary file${bin === 1 ? '' : 's'}, often build output such as ` +
+                    '__pycache__; listed first.');
+  if (diff.truncated) out.push('The diff hit its size limit, so some files show no lines. ' +
+                               'Their changes are still in what you commit.');
+  return out;
+}
+
+function fileRow(f, onclick) {
+  const b = el('button', 'rrow');
+  b.type = 'button';
+  b.dataset.path = f.path;
+  b.append(el('span', 'rst s-' + f.status, f.status), el('span', 'rpath', f.path),
+           el('span', 'rnum', f.binary ? 'bin' : f.add == null ? '' : `+${f.add} −${f.del}`));
+  b.title = f.old_path ? `${f.old_path} → ${f.path}` : f.path;
+  b.onclick = onclick;
+  return b;
+}
+
+/* One file's section. Binary, over-cap and cut-off files are one placeholder
+ * line, never a node per line (T-UI-14). */
+function diffNodes(f) {
+  const box = el('section', 'rfile');
+  box.dataset.path = f.path;
+  const h = el('div', 'rfh');
+  h.appendChild(el('span', 'rst s-' + f.status, f.status));
+  h.appendChild(el('span', 'rpath', f.old_path ? `${f.old_path} → ${f.path}` : f.path));
+  if (!f.binary && f.add != null) h.appendChild(el('span', 'rnum', `+${f.add} −${f.del}`));
+  box.appendChild(h);
+  const note = f.binary ? 'binary file, not shown'
+             : f.too_big ? 'too large to show: over 512 KiB'
+             : f.patch == null ? 'not shown: the review hit its size limit' : null;
+  if (note) { box.appendChild(el('div', 'rnote', note)); return box; }
+  const d = parseUnified(f.patch);
+  if (d.mode) box.appendChild(el('div', 'rnote', `mode ${d.mode.old} → ${d.mode.new}`));
+  if (d.binary) { box.appendChild(el('div', 'rnote', 'binary file, not shown')); return box; }
+  if (!d.hunks.length && !d.mode) box.appendChild(el('div', 'rnote', 'no line changes'));
+  const sign = { add: '+', del: '-', ctx: ' ', nonl: '\\ ' };
+  for (const hk of d.hunks) {
+    box.appendChild(el('div', 'rhunk', hk.header));
+    for (const l of hk.lines) {
+      const row = el('div', 'rl ' + l.t);
+      const t = el('span', 'lt', sign[l.t] + l.text);
+      if (l.cr) {
+        const cr = el('span', 'cr', '␍');
+        cr.title = 'this line ends in CRLF (a Windows line ending)';
+        t.appendChild(cr);
+      }
+      row.append(el('span', 'ln', l.old == null ? '' : String(l.old)),
+                 el('span', 'ln', l.new == null ? '' : String(l.new)), t);
+      box.appendChild(row);
+    }
+  }
+  return box;
+}
+
+/* The review dialog. R.snap is what is on screen; every action posts from it. */
+const R = { pane: null, snap: null, busy: false, loading: false, reason: '', done: null,
+            painted: null };
+
+async function openReview(p) {
+  const dlg = $('#revdlg');
+  if (!dlg || !p || !p.worktree) return;
+  if (p.worktree.phase !== 'active')
+    return toast(p.worktree.blocked || 'this branch is not active, so there is nothing to review', true);
+  Object.assign(R, { pane: p.id, snap: null, busy: false, reason: '', done: null, painted: null });
+  $('#rev-msg').value = '';
+  $('#rev-filter').value = '';
+  $('#rev-pr').checked = false;
+  $('#rev-prtitle').value = p.title || '';
+  if (!dlg.open) dlg.showModal();
+  await loadReview();
+}
+
+async function loadReview() {
+  R.loading = true; paintReview();
+  try {
+    R.snap = await api('/api/session/worktree/snapshot', { pane: R.pane });
+    wtMarkSeen(R.pane, R.snap.summary);
+    scheduleRender();                      // the rail card goes once reviewed
+  } catch (e) {
+    R.snap = null;
+    R.reason = (e.body && e.body.error) || e.message;
+  } finally {
+    R.loading = false; paintReview();
+  }
+}
+
+function applyReviewFilter() {
+  const q = $('#rev-filter').value.trim().toLowerCase();
+  for (const box of [$('#rev-list'), $('#rev-diff')])
+    for (const c of box.children)
+      c.classList.toggle('hide', !!q && !String(c.dataset.path || '').toLowerCase().includes(q));
+}
+
+function paintReview() {
+  const dlg = $('#revdlg');
+  if (!dlg) return;
+  const p = S.panes.get(R.pane);
+  const w = (p && p.worktree) || {};
+  const snap = R.snap;
+  $('#rev-title').textContent = 'Review ⎇ ' + String(w.branch || '').replace(/^corral\//, '');
+  const files = snap ? [...((snap.diff || {}).files || [])]
+    .sort((a, b) => (b.binary ? 1 : 0) - (a.binary ? 1 : 0)) : [];
+  $('#rev-sub').textContent = R.loading ? 'freezing a snapshot…'
+    : snap ? `${files.length} file${files.length === 1 ? '' : 's'} against ` +
+             `${w.base || 'the base'} @ ${shortSha(snap.base_sha)} · ` +
+             (snap.tree !== snap.head_tree ? 'not committed yet'
+              : (snap.too_big || []).length ? 'committed, except files left out for size'
+              : 'all committed')
+    : '';
+  const rr = $('#rev-reason');
+  rr.textContent = R.reason;
+  rr.classList.toggle('hide', !R.reason);
+  const done = $('#rev-done');
+  done.replaceChildren();
+  if (R.done) {
+    done.appendChild(el('span', null, R.done.text));
+    if (R.done.url && /^https:\/\//.test(R.done.url)) {
+      const a = el('a', null, R.done.url);
+      a.href = R.done.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      done.append(el('span', null, ' · '), a);
+    }
+  }
+  $('#rev-banners').replaceChildren(...(snap ? reviewBanners(snap) : [])
+    .map(t => el('p', 'revbanner', t)));
+  if (R.painted !== snap) {                 // rebuild the diff only for a new snapshot
+    R.painted = snap;
+    const diff = $('#rev-diff');
+    $('#rev-list').replaceChildren(...files.map(f => fileRow(f, () => {
+      const box = [...diff.children].find(c => c.dataset.path === f.path);
+      if (box) box.scrollIntoView({ block: 'start' });
+    })));
+    diff.replaceChildren(...files.map(diffNodes));
+    if (snap && !files.length) diff.appendChild(el('div', 'rnote', 'no changes against the base'));
+    const sel = $('#rev-remote');
+    sel.replaceChildren(...((snap && snap.remotes) || []).map((r, i) => {
+      const o = el('option', null, r.name); o.value = String(i); return o;
+    }));
+    applyReviewFilter();
+  }
+  const remotes = (snap && snap.remotes) || [];
+  const remote = remotes[+$('#rev-remote').value || 0];
+  $('#rev-remoterow').classList.toggle('hide', !remotes.length);
+  $('#rev-url').textContent = !remote ? 'this repo has no remote to push to'
+    : remote.pushUrls.length === 1 ? remote.pushUrls[0] : `${remote.pushUrls.length} push URLs`;
+  const gh = remote && remote.pushUrls.length === 1 ? remote.githubRepo : null;
+  $('#rev-prrow').classList.toggle('hide', !gh);
+  $('#rev-prrepo').textContent = gh || '';
+  const prOn = !!gh && $('#rev-pr').checked;
+  $('#rev-prtitlerow').classList.toggle('hide', !prOn);
+  $('#rev-publish').textContent = prOn ? 'Push & open PR' : 'Push';
+  const ra = reviewActions(snap, { message: $('#rev-msg').value, busy: R.busy || R.loading,
+                                   remote: +$('#rev-remote').value || 0 });
+  for (const [id, k] of [['#rev-commit', 'commit'], ['#rev-publish', 'publish'],
+                         ['#rev-discard', 'discard'], ['#rev-copy', 'copy'],
+                         ['#rev-refresh', 'refresh']]) {
+    $(id).disabled = !ra[k].ok;
+    $(id).title = ra[k].why;
+  }
+  $('#rev-why').textContent = snap && !R.busy
+    ? [!ra.commit.ok && `Commit: ${ra.commit.why}.`, !ra.publish.ok && `Push: ${ra.publish.why}.`]
+        .filter(Boolean).join(' ')
+    : '';
+}
+
+function wireReview() {
+  const dlg = $('#revdlg');
+  if (!dlg) return;
+  const run = (call, after) => reviewRun(R, { call, after, reload: loadReview, paint: paintReview });
+  // Enter in a field must not submit the form (its first submit button is Close).
+  for (const id of ['#rev-msg', '#rev-filter', '#rev-prtitle']) {
+    $(id).addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      if (id === '#rev-msg' && !$('#rev-commit').disabled) $('#rev-commit').click();
+    });
+  }
+  $('#rev-msg').oninput = paintReview;
+  $('#rev-filter').oninput = applyReviewFilter;
+  $('#rev-remote').onchange = paintReview;
+  $('#rev-pr').onchange = paintReview;
+  $('#rev-refresh').onclick = () => { R.reason = ''; R.done = null; loadReview(); };
+  $('#rev-commit').onclick = () => run(
+    () => api('/api/session/worktree/commit',
+              commitBody(R.pane, R.snap, $('#rev-msg').value.trim())),
+    async r => {
+      R.done = { text: `committed ${shortSha(r.commit)}` };
+      $('#rev-msg').value = '';
+      await loadReview();
+    });
+  $('#rev-publish').onclick = () => {
+    const remote = ((R.snap && R.snap.remotes) || [])[+$('#rev-remote').value || 0];
+    if (!remote) return;
+    const pr = remote.githubRepo && $('#rev-pr').checked
+      ? { repo: remote.githubRepo, title: $('#rev-prtitle').value.trim(), body: '' } : null;
+    run(() => api('/api/session/worktree/publish', publishBody(R.pane, R.snap, remote, pr)),
+        async r => {
+          R.done = { text: `pushed ${shortSha(r.pushed)} to ${remote.name}`,
+                     url: r.pr_url || r.compare_url || null };
+          await loadReview();
+        });
+  };
+  $('#rev-copy').onclick = e => {
+    const p = S.panes.get(R.pane);
+    if (p && p.worktree) copyText(mergeCommand(p.worktree), e.clientX, e.clientY);
+  };
+  $('#rev-discard').onclick = () => {
+    if (!confirm('Discard this branch? Its agent stops. The branch is kept as a recovery ' +
+                 'ref and its files move to trash; nothing is deleted.')) return;
+    run(() => api('/api/session/worktree/discard', discardBody(R.pane, R.snap)),
+        async r => {
+          dlg.close();
+          toast(`branch discarded: kept as ${r.recovery_ref}`);
+          await refresh();
+        });
+  };
+}
+/* ── end own branches ─────────────────────────────────────────────────── */
 
 /* ── copy & find ─────────────────────────────────────────────────────────
  * Release-to-copy, double-click word copy, selections that survive live output
@@ -1695,7 +2181,7 @@ function render() {
     const agentTag = p.agent !== 'claude' ? p.label + ' · ' : '';
     const sub = el('div', 's',
       (DISPLAY_LABEL[disp] || disp) + quiet + ' · ' + agentTag +
-      p.cwd.split('/').pop());
+      paneDir(p));
     // The raw state stays one hover away.
     sub.title = p.state;
     t.appendChild(sub);
@@ -1964,7 +2450,7 @@ function render() {
       }
       const c = el('div', 'ncard');
       c.appendChild(el('div', 't', p.title || p.label));
-      c.appendChild(el('div', 'm', `${p.label} · ${p.cwd.split('/').pop()}` +
+      c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)}` +
                                    (p.minimized ? ' · minimized' : '')));
       if (ev) {
         c.appendChild(permCard(p, ev.data, null, true));
@@ -2024,6 +2510,23 @@ function render() {
     c.appendChild(acts);
     n.appendChild(c); items++;
   }
+  // Own branches with changes not yet reviewed. Never blocking: `blocked`
+  // below counts pending permissions only.
+  let quiet = 0;
+  for (const p of wtRailCards(panes, wtSeen())) {
+    const c = el('div', 'ncard wt');
+    c.appendChild(el('div', 't', `${p.title || p.label} — ready to review`));
+    c.appendChild(el('div', 'm', wtPillModel(p.worktree).text));
+    const acts = el('div', 'facts');
+    const go = el('button', 'fbtn', 'Review');
+    go.onclick = () => openReview(p);
+    const later = el('button', 'fbtn', 'Not now');
+    later.title = 'hide this card until the branch changes again';
+    later.onclick = () => { wtMarkSeen(p.id, p.worktree.summary); render(); };
+    acts.append(go, later);
+    c.appendChild(acts);
+    n.appendChild(c); items++; quiet++;
+  }
   if (!items) n.appendChild(el('div', 'calm', 'Nothing. Quiet is the steady state.'));
   const mobilePane = $('#mobile-pane');
   if (mobilePane) {
@@ -2045,7 +2548,7 @@ function render() {
       if (panes.some(p => p.id === selected)) mobilePane.value = selected;
     }
   }
-  railFold(items, panes.reduce((a, p) => a + p.pending.length, 0));
+  railFold(items, panes.reduce((a, p) => a + p.pending.length, 0), quiet);
 }
 
 // Minimize/restore, shared by the roster row, pane header, minbar chip and rail.
@@ -2060,8 +2563,16 @@ async function setMin(p, flag) {
  * Empty folds itself. Folded is a strip that still shows the count (hot when an
  * agent is blocked), never display:none. A hand-fold is sticky; an auto-fold
  * follows the contents. */
-function railFold(items, blocked) {
-  const open = S.railShut === null ? items > 0 : !S.railShut;
+/* Whether the rail shows: a hand-fold wins; otherwise open when it holds
+ * something. On a narrow screen the rail covers the pane, so review cards
+ * (`quiet`, never blocking) count but do not pop it open there. */
+function railOpens(items, quiet, narrow, shut) {
+  if (shut !== null) return !shut;
+  return (narrow ? items - quiet : items) > 0;
+}
+function railFold(items, blocked, quiet = 0) {
+  const narrow = !!(window.matchMedia && window.matchMedia('(max-width: 820px)').matches);
+  const open = railOpens(items, quiet, narrow, S.railShut);
   $('#app').classList.toggle('railshut', !open);
   $('#rrail').classList.toggle('shut', !open);
   $('#railhead').textContent = `Needs you${items ? ' · ' + items : ''} ▾`;
@@ -2260,6 +2771,11 @@ function connect() {
     // The commands event carries only a count; pull the list from state.
     if (ev.kind === 'commands') refresh();
     if (ev.kind === 'note') toast(d.text, true);
+    // Own branch: a turn's summary, and the actions that change the entry.
+    if (ev.kind === 'worktree' && p.worktree) {
+      if (d.summary) p.worktree.summary = d.summary;
+      if (d.commit || d.published || d.discarded) refresh().catch(() => {});
+    }
     scheduleRender();
   };
 }
@@ -2606,9 +3122,14 @@ function wireDialog() {
       }
     };
     // Order matters: fillHost resolves which lane the other two describe.
-    $('#f-agent').onchange = () => { fillHost(); fillCfg(); fillPosture(); };
+    $('#f-agent').onchange = () => { fillHost(); fillCfg(); fillPosture(); wtProbeSoon(dlg, 0); };
     // Switching host changes the lane, so model and posture follow it.
-    $('#f-host').onchange = () => { fillCfg(); fillPosture(); };
+    $('#f-host').onchange = () => { fillCfg(); fillPosture(); wtProbeSoon(dlg, 0); };
+    // Own branch: the row follows the folder (debounced) and the lane.
+    dlg._wt = { show: false };
+    paintWtRow(dlg._wt);
+    $('#f-cwd').oninput = () => wtProbeSoon(dlg, 300);
+    wtProbeSoon(dlg, 0);
     fillHost();
     fillCfg();
     fillPosture();
@@ -2633,6 +3154,10 @@ function wireDialog() {
     // Omit posture rather than send it empty, so it is never read as a deliberate
     // "none".
     if (posture) common.posture = posture;
+    // Own branch: only when checked, visible, and probed for this folder and lane.
+    const wtPick = wtSubmit(dlg._wt, $('#f-wt').checked, cwd, common.agent);
+    if (dlg._wt && dlg._wt.checkbox && dlg._wt.cwd === cwd) wtRemember(dlg._wt.top, $('#f-wt').checked);
+    if (wtPick.error) { toast(wtPick.error, true); return; }
     if ($('#f-quick').checked) {
       const a = S.agents.find(x => x.key === common.agent) || {};
       const m = $('#f-model'), ef = $('#f-effort');
@@ -2645,6 +3170,10 @@ function wireDialog() {
       toast('⚡ now starts ' + quickLabel());
     }
     const when = $('#f-when').value;
+    if (when && wtPick.worktree) {
+      toast('an own branch cannot be scheduled yet: start it now, or untick Own branch', true);
+      return;
+    }
     if (when) {
       // Later: arm it, open nothing now. The prompt is stored as typed (a
       // role's instructions are inlined server-side when it is armed).
@@ -2658,7 +3187,7 @@ function wireDialog() {
       } catch (e) { toast(e.message, true); }
       return;
     }
-    await startConversation(common);
+    await startConversation({ ...common, ...wtPick });
   });
   $('#new-quick').onclick = quickStart;
   // Say exactly what ⚡ will start, read at hover time so it never goes stale.
@@ -3091,6 +3620,9 @@ const KEYS = [
   { combo: 'Esc', what: 'Close this list, or the search',
     match: e => e.key === 'Escape' && $('#keysdlg') && $('#keysdlg').open,
     run: () => toggleKeys(false) },
+  { combo: 'r', where: 'on a focused own-branch pane', what: 'Review its changes',
+    match: e => reviewKey(e, reviewTarget(), anyDialogOpen()),
+    run: () => openReview(reviewTarget()) },
   { combo: 'Enter', where: 'in a message box', what: 'Send' },
   { combo: 'Shift+Enter', where: 'in a message box', what: 'Newline, do not send' },
   { combo: '⌘Enter', alt: 'Ctrl+Enter', where: 'in a message box',
@@ -3174,6 +3706,7 @@ async function start() {
   wireCopySelect();
   wirePalette();
   wireSeat();
+  wireReview();
   wireKeysButton();
   wireMobileActions();
   // Stream first, then snapshot, so no event falls in the gap between them.

@@ -91,6 +91,13 @@
     <label>Directory<input id="f-cwd" spellcheck="false" list="cwdlist"
                            autocomplete="off"></label>
     <datalist id="cwdlist"></datalist>
+    <!-- Own branch: filled by the probe (wtRowModel); hidden outside a git repo and
+         for lanes that cannot take one. A refusal replaces the checkbox. -->
+    <div id="wtrow" class="wtrow hide">
+      <label class="checkrow" id="wt-check"><input type="checkbox" id="f-wt">
+        Own branch <span id="wt-cut" class="wtcut"></span></label>
+      <p class="hint" id="wthint"></p>
+    </div>
     <label>Model<select id="f-model"></select></label>
     <p class="hint" id="modelhint"></p>
     <label>Effort<select id="f-effort"></select></label>
@@ -194,6 +201,45 @@
            placeholder="Jump to a conversation, or find a note to attach…">
     <div id="pal-res" class="palres"></div>
   </div>
+</dialog>
+
+<!-- Review: an own-branch pane's changes, frozen as a tree when it opens. Commit,
+     Push and Discard post that tree; if the files moved since, the hub refuses. -->
+<dialog id="revdlg">
+  <form method="dialog" class="dlg rev">
+    <h2 id="rev-title">Review</h2>
+    <p class="hint" id="rev-sub"></p>
+    <p class="revbanner bad hide" id="rev-reason"></p>
+    <p class="hint" id="rev-done"></p>
+    <div id="rev-banners" class="revbanners"></div>
+    <div class="revbody">
+      <div class="revfiles">
+        <input id="rev-filter" type="text" spellcheck="false" autocomplete="off"
+               placeholder="filter files">
+        <div id="rev-list" class="revlist"></div>
+      </div>
+      <div id="rev-diff" class="revdiff"></div>
+    </div>
+    <label>Commit message<input id="rev-msg" autocomplete="off"
+           placeholder="what this change does"></label>
+    <div class="revpub">
+      <label id="rev-remoterow">Push to<select id="rev-remote"></select></label>
+      <code id="rev-url"></code>
+      <label class="checkrow hide" id="rev-prrow"><input type="checkbox" id="rev-pr">
+        open a pull request on <span id="rev-prrepo"></span></label>
+      <label class="hide" id="rev-prtitlerow">PR title<input id="rev-prtitle"
+             autocomplete="off"></label>
+    </div>
+    <p class="hint" id="rev-why"></p>
+    <menu>
+      <button type="button" class="btn" id="rev-refresh">Refresh</button>
+      <button type="button" class="btn" id="rev-discard">Discard…</button>
+      <button type="button" class="btn" id="rev-copy">Copy merge command</button>
+      <button type="button" class="btn" id="rev-publish">Push</button>
+      <button type="button" class="btn go" id="rev-commit">Commit</button>
+      <button value="cancel" class="btn">Close</button>
+    </menu>
+  </form>
 </dialog>
 
 <div id="toast" class="toast"></div>

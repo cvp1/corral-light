@@ -78,12 +78,15 @@ const KEYS_SRC = /^const KEYS = \[[\s\S]*?^\];$/m.exec(src);
 if (!KEYS_SRC) throw new Error('no `const KEYS = [...]` in app.js');
 
 const openPalette = () => { NODES['#palette'].open = true; };
-const M = new Function('$', 'el', 'openPalette', `
+// `r` (own-branch review) needs a focused own-branch pane; there is none here.
+const reviewTarget = () => null, openReview = () => {}, anyDialogOpen = () => false;
+const M = new Function('$', 'el', 'openPalette', 'reviewTarget', 'openReview', 'anyDialogOpen', `
   ${KEYS_SRC[0]}
   ${fn('isTypingTarget')}
   ${fn('toggleKeys')}
+  ${fn('reviewKey')}
   return { KEYS, toggleKeys, isTypingTarget };
-`)($, el, openPalette);
+`)($, el, openPalette, reviewTarget, openReview, anyDialogOpen);
 
 /* Every entry is describable — an overlay row with no words is a row that
  * teaches nothing. */
@@ -135,6 +138,8 @@ const press = (init) => {
   return null;
 };
 
+check(press({ key: 'r' }) === null,
+      'r is swallowed with no own-branch pane in focus — it must stay typeable');
 check(press({ key: '?' }) !== null, 'pressing ? matched no binding');
 check(NODES['#keysdlg'].open, 'pressing ? did not open the overlay');
 
