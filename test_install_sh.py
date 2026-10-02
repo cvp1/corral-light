@@ -110,6 +110,15 @@ class Static(unittest.TestCase):
         # then fails the whole pipeline (seen live: the glibc probe died on Arch).
         self.assertNotRegex(TEXT, r"\|\s*grep -q")
 
+    def test_questions_come_before_sudo_and_downloads(self):
+        q = TEXT.index("Which assistants do you have an account for?")
+        self.assertLess(q, TEXT.index('step "Base tools'))
+        self.assertLess(q, TEXT.index("sudo apt-get"))
+
+    def test_detect_output_must_be_a_known_form(self):
+        self.assertIn('*"no prior AI-OS Seed footprint"*|*"prior-install signal"*', TEXT)
+        self.assertNotIn("--detect 2>&1 || true", TEXT)
+
     def test_no_vendor_api_keys(self):
         for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GROK_CODE_XAI_API_KEY"):
             self.assertNotIn(key, TEXT)

@@ -42,7 +42,7 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.1.3"
+INSTALLER_VERSION="1.1.4"
 
 # ── pins ────────────────────────────────────────────────────────────────────
 CORRAL_LIGHT_REPO="${CORRAL_LIGHT_REPO:-https://github.com/cvp1/corral-light}"
@@ -179,13 +179,17 @@ die()  {
 # A terminal we can actually read from, or none.
 TTY_IN=/dev/null
 if [ -r /dev/tty ] && { : < /dev/tty; } 2>/dev/null; then TTY_IN=/dev/tty; fi
+# A prompt is written to the terminal directly (stdout is the log pipe); the
+# answer is then echoed to stdout so the log keeps it.
+say_tty() { if [ "$TTY_IN" = /dev/tty ]; then printf "$@" > /dev/tty; else printf "$@"; fi; }
 ask_yn() {   # ask_yn "question" default(Y|N)  → 0 yes, 1 no. No terminal and no --yes: "no".
   local q="$1" def="${2:-Y}" ans
   if [ "$YES" = 1 ]; then [ "$def" = Y ]; return; fi
   if [ "$TTY_IN" = /dev/null ]; then printf '  %s — no terminal to ask on, taking "no" (--yes says yes to everything)\n' "$q"; return 1; fi
-  if [ "$def" = Y ]; then printf '  %s [Y/n] ' "$q"; else printf '  %s [y/N] ' "$q"; fi
+  if [ "$def" = Y ]; then say_tty '  %s [Y/n] ' "$q"; else say_tty '  %s [y/N] ' "$q"; fi
   read -r ans < "$TTY_IN" || ans=""
   ans="$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')"
+  printf '  %s → %s\n' "$q" "${ans:-(Enter)}"
   case "$ans" in
     "") [ "$def" = Y ] ;;
     y|yes) return 0 ;;
@@ -195,8 +199,9 @@ ask_yn() {   # ask_yn "question" default(Y|N)  → 0 yes, 1 no. No terminal and 
 press_enter() {   # 0 = go on, 1 = skip
   [ "$YES" = 1 ] && return 0
   [ "$TTY_IN" = /dev/null ] && return 1
-  printf '  %s(press Enter to continue, or type s to skip)%s ' "$D" "$N"
+  say_tty '  %s(press Enter to continue, or type s to skip)%s ' "$D" "$N"
   local ans; read -r ans < "$TTY_IN" || ans=""
+  printf '  → %s\n' "${ans:-(Enter)}"
   [ "$ans" != "s" ] && [ "$ans" != "S" ]
 }
 
@@ -320,7 +325,7 @@ main() {
   libc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
   case "$libc" in glibc\ *) ;; *) die "This Linux does not use glibc (Alpine/musl?)." "The prebuilt Node.js and assistant binaries need glibc 2.28+. Use a glibc-based distro for this release." ;; esac
   glibc="${libc#glibc }"
-  if [ -n "$glibc" ] && [ "$(printf '%s\n2.28\n' "$glibc" | sort -V | head -1)" != "2.28" ]; then
+  if [ -n "$glibc" ] && ! printf '2.28\n%s\n' "$glibc" | sort -C -V; then
     die "glibc $glibc is too old; 2.28 or newer is needed (Ubuntu 20.04+, Debian 10+, Fedora 29+)."
   fi
   ok "glibc ${glibc:-present}"
@@ -330,6 +335,46 @@ main() {
   fi
   HEADLESS=0; [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && HEADLESS=1
   if [ "$HEADLESS" = 0 ]; then ok "a desktop is available (the browser can open)"; else warn "no desktop display — sign-ins use device codes and the browser address is printed for you"; fi
+
+  # ── the two questions: before sudo, before any download ───────────────
+  if [ -z "$LANES" ]; then
+    if [ "$YES" = 1 ]; then
+      LANES="claude,codex,grok,gemini"
+    elif [ "$TTY_IN" = /dev/null ]; then
+      LANES="claude"
+      warn "no terminal to ask which assistants you have — setting up Claude only (use --lanes or --yes)"
+    else
+      say_tty '\n  %sWhich assistants do you have an account for?%s\n' "$B" "$N"
+      say_tty '    1  Claude    (claude.ai — Pro or Max)\n'
+      say_tty '    2  ChatGPT   (Plus, Pro or Team)\n'
+      say_tty '    3  Grok      (SuperGrok or X Premium)\n'
+      say_tty '    4  Gemini    (a Google account; this one is a 1.5 GB download)\n'
+      tries=0
+      while :; do
+        say_tty '  Type the numbers, like  1 3  (or  1 2 3 4  for all) — or just press Enter for Claude only: '
+        read -r picks < "$TTY_IN" || picks=""
+        case "$picks" in
+          "") LANES="claude"; break ;;
+          *[!1-4\ ]*) tries=$((tries+1)); say_tty '  Just the numbers 1 to 4, please (or Enter).\n'
+               [ "$tries" -ge 3 ] && { LANES="claude"; say_tty '  Taking Claude only.\n'; break; } ;;
+          *) LANES=""
+             case "$picks" in *1*) LANES="$LANES,claude" ;; esac
+             case "$picks" in *2*) LANES="$LANES,codex" ;; esac
+             case "$picks" in *3*) LANES="$LANES,grok" ;; esac
+             case "$picks" in *4*) LANES="$LANES,gemini" ;; esac
+             LANES="${LANES#,}"; [ -n "$LANES" ] && break ;;
+        esac
+      done
+    fi
+  fi
+  ok "assistants: $LANES"
+  WIRE_HOOKS=0
+  if [ "$NO_SCHEDULE" = 0 ] && has_lane claude; then
+    say_tty '\n  %sShould Claude remember your past conversations?%s\n' "$B" "$N"
+    say_tty '  (It adds a few lines to Claude'"'"'s settings file; they are printed when written and can be removed.)\n'
+    if ask_yn "Remember past conversations?" Y; then WIRE_HOOKS=1; fi
+  fi
+
 
   # ── 2. distro packages ────────────────────────────────────────────────────
   step "Base tools (git, python3, PyYAML, curl, tar, xz, cron)"
@@ -410,40 +455,6 @@ main() {
   fi
   ok "internet reachable"
 
-  # ── the two questions, before anything slow ───────────────────────────────
-  if [ -z "$LANES" ]; then
-    if [ "$YES" = 1 ]; then
-      LANES="claude,codex,grok,gemini"
-    elif [ "$TTY_IN" = /dev/null ]; then
-      LANES="claude"
-      warn "no terminal to ask which assistants you have — setting up Claude only (use --lanes or --yes)"
-    else
-      printf '\n  %sWhich assistants do you have an account for?%s\n' "$B" "$N"
-      printf '    1  Claude    (claude.ai — Pro or Max)\n'
-      printf '    2  ChatGPT   (Plus, Pro or Team)\n'
-      printf '    3  Grok      (SuperGrok or X Premium)\n'
-      printf '    4  Gemini    (a Google account; this one is a 1.5 GB download)\n'
-      printf '  Type the numbers, like  1 3  (or  1 2 3 4  for all) — or just press Enter for Claude only: '
-      read -r picks < "$TTY_IN" || picks=""
-      if [ -z "${picks//[^1-4]/}" ]; then
-        LANES="claude"
-      else
-        LANES=""
-        case "$picks" in *1*) LANES="$LANES,claude" ;; esac
-        case "$picks" in *2*) LANES="$LANES,codex" ;; esac
-        case "$picks" in *3*) LANES="$LANES,grok" ;; esac
-        case "$picks" in *4*) LANES="$LANES,gemini" ;; esac
-        LANES="${LANES#,}"
-      fi
-    fi
-  fi
-  ok "assistants: $LANES"
-  WIRE_HOOKS=0
-  if [ "$NO_SCHEDULE" = 0 ]; then
-    printf '\n  %sShould Claude remember your past conversations?%s\n' "$B" "$N"
-    printf '  (It adds a few lines to Claude'"'"'s settings file; they are printed when written and can be removed.)\n'
-    if ask_yn "Remember past conversations?" Y; then WIRE_HOOKS=1; fi
-  fi
   need_mb=1200; has_lane gemini && need_mb=3600
   free_mb="$(df -Pm "$HOME" | awk 'NR==2 {print $4}')"
   if [ -n "$free_mb" ] && [ "$free_mb" -lt "$need_mb" ]; then
@@ -465,11 +476,14 @@ main() {
         return 0
       fi
       git -C "$dir" fetch -q --tags origin
-      if git -C "$dir" show-ref -q --verify "refs/remotes/origin/$ref"; then
-        git -C "$dir" checkout -q -B "$ref" "origin/$ref"
-      else
-        git -C "$dir" checkout -q --detach "$ref"
+      local want="$ref"
+      git -C "$dir" show-ref -q --verify "refs/remotes/origin/$ref" && want="origin/$ref"
+      if ! git -C "$dir" merge-base --is-ancestor HEAD "$want" 2>/dev/null; then
+        warn "$label at $dir has commits of its own that $ref does not contain — left exactly as it is (not updated)"
+        return 0
       fi
+      if [ "$want" = "origin/$ref" ]; then git -C "$dir" checkout -q -B "$ref" "origin/$ref"
+      else git -C "$dir" checkout -q --detach "$ref"; fi
       after="$(git -C "$dir" rev-parse HEAD)"
       if [ "$before" = "$after" ]; then skip "$label already at $ref ($(git -C "$dir" rev-parse --short HEAD))"
       else SYNC_CHANGED=1; ok "$label updated to $ref ($(git -C "$dir" rev-parse --short HEAD))"; fi
@@ -582,7 +596,11 @@ EOF
   step "AI-OS Seed in $AIOS"
   if [ ! -f "$AIOS/.cc-seed/receipt.json" ]; then
     # Never two installs on one machine: the scheduler owns one managed block.
-    detect="$(python3 "$SEED/install.py" --detect 2>&1 || true)"
+    detect="$(python3 "$SEED/install.py" --detect 2>&1)" || die "Seed's prior-install check failed:" "$detect"
+    case "$detect" in
+      *"no prior AI-OS Seed footprint"*|*"prior-install signal"*) ;;
+      *) die "Seed's prior-install check gave an answer this installer does not recognise:" "$detect" ;;
+    esac
     other="$(printf '%s\n' "$detect" | python3 -c '
 import os, re, sys
 mine = os.path.realpath(sys.argv[1])
@@ -809,15 +827,17 @@ EOF
 
   # ── 11. receipt + what you have ───────────────────────────────────────────
   step "Done"
-  python3 - "$RECEIPT" "$INSTALLER_VERSION" "$CL" "$SEED" "$AIOS" "$NODE_VERSION" "$LANES" "$PORT" <<'PY'
+  claude_ver=""; c="$(claude_bin)"; [ -n "$c" ] && claude_ver="$("$c" --version 2>/dev/null | head -n1 || true)"
+  python3 - "$RECEIPT" "$INSTALLER_VERSION" "$CL" "$SEED" "$AIOS" "$NODE_VERSION" "$LANES" "$PORT" "$claude_ver" <<'PY'
 import json, subprocess, sys, datetime
-rc, ver, cl, seed, aios, node, lanes, port = sys.argv[1:9]
+rc, ver, cl, seed, aios, node, lanes, port, claude_ver = sys.argv[1:10]
 def rev(d):
     try: return subprocess.check_output(["git", "-C", d, "rev-parse", "HEAD"], text=True).strip()
     except Exception: return None
 json.dump({"installer": ver, "at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
            "corral_light": {"path": cl, "commit": rev(cl)}, "ai_os_seed": {"path": seed, "commit": rev(seed)},
-           "workspace": aios, "node": node, "lanes": lanes.split(","), "port": int(port)},
+           "workspace": aios, "node": node, "lanes": lanes.split(","), "port": int(port),
+           "claude_code": claude_ver or None},
           open(rc, "w"), indent=1)
 PY
   ok "receipt: $RECEIPT"
