@@ -740,8 +740,8 @@ class Handler(BaseHTTPRequestHandler):
                 # the page is visible and focused).
                 return self._json({"ok": True, "seen": mark_seen(
                     b.get("pane", ""), b.get("seq") or 0)})
-            if p.startswith("/api/session/worktree/"):
-                return self._worktree_post(p[len("/api/session/worktree/"):], b)
+            if p in WORKTREE_POSTS:
+                return self._worktree_post(p.rsplit("/", 1)[1], b)
             if p == "/api/session/cancel":
                 return self._json({"ok": MGR.get(b.get("pane", "")).cancel()})
             if p == "/api/session/close":
@@ -756,6 +756,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:                      # noqa: BLE001
             return self._json({"error": f"{type(e).__name__}: {e}"[:300]}, 500)
 
+
+# Spelled out, so the front end's route check can see each one.
+WORKTREE_POSTS = ("/api/session/worktree/snapshot", "/api/session/worktree/commit",
+                  "/api/session/worktree/publish", "/api/session/worktree/discard")
 
 _OID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 

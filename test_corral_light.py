@@ -3115,6 +3115,11 @@ class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
         _run_node_selftest(self, "selftest_posture.mjs",
                            "the posture pill and the New dialog")
 
+    def test_own_branch_review_in_the_browser(self):
+        """T-UI-1..14: the New row, the pill, parseUnified, the review dialog."""
+        _run_node_selftest(self, "selftest_review.mjs",
+                           "the own-branch row, pill and review dialog")
+
 
 class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
     """install_service resolves every path from the running checkout and never
