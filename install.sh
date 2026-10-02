@@ -378,6 +378,7 @@ else
 fi
 export PATH="$NODE_DIR/bin:$PATH"
 export CORRAL_NODE_BIN="$NODE_DIR/bin"
+export NPM_CONFIG_UPDATE_NOTIFIER=false   # no "new npm available" banners in an install log
 
 # ── 5. adapters ─────────────────────────────────────────────────────────────
 step "Claude and ChatGPT adapters (npm ci, from the lock file)"
@@ -523,8 +524,12 @@ EOF
   else
     warn "--no-schedule: scheduler, memory mesh and hooks skipped"
   fi
-  python3 "$SEED/install.py" --target "$AIOS" --audit --package "$SEED" || die "Seed's post-install audit flagged a difference (above)."
-  ok "post-install audit clean"
+  if [ "$NO_SCHEDULE" = 0 ]; then
+    python3 "$SEED/install.py" --target "$AIOS" --audit --package "$SEED" || die "Seed's post-install audit flagged a difference (above)."
+    ok "post-install audit clean"
+  else
+    python3 "$SEED/install.py" --target "$AIOS" --audit --package "$SEED" || warn "audit FLAGGED — expected under --no-schedule (the scheduler was not synced)"
+  fi
 fi
 
 # ── 8. service ──────────────────────────────────────────────────────────────
