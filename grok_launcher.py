@@ -45,18 +45,12 @@ def resolve_grok(explicit: str | None = None) -> str | None:
     return None
 
 
-# Where the Grok CLI keeps its own credential. Same shape as codex's
-# auth.json, which is why the same check was available all along and simply
-# was not made.
+# Where the Grok CLI keeps its own credential.
 GROK_HOME = Path(os.environ.get("CORRAL_GROK_HOME", Path.home() / ".grok"))
 
 
 def auth_present() -> bool:
-    """A file that exists and carries no token is not a login.
-
-    Same class as Claude's empty `.credentials.json`: `is_file()` passed,
-    the picker said ok, the pane died on `Authentication required`.
-    """
+    """True if auth.json exists and carries a usable token."""
     from sessions import usable_credential
     return usable_credential(GROK_HOME / "auth.json")
 
@@ -66,19 +60,8 @@ def login_command(grok: str | None = None) -> str:
 
 
 def unavailable_reason() -> str | None:
-    """Why this lane cannot open right now, or None if it can.
-
-    WHY THIS EXISTS (2026-08-31, dogma-2): `resolve_grok()` says in its own
-    docstring that it returns a path "without probing auth", and the picker
-    was calling ONLY that — so a host with the Grok CLI installed but never
-    signed in reported `ok Grok`, and the pane died on its first prompt with
-    `Authentication required`. Craig hit exactly that.
-
-    available_agents() exists to stop a picker listing a binary that isn't
-    installed; a binary that is installed and cannot authenticate is the same
-    lie one layer in. Codex and Ollama already refused at pick time with the
-    exact remedy — this lane just never learned to.
-    """
+    """Why this lane cannot open right now (not installed or not signed in),
+    or None if it can."""
     grok = resolve_grok()
     if not grok:
         return "Grok CLI not installed"
@@ -88,18 +71,11 @@ def unavailable_reason() -> str | None:
 
 
 def build_argv(grok: str, model: str | None = None) -> list[str]:
-    # --model belongs to `grok agent`, not `grok agent stdio` -- it is a
-    # Clap option on the PARENT command and must appear before the
-    # subcommand token or the CLI refuses the whole invocation ("unexpected
-    # argument '--model' found"), confirmed live, 2026-08-23.
+    # --model is an option of `grok agent` and must precede `stdio`.
     argv = [grok, "agent"]
     if model:
-        # ACP's session/set_config_option returns -32601 "Method not found"
-        # for this agent -- confirmed live, 2026-08-23 -- so a model can
-        # only be chosen at PROCESS SPAWN, as a CLI flag, never afterward
-        # against a running session. There is no live "change model" path
-        # for Grok and there cannot be one until the vendor CLI's ACP mode
-        # reports real configOptions.
+        # The agent does not support session/set_config_option, so the model
+        # can only be chosen at spawn.
         argv += ["--model", model]
     argv.append("stdio")
     return argv
@@ -109,17 +85,8 @@ _AVAILABLE_RE = re.compile(r"^\s*([*-])\s*(\S+?)(?:\s*\(default\))?\s*$")
 
 
 def resolve_models(grok: str, timeout: float = 5.0) -> list[dict]:
-    """The account's real, live model list, parsed from `grok models` -- a
-    local CLI metadata read against the CLI's own cache/account state, not
-    an LLM call. Empty list on any failure; callers must treat that as
-    "no picker available", never fall back to a guessed/hardcoded list.
-
-    Exists because ACP mode reports configOptions: null for this agent --
-    no model, no effort, nothing -- so both the pane header (which model is
-    this?) and the new-pane dialog (which model do you want?) had nothing
-    to show, even though the underlying CLI has always known both the
-    default (grok-4.6, live-confirmed) and the full list.
-    """
+    """The account's live model list, parsed from `grok models` (no LLM call).
+    Empty on any failure, meaning no picker; never a guessed list."""
     try:
         result = subprocess.run([grok, "models"], capture_output=True,
                                 text=True, timeout=timeout)
@@ -170,10 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     if not grok:
         print(unavailable_message(), file=sys.stderr, flush=True)
         return 127
-    # Set by sessions.py's Pane.start()/resume() from self.want_model, only
-    # when Craig actually requested one in the new-pane dialog -- absent,
-    # this launches with no --model flag at all, same as before this
-    # existed, and the CLI's own default (grok-4.6) applies.
+    # Set by sessions.py only when a model was requested; otherwise the
+    # CLI's default applies.
     command = build_argv(grok, os.environ.get("CORRAL_GROK_MODEL") or None)
     if args.print_argv:
         print(" ".join(command), flush=True)

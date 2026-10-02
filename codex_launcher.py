@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
 """Corral-owned ChatGPT (Codex) ACP launcher.
 
-Launches @agentclientprotocol/codex-acp — the ACP-org adapter over OpenAI's
-codex app-server (same org as the Claude adapter; Zed launches this exact
-package). OpenAI is first-party for sensitive data
-(decisions/openai-first-party-2026-07-31.md); lane adoption record:
-decisions/codex-acp-lane-2026-08-23.md.
-
-Two properties this launcher exists to hold:
-
-- **A dedicated CODEX_HOME.** ~/.codex on this host is pinned to the .21
-  Ollama fleet (the July codex-on-local experiment) — a lane inheriting it
-  would chat with gemma while wearing a ChatGPT label, the exact
-  "config outside the repo loses its pin" failure mode the opencode
-  retirement eliminated. This lane's config and auth live in a corral-owned
-  home instead, where there is nothing to inherit and nothing to drift.
-- **Auth stays inside the CLI's own state.** ChatGPT subscription login
-  (auth.json under CODEX_HOME, written by `codex login`); no key enters
-  argv, env, or logs. Refuses up front when unauthenticated — the gemini
-  lesson: a clear reason in the picker beats a dead pane at session/new.
+Launches @agentclientprotocol/codex-acp over OpenAI's codex app-server, with
+a dedicated CODEX_HOME so no ambient ~/.codex config is inherited. Auth stays
+in the CLI's own state (`codex login`); no key enters argv, env, or logs.
 """
 from __future__ import annotations
 
@@ -29,20 +14,17 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_ADAPTER = HERE / "spike" / "node_modules" / ".bin" / "codex-acp"
-# The version-matched codex CLI the adapter bundles — the binary Craig logs
-# in with, so auth state is written by the same codex the lane runs.
+# The version-matched codex CLI the adapter bundles, used for login so auth
+# state is written by the same codex the lane runs.
 BUNDLED_CODEX = HERE / "spike" / "node_modules" / ".bin" / "codex"
 CODEX_HOME = Path(os.environ.get(
     "CORRAL_CODEX_HOME", str(Path.home() / ".config/corral-light/codex-home")))
-# Optional: a node install off PATH (hermes' bundle on ranch). Absent on a
-# stock Mac, where node IS on PATH -- so a non-existent dir must not shadow it.
+# Optional node install off PATH; ignored when absent.
 _NODE_BIN = Path.home() / ".hermes" / "node" / "bin"
 NODE_BIN = _NODE_BIN if _NODE_BIN.is_dir() else None
 
-# codex's sandboxed middle tier: workspace-write, network off, escalations
-# become ACP permission requests in the rail. Not read-only (a coding lane
-# that can never edit is a button that lies) and not agent-full-access (the
-# rail must see escapes). Override: CORRAL_CODEX_MODE.
+# Workspace-write, network off; escalations become ACP permission requests.
+# Override: CORRAL_CODEX_MODE.
 DEFAULT_MODE = "agent"
 
 
@@ -63,38 +45,20 @@ def resolve_adapter(explicit: str | None = None) -> str | None:
 
 
 def auth_present() -> bool:
-    """A file that exists and carries no token is not a login.
-
-    Same class as Claude's empty `.credentials.json`: `is_file()` passed,
-    the picker said ok, the pane died on `Authentication required`.
-    """
+    """True if auth.json exists and carries a usable token."""
     from sessions import usable_credential
     return usable_credential(CODEX_HOME / "auth.json")
 
 
 def login_command() -> str:
-    """The exact shell line to paste — INCLUDING creating CODEX_HOME.
-
-    The mkdir is not decoration. codex refuses to start when CODEX_HOME does
-    not exist ('Error loading configuration: CODEX_HOME points to "…", but
-    that path does not exist'), and this directory only gets created by
-    main() at pane-spawn time — which cannot have happened yet, because not
-    being logged in is precisely why you are reading this. So the command
-    this lane printed was one that could never work as pasted: it told the
-    operator to log in and then failed on the login. Measured on dogma-2,
-    2026-08-31, from a clean install.
-
-    A command shown to a human is a promise that running it does the thing.
-    """
+    """The exact shell line to paste, including creating CODEX_HOME (codex
+    refuses to start when it does not exist)."""
     codex = BUNDLED_CODEX if BUNDLED_CODEX.is_file() else Path("codex")
     return (f"mkdir -p {CODEX_HOME} && "
             f"CODEX_HOME={CODEX_HOME} {codex} login --device-auth")
 
 
-# Vars this launcher's own docstring promises never reach the process --
-# an ambient one (a dev shell with a key exported for something unrelated,
-# not systemd's own clean unit env) would otherwise ride along via the
-# `dict(os.environ)` copy below. Found 2026-08-23 bugbash panel (GPT-5.6-sol).
+# Ambient provider credentials never reach the adapter.
 _STRIP_ENV_PREFIXES = ("OPENAI_", "ANTHROPIC_", "GEMINI_", "GOOGLE_", "XAI_", "GROK_")
 
 
@@ -103,9 +67,7 @@ def build_env() -> dict[str, str]:
            if not k.startswith(_STRIP_ENV_PREFIXES)}
     env["CODEX_HOME"] = str(CODEX_HOME)
     env["NO_BROWSER"] = "1"          # headless host; device-auth, not a browser
-    # Explicit, not setdefault: this launcher OWNS the sandbox posture: an
-    # ambient INITIAL_AGENT_MODE (however it got there) must not silently
-    # override the mode Corral just computed for this pane.
+    # Explicit, not setdefault: an ambient INITIAL_AGENT_MODE must not win.
     env["INITIAL_AGENT_MODE"] = os.environ.get("CORRAL_CODEX_MODE", DEFAULT_MODE)
     if NODE_BIN and str(NODE_BIN) not in env.get("PATH", ""):
         env["PATH"] = f"{NODE_BIN}:{env.get('PATH', '')}"
@@ -115,13 +77,7 @@ def build_env() -> dict[str, str]:
 def unavailable_reason() -> str | None:
     """Why this lane cannot open right now, or None if it can."""
     if not resolve_adapter():
-        # Name the path actually probed, not a relative folder name. The old
-        # text said "npm install in corral-light/spike", which is a sentence
-        # about a tree this process may not be running out of: during the
-        # 2026-09-01 bug bash the service ran from a worktree with no
-        # node_modules, and that message sent the operator to ~/corral-light
-        # — where the adapter was present and nothing looked wrong. A message
-        # that names a folder it did not check is worse than no message.
+        # Name the absolute path actually probed.
         return (f"codex-acp adapter not installed at {DEFAULT_ADAPTER} — "
                 f"run `npm install` in {HERE / 'spike'} (or set "
                 f"CORRAL_CODEX_ACP)")

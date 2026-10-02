@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""Every consumer of the `peer` event kind knows it (DESIGN-5 S7, section 7.6).
+"""Every consumer of the `peer` event kind knows it.
 
-A new event kind is only as honest as the least careful reader of it:
-
-  T7.16  the port pack starts a turn at `peer` and renders it as untrusted
-         content from another agent -- never as "User:";
-  T7.17  transcript search finds a peer message by what it said, and the index
-         version moved so an old index is rebuilt rather than trusted;
-  T7.8   the digest counts peer messages APART from the human's turns.
-
-The same test runs in both products, each against its own port.py and
-transcripts.py (copies, not the core); each copy names only its own state var.
+  * the port pack starts a turn at `peer` and renders it as untrusted content
+    from another agent, never as "User:";
+  * transcript search finds a peer message, and the index version moved so an
+    old index is rebuilt;
+  * the digest counts peer messages apart from the human's turns.
 
     python3 test_peer_consumers.py
 """

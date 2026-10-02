@@ -1,48 +1,16 @@
 #!/usr/bin/python3
-"""transcript — ONE reader of "the conversation", for every consumer of it.
+"""transcript — the single reader of a pane's conversation log.
 
-WHY THIS EXISTS (2026-09-14 bug bash, both arms, same answer)
-    A pane's words were read four different ways: the bounded in-memory ring
-    (`compose`, `last_answer`), `history()`'s backwards pager, `port._read_log`
-    (export), and `transcripts._scan` (the search index). They disagreed, and
-    every disagreement was a defect a user could see:
-
-      * the handoff pack labelled turn 3 "## The original ask", because the
-        real first ask had left the 4,000-event ring (Astra 4 / Grok 4);
-      * the search index dropped everything past the first 32 MiB of a
-        ROTATED log, so words that were on disk became unfindable, silently
-        (Astra 7) -- and a single line longer than that chunk stalled the
-        pane's read offset at 0 forever;
-      * export read whole files into memory before applying any cap.
-
-    Grok: "do not add a fourth transcript reader." Astra: "give conversation
-    interpretation one owner." This is that owner. Feature-specific inclusion
-    rules (what a pack carries, what is searchable) stay with the features;
-    what is IN the conversation is decided once, here.
-
-BOUNDED, AND IT SAYS WHEN IT BOUND (P8, P4)
-    Every read has a byte ceiling and every result carries `complete`. A
-    reader that silently returns less than the file holds is how "no matches"
-    came to mean two different things. `complete=False` is the caller's cue to
-    say so rather than to imply the rest is not there.
-
-NOTHING HERE MAY IMPORT FROM `corral/` -- see the package docstring.
+Every read is byte-bounded and reports `complete=False` when the bound stopped
+it. Must not import from `corral/`.
 """
 import json
 from pathlib import Path
 
-# One read() syscall's worth. Small enough that a huge log streams instead of
-# arriving as one allocation; large enough that a normal log is one or two.
 CHUNK_BYTES = 4 * 1024 * 1024
-# A single JSONL line longer than this is not a transcript event; it is a
-# corruption or an attack on the reader. It is SKIPPED and counted, never
-# waited on: the old code returned "no complete line yet" and left the pane's
-# byte offset where it was, which is a permanent stall dressed as patience.
+# Longer lines are skipped and counted, never waited on (would stall the offset).
 MAX_LINE_BYTES = 8 * 1024 * 1024
-# Per file, per pass. 512 MiB is eight rotations' worth of the 64 MiB cap
-# `_rotate_log` enforces -- so in practice this never binds, which is the
-# point: the old 32 MiB ceiling bound on a log that rotates at 64 MiB and
-# discarded the rest.
+# Per file, per pass; well above the 64 MiB rotation cap so it rarely binds.
 DEFAULT_MAX_BYTES = 512 * 1024 * 1024
 
 LOG_NAMES = ("events.jsonl.1", "events.jsonl")   # oldest generation first
@@ -51,10 +19,7 @@ LOG_NAMES = ("events.jsonl.1", "events.jsonl")   # oldest generation first
 class Reading:
     """Events, where the read stopped, and whether it saw everything.
 
-    `offsets[i]` is the byte offset the i-th event's LINE starts at, in the
-    file named by `path`. A caller that wants to re-read from an event (the
-    index does, to coalesce a turn's streamed chunks across refreshes) rewinds
-    to that offset instead of guessing.
+    `offsets[i]` is the byte offset where the i-th event's line starts in `path`.
     """
 
     __slots__ = ("events", "offsets", "path", "offset", "complete",
@@ -79,13 +44,10 @@ class Reading:
 
 
 def read_file(path, offset=0, max_bytes=DEFAULT_MAX_BYTES):
-    """(Reading) from `path`, starting at byte `offset`.
+    """Read `path` from byte `offset` into a Reading.
 
-    Stops on a LINE BOUNDARY so the next pass resumes cleanly; a trailing
-    partial line is left unread and `offset` points at its first byte. A line
-    that exceeds MAX_LINE_BYTES is skipped and counted rather than stalling
-    the offset. `complete` is False when the byte ceiling stopped the read
-    before the end of the file.
+    Stops on a line boundary (a trailing partial line is left unread); oversize
+    lines are skipped; `complete` is False if `max_bytes` stopped the read.
     """
     path = Path(path)
     events, offsets = [], []
@@ -113,9 +75,7 @@ def read_file(path, offset=0, max_bytes=DEFAULT_MAX_BYTES):
                 nl = buf.find(b"\n")
                 if nl < 0:
                     if len(buf) > MAX_LINE_BYTES:
-                        # No newline in a line already longer than any event
-                        # can be. Drop what we hold and keep scanning for the
-                        # next boundary rather than re-reading it forever.
+                        # Oversize line: drop it and scan on for the next newline.
                         skipped += 1
                         buf_at += len(buf)
                         buf = b""
@@ -132,7 +92,7 @@ def read_file(path, offset=0, max_bytes=DEFAULT_MAX_BYTES):
                 try:
                     ev = json.loads(s.decode("utf-8", "replace"))
                 except ValueError:
-                    continue              # a torn line is skipped, not fatal
+                    continue              # skip a torn line
                 if isinstance(ev, dict):
                     events.append(ev)
                     offsets.append(line_at)
@@ -144,12 +104,7 @@ def read_file(path, offset=0, max_bytes=DEFAULT_MAX_BYTES):
 
 
 def read_pane_dir(pane_dir, max_bytes=DEFAULT_MAX_BYTES):
-    """Every durable event of one pane, oldest generation first.
-
-    `events.jsonl.1` is read WHOLE. It holds the turns rotation moved out from
-    under the live file, and a reader that takes only its head is a deletion
-    nobody asked for -- which is exactly what the search index was doing.
-    """
+    """Every durable event of one pane, oldest generation (rotated log) first."""
     d = Path(pane_dir)
     events, complete, skipped, used = [], True, 0, 0
     for name in LOG_NAMES:
@@ -166,15 +121,8 @@ def read_pane_dir(pane_dir, max_bytes=DEFAULT_MAX_BYTES):
 
 
 def pane_events(pane, max_bytes=DEFAULT_MAX_BYTES):
-    """The conversation as the DURABLE log has it, falling back to the ring.
-
-    The in-memory `pane.events` ring is a display cache bounded at MAX_EVENTS;
-    reading it and calling the first entry "the original ask" is the bug this
-    module was built for. The log is the record. A pane with no directory (a
-    test double, a pane that never persisted) still answers from the ring --
-    and says `complete=False` when that ring is at its bound, because then it
-    demonstrably is not the whole conversation.
-    """
+    """A pane's conversation from its durable log, falling back to the in-memory
+    ring (marked incomplete when the ring is at MAX_EVENTS)."""
     d = getattr(pane, "dir", None)
     if d:
         try:
@@ -192,18 +140,12 @@ def pane_events(pane, max_bytes=DEFAULT_MAX_BYTES):
     return Reading(events=ring, complete=not capped)
 
 
-# ── one definition of a tool call ─────────────────────────────────────────
-# ACP sends one `tool_call` and then a stream of `tool_call_update`s for the
-# SAME toolCallId. Anything that counts rows instead of ids reports a number
-# nobody can reproduce by eye: the digest said "tools: 5 calls" for two calls
-# (Grok 3), and the UI has deduplicated by id since 2026-08-01. One helper,
-# used by the pack (`port._turns`) and by the index the digest counts.
+# ── tool calls ────────────────────────────────────────────────────────────
+# ACP sends one `tool_call` then many `tool_call_update`s for the same id;
+# count by id, not by row.
 EDIT_KINDS = frozenset(("edit", "delete", "move"))
-# ACP's kinds for calls that DO NOT write. An unknown/absent kind is not on
-# this list on purpose: an adapter that sends no kind at all leaves us unable
-# to tell, and dropping its paths would trade a false "edited" for a false
-# "nothing happened" -- the direction that hides work (P4 cuts the other way
-# here: the honest default is to report the file, not to swallow it).
+# Kinds that do not write. Unknown/absent kinds are deliberately absent, so
+# their paths are reported as edits rather than hidden.
 NON_EDIT_KINDS = frozenset(("read", "search", "fetch", "think", "execute",
                             "switch_mode", "other"))
 
@@ -221,12 +163,9 @@ def tool_facts(ev):
 
 
 def merge_tools(facts):
-    """Fold a stream of `tool_facts` into one record per tool id.
+    """Fold `tool_facts` into one record per tool id.
 
-    Later updates win on every field they actually carry -- an update with no
-    title must not blank the title the call arrived with (the same rule
-    app.js's `pushStep` follows). Anonymous rows (no id) each stay their own
-    call rather than collapsing into one.
+    Later non-empty fields win; rows with no id each stay a separate call.
     """
     out, anon = {}, 0
     for f in facts:
@@ -251,14 +190,7 @@ def merge_tools(facts):
 
 
 def edited_paths(merged):
-    """The files a set of merged tool records actually EDITED.
-
-    Not "every path any tool named": a `read` names its file too, and the
-    digest counted those as edits (Astra 11 -- three updates of one read-only
-    tool printed "edited 1 file: untouched.py"). A failed call did not edit
-    anything either. `EDIT_KINDS` names the writes; `NON_EDIT_KINDS` names the
-    reads; anything else is a kind neither list knows, and is reported.
-    """
+    """Paths edited by merged tool records: skips NON_EDIT_KINDS and failed calls."""
     out = []
     for rec in merged.values():
         if rec.get("kind") in NON_EDIT_KINDS:

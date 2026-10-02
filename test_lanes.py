@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Tests for `corral-light lanes update` (DESIGN-6 S-F2).
+"""Tests for `corral-light lanes update`.
 
 The npm and download steps are stubbed; the file swap is real, on a scratch
 checkout. Every refusal also checks that nothing on disk moved.
@@ -117,7 +117,7 @@ class Checkout(unittest.TestCase):
 
 
 class AFailingProbe(Checkout):
-    def test_leaves_the_pin_the_lock_and_the_live_adapter_byte_identical(self):  # T-F2.1
+    def test_leaves_the_pin_the_lock_and_the_live_adapter_byte_identical(self):
         before = self.snapshot()
         rec = self.update("codex", ok=False)
         self.assertEqual(rec["outcome"], "red")
@@ -148,7 +148,7 @@ class AFailingProbe(Checkout):
 
 
 class APassingProbe(Checkout):
-    def test_changes_exactly_one_pin(self):  # T-F2.2
+    def test_changes_exactly_one_pin(self):
         old_pj = json.loads((self.spike / "package.json").read_text())
         self.latest = "0.85.0"
         rec = self.update("claude")
@@ -183,7 +183,7 @@ class APassingProbe(Checkout):
 
 
 class TheLiveHub(Checkout):
-    def test_its_pid_and_panes_are_unchanged_across_an_update(self):  # T-F2.3
+    def test_its_pid_and_panes_are_unchanged_across_an_update(self):
         state = self.tmp / "state"
         (state / "panes" / "abc").mkdir(parents=True)
         (state / "panes" / "abc" / "meta.json").write_text('{"agent": "codex"}')
@@ -206,7 +206,7 @@ class TheLiveHub(Checkout):
 
 
 class AlreadyCurrent(Checkout):
-    def test_is_a_no_op_that_reports_current(self):  # T-F2.4
+    def test_is_a_no_op_that_reports_current(self):
         self.latest = "2.0.1"
         before = self.snapshot()
         rec = self.update("codex")
@@ -218,7 +218,7 @@ class AlreadyCurrent(Checkout):
 
 
 class Grok(Checkout):
-    def test_reports_and_probes_and_never_installs(self):  # T-F2.5
+    def test_reports_and_probes_and_never_installs(self):
         before = self.snapshot()
         with mock.patch("grok_launcher.resolve_grok", return_value="/fake/grok"):
             rec = self.update("grok")
@@ -306,7 +306,7 @@ class Antigravity(Checkout):
 
 
 class TheCheck(Checkout):
-    """`lanes check` (S-F1): read only, unknown on failure, edge-triggered."""
+    """`lanes check`: read only, unknown on failure, edge-triggered."""
 
     def setUp(self):
         super().setUp()
@@ -342,7 +342,7 @@ class TheCheck(Checkout):
                             now=lanes.datetime(2026, 10, 1, hour))
         return out, notes
 
-    def test_a_failing_check_is_unknown_never_current(self):  # T-F1.1
+    def test_a_failing_check_is_unknown_never_current(self):
         self.latest = "garbage"
         def broken(argv, timeout, cwd=None, env=None):
             self.calls.append(list(argv))
@@ -364,7 +364,7 @@ class TheCheck(Checkout):
         self.assertEqual(r["gemini"]["status"], "unknown")
         self.assertLessEqual(len(self.heads), lanes.MAX_HEADS + 1, "unbounded scan")
 
-    def test_one_notice_per_edge(self):  # T-F1.2
+    def test_one_notice_per_edge(self):
         self.latest = "2.0.1"                        # codex current, claude behind
         rows = self.rows()
         self.assertEqual((rows["codex"]["status"], rows["claude"]["status"]),
@@ -381,7 +381,7 @@ class TheCheck(Checkout):
         self.assertIn("claude is current again at 0.84.0", notes)
         self.assertEqual(len([n for n in notes if n.startswith("codex is behind")]), 1)
 
-    def test_steady_state_emits_nothing(self):  # T-F1.3
+    def test_steady_state_emits_nothing(self):
         rows = {k: dict(v, status="current", why="") for k, v in self.rows().items()}
         self.assertEqual(self.job(rows, 6), ("", []))
         self.assertEqual(self.job(rows, 7), ("", []))

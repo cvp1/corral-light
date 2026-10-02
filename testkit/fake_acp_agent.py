@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """A tiny, real ACP agent for Corral Light's tests. Stdlib only.
 
-Speaks just enough of the protocol over stdio for the lifecycle tests to use
-a REAL process (spawned, killed, resumed) instead of a hand-built stub:
+Speaks just enough of the protocol over stdio for lifecycle tests to use a real
+process (spawned, killed, resumed):
 
     initialize, session/new, session/load (replays one chunk, which the
     hub must suppress; refused when FAKE_ACP_NO_LOAD is set), session/prompt,
@@ -21,8 +21,8 @@ Prompt verbs (the text of the prompt):
                          answer (it never runs anything, whatever the answer)
     anything else     -> "echo: <text>"
 
-State lives in $FAKE_ACP_DIR (a test's temp dir): one JSON file per session,
-plus `pid-<pid>` marker files so a test can find and kill the process.
+State lives in $FAKE_ACP_DIR: one JSON file per session, plus `pid-<pid>`
+marker files so a test can find and kill the process.
 """
 import json
 import os

@@ -15,25 +15,16 @@
     corral-light quote <from> [<to>]           composer text quoting a pane's last answer
     corral-light rig save|up|list|rm [name]    saved seats, brought back per seat
 
-A CLIENT of the running hub, exactly like the browser: every verb is the same
-route a click uses, so a pane opened here is an ordinary pane on the wall and
-nothing bypasses its permission rail. Pairing and the cached session are
-consult.py's (`Hub`, self-pairing on the hub host), re-paired once on a 401.
+A client of the running hub, using the same routes as the browser, so
+nothing bypasses the permission rail. Pairing comes from consult.py.
 
-THE PERMISSION RULES (resilience review v2, CLI section; Astra and Grok
-2026-09-28), which is why `say` is not built on consult.wait_turn:
-  - a turn is NEVER cancelled on a timer. consult cancels on its budget and
-    on a transport error, which in a foreground terminal kills the very turn
-    the human was about to approve. `say` waits for as long as the turn
-    takes; Ctrl-C DETACHES (the turn keeps running on the wall) and only
-    the `cancel` verb, or answering `cancel` at a card, cancels.
-  - when the pane needs you, the FULL pending payload is printed — every
-    byte the digest covers, from /api/session/pending (the authoritative
-    record, not the event ring) — and ok / no / cancel is taken on the SAME
-    terminal. An approval carries the digest of what was printed (P17).
-  - `ok` from a script (no TTY) must name the digest (--digest, a prefix of
-    at least DIGEST_MIN hex chars) of the payload it prints; refusing never
-    needs one, because refusal is the fail-closed direction.
+Permission rules:
+  - a turn is never cancelled on a timer; Ctrl-C detaches, and only `cancel`
+    (the verb or the answer at a card) cancels.
+  - the full pending payload is printed before ok / no / cancel is taken on
+    the same terminal; an approval carries the digest of what was printed.
+  - `ok` without a TTY must name the digest (--digest, at least DIGEST_MIN
+    hex chars); refusing never needs one.
 """
 from __future__ import annotations
 
@@ -53,14 +44,11 @@ sys.path.insert(0, str(HERE))
 import consult                                          # noqa: E402
 from consult import ConsultError                        # noqa: E402
 
-DIGEST_MIN = 12             # hex chars of the sha256 a script must name to approve:
-                            # 48 bits — no accidental match, still pasteable
+DIGEST_MIN = 12             # hex chars of the sha256 a script must name to approve
 SEEN_EVERY_S = 1.0          # at most one "a human saw this" report per second
 STREAM_RETRY_S = 2.0        # reconnect delay when the event stream drops
-STREAM_UP_S = 10            # wait this long for the stream before backfilling
-                            # anyway; the per-second backfill covers the rest
-MAX_SHOW_CHARS = 262_144    # printing cap for one payload field; the hub already
-                            # refuses to offer approval past MAX_PERM_BYTES
+STREAM_UP_S = 10            # wait this long for the stream before backfilling anyway
+MAX_SHOW_CHARS = 262_144    # printing cap for one payload field
 
 
 class Cli:
@@ -79,8 +67,7 @@ class Cli:
         return self.hub
 
     def _retry(self, fn, *a, **k):
-        """One re-pair on a 401 (Astra 2026-09-28, K10: consult re-paired on
-        the FIRST call only; a 12 h cookie expiring mid-session just raised)."""
+        """Call fn, re-pairing once on a 401."""
         try:
             return fn(*a, **k)
         except ConsultError as e:
@@ -176,15 +163,14 @@ class Cli:
         if k == "user":
             self.say(f"\n› {d.get('text', '')}")
         elif k == "peer":
-            # Another pane's agent, not the human (DESIGN-5 S7): never the `›`
-            # the operator's own lines wear.
+            # Another pane's agent, never marked like the human's own lines.
             self.say(f"\n⇄ from @{d.get('from_seat') or d.get('from_pane') or '?'}: "
                      f"{d.get('text', '')}")
         elif k == "peer_result" and d.get("delivered") is False:
             self.say(f"  · that message was not run: {d.get('reason') or 'unknown'}")
         elif k == "peer_queue" and not (d.get("side") == "to"
                                         and d.get("status") == "delivered"):
-            # DESIGN-5 S11b, both sides; the receiver's delivery is its ⇄ row.
+            # The receiver's delivery is already shown as its ⇄ row.
             who = (f"to @{d.get('to_seat') or '?'}" if d.get("side") == "from"
                    else f"from @{d.get('from_seat') or d.get('from_pane') or '?'}")
             what = ("queued until the current turn ends" if d.get("status") == "queued"
@@ -207,7 +193,7 @@ class Cli:
             self.say(f"  ! permission requested: {d.get('title') or d.get('kind')}")
 
     def mark_seen(self, pid, seq, state):
-        """The terminal in the foreground IS a human looking (P0-e')."""
+        """Report a foreground terminal as a human looking."""
         if not getattr(self.out, "isatty", lambda: False)():
             return                     # piped output: nobody is necessarily looking
         now = time.time()
@@ -307,9 +293,7 @@ class Cli:
         mine = turn is None
         asked = set()
         try:
-            # Backfill AFTER the stream is up, so nothing falls in a gap
-            # (found in the first live run: a fast reply landed between the
-            # backfill and the stream connecting, and `say` waited forever).
+            # Backfill after the stream is up, so nothing falls in a gap.
             up.wait(STREAM_UP_S)
             p, evs = self.events_since(pid, last)
             backlog = list(evs)
@@ -348,9 +332,8 @@ class Cli:
                         if self.take_cards(pid) == "cancelled" and turn:
                             continue
                 elif ev is None:
-                    # Quiet second: backfill from the authoritative state (a
-                    # safety net under the stream) and re-check it, so a card
-                    # that arrived before we attached is still offered.
+                    # Quiet second: backfill from the authoritative state, so a
+                    # card that arrived before we attached is still offered.
                     p, more = self.events_since(pid, last)
                     if more:
                         backlog.extend(more)
@@ -403,9 +386,7 @@ def v_panes(c, a):
         c.say("no panes")
     for p in rows:
         pend = len(p.get("pending") or [])
-        # The seat column: `@name`, or `(@name withheld)` when another open
-        # pane holds it -- shown, so the operator can see why a peer cannot
-        # reach this one (DESIGN-5 S6).
+        # `@name`, or `(@name withheld)` when another open pane holds it.
         seat = (f"@{p['seat']}" if p.get("seat") else
                 f"(@{p['seatWithheld']} withheld)" if p.get("seatWithheld") else "-")
         c.say(f"{p['id']}  {p.get('state', ''):<10} {p.get('agent', ''):<10} "
@@ -434,9 +415,7 @@ def v_open(c, a):
         print(f"corral-light: {n}", file=sys.stderr, flush=True)
     c.say(p["id"] if not a.json else json.dumps(p, indent=2))
     if r.get("preamble"):
-        # The role's instructions are turn 0. With --ask they go with it,
-        # composed exactly as roles.compose does; without, they are shown and
-        # NOT sent — a script must see what it is about to send (P17).
+        # Role instructions are turn 0: sent with --ask, otherwise shown, not sent.
         if a.ask:
             import roles
             text = roles.compose(r["preamble"], a.ask)
@@ -451,8 +430,7 @@ def v_open(c, a):
 def v_say(c, a):
     p = c.pane(a.pane)
     text = _text(a)
-    # `via: cli` -- a turn typed at a terminal is still the human, but it is
-    # not the browser, and the transcript says which (DESIGN-5 section 7.11).
+    # `via: cli` marks a human turn typed at a terminal rather than the browser.
     r = c.post("/api/session/send", {"pane": p["id"], "text": text, "via": "cli"},
                timeout=consult.HANDSHAKE_S)       # a dead pane resumes first
     return c.follow(p["id"], turn=r.get("turn"), seq0=int(p.get("seq") or 0))
@@ -497,7 +475,7 @@ def _pick(c, pid, n):
 def v_ok(c, a):
     p = c.pane(a.pane)
     card = _pick(c, p["id"], a.n)
-    c.show_card(a.n or 1, card)               # printed in full BEFORE approving (P17)
+    c.show_card(a.n or 1, card)               # printed in full before approving
     dg = card.get("digest") or ""
     if a.digest:
         if len(a.digest) < DIGEST_MIN or not dg.startswith(a.digest.lower()):
@@ -546,8 +524,7 @@ def v_rename(c, a):
 
 
 def v_seat(c, a):
-    """Bind a seat (DESIGN-5 S6), or unbind it with `-`. A human verb: this is
-    the operator at a terminal, holding the same pairing the browser does."""
+    """Bind a seat, or unbind it with `-`."""
     p = c.pane(a.pane)
     name = "" if a.name == "-" else a.name
     r = c.post("/api/session/seat", {"pane": p["id"], "seat": name})
@@ -600,7 +577,7 @@ def v_digest(c, a):
 
 def v_port(c, a):
     """Carry a pane's transcript to another lane: print the EXACT pack and its
-    sha, then confirm on the terminal or by --sha (P17), then send."""
+    sha, then confirm on the terminal or by --sha, then send."""
     p = c.pane(a.pane)
     lane = consult.lane_key(a.lane)
     pack = c.post("/api/session/port/preview", {"pane": p["id"], "agent": lane})
@@ -663,9 +640,8 @@ RIG_PROBLEMS = ("failed", "withheld", "not-restored")
 
 
 def v_rig(c, a):
-    """Rigs (DESIGN-5 S12): save the seated panes, bring them back, list, rm.
-    The hub does the work (corral_core/rigs.py); this prints its one line per
-    seat. Exit 1 when any seat did not come up, 2 when the rig was refused."""
+    """Rigs: save the seated panes, bring them back, list, rm. Exit 1 when any
+    seat did not come up, 2 when the rig was refused."""
     if a.rig_cmd == "list":
         rows = c.get("/api/session/rigs")["rigs"]
         if not rows:

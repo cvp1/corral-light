@@ -10,11 +10,9 @@
 # On a headless box you also want the unit to survive logout:
 #   loginctl enable-linger $USER
 #
-# A USER unit, not a system service, on purpose: every lane authenticates as
-# the logged-in user (Claude's credentials, the Grok CLI's own state,
-# Antigravity's OAuth, the codex device-auth token) and every pane runs with
-# that user's filesystem access. Running this as root would hand a browser on
-# the network a root shell behind a pairing gate.
+# A user unit, not a system service: every lane authenticates as the
+# logged-in user, and running as root would put a root shell behind the
+# pairing gate.
 
 [Unit]
 Description=Corral Light — multi-model agent workspace
@@ -25,11 +23,7 @@ Type=simple
 ExecStart=/usr/bin/python3 %HERE%/hub.py
 WorkingDirectory=%HERE%
 
-# Loopback. This is the default in hub.py too; it is restated here because a
-# unit file is where someone looks to change it, and the reasoning should be
-# where the knob is: a machine that moves between networks has not earned the
-# ranch LAN's "the pairing gate is the boundary" ruling. To expose it, set
-# 0.0.0.0 and mean it.
+# Loopback by default; set 0.0.0.0 only on a trusted LAN.
 Environment=CORRAL_LIGHT_BIND=127.0.0.1
 Environment=CORRAL_LIGHT_PORT=8098
 Environment=CORRAL_OLLAMA_URL=http://127.0.0.1:11434
@@ -37,14 +31,8 @@ Environment=CORRAL_OLLAMA_URL=http://127.0.0.1:11434
 Restart=always
 RestartSec=3
 
-# mixed: on stop/restart, SIGTERM goes to the hub ALONE first; only after it
-# exits does systemd SIGKILL the rest of the cgroup (the agents). The default,
-# control-group, signals every process at once, so the hub's SIGTERM handler
-# ran beside dying children and could not reliably write its one job: a note
-# in each busy pane naming the turn being interrupted (resilience review
-# 2026-09-28, P0-b'; Grok). The agents still die with the unit — this changes
-# the ORDER, not the outcome. Anything that survives anyway is reaped by pid
-# at the next boot (restore(), P0-pid).
+# mixed: SIGTERM reaches the hub alone first, so it can note interrupted turns
+# in busy panes before systemd kills the agents in the cgroup.
 KillMode=mixed
 
 [Install]

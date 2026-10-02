@@ -1,15 +1,7 @@
-"""Behavioural proof of the edge guards against a REAL hub Handler on a socket.
+"""Behavioural checks of the edge guards against a real hub Handler over TCP.
 
-The first cut of these guards was tested by string-matching hub.py, and the
-2026-09-24 review (Astra 6, Gemini 6) showed the guards could be disabled with
-every such test still green. These checks drive the actual Handler class of
-whichever skin passes itself in, over real TCP, and assert status codes, side
-effects and cleanup. Both suites call `run(hub, auth)`; it returns a list of
-failure strings (empty = pass).
-
-Loopback is the only peer a test can have, so the peer-address rules (tailnet
-direct refused; identity header from a non-proxy peer refused) are proved as
-pure functions in test_edge.py, and here only through what loopback can show.
+`run(hub, auth)` returns a list of failure strings (empty = pass). Peer-address
+rules beyond loopback are covered in test_edge.py.
 """
 import http.client
 import socket
@@ -19,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 from corral_core import edge
 
-ME = "craig@example.com"
+ME = "user@example.com"
 
 
 def _raw(port, data, read_s=3.0):
@@ -106,9 +98,8 @@ def run(hub, auth):
         st, _, _ = _get(port, "/api/state", {"Cookie": f"{hub.COOKIE}={lan_tok}"})
         check(st == 200, f"a LAN cookie stopped working locally (got {st})")
 
-        # 5b. Grok (2026-09-24): a PAIRED POST whose Content-Length is bad or
-        #     over the cap is refused with its body still on the socket; a GET
-        #     that carries a body likewise. Neither may answer the body.
+        # 5b. a paired POST with a bad/oversized Content-Length, or a GET with
+        #     a body, must not answer the body as a second request.
         ck_lan = f"Cookie: {hub.COOKIE}={lan_tok}\r\n".encode()
         for label, cl in (("oversized", b"99999999"), ("malformed", b"abc")):
             req = (b"POST /api/session/close HTTP/1.1\r\nHost: x\r\n" + ck_lan +
@@ -155,7 +146,7 @@ def run(hub, auth):
               f"stream subscriber leaked ({len(hub.MGR.subscribers)} vs {base})")
 
         # 8. a reset while the stream's headers are written must not leak the
-        #    subscriber (the queue used to be added outside the try/finally).
+        #    subscriber.
         class Resetting(hub.Handler):
             def end_headers(self):
                 if self.path.startswith("/api/stream"):

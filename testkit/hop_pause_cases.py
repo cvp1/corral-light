@@ -1,13 +1,9 @@
-"""The hop limit raises itself to the human -- as ONE set of cases both
-products run against their own skin's real Manager and drain: full Corral's
-`test_peer.HopPause` and Light's `test_corral_light.LightHopPause`.
+"""Hop-limit pause cases shared by both products, run against each skin's
+real Manager and drain.
 
-Measured 2026-09-30: in a rig review loop @reviewer's PASS was refused
-`peer-chain` (the fifth message with no human turn), @author's seat_wait
-returned `reached`, both panes read as ordinary finished turns, and the loop
-sat stalled until a human noticed by eye. Now the refusal opens a
-HUB-originated question (`source: hop-limit`) on the SENDING pane: needs-you
-everywhere, cleared by the next human turn exactly like ask_human's.
+A `peer-chain` refusal opens a hub-originated question (`source: hop-limit`) on
+the sending pane: needs-you everywhere, cleared by the next human turn like
+ask_human's.
 
     H1 a direct send over the limit raises it on the sender, not the target
     H2 a broadcast over the limit raises it
@@ -86,7 +82,6 @@ class HopPauseCases:
         self.assertEqual(ev[-1].get("source"), SRC,
                          "the transcript would attribute the hub's pause to the agent")
 
-    # ── H1 ───────────────────────────────────────────────────────────────
     def test_H1_a_send_over_the_limit_raises_it_on_the_sender(self):
         a, b = self._pair()
         src, seat, dst = self._to_the_limit(a, b)
@@ -98,7 +93,6 @@ class HopPauseCases:
         snap = src.snapshot(since=1 << 60)
         self.assertEqual((snap["display"], snap["question"]["source"]), ("needs-you", SRC))
 
-    # ── H2 ───────────────────────────────────────────────────────────────
     def test_H2_a_broadcast_over_the_limit_raises_it(self):
         a, b = self._pair()
         src, seat, dst = self._to_the_limit(a, b)
@@ -107,7 +101,6 @@ class HopPauseCases:
                          [(seat, "peer-chain")])
         self._assert_paused(src, seat, src.seat)
 
-    # ── H3 ───────────────────────────────────────────────────────────────
     def test_H3_the_queue_drain_over_the_limit_raises_it_on_the_replier(self):
         a, b, ta, tb = self.waiting_pair(a_sleep=2)
         self.assertEqual(self.mgr.deliver_peer(b.id, "author", "reply")["result"],
@@ -119,7 +112,6 @@ class HopPauseCases:
         self._assert_paused(b, "author", "reviewer", limit=1)
         self.assertIsNone(a.question)
 
-    # ── H4 ───────────────────────────────────────────────────────────────
     def test_H4_other_refusals_raise_nothing(self):
         a, b = self._pair()
         r = self.mgr.deliver_peer(a.id, "nobody-here", "x")
@@ -134,7 +126,6 @@ class HopPauseCases:
         self.assertIsNone(a.question, a.question)
         self.assertNotIn("peer_paused", [e["kind"] for e in a.events])
 
-    # ── H5 ───────────────────────────────────────────────────────────────
     def test_H5_an_agents_own_question_is_not_overwritten(self):
         a, b = self._pair()
         src, seat, dst = self._to_the_limit(a, b)
@@ -149,7 +140,6 @@ class HopPauseCases:
         self.assertEqual([(p["to_seat"], p["raised"]) for p in paused], [(seat, False)])
         self.assertEqual(core.display_state(src)["state"], "needs-you")
 
-    # ── H6 ───────────────────────────────────────────────────────────────
     def test_H6_a_human_turn_clears_it_and_the_loop_can_continue(self):
         a, b = self._pair()
         src, seat, dst = self._to_the_limit(a, b)

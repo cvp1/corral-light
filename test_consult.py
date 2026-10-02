@@ -1,11 +1,7 @@
 #!/usr/bin/python3
-"""consult.py offline tests — the answer collector against a scripted hub.
+"""consult.py offline tests: the answer collector against a scripted stub hub.
 
-No hub, no lane, no network: `Hub` is replaced by a stub that serves a
-scripted sequence of /api/state deltas and records every POST. What is under
-test is the part that decides whether an answer IS an answer (turn_end after
-OUR user event), whether a stall is a stall, and whether a timeout cancels
-through the hub rather than pretending.  Run: python3 test_consult.py
+Run: python3 test_consult.py
 """
 import json
 import sys
@@ -109,7 +105,7 @@ class WaitTurn(unittest.TestCase):
         # the operator typed into the pane mid-turn: what follows is not our answer.
         hub = StubHub([
             {"state": "busy", "events": [ev(1, "user", text="q"), ev(2, "text", text="A"),
-                                          ev(3, "user", text="craig"), ev(4, "text", text="B"),
+                                          ev(3, "user", text="operator"), ev(4, "text", text="B"),
                                           ev(5, "turn_end")]},
         ])
         r = consult.wait_turn(hub, "P1", 0, timeout_s=10)
@@ -147,11 +143,11 @@ class Attribution(unittest.TestCase):
     def setUp(self):
         consult.POLL_S = 0
 
-    def test_craigs_prompt_between_read_and_send_is_not_our_answer(self):
+    def test_operators_prompt_between_read_and_send_is_not_our_answer(self):
         # seq read = 0; the operator's prompt lands as seq 1 with its answer, ours is seq 4.
         hub = StubHub([
-            {"state": "ready", "events": [ev(1, "user", text="craig's question"),
-                                           ev(2, "text", text="CRAIG ANSWER"), ev(3, "turn_end"),
+            {"state": "ready", "events": [ev(1, "user", text="operator's question"),
+                                           ev(2, "text", text="OPERATOR ANSWER"), ev(3, "turn_end"),
                                            ev(4, "user", text="our prompt"),
                                            ev(5, "text", text="OUR ANSWER"), ev(6, "turn_end")]},
         ])
@@ -190,7 +186,7 @@ class Attribution(unittest.TestCase):
 
 
 class HubEventOrder(unittest.TestCase):
-    """The hub's REAL sequences (Grok 4.6, panel review 2026-09-03)."""
+    """The hub's real event sequences."""
 
     def setUp(self):
         consult.POLL_S = 0
@@ -313,11 +309,10 @@ class PairHub:
 
 
 class PairingAgainstAnotherStore(unittest.TestCase):
-    """A private hub driven from a shell without its scratch CORRAL_LIGHT_STATE: the
-    client approves the hub's fresh code against the WRONG pairing store.
-    It used to wait out all of PAIR_WAIT_S (the S12 live 'hang'); it must fail
-    at once, naming the cause and the exact `corral-light pair CODE` line — while the
-    genuine wait-for-a-human case keeps its wait."""
+    """A client pairing against a different store than the hub's fails at once,
+    naming the cause and the `corral-light pair CODE` line; a genuine wait for a
+    human keeps its wait.
+    """
 
     def setUp(self):
         import tempfile
@@ -431,13 +426,7 @@ class LaneNames(unittest.TestCase):
 
 
 class AnUnsetPostureIsNotAClaim(unittest.TestCase):
-    """DESIGN-5 S2. `open_pane` used to default `posture="strict"`, so every
-    scripted arm -- every panel run, every eval pass -- wrote `strict` into the
-    pane's meta.json, including on the lanes where nothing can impose it. 244
-    of 446 panes on this fleet carry that annotation. No historic meta is
-    rewritten (a stored fact stays a fact); the point is that no NEW pane gets
-    an unearned one.
-    """
+    """An unset posture is sent as unset, never defaulted to `strict`."""
 
     LANES = [{"key": "grok", "label": "Grok", "available": True,
               "postureEnforced": False}]
@@ -468,9 +457,7 @@ class AnUnsetPostureIsNotAClaim(unittest.TestCase):
         self.assertEqual(self._new_body(posture="strict")["posture"], "strict")
 
     def test_the_cli_no_longer_defaults_to_strict(self):
-        """The default lived in TWO places -- the function signature and the
-        argparse flag -- and fixing only one would leave every command-line
-        caller posting `strict` exactly as before."""
+        """The argparse flag must not default to `strict` either."""
         for verb in ("ask", "fanout"):
             args = consult.build_parser().parse_args(
                 [verb, "--lane", "grok", "--prompt", "x"])
@@ -479,10 +466,9 @@ class AnUnsetPostureIsNotAClaim(unittest.TestCase):
 
 
 class AScriptedTurnSaysSo(unittest.TestCase):
-    """DESIGN-5 S5, T5.3: a turn this script sends is marked `via: consult`
-    in the transcript, so it never reads as the human typing. Client-declared
-    -- the hub ignores the key on an older build, which is why it is safe to
-    send to either."""
+    """A scripted turn is marked `via: consult` so it never reads as the human
+    typing; older hubs ignore the key.
+    """
 
     def test_send_and_wait_declares_consult(self):
         hub = StubHub([

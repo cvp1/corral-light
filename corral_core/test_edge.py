@@ -1,4 +1,4 @@
-"""The edge contract — run by both skins' suites, like test_acp_rail."""
+"""The edge contract, shared by both skins' suites."""
 import unittest
 
 from corral_core import edge
@@ -30,7 +30,7 @@ class CookieHeader(unittest.TestCase):
 
 
 class IdentityOk(unittest.TestCase):
-    ME = "craig@example.com"
+    ME = "user@example.com"
 
     def test_unbound_hub_is_unchanged(self):
         self.assertEqual(edge.identity_ok({"Tailscale-User-Login": "eve@x"}, None),
@@ -41,7 +41,7 @@ class IdentityOk(unittest.TestCase):
         self.assertEqual(edge.identity_ok({}, self.ME), (True, "local"))
 
     def test_bound_login_passes_case_insensitively(self):
-        ok, why = edge.identity_ok({"Tailscale-User-Login": "Craig@Example.com"},
+        ok, why = edge.identity_ok({"Tailscale-User-Login": "User@Example.com"},
                                    self.ME)
         self.assertTrue(ok)
         self.assertEqual(why, "bound")
@@ -59,16 +59,14 @@ class IdentityOk(unittest.TestCase):
         self.assertIn("no tailnet identity", why)
 
     def test_spoof_can_only_narrow(self):
-        # A LAN client that forges the identity header gains nothing it did
-        # not have: the same request without the header also passes this
-        # check, and the pairing cookie is still required after it.
+        # A forged header passes only what the plain request already passes.
         forged = edge.identity_ok({"Tailscale-User-Login": self.ME}, self.ME)
         plain = edge.identity_ok({}, self.ME)
         self.assertTrue(forged[0] and plain[0])
 
 
 class PeerRules(unittest.TestCase):
-    ME = "craig@example.com"
+    ME = "user@example.com"
 
     def test_direct_tailnet_connection_refused_when_bound(self):
         ok, why = edge.identity_ok({}, self.ME, peer="100.100.1.2")
@@ -95,7 +93,7 @@ class PeerRules(unittest.TestCase):
         self.assertTrue(edge.audience_ok(edge.SERVE_USER, h, "127.0.0.1"))
         self.assertFalse(edge.audience_ok(edge.SERVE_USER, {}, "127.0.0.1"))
         self.assertFalse(edge.audience_ok(edge.SERVE_USER, h, "198.51.100.7"))
-        self.assertTrue(edge.audience_ok("craig", {}, "198.51.100.7"))
+        self.assertTrue(edge.audience_ok("user", {}, "198.51.100.7"))
         self.assertFalse(edge.audience_ok(None, h, "127.0.0.1"))
 
 

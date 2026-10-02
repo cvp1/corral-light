@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
 """corral-light install-service — write the service file, and stop there.
 
-WHY THIS EXISTS
-    The repo ships `corral-light.service` and `com.cvande.corral-light.plist`
-    as TEMPLATES with install instructions in their comments, and the Linux
-    one wants a `sed "s|%HERE%|$PWD|"` the reader has to notice and type in
-    the right directory. The macOS one carries absolute paths from the machine
-    it was written on, so copying it as-is points launchd at a home directory
-    that does not exist on the reader's Mac -- and launchd's failure for that
-    is a log line nobody is watching yet, on their first ten minutes with the
-    product.
-
-    So: resolve the paths from the checkout that is actually running, write
-    the file, print where it went and what to type next.
-
-WHY IT DOES NOT ENABLE OR START ANYTHING (P6, degrade toward safety)
-    Writing a file into ~/.config or ~/Library is reversible with `rm` and
-    affects nothing until something loads it. STARTING a long-lived daemon
-    that holds a network port and spawns agents with the user's filesystem
-    access is a different kind of act, and it is the operator's. The enable
-    command is printed, exactly, ready to paste -- one line to read before it
-    runs, rather than a surprise process.
-
-    `--print` goes one step further and writes nothing at all.
-
-    python3 install_service.py --print
-    corral-light install-service
+Resolves paths from the running checkout, writes the systemd user unit
+(Linux) or launchd agent (macOS), and prints the enable command; it never
+enables or starts anything. `--print` writes nothing.
 """
 from __future__ import annotations
 
@@ -35,10 +13,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-# The defaults the shipped templates carry, restated in ONE place so the
-# generated file and the checked-in template cannot drift apart silently.
-# Loopback deliberately: a machine that moves between networks has not earned
-# "the pairing gate is the boundary". Set 0.0.0.0 and mean it.
+# Defaults matching the shipped templates. Loopback unless explicitly exposed.
 DEFAULT_BIND = "127.0.0.1"
 DEFAULT_PORT = "8098"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
@@ -150,20 +125,11 @@ _MAC_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 def plan(platform=None, root=None, python=None, home=None,
          bind=DEFAULT_BIND, port=DEFAULT_PORT, ollama=DEFAULT_OLLAMA_URL):
-    """Where the file goes, what is in it, and what to type next.
-
-    Pure: takes the platform, the checkout, the interpreter and the home
-    directory rather than reading them, so a Linux host can render and assert
-    the macOS answer (and the reverse) without pretending to be one.
-    """
+    """Where the file goes, what is in it, and what to type next. Pure, so
+    any platform's answer can be rendered on any host."""
     platform = sys.platform if platform is None else platform
     root = Path(root or HERE).resolve()
-    # NOT resolved. `sys.executable` is already absolute, and following its
-    # symlinks turns /usr/bin/python3 into /usr/bin/python3.12 -- a path a
-    # distro upgrade deletes, leaving a service that will not start for a
-    # reason nothing on screen explains. The stable name is the right one to
-    # write into a unit file; a venv's interpreter is already its own path and
-    # is carried through unchanged.
+    # Not resolved: following symlinks yields a versioned path an upgrade deletes.
     python = str(python or sys.executable)
     home = Path(home or Path.home())
     common = {"root": root, "python": python, "bind": bind,
@@ -188,8 +154,6 @@ def plan(platform=None, root=None, python=None, home=None,
                      "# on a headless box, so it survives logout:",
                      "loginctl enable-linger $USER"],
         }
-    # P4: a platform this does not know gets a refusal naming itself, never a
-    # Linux unit written hopefully into a directory that means nothing there.
     raise SystemExit(
         f"install-service: no service format for platform {platform!r} — "
         f"this writes a systemd user unit on Linux and a launchd agent on "
@@ -218,10 +182,7 @@ def main(argv=None):
         return 0
 
     if p["path"].exists() and not a.force:
-        # Never silently replace a file the operator may have edited: the
-        # installed copy is where a port change or an extra Environment line
-        # lives, and overwriting that on a re-run is how a working service
-        # loses its configuration.
+        # Never silently replace a possibly hand-edited installed file.
         print(f"{p['path']} already exists — left alone.\n"
               f"Compare it with `corral-light install-service --print`, "
               f"or pass --force to replace it.", file=sys.stderr, flush=True)

@@ -1,44 +1,9 @@
 #!/usr/bin/python3
 """roles — a named preset for starting a conversation, and nothing more.
 
-Ported from full Corral's roles.py (2026-09-10 design, reviewed by GPT-6-Astra
-and Grok-4.6) for Corral Light on 2026-09-29, resilience review §3. What it
-is and is not is unchanged, and it is the point of the thing:
-
-A ROLE IS
-    A named preset over the pane-creation call (lane, effort, posture) plus a
-    PREAMBLE — the role's instructions — that becomes the first bytes of the
-    first prompt. One click to open "reviewer on Grok, strict" instead of
-    five fields.
-
-A ROLE IS NOT
-    * Authority. Same lanes, same permission rail. A role cannot grant a
-      tool, widen a posture, or answer a permission.
-    * A schedule, a model pin, a working directory, a file contract or a
-      persona — each refused BY NAME in the file (REFUSED_KEYS says why).
-    * A system prompt. The preamble lands as user turn 0 under the vendor's
-      own system prompt; `role_delivery = "preamble"` records that.
-
-CONSENT BINDS TO BYTES (P17)
-    A role is resolved ONCE, when the pane is started, and its digest (TOML +
-    preamble) is stored on the pane (`role_sha`). In Light the preamble goes
-    INTO THE COMPOSER, visible, and nothing is sent until you press send.
-
-WHAT CHANGED IN THE PORT
-    * No data-class gate. Full Corral asks _lib/merit_policy whether a
-      role's data class may reach a lane's vendor; Light is standalone and
-      ships no trust registry, the same stance the core takes for
-      TRANSFER_GATE. `data_class` is still required and validated, recorded
-      on the role, and SAID in the picker — never silently treated as
-      enforced.
-    * Roles live in the operator's config dir (CORRAL_LIGHT_ROLES_DIR,
-      default ~/.config/corral-light/roles), not in this public repository.
-    * TOML: `tomllib` where it exists (3.11+); on 3.9/3.10 the strict reader
-      in corral_core/tomlmini.py (shared with rigs since DESIGN-5 S12), which
-      REFUSES anything outside the shapes Corral writes rather than guessing.
-
-BOUNDS (P8): MAX_ROLES files, MAX_ROLE_BYTES per TOML, MAX_PREAMBLE_BYTES per
-preamble, and MIN_ASK_ROOM characters left under the tightest prompt cap.
+A role presets lane, effort and posture and supplies a preamble that becomes
+the start of the first prompt; it grants no authority. Roles live in
+CORRAL_LIGHT_ROLES_DIR (default ~/.config/corral-light/roles).
 
 Run: python3 roles.py {list,show,check,resolve,create} …
 """
@@ -55,10 +20,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-MAX_ROLES = 40              # a picker longer than this is not a picker
-MAX_ROLE_BYTES = 8 * 1024   # a role file is a handful of keys; 8 KB is 20x that
-MAX_PREAMBLE_BYTES = 6000   # instructions, not a document — and must fit the
-                            # scheduler's 8,000-char prompt cap with room to ask
+MAX_ROLES = 40
+MAX_ROLE_BYTES = 8 * 1024
+MAX_PREAMBLE_BYTES = 6000   # must fit the scheduler's prompt cap with room to ask
 MIN_ASK_ROOM = 1500         # chars that must remain under the prompt cap for the ask
 SEPARATOR = "\n\n---\n\n"
 
@@ -112,14 +76,10 @@ DATA_CLASS_NOTE = ("Corral Light has no data-class registry: this role's "
 
 
 class RoleError(ValueError):
-    """A role could not be read, or could not be applied to this lane.
-    Raised at the dialog / CLI, never at fire time."""
+    """A role could not be read or applied to this lane."""
 
 
 # ── TOML, 3.9-safe ───────────────────────────────────────────────────────
-# One reader for every Corral file (DESIGN-5 S12): tomllib where it exists, the
-# strict reader in corral_core/tomlmini.py otherwise. The names below are kept
-# so nothing that called them changes.
 from corral_core import tomlmini as _tomlmini              # noqa: E402
 
 _parse_toml = _tomlmini.loads
@@ -170,7 +130,7 @@ def roles_dir():
 
 
 def _digest(toml_bytes, preamble_bytes):
-    """Both halves: prompt_file can change while the TOML does not."""
+    """Digest both the TOML and the preamble, which can change independently."""
     h = hashlib.sha256()
     h.update(b"toml:")
     h.update(toml_bytes)
@@ -287,9 +247,8 @@ class Resolved:
 
 
 def MAX_PROMPT():                                      # noqa: N802
-    """The TIGHTEST prompt cap a composed role must survive: a live pane
-    (sessions.MAX_PROMPT) and an armed job (later.MAX_PROMPT) differ 25x, and
-    a role that fits only the larger starts fine and refuses to schedule."""
+    """The tightest prompt cap a composed role must fit: the smaller of the
+    live-pane and scheduled-job caps."""
     caps = []
     for mod in ("sessions", "later"):
         try:
@@ -301,8 +260,8 @@ def MAX_PROMPT():                                      # noqa: N802
 
 def resolve(role_id, *, lane=None, posture=None, effort=None, agents=None,
             rdir=None):
-    """A role plus the caller's overrides -> create() arguments. Everything
-    that can refuse, refuses here, before any process exists."""
+    """A role plus the caller's overrides -> create() arguments; all refusals
+    happen here, before any process exists."""
     role = load(role_id, rdir)
     import sessions                                     # noqa: WPS433
     if agents is None:
@@ -321,8 +280,6 @@ def resolve(role_id, *, lane=None, posture=None, effort=None, agents=None,
     notes = []
     want_posture = _valid_posture(posture, f"role {role.id!r}") or role.posture
     if want_posture and not sessions.posture_enforceable(spec):
-        # A control that does nothing, then displays its imaginary result: the
-        # role must not reintroduce what the dialog was fixed for.
         notes.append(f"{spec.get('label', agent)} manages its own permissions — "
                      f"the role's posture ({want_posture}) was NOT applied")
         want_posture = None
@@ -422,7 +379,7 @@ def compose_preamble(f):
 
 
 def compose_toml(f):
-    """Pure: no clock, no environment — a preview and a save write the same bytes."""
+    """Pure, so a preview and a save write the same bytes."""
     lines = [f"# {f['id']} — written by `roles.py create`. Edit this file to change it.",
              "schema      = 1",
              f"description = {_toml_basic(f['description'])}"]
@@ -449,7 +406,7 @@ def create(fields, rdir=None):
         for path, text in ((d / "prompts" / f"{f['id']}.md", preamble),
                            (d / f"{f['id']}.toml", toml_text)):
             try:
-                fh = path.open("x", encoding="utf-8")        # O_EXCL: no races
+                fh = path.open("x", encoding="utf-8")        # O_EXCL
             except FileExistsError:
                 raise RoleError(f"{path.name} already exists — create never "
                                 f"overwrites") from None

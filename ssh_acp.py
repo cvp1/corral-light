@@ -1,50 +1,16 @@
 #!/usr/bin/python3
 """ssh_acp.py -- a remote host as a Corral Light SHELL pane (ACP over stdio).
 
-Ported from ranch-server's `corral/ssh_acp.py` (cvp1/corral @ 2026-08-31) on
-2026-09-01. The heavy build generates one of these per lightsail box from the
-estate inventory; Light has no estate, so its hosts come from a hand-written
-`ssh-hosts.json` instead (sessions._live_ssh_hosts). The adapter itself is
-unchanged in every part that carries a guarantee -- it is the same wire
-contract, the same bounds, and the same consent model, because those were
-earned by running and not by design.
+One persistent `ssh ... bash` per pane: every line the user types runs on the
+host under their own ssh identity, and output streams back. No LLM in the
+chain and no permission rail -- the human types the exact command, so this
+lane must never be handed to an agent as a tool.
 
-One persistent `ssh ... bash` per pane. Every line Craig types runs on the host
-as his own ssh identity; stdout+stderr stream back. No LLM anywhere in the
-chain.
+Output, wall clock and line length are capped per command; on overflow or
+timeout the shell is killed and restarted clean. Non-interactive commands
+only. An unreachable host refuses the pane up front with the real reason.
 
-Consent model: there is no permission rail here ON PURPOSE -- the human types
-the exact command that runs (PRINCIPLES 17: the artifact approved IS the bytes
-executed). This lane must therefore never be handed to an agent as a tool; it
-exists only behind Corral's paired-browser auth, driven by the human keyboard,
-exactly like a terminal window.
-
-The chain, and where each guarantee lives:
-
-    corral pane -> this adapter (dogma-2) -> ssh -T user@host bash
-                -> the host's own account permissions
-
-  * AUTH: Craig's ssh key + the host's own account -- nothing new. Corral
-    Light's own auth is already "possession of his UNIX login" (auth.py), so
-    this lane grants a paired browser exactly the reach the pairing already
-    proved, and no more.
-  * BOUNDS (P8): output capped per command (MAX_OUTPUT_BYTES, then the
-    shell is killed and restarted clean), wall clock capped per command
-    (CMD_TIMEOUT, same recovery), every read line capped (MAX_LINE).
-  * NON-INTERACTIVE ONLY: a command that reads stdin (cat, vim) or runs
-    forever (tail -f) eats the completion sentinel and hits the timeout;
-    the shell restarts and says so. That is the designed degrade, not a
-    bug -- this is a command runner, not a pty. It is also what keeps a
-    password prompt from ever reaching the transcript: nothing here can
-    answer one, so nothing here can record one.
-
-Wire contract: initialize, session/new, session/load, session/list,
-session/prompt, session/cancel. An unreachable host refuses the pane UP FRONT
-with the real reason (the gemini-lane lesson).
-
-Test hook: SSH_ACP_CONNECT overrides the whole connect command (shlex split),
-so a local `bash --noprofile --norc` exercises this entire file with no host
-and no ssh.
+Test hook: SSH_ACP_CONNECT overrides the whole connect command (shlex split).
 """
 import argparse
 import json
@@ -58,10 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-# Light keeps its state under its own root, never the full Corral's and never
-# the CC workspace's (see sessions.STATE, and the structural test that forbids
-# a `Github/CC/` path anywhere in this tree). Honours CORRAL_LIGHT_STATE so a
-# test run does not scribble in the real one.
+# Corral Light's own state root; honours CORRAL_LIGHT_STATE.
 _LIGHT_STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
                                    str(Path.home() / ".local/share/corral-light")))
 STATE_ROOT = Path(os.environ.get("SSH_ACP_STATE", str(_LIGHT_STATE / "ssh-acp")))
@@ -121,13 +84,7 @@ class Shell:
             out_queue.put(None)      # EOF marker
 
     def kill(self):
-        # Close the pipes and REAP, not just signal. The ported version set
-        # `self.proc = None` on a live Popen, which drops the last reference to
-        # three open file objects and leaves a zombie behind; CPython closes
-        # them eventually with a ResourceWarning, but "eventually" in a daemon
-        # that restarts this shell on every overflow, timeout and typed `exit`
-        # is a descriptor leak the operator never sees. Surfaced by the suite's
-        # own warnings, 2026-09-01 — worth fixing here and upstream on ranch.
+        # Close the pipes and reap, not just signal, to avoid leaking fds and zombies.
         proc, self.proc = self.proc, None
         if proc is None:
             return
@@ -259,10 +216,7 @@ class Server:
 
     def _ping(self):
         """Reach the host NOW or refuse with the real reason."""
-        # Keep whatever ssh said (stderr is merged into the stream): on a
-        # failed ping THAT is the real reason, and reporting only the bound
-        # that tripped ("no completion within 12s") sends the reader hunting
-        # a network problem when ssh already named an auth one.
+        # Keep what ssh said; on failure it is the real reason.
         seen = []
         try:
             status = self.shell.run(
@@ -382,12 +336,8 @@ def connect_argv(args):
     override = os.environ.get("SSH_ACP_CONNECT", "").strip()
     if override:
         return shlex.split(override), override
-    # Light's hosts are hand-written, and the common case on a personal fleet is
-    # a `~/.ssh/config` alias carrying the user, port and key already. So --key
-    # is OPTIONAL here (ranch's estate always had one to pass): with no key we
-    # hand ssh the bare target and let its own config answer, and we do NOT set
-    # IdentitiesOnly, which would suppress exactly the config-supplied identity
-    # we are deferring to.
+    # --key is optional: without it, defer to ~/.ssh/config (and do not set
+    # IdentitiesOnly, which would suppress the config-supplied identity).
     if not args.ip:
         raise SystemExit("ssh_acp: --ip (host or user@host) is required "
                          "(or SSH_ACP_CONNECT for a local test)")
@@ -399,10 +349,8 @@ def connect_argv(args):
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=4"]
     if args.key:
-        # IdentitiesOnly: the desktop keyring agent's keys are offered
-        # BEFORE -i, and sshd's MaxAuthTries (6) disconnects before the
-        # right key is ever tried. Same lesson as wan_ip_guard /
-        # fleet_verify / delegate_acp (2026-08-24); this lane predates it.
+        # IdentitiesOnly: agent keys are offered before -i and can exhaust
+        # sshd's MaxAuthTries.
         argv += ["-i", args.key, "-o", "IdentitiesOnly=yes"]
     argv += [target, "bash", "--noprofile", "--norc"]
     return argv, target

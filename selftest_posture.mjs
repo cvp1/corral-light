@@ -1,21 +1,12 @@
-/* Does the UI say only what is TRUE about a lane's permissions?
+/* The UI says only what is true about a lane's permissions:
  *
- * Three defects, one theme — a control or a label claiming a safety property
- * nothing established (DESIGN-5 S2):
- *
- *   1. The New dialog disables the Permissions <select> on a lane that cannot
- *      enforce a posture, but the close handler read `.value` anyway, so a
- *      leftover `strict` from the previously chosen lane was POSTED and stored
- *      on the pane. Blanking is not enough on its own — the key has to be
- *      absent from the body.
- *   2. Every id app.js writes into must exist in the shipped index.html. Full
- *      Corral shipped a note written into `#pt-postnote`, an element that was
- *      never there, and its mini-DOM test did not catch it because a mini-DOM
- *      INVENTS every id it is asked for. So this reads the real index.html.
- *   3. `agent-set` was one pill for three different promises: the vendor
- *      decides, OUR adapter asks and fails closed, or the lane has no tools at
- *      all. The most constrained lane and the least constrained lane wore the
- *      same badge.
+ *   1. The New dialog's submitted body omits posture when the Permissions
+ *      control is disabled (blanking alone is not enough).
+ *   2. Every id app.js writes into exists in the shipped index.html, not
+ *      only in a mini-DOM that invents every id it is asked for.
+ *   3. The pill distinguishes the three promises `agent-set` used to flatten:
+ *      the vendor decides, our adapter asks and fails closed, or the lane has
+ *      no tools.
  *
  * Run: node selftest_posture.mjs   (exit 0 = pass)
  */
@@ -39,13 +30,8 @@ function fn(name) {
   throw new Error(`unbalanced braces in ${name}`);
 }
 
-/* Corral Light has no port dialog with a posture control (its port picker is
- * `#p-agent` and carries none), so the missing-#pt-postnote defect is full
- * Corral's alone. What IS shared is the pill and the New dialog, below.
- *
- * The general property behind that defect still applies here: an id app.js
- * writes into must exist in the shipped index.html, not only in a mini-DOM.
- * Checked over the New dialog's own controls. */
+/* An id app.js writes into must exist in the shipped index.html, checked
+ * over the New dialog's own controls. */
 for (const id of new Set([...src.matchAll(/\$\('#(f-[\w-]+|posturehint)'\)/g)]
                            .map(m => m[1])))
   check(new RegExp(`id="${id}"`).test(html),
@@ -89,8 +75,8 @@ for (const c of cases) {
         `${c.why}: a pill this terse MUST carry the full sentence on hover`);
 }
 
-/* The old single label is gone. Left in place it would keep flattening the
- * three promises for whichever branch still used it. */
+/* The old single label is gone, so no branch can flatten the three
+ * promises. */
 check(!/'agent-set'/.test(src),
       "app.js still renders the literal 'agent-set' — three different promises "
     + 'under one word is the defect S2 removes');

@@ -1,59 +1,11 @@
 #!/usr/bin/python3
-"""rigs — a saved set of seats, brought back with one verb (DESIGN-5 S12).
+"""rigs — a saved set of seats (`$STATE/rigs/<name>.toml`), brought back with one verb.
 
-A RIG IS
-    `$STATE/rigs/<name>.toml`, `version = 1`, one `[[seat]]` per pane:
-
-        [[seat]]
-        id      = "reviewer"            # the seat name (the pane's address)
-        agent   = "claude"              # the lane
-        cwd     = "/path/to/repo"       # an existing directory
-        posture = "strict"              # optional; the pane's permission mode
-        role    = "reviewer"            # optional; only where the product has roles
-        prompt  = "Read the diff."      # optional, hand-written; the opening turn
-
-    `rig save <name>` writes it from the seated panes on the roster — agent,
-    cwd, seat, posture and role; never a prompt. A prompt is only ever
-    something a human typed into the file.
-
-A RIG IS NOT
-    A topology, a culture file or a snapshot. No edges, no routing, nothing
-    beyond the meta each pane already keeps. Nothing in it grants authority:
-    every pane it starts goes through the same create(), the same lane checks
-    and the same permission rail as a click.
-
-`rig up <name>`
-    1. PREFLIGHT refuses the whole file before any create() — parse, version,
-       grammar, unknown key, unknown agent, cwd not a directory, too many
-       seats, a seat twice in the file, a role that does not resolve, a seat
-       name already live. Every reason is returned, not just the first (P4).
-    2. Then per seat, in file order, exactly one outcome:
-         resumed       an open pane already held the seat; its lane reloaded
-                       the conversation (session/load)
-         rebuilt       an open pane held the seat; its meta and transcript are
-                       back but the lane could not reload the conversation
-         started-fresh no pane held the seat: a new pane, seated
-         fresh-primed  ...and the rig's opening prompt was sent to it
-         withheld      the seat was taken between the check and this seat
-         not-restored  the product's pane cap would be exceeded, or the pane
-                       holding the seat is on disk but not on this roster
-         failed        the pane could not be started or resumed (reason given)
-       Nothing rolls back: a seat that failed does not undo the ones before
-       it, and every outcome says what is now true.
-
-AN OPENING PROMPT IS THE HUMAN'S TURN (P17, P20)
-    It goes through the pane's own `send()` with `via: rig` — never a peer
-    message, never a system instruction. It is sent only to a pane this rig
-    STARTED; a resumed conversation is not re-prompted. A seat with a role and
-    a prompt sends the role's instructions then the prompt, as a role's first
-    turn always is; a role with no prompt sends nothing — the role file's
-    bytes were not written into the rig by the human who ran it.
-
-BOUNDS (P8): MAX_RIG_SEATS seats, MAX_RIG_PROMPT characters per prompt,
-MAX_RIG_BYTES per file, MAX_RIGS files.
-
-REMOVAL (P23): delete this module, tomlmini.py's rig use, the verbs, and the
-`rigs/` directory. Trigger: DESIGN-5 §5.
+`rig save` writes agent/cwd/seat/posture/role from the seated panes (never a
+prompt). `rig up` preflights the whole file and refuses it with every reason
+before starting anything, then brings each seat up in file order with one
+outcome from OUTCOMES; nothing rolls back. A hand-written opening prompt is
+sent via the pane's own `send()` only to panes the rig started fresh.
 """
 import os
 import sys
@@ -65,19 +17,17 @@ from corral_core import sessions as _s
 from corral_core import tomlmini
 
 RIG_VERSION = 1
-MAX_RIG_SEATS = _s.MAX_PANES        # a rig bigger than the live cap cannot come up
-MAX_RIG_PROMPT = 8000               # the smaller of the two prompt caps (a
-                                    # scheduled prompt's; a live pane takes more)
-MAX_RIG_BYTES = 128 * 1024          # 12 seats x 8,000 chars of prompt, with room
-MAX_RIGS = 100                      # files in the directory: a list, not a store
+MAX_RIG_SEATS = _s.MAX_PANES
+MAX_RIG_PROMPT = 8000               # the smaller (scheduled) of the two prompt caps
+MAX_RIG_BYTES = 128 * 1024
+MAX_RIGS = 100
 TOP_KEYS = ("version", "seat")
 SEAT_KEYS = ("id", "agent", "cwd", "posture", "role", "prompt")
 OUTCOMES = ("resumed", "rebuilt", "started-fresh", "fresh-primed", "withheld",
             "not-restored", "failed")
 LIVE_EXCLUDES = ("dead", "detached")
 
-# One rig verb at a time per hub: two concurrent `up`s would each pass
-# preflight for the same seat and race to create it.
+# One rig verb at a time: concurrent `up`s would race to create the same seat.
 _LOCK = threading.Lock()
 
 
@@ -95,8 +45,7 @@ def rigs_dir():
 
 
 def check_name(name):
-    """A rig name follows the seat grammar: it is also a filename, so the
-    grammar is what keeps it inside rigs/."""
+    """Validate a rig name against the seat grammar (keeps the filename in rigs/)."""
     if not isinstance(name, str) or not _s.SEAT_RE.match(name.strip()):
         raise ValueError(_s.SEAT_RULE.replace("a seat", "a rig name")
                          + (f" — not {name[:40]!r}" if isinstance(name, str) else ""))
@@ -186,8 +135,8 @@ def compose(seats, note=None):
 
 
 def save(mgr, name, replace=False):
-    """Write `name` from every seated pane on the roster (a withheld seat is
-    not the pane's to save). Refuses to overwrite unless `replace`."""
+    """Write `name` from every seated pane on the roster; refuses to overwrite
+    unless `replace`."""
     name = check_name(name)
     path = _path(name)
     seats = []
@@ -470,16 +419,15 @@ def render(o):
 
 
 def resolve_with(roles_mod, role_id, agent, posture):
-    """The ROLE_RESOLVER both products inject, over their own `roles` module
-    (same `resolve` / `compose` shape in each): the role's preset for this
-    seat's lane, and how its first turn is composed."""
+    """ROLE_RESOLVER over a `roles` module: the role's preset for this lane and
+    its first-turn composer."""
     r = roles_mod.resolve(role_id, lane=agent, posture=posture)
     return {"agent": r.agent, "posture": r.posture, "effort": r.effort,
             "sha": r.sha256, "notes": list(r.notes or []),
             "compose": lambda prompt: roles_mod.compose(r.preamble, prompt)}
 
 
-# ── one HTTP surface for both hubs, behind their pairing check ───────────
+# ── HTTP routes (shared by both hubs) ────────────────────────────────────
 def route(mgr, method, path, body=None, by=None):
     """-> (status, payload), or None for a path that is not a rig route.
     Called only AFTER the hub's auth check (401 before routing)."""

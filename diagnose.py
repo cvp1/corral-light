@@ -1,33 +1,9 @@
 #!/usr/bin/python3
 """diagnose — run one lane exactly as a pane does, and report every difference.
 
-WHY THIS EXISTS
-    Craig's Claude panes on dogma-2 died at `session/prompt` with
-    `Authentication required` while `claude` worked fine in his terminal. I
-    proposed three mechanisms in a row — a credential-file check, a private
-    CLAUDE_CONFIG_DIR with no credential in it, an ambient ANTHROPIC_API_KEY —
-    and shipped a fix for each. All three were defensible. None was measured.
-    The third was disproved by one `env | grep` that took him five seconds.
-
-    Three misses is the signal to stop proposing mechanisms and build the
-    thing that reports what is actually happening (P18: always be prepared for
-    an audit — every load-bearing claim arrives with what is needed to CHECK
-    it; P1: distrust green).
-
-WHAT MAKES THIS DIFFERENT FROM `doctor`
-    `doctor` asks whether a lane can START. That question was answering `ok`
-    while every conversation died, because the failure is one step further in:
-    the handshake succeeds and the first PROMPT fails. So this sends a real
-    prompt. It costs a token or two, which is why it is an explicit command
-    and not part of every doctor run.
-
-    It also reports the things that differ between a pane and a terminal —
-    the config dir, the environment, the working directory — because that
-    delta is where every one of these bugs has lived.
-
-SECRETS
-    Environment variable NAMES, never values. File names and sizes, never
-    contents. The whole point is to make this safe to paste into a chat.
+Unlike `doctor`, this sends a real prompt (a token or two) and reports what
+differs between a pane and a terminal: config dir, environment, working
+directory. Prints variable names and file sizes only, never secret values.
 """
 import argparse
 import json
@@ -45,34 +21,17 @@ import sessions
 SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
 
 # --- WHICH TREE IS ACTUALLY RUNNING ------------------------------------------
-# Craig, 2026-09-01: "we just finished a bug bash on corral light and now claude
-# and GPT don't show as available."
-#
-# Neither lane was broken. The installed LaunchAgent had been repointed at a
-# superpowers worktree, and `spike/node_modules/` is gitignored — so the
-# worktree had every tracked file and NEITHER vendor adapter. Both lanes
-# refused, correctly, with the path they had looked at. The other three lanes
-# resolve their binaries outside the tree, so the failure presented as "the two
-# frontier vendors stopped authenticating", which is a much scarier and
-# completely wrong hypothesis.
-#
-# The suite already asserts the REPO's plist is sane (MacosPlistIsThisHost).
-# Nothing asserted the INSTALLED one, and that is the gap the incident lived
-# in: an artifact copied out of the repo drifts from it silently and forever.
-# So this asks the two questions the bug bash could not answer in one line —
-# what will launchd run, and what is it running right now.
+# A LaunchAgent pointed at a worktree lacks the gitignored spike/node_modules/,
+# so the Claude and ChatGPT lanes vanish. Report what launchd will run and
+# what it is running now.
 LAUNCHD_LABEL = "com.cvande.corral-light"
 INSTALLED_PLIST = (Path.home() / "Library" / "LaunchAgents"
                    / f"{LAUNCHD_LABEL}.plist")
 
 
 def installed_service_trees(path=INSTALLED_PLIST):
-    """Every tree the INSTALLED LaunchAgent would run out of, resolved.
-
-    `[]` when no agent is installed, which is NOT a fault: running hub.py by
-    hand from a checkout is the supported way to preview a branch, and a
-    developer doing that must not be told their host is misconfigured.
-    """
+    """Every tree the installed LaunchAgent would run out of, resolved.
+    `[]` when no agent is installed (not a fault)."""
     try:
         with open(path, "rb") as fh:
             data = plistlib.load(fh)
@@ -80,7 +39,6 @@ def installed_service_trees(path=INSTALLED_PLIST):
         return []
     trees = set()
     for arg in data.get("ProgramArguments") or []:
-        # The interpreter is argv[0]; the tree is wherever the script lives.
         if isinstance(arg, str) and arg.endswith(".py"):
             trees.add(Path(arg).resolve().parent)
     wd = data.get("WorkingDirectory")
@@ -90,14 +48,7 @@ def installed_service_trees(path=INSTALLED_PLIST):
 
 
 def running_service_tree(label=LAUNCHD_LABEL):
-    """The tree the LIVE hub is running from, or None if it isn't running.
-
-    The plist says what launchd WILL run. This says what it IS running, and
-    they disagree for exactly as long as it takes someone to restart the
-    service — which is the window every "fixed it" claim lands in. Reporting
-    only the plist would have let this incident be declared closed while the
-    old process still held the port.
-    """
+    """The tree the live hub is running from, or None if it isn't running."""
     if sys.platform != "darwin":
         return None
     try:
@@ -117,12 +68,8 @@ def running_service_tree(label=LAUNCHD_LABEL):
 
 
 def service_tree_problem(root=None, path=INSTALLED_PLIST, label=LAUNCHD_LABEL):
-    """Why the service is not running THIS tree, or None if it is (or if no
-    service is installed here).
-
-    Names both trees and the consequence, because "wrong path" alone does not
-    tell you why two specific lanes vanished — the gitignored adapters do.
-    """
+    """Why the service is not running this tree, or None if it is (or if no
+    service is installed here)."""
     root = Path(root or sessions.ROOT).resolve()
     stray = [t for t in installed_service_trees(path) if t != root]
     live = running_service_tree(label)
@@ -146,8 +93,7 @@ def service_tree_problem(root=None, path=INSTALLED_PLIST, label=LAUNCHD_LABEL):
 
 
 def _service_report():
-    """Printed on every diagnose run, before any lane is touched: if this is
-    wrong, nothing below it is evidence about the tree you are editing."""
+    """Report which tree the service runs; printed before any lane is touched."""
     root = Path(sessions.ROOT).resolve()
     _line("this tree", root)
     installed = installed_service_trees()
@@ -179,9 +125,7 @@ def _env_report(env_overrides, strip):
                          )
     removed = sorted(k for k in os.environ
                      if strip and k.startswith(tuple(strip)))
-    # Mark what CORRAL sets, so a variable appearing in both lists reads as
-    # "the inherited one was removed and ours was applied" rather than as a
-    # contradiction.
+    # Mark what corral-light sets, so a variable in both lists reads as replaced.
     shown = [f"{k} (set by corral-light)" if k in (env_overrides or {}) else k
              for k in interesting]
     _line("env vars reaching agent:",
@@ -193,13 +137,7 @@ def _env_report(env_overrides, strip):
 
 
 def _credential_shape(path):
-    """Which fields the credential file carries, and how long they are.
-
-    NEVER the values. A token's LENGTH is diagnostic and its content is not:
-    a working file on a Linux host carries accessToken(108) +
-    refreshToken(108); a file that is materially smaller is missing something,
-    and knowing WHICH field is the difference between a theory and a fact.
-    """
+    """Which fields the credential file carries, and their lengths — never values."""
     if not path.is_file():
         return
     try:
@@ -222,12 +160,8 @@ def _credential_shape(path):
 
     walk(doc if isinstance(doc, dict) else {"<not an object>": str(type(doc))})
     _line("  credential fields", ", ".join(rows) or "(empty)")
-    # The two that decide whether an isolated config dir can authenticate.
-    # Absent AND empty both matter, and empty is the one that fools every
-    # check that came before: the key is there, the file parses, the copy
-    # succeeds, and the token is "". Measured on ranch-server 2026-08-31 —
-    # accessToken="" , refreshToken="", expiresAt=0, in a file that looks
-    # complete by every structural test.
+    # These decide whether an isolated config dir can authenticate; an empty
+    # token passes every structural check, so flag it too.
     flat = " ".join(rows)
     for field in ("accessToken", "refreshToken"):
         if field not in flat:
@@ -262,18 +196,7 @@ def _run_once(spec, cwd, config_dir, prompt, label):
 
 
 def _control(spec, cwd, config_dir, prompt):
-    """THE POSITIVE CONTROL. Re-run with the ONE variable removed.
-
-    Everything before this narrows the suspect list. This settles it: the same
-    lane, the same prompt, the same machine, differing only in whether the
-    agent runs under Corral's private CLAUDE_CONFIG_DIR or under the user's
-    own ~/.claude — which is the single thing Corral adds to a terminal that
-    already works.
-
-    Four theories have been proposed in this investigation without one being
-    measured. An A/B that either party can run in ten seconds is worth more
-    than a fifth.
-    """
+    """Positive control: re-run without the private CLAUDE_CONFIG_DIR."""
     if config_dir is None:
         print("\n  (no private config dir was used, so there is no control "
               "to run — the failure is not about CLAUDE_CONFIG_DIR)",
@@ -312,12 +235,7 @@ def _mode(path):
 
 
 def _permission_audit(real_dir, config_dir):
-    """Directory modes, real vs. private. Some credential-handling CLIs
-    refuse to trust a token sitting in a loosely-permissioned directory even
-    when the file itself is locked down — the way ssh refuses a loose
-    ~/.ssh. This is the cheapest way to rule that class of cause in or out:
-    no content is read, only os.stat.
-    """
+    """Directory modes, real vs. private (some CLIs distrust loose directories)."""
     print("\n  permission audit (owner/group/other, octal)", flush=True)
     _line("    real ~/.claude", _mode(real_dir))
     _line("    real .credentials.json", _mode(real_dir / ".credentials.json"))
@@ -328,11 +246,7 @@ def _permission_audit(real_dir, config_dir):
 
 
 def _content_equality(src, dst):
-    """Is the copy actually byte-identical to the source? A hash, never the
-    bytes — this only answers equal/not-equal, which is all the question
-    needs. If this ever says 'DIFFERS', that is worth chasing on its own:
-    the copy mechanism itself would be the bug, not what surrounds it.
-    """
+    """Report whether the copy is byte-identical to the source (by hash)."""
     import hashlib
     try:
         a = hashlib.sha256(Path(src).read_bytes()).hexdigest()
@@ -356,9 +270,7 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
     _line("python", sys.version.split()[0])
     _line("cwd for this run", cwd)
 
-    # BEFORE the lane, deliberately. A lane report gathered from a tree the
-    # service is not running is a measurement of the wrong thing, and it looks
-    # exactly like a measurement of the right one.
+    # Before the lane: a report from a tree the service isn't running is moot.
     print("\nSERVICE", flush=True)
     _service_report()
 
@@ -417,7 +329,7 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
               ", ".join(str(c.get("id")) for c in new.get("configOptions") or [])
               or "(none)")
 
-        # THE STEP `doctor` DOES NOT TAKE, and the one that has been failing.
+        # The step `doctor` does not take.
         print("\nPROMPT (the step that fails)", flush=True)
         r = client.prompt(new.get("sessionId"), prompt) or {}
         _line("session/prompt", f"ok — stopReason={r.get('stopReason')}")
@@ -434,10 +346,7 @@ def diagnose(key="claude", cwd=None, prompt="Reply with exactly: DIAGNOSTIC OK")
         return 1
     finally:
         if client is not None:
-            # The adapter's OWN words. acp.py has always captured these and
-            # only ever used the last line, inside an exit reason — so the
-            # detail behind every failure in this saga was collected and
-            # thrown away. This is the whole reason the command exists.
+            # The adapter's own stderr, which otherwise surfaces only its last line.
             tail = getattr(client, "stderr_tail", [])
             if tail:
                 print("\nADAPTER STDERR (last lines — the agent's own words)",

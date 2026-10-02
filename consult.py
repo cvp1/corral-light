@@ -1,36 +1,9 @@
 #!/usr/bin/python3
-"""consult — let a script (or an assistant) ask another assistant THE WAY THE
-WALL DOES: through the running Corral Light hub, on the lanes already signed
-in under your own subscriptions. No API key, no second bill, no second auth.
+"""consult — ask another assistant through the running Corral Light hub.
 
-WHY THIS EXISTS
----------------
-Every "second opinion" an assistant wants — a review pass, a rival read on a
-design, a one-off "run this by Grok" — used to mean either you relaying by
-hand, or the assistant shelling out to another vendor's CLI with its own
-login. Meanwhile the same vendors were already on the wall as lanes, driven
-by their own CLIs, each with a permission rail you can see.
-
-This module makes the wall the one path. It is a CLIENT of the running hub —
-hub.py is not touched, no restart is needed, and everything it does is
-exactly what a click in the browser does: /api/session/new, /api/session/send
-(fan-out when several panes are named), /api/session/crossfeed. The panes it
-opens are ordinary panes: you see them, can answer their permission requests,
-and can keep talking to them after the script is done. Nothing here bypasses
-a pane's own rail: a lane that wants to run a tool asks YOU, not this script.
-
-IDENTITY
-    The hub's gate is possession of your UNIX account (auth.py). This script
-    runs AS that account on the hub host, so it pairs itself the way
-    `corral-light pair <code>` does — no new trust model, no weaker one. On
-    any other host it prints the code and waits for you to run the pair verb.
-
-BOUNDS
-    One wall budget per ask (--timeout, default 2400 s). On expiry the turn
-    is CANCELLED through the hub and the partial answer is returned marked
-    complete=false — never a half-written reply passed off as an answer.
-    Reply text is capped at MAX_TEXT; a prompt past the hub's MAX_PROMPT is
-    refused by the hub and reported here, not silently clipped.
+A client of the hub's own API: it opens ordinary panes on lanes already signed
+in, sends, waits, and prints one JSON document. Panes keep their permission
+rail; on timeout the turn is cancelled and returned with complete=false.
 
 VERBS
     lanes                      which lanes are live right now (no spend)
@@ -38,18 +11,13 @@ VERBS
     send      --pane ID        send to an existing pane, wait, print JSON
     fanout    --lane a --lane b ...   one prompt, N new panes, wait for all
               --pane x --pane y ...   ...or N existing panes
-    crossfeed --pane a --pane b ...   the hub's own round-two verb: every pane
-                               gets every OTHER pane's last answer under one
-                               preamble (each quote clipped at the hub's
-                               QUOTE_CHARS — for a full-fidelity round two,
-                               compose the prompt yourself and use fanout)
+    crossfeed --pane a --pane b ...   every pane gets every other pane's last
+                               answer under one preamble (quotes clipped at
+                               the hub's QUOTE_CHARS)
     close     --pane ID ...    close panes this script opened
 
 The prompt comes from --prompt, --prompt-file, or stdin. Output is one JSON
 document on stdout; progress and warnings go to stderr.
-
-Ported from the full Corral's consult.py (2026-09-03), where it already
-carries a three-model adversarial review; the hub API it speaks is the same.
 """
 from __future__ import annotations
 
@@ -65,10 +33,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_URL = os.environ.get("CORRAL_LIGHT_URL", "http://127.0.0.1:8098")
-COOKIE_NAME = "corral_light"          # hub.COOKIE — its own name, its own hub
-# One paired session for every scripted client on this account, one file to
-# revoke. Its own path, never the full Corral's: the two hubs sign with
-# different keys, so a cookie for one is noise to the other.
+COOKIE_NAME = "corral_light"          # hub.COOKIE
+# One paired session shared by every scripted client on this account.
 CFG = Path(os.environ.get("CORRAL_LIGHT_CONSULT_CFG",
                           Path.home() / ".config/corral-light/consult-session.json"))
 LOCAL_TTL = 11 * 3600
@@ -77,27 +43,15 @@ CANCEL_REASONS = {"cancelled", "canceled", "interrupted", "aborted"}
 DEFAULT_TIMEOUT_S = 2400
 POLL_S = 2.0
 MAX_TEXT = 300_000              # chars of one answer kept; the pane log holds the rest
-MAX_LANES = 6                   # a fan-out wider than this is not a consultation
-PAIR_WAIT_S = 120               # how long to wait for a human `corral-light pair` elsewhere
-# auth.approve's answer when the code is not in the pairing store THIS
-# process reads. When the hub says it runs on this host (auth.host_id), it
-# minted the code a moment ago into a store on this machine, so "unknown" means
-# this shell's CORRAL_LIGHT_STATE is not the hub's -- a private hub driven from a
-# shell without its scratch state. That hung the DESIGN-5 S12 live run for the
-# whole PAIR_WAIT_S (2026-09-30), so it fails fast. A hub on another host --
-# including one behind an ssh -L tunnel to 127.0.0.1, which a URL cannot tell
-# from a local hub -- or one too old to say, keeps the wait: a human there can
-# still approve (reviewer, 2026-09-30).
+MAX_LANES = 6
+PAIR_WAIT_S = 120               # wait for a human `corral-light pair` elsewhere
+# auth.approve's answer when the code is not in this process's pairing store;
+# on the hub's own host that means a mismatched CORRAL_LIGHT_STATE, so fail fast.
 NOT_IN_OUR_STORE = "unknown or expired code"
 HTTP_TIMEOUT_S = 30
-HANDSHAKE_S = 200               # /api/session/new blocks on the adapter's ACP
-                                # handshake (acp.HANDSHAKE_TIMEOUT = 180); a
-                                # 30 s client timeout on that one call reported
-                                # a healthy hub as unreachable and left the pane
-                                # it had just created orphaned (Gemini F5).
+HANDSHAKE_S = 200               # /api/session/new blocks on the ACP handshake (180 s)
 
-# Arm names the panel uses -> lane keys the hub knows. Kept here (not in the
-# panel) so the mapping lives next to the lanes it names.
+# Friendly lane names -> lane keys the hub knows.
 LANE_ALIASES = {"gpt": "codex", "chatgpt": "codex", "openai": "codex",
                 "antigravity": "gemini", "google": "gemini",
                 "xai": "grok", "claude-code": "claude"}
@@ -141,10 +95,7 @@ class Hub:
                 r = conn.getresponse()
                 data = r.read()
             except (ConnectionRefusedError, OSError, http.client.HTTPException) as e:
-                # OSError covers refused/timed-out sockets; HTTPException covers
-                # a dropped keep-alive mid-read (IncompleteRead, BadStatusLine)
-                # — both are "the hub did not answer", never a raw traceback
-                # (Gemini, panel review 2026-09-03, finding 6).
+                # Refused/timed-out sockets and dropped keep-alives alike.
                 raise ConsultError(f"corral hub unreachable at {self.host}:{self.port} "
                                    f"({type(e).__name__}: {e}). Is corral-light serve running?")
             try:
@@ -179,10 +130,8 @@ def _origin(url):
 
 
 def _load_token(url):
-    """The cached cookie is a bearer for ONE hub. It is only ever sent to the
-    origin it was minted by — a file written by the TUI (no `url` field) is
-    taken to belong to the default hub, never to whatever --url says.
-    (GPT-5.6, panel review 2026-09-03, finding 1.)"""
+    """The cached cookie, only for the origin that minted it (no `url` field
+    means the default hub)."""
     try:
         d = json.loads(CFG.read_text())
         if d.get("exp", 0) <= time.time():
@@ -198,8 +147,7 @@ def _save_token(token, url):
     CFG.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps({"token": token, "exp": time.time() + LOCAL_TTL,
                        "url": _origin(url)}).encode()
-    # Created 0600 in the same syscall, then renamed into place: no window in
-    # which the bearer sits world-readable (Gemini finding 7).
+    # Created 0600 atomically: the bearer is never world-readable.
     tmp = CFG.with_name(CFG.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -211,10 +159,8 @@ def _save_token(token, url):
 
 
 def _approve_locally(code):
-    """The `corral-light pair` step, done by this process. Works only when
-    this process IS the operator's account on the hub host — auth.py's whole
-    gate.
-    Returns (ok, msg, the pairing store it read — None if it read none)."""
+    """Do the `corral-light pair` step in-process (works only as the hub's
+    account on the hub host). Returns (ok, msg, pairing store path or None)."""
     try:
         sys.path.insert(0, str(HERE))
         import auth                                     # noqa: WPS433 (in-repo)
@@ -322,15 +268,7 @@ def read_prompt(args):
 
 def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
               config=None):
-    """Open a pane on `lane`.
-
-    `posture=None` means "whatever this hub's default is" and posts NO posture
-    key. It used to default to "strict", which was a claim rather than a
-    setting: on every lane that reports postureEnforced:false, nothing made
-    the pane strict, and the value was still written into its meta.json. 244
-    of 446 panes on this fleet carry that annotation. Facts stay facts -- no
-    historic meta is rewritten -- but no new pane gets one for free.
-    """
+    """Open a pane on `lane`; `posture=None` posts no key so the hub default applies."""
     key = lane_key(lane)
     live = {a["key"]: a for a in lanes(hub)}
     a = live.get(key)
@@ -339,7 +277,7 @@ def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
     if not a.get("available", False):
         raise ConsultError(f"lane {key!r} ({a.get('label')}) is unavailable: "
                            f"{a.get('why') or a.get('needs') or 'no reason given'}")
-    # Resolved HERE: the hub checks is_dir() in its own working directory.
+    # Resolve locally: the hub checks is_dir() relative to its own cwd.
     body = {"agent": key, "cwd": str(Path(cwd).expanduser().resolve())}
     if posture:
         body["posture"] = posture
@@ -348,9 +286,7 @@ def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
     if effort:
         body["effort"] = effort
     pane = hub.post("/api/session/new", body, timeout=HANDSHAKE_S)["pane"]
-    # Extra lane config (e.g. codex `mode=read-only`), applied through the same
-    # /api/session/config a click in the pane header uses. A lane that cannot
-    # take it (Grok answers -32601) is reported, not silently left as-is.
+    # Extra lane config (e.g. codex `mode=read-only`); a refusal is fatal.
     applied = []
     for item in config or []:
         cid, _, val = item.partition("=")
@@ -359,9 +295,7 @@ def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
                                              "value": val.strip()})
             applied.append(f"{cid.strip()}={val.strip()}")
         except ConsultError as e:
-            # The caller asked for this control (read-only, a model). Sending
-            # the prompt without it would run the turn under a posture the
-            # caller did not accept — close the seat instead (Grok F7).
+            # Never run the prompt without a control the caller asked for.
             try:
                 hub.post("/api/session/close", {"pane": pane["id"]})
             except ConsultError:
@@ -378,11 +312,8 @@ def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
 
 
 def _is_ours(ev_text, own):
-    """Is this `user` event the prompt WE sent? The hub emits the exact text
-    it queued (stripped), so equality is the test; a prompt the hub composed
-    for us (cross-feed) is matched on its preamble prefix. With no `own` the
-    first user event is taken — only `wait` does that, and it computes seq0
-    from the pane's own last user event."""
+    """Is this `user` event our prompt? Exact match (whitespace-normalised),
+    or a preamble prefix for hub-composed prompts; no `own` matches any."""
     if own is None:
         return True
     a, b = " ".join((ev_text or "").split()), " ".join(own.split())
@@ -390,14 +321,11 @@ def _is_ours(ev_text, own):
 
 
 def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
-    """Collect the answer to OUR prompt among the events after `seq0`.
+    """Collect the answer to our prompt among the events after `seq0`.
 
     Returns {text, complete, state, wall_s, needs_you_s, stop_reason,
-    cancelled, timed_out}. `complete` is only true on a real turn_end after
-    OUR user event — matched by text, so a prompt the operator typed into the pane
-    between our sequence read and our send is never returned as our answer
-    (GPT-5.6, panel review 2026-09-03, finding 2). A pane that died, was
-    cancelled, or ran out of budget is reported as such, never rounded up."""
+    cancelled, timed_out}. `complete` only on a real turn_end after our own
+    user event (matched by text); death, cancel or timeout are reported as such."""
     t0 = time.time()
     since = {pid: seq0}
     chunks, size, dropped = [], 0, False
@@ -414,9 +342,7 @@ def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
             left = timeout_s - (time.time() - t0)
             st = _state(hub, since, timeout=min(HTTP_TIMEOUT_S, max(2.0, left)))
         except ConsultError as e:
-            # A hub that stops answering must not leave the turn running past
-            # the deadline we promised (GPT-5.6 finding 4): fall out to the
-            # cancel path below rather than raising past it.
+            # Fall through to the cancel path rather than raising past it.
             transport_err = str(e)
             break
         p = _pane_in(st, pid)
@@ -429,8 +355,7 @@ def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
             d = ev.get("data") or {}
             if k == "user":
                 if seen_user:
-                    # A later prompt in the pane — the operator typing — ends what we
-                    # may attribute to ourselves.
+                    # A later prompt ends what we may attribute to ourselves.
                     stop_reason = "another prompt was sent to this pane"
                     dead_why = stop_reason
                     break
@@ -439,8 +364,7 @@ def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
                         " ".join(text.split()).startswith(own_key) if prefix
                         else " ".join(text.split()) == own_key):
                     seen_user = True
-                # else: someone else's prompt, queued ahead of ours — keep
-                # reading; ours is still to come.
+                # else: another prompt queued ahead of ours; keep reading.
             elif k == "text" and seen_user and not complete:
                 t = d.get("text") or ""
                 if size < MAX_TEXT:
@@ -453,10 +377,7 @@ def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
             elif k == "turn_end" and seen_user:
                 stop_reason = d.get("stopReason") or "end_turn"
                 if str(stop_reason).lower() in CANCEL_REASONS:
-                    # The hub emits `cancelled` and THEN the adapter's
-                    # turn_end(stopReason=cancelled) — a cancelled turn must
-                    # never flip to complete on that second event
-                    # (Grok 4.6, panel review 2026-09-03, finding 1).
+                    # A cancelled turn's trailing turn_end must not mark it complete.
                     dead_why = dead_why or "turn cancelled on the wall"
                     break
                 complete = True
@@ -469,8 +390,7 @@ def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
                 break
         if dead_why or complete:
             break
-        # Keep every pane's `since` current, so the next poll is a delta for
-        # the whole wall — not the full ring of every other pane each time.
+        # Keep every pane's `since` current so the next poll is a delta.
         since = _all_seqs(st)
         since[pid] = max(since.get(pid, 0), p.get("seq") or 0)
         if state == "needs-you":
@@ -522,12 +442,8 @@ def _pane_record(hub, pid):
 
 
 def _await_ready(hub, pid, timeout_s, label=""):
-    """Hold until the pane has no turn in flight. The hub queues a send onto
-    a busy pane and emits our `user` event at ENQUEUE time, so the previous
-    turn's remaining text and its turn_end would land after our user event
-    and read as our answer (Grok 4.6, panel review 2026-09-03, finding 2).
-    This hold NEVER cancels: the turn in flight is not ours to cancel (GPT
-    round 2), so on expiry it refuses to send and leaves the pane as found.
+    """Wait until the pane has no turn in flight (else the previous turn's
+    output would read as our answer). Never cancels; refuses on expiry.
     Returns the pane snapshot to sequence from."""
     t0, warned = time.time(), False
     while True:
@@ -553,8 +469,7 @@ def send_and_wait(hub, pid, text, timeout_s, label=""):
     t0 = time.time()
     p = _await_ready(hub, pid, timeout_s, label)
     seq0 = int(p.get("seq") or 0)
-    # `via` marks this turn as script-originated in the transcript (DESIGN-5
-    # S5). An older hub ignores the key, so this is safe against either.
+    # `via` marks the turn as script-originated; older hubs ignore it.
     hub.post("/api/session/send", {"pane": pid, "text": text, "via": "consult"})
     rec = _pane_record(hub, pid)
     remaining = max(1, int(timeout_s - (time.time() - t0)))
@@ -562,7 +477,7 @@ def send_and_wait(hub, pid, text, timeout_s, label=""):
         rec.update(wait_turn(hub, pid, seq0, remaining, label or rec.get("title") or pid,
                              own=text))
     except KeyboardInterrupt:
-        # Ctrl+C must not leave the lane generating on the wall (Grok F6).
+        # Ctrl+C must not leave the lane generating.
         try:
             hub.post("/api/session/cancel", {"pane": pid})
         except ConsultError:
@@ -615,9 +530,7 @@ def cmd_ask(args):
     try:
         rec = send_and_wait(hub, pane["id"], text, args.timeout, args.title or args.lane)
     except BaseException:
-        # A pane WE opened and could not use is our mess: cancel whatever is
-        # in flight and give the slot back (Grok F6) — a wall of orphaned
-        # busy panes is capped at 12 and then refuses everyone.
+        # Cancel and close a pane we opened but could not use.
         for verb in ("cancel", "close"):
             try:
                 hub.post(f"/api/session/{verb}", {"pane": pane["id"]})
@@ -658,8 +571,7 @@ def cmd_fanout(args):
             pane = open_pane(hub, lane, args.cwd, title, None, None, args.posture)
             opened[pane["id"]] = lane
         except ConsultError as e:
-            # One lane refusing does not stop the others (fanout's own rule),
-            # but the refusal is reported by name, never swallowed.
+            # One lane refusing does not stop the others; report it by name.
             opened[f"refused:{lane}"] = str(e)
     pids += [k for k in opened if not k.startswith("refused:")]
     try:
@@ -711,11 +623,8 @@ def cmd_crossfeed(args):
     return 0 if sum(1 for x in out if x["ok"]) >= 1 else 1
 
 
-# There is deliberately no `wait <pane>` verb. Without a hub-issued turn id a
-# client cannot tell which retained turn is "current" (ring eviction, queued
-# type-ahead, an idle pane's last answer) — every heuristic the review panel
-# tried was wrong in one of those states (2026-09-03, three arms). A caller
-# only ever waits on a turn it sent, through `send`.
+# No `wait <pane>` verb: without a hub turn id a client cannot tell which
+# turn is current, so callers only wait on turns they sent.
 
 
 def cmd_close(args):
@@ -739,11 +648,7 @@ def _prompt_args(p):
 
 
 def build_parser():
-    """The CLI, built separately from main() so a test can ask what a
-    flag DEFAULTS to. The `--posture strict` default lived here as well
-    as in open_pane's signature, and fixing only the signature would
-    have left every command-line caller posting `strict` exactly as
-    before -- the kind of half-fix this split makes visible."""
+    """The CLI parser, separate from main() so tests can inspect defaults."""
     ap = argparse.ArgumentParser(prog="corral-light consult",
                                  description=__doc__.split("\n")[0])
     ap.add_argument("--url", default=DEFAULT_URL)
@@ -760,10 +665,7 @@ def build_parser():
     p.add_argument("--title")
     p.add_argument("--model")
     p.add_argument("--effort")
-    # No default: an unset posture posts no key and the hub applies its own
-    # DEFAULT_POSTURE. `strict` here was the single largest source of the
-    # unenforced "strict" annotation on stored panes -- every scripted arm,
-    # including every panel run, carried it onto lanes nothing can make strict.
+    # No default: an unset posture lets the hub apply its DEFAULT_POSTURE.
     p.add_argument("--posture", default=None)
     p.add_argument("--config", action="append", metavar="ID=VALUE",
                    help="extra lane config, e.g. mode=read-only (repeatable)")
@@ -781,10 +683,7 @@ def build_parser():
     p.add_argument("--pane", action="append")
     p.add_argument("--cwd", default=str(Path.home()))
     p.add_argument("--title")
-    # No default: an unset posture posts no key and the hub applies its own
-    # DEFAULT_POSTURE. `strict` here was the single largest source of the
-    # unenforced "strict" annotation on stored panes -- every scripted arm,
-    # including every panel run, carried it onto lanes nothing can make strict.
+    # No default: an unset posture lets the hub apply its DEFAULT_POSTURE.
     p.add_argument("--posture", default=None)
     _prompt_args(p)
     p.set_defaults(fn=cmd_fanout)

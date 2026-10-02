@@ -1,25 +1,7 @@
 #!/usr/bin/python3
-"""tomlmini — the TOML this product reads and writes, on any Python it runs on.
-
-`tomllib` where it exists (3.11+). On 3.9/3.10 a STRICT reader for the only
-shapes Corral's own files have, which REFUSES anything else rather than
-guessing:
-
-    # a comment                  blank lines
-    key = "a basic string"       key = 12        (trailing `# comment` allowed)
-    [[name]]                     an array-of-tables header; the keys under it
-                                 belong to that table, as in TOML
-
-Refused on the strict path, loudly: `[table]` headers, arrays, inline tables,
-literal ('...') and multi-line strings, floats, booleans, dates, dotted keys,
-and a duplicate key within one table. What it accepts it parses exactly as
-`tomllib` does — `test_tomlmini.py` holds the two to the same result on the
-rig template and on role files.
-
-Moved here from Corral Light's roles.py (DESIGN-5 S12) so a rig and a role
-are read by one reader. `basic()` is the one emitter: a TOML basic string with
-every control character escaped, so no value can end its line and start a key.
-"""
+"""TOML read/write: `tomllib` on 3.11+, else a strict reader for the subset
+Corral's files use (comments, `key = "string"|int`, `[[name]]` headers) that
+refuses anything else. `basic()` emits an escaped TOML basic string."""
 import re
 
 _KEY = r"[A-Za-z0-9_-]+"
@@ -31,8 +13,7 @@ _ESC = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r",
 
 
 def loads(text):
-    """Parse `text`: tomllib where present, the strict reader otherwise.
-    Raises ValueError (tomllib's error is one) on anything it will not read."""
+    """Parse `text` with tomllib if present, else the strict reader; ValueError on failure."""
     try:
         import tomllib                                  # 3.11+
     except ImportError:
@@ -87,8 +68,7 @@ def _value(raw, n):
 
 
 def loads_strict(text):
-    """The 3.9/3.10 reader. Always strict, whatever Python this is — the
-    parity test calls it directly."""
+    """The strict subset reader, used regardless of Python version."""
     root, table = {}, None
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
@@ -118,8 +98,8 @@ def loads_strict(text):
 
 
 def basic(value):
-    """One TOML basic string; the whole injection defence (a newline must never
-    be able to introduce a key)."""
+    """One TOML basic string with all control characters escaped, so no value
+    can start a new key."""
     simple = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t",
               "\n": "\\n", "\f": "\\f", "\r": "\\r"}
     out = ['"']

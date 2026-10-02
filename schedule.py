@@ -1,38 +1,9 @@
 #!/usr/bin/python3
-"""later — run a conversation later, or every day, without you present.
+"""later — run a conversation later, or daily/weekly, without you present.
 
-Ported from full Corral's schedule.py (2026-08-01 design) for Corral Light on
-2026-09-29, resilience review §3: "at 06:00 ask this pane to summarise
-overnight runs" is the thing a browser tab cannot do and a cron line does
-badly. Named `later`, not `schedule`: `schedule` is on this repo's list of
-full-Corral modules that must not come back (test_no_heavy_corral_module_is_
-imported) because the original is wired to the fleet's run registry and
-attention queue. This port drops both; moving a name off that list is a
-decision, and a new name for the stdlib half is not one.
-
-WHAT IT DOES
-    A job is (lane, cwd, prompt, when, repeat) — or (pane, nudge|resume). At
-    `when` it opens a normal pane and sends the prompt, or lands the message
-    on an existing pane. The SAME create+send a click takes, so a scheduled
-    conversation wears its posture and stops at every permission gate.
-
-WHAT IT DOES NOT
-    * Grant authority. Nobody is present to answer a permission at 06:00, so
-      the pane sits blocked — the correct outcome. Corral gained the right to
-      START unattended, never to ACT unattended. (Light's hub will notify you
-      about the unseen card after quiet hours end — hub.py, P0-e'.)
-    * Remind. Full Corral's `remind` mints an attention item; Light has no
-      attention queue, so the action is refused rather than half-built.
-    * Retry. No automatic retry, ever; a failed one-shot stays as a record.
-    * Record runs. The run-registry hook (`_observe`) is gone with the
-      registry; each job's `last` / `last_error` is the record.
-
-CONSENT BINDS TO BYTES (P17): a role is resolved and INLINED when the job is
-armed; nothing fires that was not composed and stored then.
-
-BOUNDS (P8): MAX_JOBS, MAX_FAILED kept records, MAX_PROMPT, and CATCHUP_S — a
-job whose time passed while the hub was down runs once if it is recent and is
-skipped, loudly, if it is stale. Eleven missed dailies at boot is a stampede.
+A job opens a pane and sends a prompt (or lands a nudge/resume on an existing
+pane) at its time; it never answers permission gates and never retries.
+Missed runs older than CATCHUP_S are skipped, not stampeded.
 """
 from __future__ import annotations
 
@@ -43,11 +14,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-MAX_JOBS = 40               # a queue longer than this is not being read
+MAX_JOBS = 40
 MAX_FAILED = 10             # failed/missed one-shots kept as a record
-CATCHUP_S = 3 * 3600        # a missed run older than this is skipped, loudly
-TICK_S = 20                 # the ticker's resolution; finer would be a lie
-MAX_PROMPT = 8000           # an ARMED prompt: short enough to read in the list
+CATCHUP_S = 3 * 3600        # a missed run older than this is skipped
+TICK_S = 20
+MAX_PROMPT = 8000
 ACTIONS = ("start", "nudge", "resume")
 
 
@@ -60,9 +31,7 @@ def _iso(dt):
 
 
 def parse_when(s):
-    """An absolute UTC stamp (…Z) or a local-naive one from
-    <input type=datetime-local>, which is wall-clock time on this machine —
-    reading it as UTC would silently shift a 21:00 job by the offset."""
+    """Parse a UTC stamp (…Z) or a naive local wall-clock time into UTC."""
     s = (s or "").strip()
     if not s:
         raise ValueError("when is required")
@@ -102,7 +71,7 @@ class Scheduler:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(self.path.name + ".tmp")
             tmp.write_text(json.dumps({"jobs": self.jobs}, indent=1), encoding="utf-8")
-            tmp.replace(self.path)          # atomic: never a half-written queue
+            tmp.replace(self.path)          # atomic
         except OSError as e:
             print(f"corral-light: could not save {self.path}: {e}",
                   file=sys.stderr, flush=True)
@@ -133,7 +102,7 @@ class Scheduler:
             agent, posture, effort = r.agent, r.posture, r.effort
             role_sha, role_notes = r.sha256, list(r.notes or [])
         if action in ("nudge", "resume"):
-            # Validate the target NOW, not at 06:00.
+            # Validate the target at arm time, not fire time.
             if not pane_id:
                 raise ValueError(f"a scheduled {action} needs a pane to land on")
             pane = self.mgr.panes.get(pane_id)
@@ -207,7 +176,7 @@ class Scheduler:
         while not self._stop.wait(TICK_S):
             try:
                 self.tick()
-            except Exception as e:           # noqa: BLE001 — a ticker never dies
+            except Exception as e:           # noqa: BLE001
                 print(f"corral-light: scheduler tick failed: {e}",
                       file=sys.stderr, flush=True)
 
@@ -230,9 +199,8 @@ class Scheduler:
         return due
 
     def _fire_target(self, job):
-        """Land a nudge/resume on an EXISTING pane. A pane blocked at a
-        permission gate REFUSES — nothing queues invisibly behind a consent
-        gate — and a gone pane fails loud; no lookalike is ever opened."""
+        """Land a nudge/resume on an existing pane; refuse if it is gone or
+        blocked at a permission gate."""
         pane = self.mgr.panes.get(job.get("pane_id") or "")
         if pane is None:
             raise RuntimeError("its pane is gone — nothing was resumed, and "
@@ -274,11 +242,11 @@ class Scheduler:
                     "weekly": timedelta(weeks=1)}.get(job.get("repeat"))
             if step:
                 nxt, now = parse_when(job["at"]), _now()
-                while nxt <= now:            # the NEXT future slot, not +1 step
+                while nxt <= now:            # next future slot, not +1 step
                     nxt += step
                 job["at"] = _iso(nxt)
             elif error:
-                job["failed"] = True         # a record until dismissed
+                job["failed"] = True         # kept as a record until dismissed
                 dead = [j for j in self.jobs if j.get("failed")]
                 for old in sorted(dead, key=lambda j: j.get("last") or "")[:-MAX_FAILED]:
                     self.jobs = [j for j in self.jobs if j is not old]

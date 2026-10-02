@@ -1,9 +1,5 @@
-// Corral — the front end. Vanilla ES modules, no build step.
-//
-// State lives on the server; this renders it. Two inputs: a snapshot from
-// /api/state on load, and a single SSE stream carrying every pane's events.
-// Panes are re-rendered from their own event list, so a reload is identical to
-// having watched it live — which is the whole reason events are persisted.
+// Corral front end: renders server state from an /api/state snapshot plus one SSE stream.
+// Panes re-render from their own event list, so a reload matches watching live.
 
 const $ = s => document.querySelector(s);
 const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c;
@@ -23,10 +19,8 @@ const saveDetail = () =>
   localStorage.setItem('corral.detail', JSON.stringify([...S.detail]));
 
 /* ── theme ───────────────────────────────────────────────────────────── */
-// Measured palettes; taste is Craig's call, not something to guess at again
-// (four passes went that way). Every one states its numbers in style.css and
-// is asserted by the selftest. Applied before first paint, so no flash of the
-// wrong one.
+// Contrast-checked palettes (see style.css). Applied before first paint, so there
+// is no flash of the wrong one.
 const THEMES = [
   ['laundry', ['#e7e9e5', '#3a4660', '#d09a73'], 'Laundry', 'Cool linen & French blue', 'light'],
   ['dusk', ['#202632', '#8299c3', '#e3a173'], 'Dusk', 'Soft twilight & apricot', 'dark'],
@@ -35,12 +29,12 @@ const THEMES = [
   ['slate', ['#11171d', '#4d86aa', '#82d99a'], 'Slate', 'Steel, ice & signal green', 'dark'],
   ['ink', ['#090b0f', '#587fc2', '#a78bfa'], 'Ink', 'Graphite & spectral light', 'dark'],
   ['parchment', ['#f0ece3', '#2f5892', '#c49455'], 'Parchment', 'Warm paper, navy & ochre', 'light'],
-  // Calm set (2026-10-01): low-chroma accents, nothing loud.
+  // Calm set: low-chroma accents.
   ['sagebrush', ['#e4e9e2', '#46664f', '#c9a98a'], 'Sagebrush', 'Pale sage, moss & clay', 'light'],
   ['fog', ['#e5e7ec', '#3d4a6a', '#b8a6cc'], 'Fog', 'Morning mist & lavender', 'light'],
   ['tidepool', ['#121c1e', '#5f9fa0', '#d9c58f'], 'Tidepool', 'Deep sea-glass & sand', 'dark'],
   ['mesa', ['#1c1a1f', '#8a7aa8', '#d9a78a'], 'Mesa', 'Desert dusk, sandstone & sage', 'dark'],
-  // Calm set II (2026-10-01): after Omarchy's quieter themes.
+  // Calm set II.
   ['everforest', ['#2d353b', '#a7c080', '#e69875'], 'Everforest', 'Forest floor, moss & ember', 'dark'],
   ['kanagawa', ['#1f1f28', '#7e9cd8', '#e6c384'], 'Kanagawa', 'Sumi ink, wave blue & lantern', 'dark'],
   ['nord', ['#2e3440', '#88c0d0', '#a3be8c'], 'Nord', 'Arctic slate & frost', 'dark'],
@@ -92,9 +86,8 @@ function wireThemes() {
   menu.setAttribute('aria-label', 'Color palette');
   for (const [name, colors, label, note] of THEMES) {
     const b = document.createElement('button');
-    // `data-theme` belongs ONLY on <html>: putting it here would activate the
-    // stylesheet's full [data-theme] block inside this option, so a dark
-    // option in a light menu would paint its label with dark-theme text.
+    // `data-theme` belongs only on <html>: here it would apply the full theme
+    // block inside this option and paint its label in the wrong colours.
     b.type = 'button'; b.className = 'theme-option'; b.dataset.palette = name;
     b.setAttribute('role', 'option'); b.setAttribute('aria-selected', String(name === cur));
     const mark = document.createElement('span'); mark.className = 'theme-mark';
@@ -135,12 +128,7 @@ function wireThemes() {
   box.append(trigger, menu);
   applyTheme(cur);
 }
-// Shipped default is 'ink', not 'laundry' -- Craig asked 2026-08-22 for
-// something closer to a dark Notion-style look; Ink was already one of the
-// four measured/contrast-checked palettes above, so this points the default
-// at it rather than inventing a new one. A saved localStorage preference
-// (any theme) always wins -- this only changes what a browser that has never
-// chosen sees. Full rationale + scope boundary: vault 06 Logs/Decisions/.
+// Default theme is 'ink'; a saved preference always wins.
 applyTheme(localStorage.getItem('corral.theme') || 'ink');
 
 /* ── toast ───────────────────────────────────────────────────────────── */
@@ -158,10 +146,7 @@ async function api(path, body) {
     body: JSON.stringify(body)
   } : {});
   let d = {}; try { d = await r.json(); } catch (e) { }
-  // A 401 must NEVER trigger location.reload(). boot() begins by calling
-  // /api/state, which 401s precisely when you are not paired yet — reloading
-  // there reloads into the same 401 forever and the pairing screen never gets
-  // to render. Shipped that way 2026-08-01; Craig: "it appears to be looping."
+  // Never reload on 401: boot() 401s until paired, so a reload would loop forever.
   // Callers decide what a 401 means; this only reports it.
   if (!r.ok) {
     const err = new Error(d.error || `${r.status} ${r.statusText}`);
@@ -174,8 +159,7 @@ async function api(path, body) {
   return d;
 }
 
-// One place decides what an expired session looks like: show the pairing
-// screen in situ. No navigation, so no loop is reachable from here either.
+// Show the pairing screen in place on an expired session; no navigation, so no reload loop.
 function relock() {
   if (S.es) { S.es.close(); S.es = null; }
   $('#app').classList.add('hide');
@@ -191,10 +175,7 @@ async function pair() {
   try { ({ code, ttl, how } = await api('/api/pair/new')); }
   catch (e) { $('#pairnote').textContent = 'Cannot reach Corral Light: ' + e.message; return; }
   $('#paircode').textContent = code;
-  // The command comes from the SERVER, not from a template here. Light and the
-  // full Corral have different CLI names, and a pairing screen that prints the
-  // other product's command is an instruction that cannot work — measured
-  // 2026-08-31, this screen said `corral pair` on a corral-light hub.
+  // The command comes from the server: Light and the full Corral have different CLI names.
   $('#paircmd').textContent = how || `corral-light pair ${code}`;
   let left = ttl;
   const tick = setInterval(() => {
@@ -217,23 +198,12 @@ async function pair() {
 }
 
 /* ── rendering: a pane ───────────────────────────────────────────────── */
-// A host:<name> shell lane is a terminal, not a conversation (Craig,
-// 2026-08-24: "more of a terminal design and less of a chat design") — its
-// transcript and composer render monospace, prompt-prefixed, bubble-free.
-//
-// The fork claimed this mode was "absent rather than dormant". It was not: the
-// branches survived intact and `term` was pinned to a literal `false`, which is
-// dormant wearing absent's clothes — the comment was load-bearing and wrong.
-// Restoring the lane (2026-09-01) needed one expression, not a rendering mode.
+// A host:<name> shell lane renders as a terminal: monospace, prompt-prefixed, no bubbles.
 const isTerm = p => (p.agent || '').startsWith('host:');
 
-/* ── markdown, the mdview manner ─────────────────────────────────────────
- * Agent replies arrive as markdown and used to render as raw text — every
- * **bold**, fence and table shipped as punctuation. Same trust posture as
- * mdview.py (the Library's renderer): DOM built only from createElement/
- * textContent, no innerHTML of content ever, links only http(s) and only as
- * links, images degrade to links. Partial input (a still-streaming fence)
- * must render sanely, because this runs on every SSE tick. */
+/* ── markdown ────────────────────────────────────────────────────────────
+ * DOM built only from createElement/textContent, never innerHTML; links only
+ * http(s). Must render partial input (an unclosed fence) since it runs every tick. */
 function mdInline(s) {
   const frag = document.createDocumentFragment();
   const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\((https?:\/\/[^\s)]+)\))/g;
@@ -328,47 +298,33 @@ function pendingPerm(p) {
   }
   return null;
 }
-// The options actually offered for a request — oversize keeps only refusals,
-// exactly permCard's own rule, so key N always matches button N. A function
-// declaration, not a const: selftest_permcard.mjs lifts it out by name.
+// The options offered for a request: oversize keeps only refusals, matching permCard,
+// so key N matches button N. A function declaration so a selftest can lift it by name.
 function permOptions(d) {
   return (d.options || []).filter(o => !d.oversize || String(o.kind || '').startsWith('reject'));
 }
 
 function renderLog(p) {
-  // A transcript should read like a conversation. Tool calls, plans and
-  // lifecycle noise are collapsed into one quiet line per run -- Craig: "hide
-  // all the tool calls and info that I don't necessarily need to see."
-  // Nothing is DISCARDED: the line expands, and the eye in the header reveals
-  // everything permanently. Permissions and real errors are never collapsed;
-  // those are the two things he must not miss.
+  // Tool calls, plans and lifecycle noise collapse to one expandable line per run;
+  // permissions and real errors are never collapsed.
   const log = el('div', 'log');
   const term = isTerm(p);
   const detailed = S.detail.has(p.id);
   let textBuf = null, thoughtBuf = null, pendingSteps = [], stepIx = new Map();
-  // ⎿ rows held open live OUTSIDE this per-tick rebuild (panel 2026-08-30:
-  // click-to-expand kept its flag in the throwaway closure, so the next SSE
-  // tick instantly re-collapsed it). Bounded: pruned below to the tool ids
-  // this pass actually rendered, so it can never outgrow the capped slice.
+  // Expanded ⎿ rows persist across per-tick rebuilds; pruned below to rendered tool ids.
   const xopen = TEXPAND.get(p.id) || new Set();
   const xseen = new Set();
 
-  // `/clear` folds everything up to and including its own marker out of view
-  // (sessions.py Pane.send — the SDK's own `conversation_reset` for this text
-  // never reaches us, the vendored ACP adapter drops it on the wire, so
-  // Corral marks the fold itself). Nothing on disk or in p.events is
-  // discarded; this is purely which events become DOM this pass.
+  // `/clear` hides everything up to its own marker; p.events keeps it all. The ACP
+  // adapter drops the SDK's reset, so sessions.py writes the marker itself.
   let clearIx = -1;
   for (let i = p.events.length - 1; i >= 0; i--) {
     if (p.events[i].kind === 'cleared') { clearIx = i; break; }
   }
   const visible = clearIx >= 0 ? p.events.slice(clearIx + 1) : p.events;
 
-  // Transcript paging (Phase 5b): the ring holds the tail; older events live
-  // only in events.jsonl. If this pane's history starts past seq 1, offer
-  // the disk read — 200 events a click, prepended in place. Skipped right
-  // after a clear: everything a disk fetch would surface is pre-clear, i.e.
-  // exactly what the fold just hid on purpose.
+  // Older events live only on disk: offer to load them 200 at a time. Skipped after
+  // a clear, since everything earlier is pre-clear.
   const first = visible[0];
   if (clearIx < 0 && first && first.seq > 1) {
     const more = el('button', 'fbtn more',
@@ -388,25 +344,13 @@ function renderLog(p) {
     log.appendChild(more);
   }
 
-  // ACP sends one `tool_call` and then a stream of `tool_call_update`s for
-  // the SAME toolCallId. Rendering each as its own step inflated the count
-  // about 5x on every pane measured (2026-08-01: 415 "steps" for 79 real
-  // tool calls under Claude, 24 for 5 under Grok) — so the collapsed line,
-  // whose whole job is to tell you how much you are not looking at, was
-  // overstating it fivefold. One row per actual call; latest status wins.
-  // Merge only the fields an update actually carries. A plain latest-wins
-  // Object.assign loses the title: Claude's stream is
-  // ("Terminal", pending) -> ("cd … && git log …", null) -> (null, completed),
-  // so the last message nulls the one field worth reading and every step
-  // renders as the word "tool".
+  // ACP streams tool_call_updates for the same toolCallId: merge into one row per call,
+  // copying only fields an update carries (latest-wins would null the title).
   const pushStep = rec => {
     const k = rec.id;
     if (k && stepIx.has(k)) {
       const cur = pendingSteps[stepIx.get(k)];
-      // An empty array is also "this update carries nothing": sessions.py
-      // emits content:[] on every contentless tool_call_update, and letting
-      // it through blanked the accumulated preview mid-stream (Gemini
-      // adversarial review 2026-08-31, confirmed both sides in source).
+      // Empty arrays carry nothing too: contentless updates send content:[].
       for (const [f, v] of Object.entries(rec))
         if (v != null && v !== '' && !(Array.isArray(v) && !v.length)) cur[f] = v;
       return;
@@ -414,10 +358,8 @@ function renderLog(p) {
     if (k) stepIx.set(k, pendingSteps.length);
     pendingSteps.push(rec);
   };
-  // Native-Claude tool rows: ⏺ title, then ⎿ result-preview lines from the
-  // content/locations sessions.py already captures (and this UI used to drop).
-  // Three lines by default; the row expands on click. Status is the dot's
-  // colour, the way the real TUI paints it, not a word.
+  // Tool rows: ⏺ title with status as dot colour, then up to three ⎿ preview lines;
+  // the row expands on click.
   const stepNode = r => {
     if (r.kind === 'plan' && Array.isArray(r.entries)) return planNode(r);
     const t = el('div', 'tool');
@@ -458,9 +400,7 @@ function renderLog(p) {
     }
     return t;
   };
-  // The agent's todo list, rendered as the native TUI draws it — one glyph
-  // per entry, the in-progress one bright — instead of the old "plan · N
-  // steps" string that hid the plan itself.
+  // The agent's todo list, one glyph per entry as the native TUI draws it.
   const planNode = r => {
     const t = el('div', 'tool planbox');
     const head = el('div', 'trow');
@@ -517,17 +457,8 @@ function renderLog(p) {
   };
   const flush = () => { flushText(); flushSteps(); };
 
-  // Transcript soft-cap (DESIGN-2 Phase 5 harden): the DOM, not the data, is
-  // what was unbounded -- every visible pane's WHOLE log was rebuilt from
-  // p.events on every SSE tick, which is the thing the README named as "the
-  // first thing to feel slow at ten busy panes." p.events itself keeps every
-  // event up to the existing MAX_EVENTS ring (4,000); only how much of it
-  // gets turned into DOM nodes each render is bounded here, and a click
-  // raises the cap for that one pane on demand -- nothing is discarded.
-  // Thought events never spend the display cap while the eye is off (panel
-  // 2026-08-30): they render nothing then, so letting them count let a long
-  // hidden monologue evict the user prompt and permission cards from view.
-  // The server now coalesces them too; this also covers replayed old logs.
+  // Bound how many events become DOM per render (p.events keeps them all); a click
+  // raises the cap for that pane. Thoughts don't count against it while hidden.
   const renderable = detailed ? visible : visible.filter(e => e.kind !== 'thought');
   const cap = LOG_CAP.get(p.id) || DEFAULT_LOG_CAP;
   const hidden = Math.max(0, renderable.length - cap);
@@ -539,27 +470,9 @@ function renderLog(p) {
     log.appendChild(more);
   }
 
-  // A permission's OUTCOME (answered vs. expired) lives in a later event, not
-  // in `p.pending` — that array only says what's ACTIONABLE right now, so a
-  // request that was answered five minutes ago and one that just timed out
-  // unanswered both read as "not pending" and rendered as the identical
-  // word "answered". Resolve from the transcript itself, over the full
-  // visible ring (not just the capped slice below), so history replay gets
-  // the same answer live SSE handling already computes for `p.pending`.
-  //
-  // Paired by POSITION, not by requestId alone. A requestId is the agent's own
-  // JSON-RPC id, unique only among the requests it has IN FLIGHT — it is free
-  // to reuse one the moment the previous is answered, and Grok reuses `0` for
-  // every permission it ever asks (measured on pane 495d803d, 2026-08-31: two
-  // cards 18,000 events apart, both requestId "0"). So one transcript holds
-  // many cards under one id. Keyed by id alone, every old card inherited the
-  // newest outcome — and, far worse, the LIVENESS test below (`is this id
-  // pending?`) said yes to all of them, so a card from an hour ago re-armed
-  // its buttons carrying an hour-old digest. Clicking it posted that stale
-  // digest and the server refused it, correctly and unanswerably. That is the
-  // freeze Craig hit. Walk forward instead and bind each permission to the
-  // first outcome that follows IT; whatever is still open at the end is the
-  // one — and the only one — the agent is actually blocked on.
+  // Resolve each permission's outcome from the transcript. Pair by position, not by
+  // requestId alone: agents reuse ids, so bind each card to the first outcome after
+  // it; whatever is still open at the end is the one the agent is blocked on.
   const permOutcomes = new Map();   // permission event seq -> its outcome event
   const permOpen = new Map();       // requestId -> seq of its unanswered card
   for (const e of visible) {
@@ -576,10 +489,7 @@ function renderLog(p) {
     const d = e.data || {};
     switch (e.kind) {
       case 'text': flushSteps(); textBuf = (textBuf || '') + (d.text || ''); break;
-      // Thinking, the native way: gray italic, and only behind the same
-      // "every step" eye that reveals tool calls — quiet by default.
-      // Text is flushed first so a thought can never render ahead of the
-      // reply text that preceded it in the stream (panel 2026-08-30).
+      // Thoughts render only in detail mode; text is flushed first to keep stream order.
       case 'thought':
         if (detailed) { flushSteps(); flushText();
                         thoughtBuf = (thoughtBuf || '') + (d.text || ''); }
@@ -592,11 +502,8 @@ function renderLog(p) {
           log.appendChild(c);
         } else {
           const u = el('div', 'msg user', d.text || '');
-          // A turn a script sent (consult, the CLI) says so on its face
-          // (DESIGN-5 S5): it is still a human-path turn, but it was not typed
-          // in this box, and reading it as if it were is how an operator ends
-          // up answering a question they never asked. `via` is the CALLER's
-          // word -- a label on the supported path, not proof of origin.
+          // A turn sent by a script (consult, the CLI) is marked; `via` is the
+          // caller's label, not proof of origin.
           if (d.via) {
             u.classList.add('via');
             u.prepend(el('span', 'viatag', 'via ' + d.via));
@@ -605,11 +512,8 @@ function renderLog(p) {
           log.appendChild(u);
         }
         break;
-      // A message from another pane's agent (DESIGN-5 S7). Its OWN block,
-      // never the human bubble: it is untrusted content from another model
-      // (P20), and the hub -- not the sender -- wrote the `from` line.
-      // textContent only (el() never parses), so a body carrying markup
-      // renders as the characters it is.
+      // A message from another pane's agent: its own block, never the human bubble,
+      // since it is untrusted. textContent only, so markup renders literally.
       case 'peer':
         flush();
         {
@@ -623,9 +527,8 @@ function renderLog(p) {
             b.appendChild(el('div', 'peerclaim',
               `⚠ unverified: claims your approval ("${d.approval_claim}"). Another agent cannot give it.`));
           }
-          // The honest threat statement (section 7.9): the sender label is the
-          // SUPPORTED path, not proof. Any process of the same user can read a
-          // pane's token and send as that pane.
+          // The sender label is the supported path, not proof: any process of the
+          // same user can send as that pane.
           b.title = `Sent by the agent in @${d.from_seat || d.from_pane || '?'} through `
                   + `Corral's seat tool. Not proof of origin: any process running `
                   + `as this user could send as that pane.`;
@@ -639,9 +542,8 @@ function renderLog(p) {
         }
         break;
       case 'peer_queue':
-        // DESIGN-5 S11b: a reply held for a pane that is waiting on its
-        // sender, recorded on BOTH panes. On the receiving side `delivered`
-        // prints nothing -- the `peer` block right after it says so.
+        // A reply held for a pane waiting on its sender, recorded on both panes;
+        // on the receiving side `delivered` prints nothing (the `peer` block does).
         if (!(d.side === 'to' && d.status === 'delivered')) {
           flush();
           const who = d.side === 'from' ? `to @${d.to_seat || '?'}`
@@ -694,17 +596,14 @@ function renderLog(p) {
         break;
       case 'plan':
         flushText();
-        // One row, updated in place: every plan event replaces the whole
-        // list (ACP semantics), so they merge by the same id — namespaced
-        // with \u0000 so a real toolCallId literally named "plan" (nothing
-        // reserves that string) cannot merge into it (panel 2026-08-30).
+        // One row, updated in place: each plan event replaces the list. The \u0000
+        // prefix keeps a real toolCallId named "plan" from merging into it.
         pushStep({ id: '\u0000plan', kind: 'plan', entries: d.entries || [],
                    title: `plan · ${(d.entries || []).length} steps`, status: '' });
         break;
       // Never collapsed — the two things that must not be missed.
       case 'permission': flush();
-        // Live only if this is the still-open card for that id AND the id
-        // is actionable right now. Both halves are load-bearing; see above.
+        // Live only if this is the still-open card for that id AND the id is pending.
         log.appendChild(permCard(p, d, permOutcomes.get(e.seq),
                                  permOpen.get(d.requestId) === e.seq &&
                                  p.pending.includes(d.requestId)));
@@ -735,9 +634,7 @@ function renderLog(p) {
   for (const k of [...xopen]) if (!xseen.has(k)) xopen.delete(k);
   TEXPAND.set(p.id, xopen);
   if (p.state === 'busy') {
-    // The native spinner's shape: glyph + elapsed + the interrupt hint.
-    // Elapsed is computed at render, so it advances with the SSE ticks a
-    // busy pane produces anyway \u2014 no timer of its own.
+    // Native spinner shape; elapsed is computed per render, so no timer is needed.
     let t0 = null;
     for (let i = visible.length - 1; i >= 0; i--) {
       if (visible[i].kind === 'user' || visible[i].kind === 'peer') { t0 = visible[i].at; break; }
@@ -751,24 +648,15 @@ function renderLog(p) {
   return log;
 }
 
-// The permission card. This is the load-bearing surface: it must show the
-// EXACT thing being approved, because an approval proves only what the human
-// could see (PRINCIPLES 17). ACP gives us rawInput and a structured diff.
-// `live` says whether THIS card is the one the agent is blocked on. It is
-// passed in, never derived from `p.pending` here: requestId is reused across a
-// pane's transcript (see renderLog), so "is that id pending?" is true of every
-// stale card sharing the id, and each of them carries a digest the server will
-// refuse. The rail passes true because it renders only the open card by
-// construction.
+// The permission card: shows exactly what is being approved. `live` is passed in
+// rather than derived from p.pending, because requestIds are reused and a stale
+// card would carry a digest the server refuses.
 function permCard(p, d, outcome, live) {
   const answered = !live;
   const c = el('div', 'perm');
   c.appendChild(el('div', 'h', `Wants to: ${d.title || d.kind || 'act'}`));
 
-  // EVERY diff, and the whole rawInput. Both used to be clipped — only the
-  // first diff was rendered and rawInput was sliced at 4,000 characters — so
-  // a multi-file edit or a long command could be approved with its meaningful
-  // part never on screen. An approval proves only what was visible.
+  // Render every diff and the whole rawInput: an approval proves only what was visible.
   if (d.oversize) {
     c.appendChild(el('div', 'why',
       `This request is ${Math.round((d.bytes || 0) / 1024)} KB — too large to ` +
@@ -776,11 +664,8 @@ function permCard(p, d, outcome, live) {
       `is not consent, so only refusal is offered here. Answer it in the ` +
       `agent's own surface if you need to allow it.`));
   } else {
-    // EVERY content entry, not only the diff-shaped ones. The digest is taken
-    // over content + locations + rawInput, so anything rendered selectively is
-    // signed-for but unseen — the exact failure this card was rewritten to
-    // stop, one layer further in. Diffs get the readable view; everything else
-    // gets its literal JSON, because "unknown type" is not permission to hide.
+    // Every content entry: the digest covers content + locations + rawInput, so
+    // non-diff entries render as literal JSON rather than being hidden.
     const diffs = [];
     for (const item of d.content || []) {
       if (item && item.type === 'diff') {
@@ -832,10 +717,7 @@ function permCard(p, d, outcome, live) {
   }
 
   if (answered) {
-    // Distinguish "you decided this" from "nothing decided this" — the two
-    // used to render as the identical word "answered", so reading the log
-    // back could not tell an approval from a timeout/pause/crash that just
-    // dropped the request.
+    // Distinguish a decision from an expiry or a dropped request.
     if (outcome && outcome.kind === 'permission_expired') {
       const reason = (outcome.data || {}).reason || 'expired';
       c.appendChild(el('div', 'why expired', `expired, unanswered — ${reason}`));
@@ -848,9 +730,8 @@ function permCard(p, d, outcome, live) {
   }
 
   const opts = el('div', 'opts');
-  // Nothing that grants may be offered for a payload we could not display —
-  // permOptions applies that filter, and the composer's number keys share it,
-  // so key N and button N always name the same option.
+  // permOptions drops granting options for an undisplayable payload; the number
+  // keys share it, so key N and button N match.
   permOptions(d).forEach((o, i) => {
     const kind = String(o.kind || '');
     const b = el('button', 'pbtn ' + (kind.startsWith('allow') ? 'allow' :
@@ -869,20 +750,9 @@ function permCard(p, d, outcome, live) {
   return c;
 }
 
-// PANES ARE BUILT ONCE AND UPDATED IN PLACE — this is not an optimization.
-//
-// The first cut rebuilt the whole grid on every SSE event: `g.innerHTML = ''`
-// then a fresh <textarea> per pane. With one idle agent that is invisible.
-// With several running, events arrive continuously, so the textarea you were
-// typing into was destroyed and replaced several times a second — losing the
-// caret, the text, and the focus. Craig, 2026-08-01: "active terminals keep
-// stealing the focus from each other making it impossible to type."
-//
-// Nothing was stealing focus. Focus was being DELETED, and the browser fell
-// back to <body>. So the rule here: the composer element is created once per
-// pane and never touched again while the pane keeps the same shape. The
-// header and the transcript are cheap and rebuild freely; the one element
-// holding human state does not.
+// Panes are built once and updated in place: rebuilding the composer on every SSE
+// event would destroy the caret, text and focus while typing. Header and transcript
+// rebuild freely; the composer does not.
 const PANES = new Map();      // paneId -> {root, head, log, comp, kind}
 const TEXPAND = new Map();    // paneId -> Set(toolCallId) with ⎿ held open
 const LOG_CAP = new Map();    // paneId -> how many recent events render to DOM
@@ -897,17 +767,11 @@ function buildPane(p) {
   const comp = el('div', 'compslot');
   root.append(head, ask, log, comp);
   log.onscroll = () => {
-    // "Am I pinned to the bottom?" is the only scroll fact worth keeping, and
-    // with a persistent log element the browser preserves the rest for free.
+    // Only whether the log is pinned to the bottom needs tracking.
     const rec = PANES.get(p.id);
     if (rec) rec.pinned = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-    // Scrolling to the top of a capped transcript used to just... stop, with
-    // nothing to reveal it but a small "N earlier events not shown" sys line
-    // easy to miss mid-scroll -- Craig read that as scrolling being broken,
-    // not as a control. Reveal automatically instead, same as any normal chat
-    // UI's infinite-scroll-up. updatePane's existing height-delta re-anchor
-    // (the df78d6f fix) keeps the view pinned to the same content once the
-    // cap grows, so this doesn't jump him anywhere.
+    // Near the top of a capped transcript, raise the cap (scroll-up loads more);
+    // updatePane re-anchors by height delta so the view does not jump.
     const cap = LOG_CAP.get(p.id) || DEFAULT_LOG_CAP;
     if (rec && log.scrollTop < 80 && p.events.length > cap) {
       LOG_CAP.set(p.id, cap + 1000);
@@ -918,9 +782,7 @@ function buildPane(p) {
 }
 
 function composerKind(p) {
-  // A dead pane with a conversation to load takes a message like a live one:
-  // sending resumes it (P0-a', resilience review 2026-09-28 — Astra/Grok).
-  // Only a pane that died before it ever had a session has nothing to offer.
+  // A dead pane with a session to load takes messages too: sending resumes it.
   if (p.state === 'dead') return p.resumable ? 'live' : 'none';
   return p.state === 'detached' ? 'detached' : 'live';
 }
@@ -931,13 +793,8 @@ async function resumePane(p) {
 }
 
 function updatePane(rec, p) {
-  // A selection in this log is human state exactly like the composer's text:
-  // rebuilding the DOM under it deletes it mid-drag. Herdr rule — a selection
-  // survives live output. So the log holds still while one lives in it (the
-  // chip says so), and catches up in one render the moment it clears. Holding
-  // rather than re-anchoring is deliberate: text ABOVE a selection mutates in
-  // place here (the cap banner counts up, a steps line grows), so restoring by
-  // offset can silently re-anchor onto different text — a copy that lies.
+  // Hold the log still while a selection lives in it: a rebuild would delete the
+  // selection, and re-anchoring by offset could land on different text.
   const live = liveLogSelection();
   const hold = SEL.down === p.id || (live && live.log === rec.log);
   rec.root.className = 'pane' + ((p.pending.length || p.question) ? ' attn' : '') +
@@ -952,15 +809,8 @@ function updatePane(rec, p) {
     const wasPinned = rec.pinned;
     const oldHeight = rec.log.scrollHeight, oldTop = rec.log.scrollTop;
     rec.log.replaceChildren(...renderLog(p).childNodes);
-    // A capped transcript that happens to fit the viewport with room to
-    // spare has NOTHING to scroll -- the only sign more exists was a small
-    // "N earlier events not shown" sys line, easy to miss, with no scrollbar
-    // to hint at it either. That read as "scrolling is broken," not "there's
-    // a control here" (Craig, 2026-08-23: clicked it once he found it, and
-    // it worked fine -- the hiding itself was the confusion). Keep raising
-    // the cap until either everything shows or there's real overflow to
-    // scroll through. Bounded so a pathological pane (huge per-event render,
-    // tiny viewport) can't loop forever.
+    // If a capped transcript fits without overflow, raise the cap until it scrolls
+    // or everything shows. Bounded so a pathological pane cannot loop.
     for (let guard = 0; guard < 5 &&
          rec.log.scrollHeight <= rec.log.clientHeight &&
          p.events.length > (LOG_CAP.get(p.id) || DEFAULT_LOG_CAP); guard++) {
@@ -970,15 +820,8 @@ function updatePane(rec, p) {
     if (wasPinned) {
       rec.log.scrollTop = rec.log.scrollHeight;
     } else {
-      // Not pinned means Craig scrolled up to read something. Every tick
-      // still rebuilds this subtree from scratch (a collapsed "N steps" line
-      // re-collapses -- its `open` flag lives in renderLog()'s throwaway
-      // closure, not on the pane), which shrinks scrollHeight and the browser
-      // clamps scrollTop to the new max: the view got yanked to the bottom
-      // out from under him mid-read, on EVERY tick, with no way to hold a
-      // position (Craig, 2026-08-23: "scrolling still does not work in
-      // GPT"). Re-anchor by the height delta instead of trusting the
-      // clamped value.
+      // Scrolled up: each rebuild shrinks scrollHeight and the browser clamps
+      // scrollTop, so re-anchor by the height delta instead.
       rec.log.scrollTop = Math.max(0, oldTop + (rec.log.scrollHeight - oldHeight));
     }
     // A rebuild abandons the find highlights' ranges; re-anchor on fresh DOM.
@@ -993,12 +836,10 @@ function updatePane(rec, p) {
   return rec.root;
 }
 
-/* ── seats (DESIGN-5 S6) ──────────────────────────────────────────────────
- * A seat is a name the OPERATOR gives a pane so other panes can address it.
- * A human verb: it is bound here, behind the pairing cookie, and nothing an
- * agent can call reaches it. Edited in a dialog, not inline in the header,
- * because the header is rebuilt on every event and would eat the name
- * mid-word -- the hazard the roster's rename box already guards against. */
+/* ── seats ───────────────────────────────────────────────────────────────
+ * A name the operator gives a pane so other panes can address it; bound only
+ * here, behind the pairing cookie. Edited in a dialog because the header
+ * rebuilds on every event. */
 function seatPill(p) {
   let b;
   if (p.seat) {
@@ -1032,11 +873,8 @@ function openSeat(p) {
 function wireSeat() {
   const dlg = $('#seatdlg');
   if (!dlg) return;
-  // Enter in the name box BINDS. Left to the browser, Enter submits the form
-  // through its FIRST submit button -- which is Cancel -- so typing a name and
-  // pressing Enter silently did nothing (found in a real browser, DESIGN-5 S6
-  // live step; a mini-DOM has no default button). reportValidity() shows the
-  // grammar's own message on a bad name instead of posting it.
+  // Enter binds: left to the browser it would submit via the first button (Cancel).
+  // reportValidity() shows the grammar's message on a bad name.
   $('#seat-name').addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
@@ -1055,19 +893,9 @@ function wireSeat() {
   });
 }
 
-/* What the pill says on a lane whose posture Corral cannot set.
- *
- * `agent-set` was one word for three different promises, and the differences
- * are the ones that matter: the vendor's own policy applies (Grok, Codex),
- * OUR adapter asks before every write and fails closed (any lane the `rail`
- * flag is set on), or the lane has no tools at all so there is nothing to ask
- * about. Flattening those into one label meant the safest lane and the least
- * constrained lane wore the same badge.
- *
- * The vendor name is the label's first word: "Claude Code" -> Claude,
- * "Antigravity (Gemini)" -> Antigravity. Derived, never a second list to keep
- * in step with AGENTS.
- */
+/* The pill for a lane whose posture Corral cannot set: harness rail (our adapter
+ * asks before every write), chat only (no tools), or the vendor's own policy.
+ * The vendor is the label's first word. */
 function posturePill(p) {
   const vendor = String(p.label || p.agent || 'the agent')
     .split(/[\s(—-]/)[0] || p.label;
@@ -1095,18 +923,13 @@ function posturePill(p) {
 function paneHead(p) {
   const h = el('div', 'ph');
   h.appendChild(el('span', 'nm', p.title || p.label));
-  // The same five words the roster and the tab title use, on the pane itself:
-  // a maximized pane used to be the ONE surface with no state on it, so the
-  // answer to "is this waiting on me or working?" required looking away from
-  // the thing you were looking at. Raw enum on the tooltip, as everywhere.
+  // Display state, with the raw enum on the tooltip.
   const dsp = displayState(p);
   const st = el('span', 'pill st d-' + dsp, DISPLAY_LABEL[dsp] || dsp);
   st.title = `${p.state}${p.idleS >= 30 ? ` · quiet ${fmtAge(p.idleS)}` : ''}`;
   h.appendChild(st);
   h.appendChild(seatPill(p));
-  // Only claim a posture Corral actually imposed. `oc acp` runs under its own
-  // policy, so a Grok pane wearing a `strict` pill was the UI asserting a
-  // safety property nothing had established.
+  // Only claim a posture Corral actually imposed.
   if (p.postureEnforced === false) {
     const q = posturePill(p);
     h.appendChild(q);
@@ -1128,10 +951,8 @@ function paneHead(p) {
     };
     h.appendChild(b);
   }
-  // Context usage: ACP's usage_update is EXPERIMENTAL/UNSTABLE (spec marks it
-  // so) — size/used can arrive as 0/undefined before the first turn, or drift
-  // if a future adapter version renames the fields. Absence is silent, not an
-  // error: no pill rather than a misleading "0% ctx" claim.
+  // ACP usage_update is unstable and may be missing or zero: show no pill rather
+  // than a misleading "0% ctx".
   const u = p.usage || {};
   if (u.size > 0 && Number.isFinite(u.used)) {
     const pct = Math.round(100 * u.used / u.size);
@@ -1141,10 +962,7 @@ function paneHead(p) {
     h.appendChild(pill);
   }
   h.appendChild(el('span', 'meta', `${p.label} · ` + p.cwd.replace(/^\/(home|Users)\/[^/]+/, '~')));
-  // The on-state used to be a colour change on a 12px glyph, and it persists
-  // in localStorage per pane forever. So a pane could sit in full-detail mode
-  // indefinitely and read as a rendering bug — it did, 2026-08-01, on a Grok
-  // pane. A latched mode has to SAY it is latched.
+  // Detail mode persists per pane, so the button says when it is on.
   const on = S.detail.has(p.id);
   const eye = el('button', 'eye' + (on ? ' on' : ''), on ? '☰ every step' : '☰');
   eye.title = on ? 'showing every step — click to collapse tool calls'
@@ -1154,8 +972,7 @@ function paneHead(p) {
     saveDetail(); render();
   };
   h.appendChild(eye);
-  // Herdr's copy-mode search, on the web pane: literal smart-case find with
-  // every match highlighted and Enter/Shift+Enter walking them.
+  // Literal smart-case find, every match highlighted; Enter/Shift+Enter walk them.
   const fnd = el('button', 'x' + (FIND.pane === p.id ? ' fon' : ''), '⌕');
   fnd.title = 'find in this conversation';
   fnd.onclick = () => toggleFind(p);
@@ -1182,12 +999,9 @@ function paneHead(p) {
   return h;
 }
 
-/* ── copy & find, the herdr manner ───────────────────────────────────────
- * Craig lives in herdr the rest of the day, and its clipboard habits are the
- * ones his hands know: releasing a drag copies it, a double-clicked word
- * copies itself, a selection survives live output, and / search highlights
- * every match. This section ports those to the pane transcripts. The
- * survival half lives in updatePane (the hold); this is the rest. */
+/* ── copy & find ─────────────────────────────────────────────────────────
+ * Release-to-copy, double-click word copy, selections that survive live output
+ * (the hold in updatePane), and highlighted find. */
 const SEL = { down: null };            // paneId a drag started in, until mouseup
 
 // The element-or-null a node's enclosing pane log, for scoping copy-on-select
@@ -1211,8 +1025,7 @@ async function copyText(text, x, y) {
   if (ok) copyFlash(x, y); else toast('copy failed — clipboard unavailable', true);
 }
 
-// Quiet, herdr-quiet: a small "copied" that drifts up from the cursor and
-// fades. The toast is for problems; success should barely register.
+// A small "copied" that drifts up from the cursor and fades; toasts are for problems.
 function copyFlash(x, y) {
   const f = el('div', 'copyflash', 'copied');
   f.style.left = x + 'px'; f.style.top = y + 'px';
@@ -1250,10 +1063,9 @@ function wireCopySelect() {
 /* Find-in-pane. One find at a time — CSS.highlights is a page-global
  * registry, and two panes fighting over 'find' would highlight lies. */
 const FIND = { pane: null };
-const FIND_CAP = 2000;                 // bound the ranges (PRINCIPLES 8)
+const FIND_CAP = 2000;                 // bound the ranges
 
-// Herdr's rule, literal smart-case: any capital in the query makes it exact;
-// an all-lowercase query matches case-insensitively.
+// Smart case: any capital in the query makes it case-sensitive.
 function smartCase(q) { return q !== q.toLowerCase(); }
 
 // Every start offset of literal needle q in hay. Non-overlapping, so "aa" in
@@ -1278,8 +1090,7 @@ function toggleFind(p) {
   if (FIND.pane) closeFind();
   FIND.pane = p.id;
   if (!rec.findbar) {
-    // Built once and kept, exactly like the composer: this is a live text
-    // input under an SSE stream, and a rebuild would eat the query mid-word.
+    // Built once and kept: a rebuild under the SSE stream would eat the query.
     const bar = el('div', 'findbar');
     const inp = el('input'); inp.type = 'search'; inp.placeholder = 'find in transcript…';
     const ct = el('span', 'fct');
@@ -1353,24 +1164,18 @@ function findStep(id, delta) {
   paintFind(rec, rec.findbar.querySelector('.fct'));
   const r = rec.findRanges[rec.findCur];
   (r.startContainer.parentElement || rec.log)
-    .scrollIntoView({ block: 'center' });   // scrolling up unpins — herdr's
-}                                            // "stay put while you read history"
+    .scrollIntoView({ block: 'center' });   // scrolling up unpins
+}
 
-// A shell composer, not a chat one: one line, shell history on ↑/↓, and Ctrl-C
-// on an EMPTY input (so it does not steal copy from a selection you just made
-// or from text you typed) cancels the in-flight command — ssh_acp kills the
-// shell and reconnects clean on the next command, exactly its designed degrade.
-// No slash-completer here: "/tmp" is a path, not a skill, and the completer
-// was stealing Enter/Tab from any command that started with "/".
+// A shell composer: one line, ↑/↓ history, and Ctrl-C on an empty input cancels
+// the running command. No slash-completer: "/tmp" is a path, not a skill.
 const TERMHIST = new Map();   // pane id -> {cmds, ix, draft}; survives rebuilds
 function termComposer(p) {
   const c = el('div', 'composer term');
   const h = TERMHIST.get(p.id) ||
     { cmds: p.events.filter(e => e.kind === 'user')
                     .map(e => (e.data || {}).text || '')
-                    // A single-line <input> flattens a recalled multi-line
-                    // command into one line (see onpaste below) -- keep those
-                    // out of ↑/↓ rather than replay them mangled.
+                    // Multi-line commands stay out of ↑/↓ history.
                     .filter(t => t && !t.includes('\n')),
       ix: null, draft: '' };
   TERMHIST.set(p.id, h);
@@ -1379,15 +1184,8 @@ function termComposer(p) {
   inp.type = 'text'; inp.autocomplete = 'off'; inp.spellcheck = false;
   inp.placeholder = `runs on ${p.agent.slice(5)} as you`;
   let sending = false;
-  // A multi-line paste waiting for Enter. The browser strips newlines from
-  // anything pasted into <input type=text> and joins the lines with spaces,
-  // so three pasted commands ran as ONE line -- `git push origin HEAD --tags
-  // cd ~/x && git push ...` -> "fatal: invalid refspec" (seen live 2026-09-02).
-  // Held here instead of in the input's value, so the lines survive intact;
-  // Enter runs them as one command (the shell reads it line by line, exactly
-  // as if typed one after another), Esc discards. Not run on paste: pasting
-  // into a prompt line has never meant "execute", and the operator gets to
-  // see the line count before anything runs.
+  // A multi-line paste is held here, since <input> would join its lines with
+  // spaces. Enter runs it as one command; Esc discards. Never run on paste.
   let block = null;
   const holdBlock = (text) => {
     block = text;
@@ -1401,8 +1199,7 @@ function termComposer(p) {
     const t = block !== null ? block : inp.value.trim(); if (!t) return;
     sending = true;
     try {
-      // Same eager-clear hazard as the chat composer: clear only once the
-      // server accepted it, so a failure leaves the command typed for retry.
+      // Clear only once the server accepted it, so a failure leaves it for retry.
       await api('/api/session/send', { pane: p.id, text: t });
       if (!t.includes('\n') && h.cmds[h.cmds.length - 1] !== t) h.cmds.push(t);
       h.ix = null; h.draft = '';
@@ -1478,18 +1275,14 @@ function composer(p, kind) {
     return c;
   }
   const ta = el('textarea'); ta.placeholder = 'Message…  (/ for skills)'; ta.rows = 1;
-  // Clearing eagerly, before the request even landed, meant a queue-full,
-  // expired-auth, or network error silently ATE what Craig typed -- the
-  // textarea read empty and the toast was the only trace anything had been
-  // typed at all. Clear only once the server has actually accepted it; on
-  // failure the text stays put for a retry. `sending` replaces the clear's
-  // old accidental job of ignoring a rapid double Enter.
+  // Clear only after the server accepts, so a failed send keeps the text.
+  // `sending` also ignores a rapid double Enter.
   let sending = false;
   const send = async () => {
     if (sending) return;
     const t = ta.value.trim(); if (!t) return;
     // Fresh state: the composer outlives the snapshot it was built from.
-    if (isLoginCommand(S.panes.get(p.id) || p, t)) {   // DESIGN-6 S4: a sign-in, not a message
+    if (isLoginCommand(S.panes.get(p.id) || p, t)) {   // a sign-in, not a message
       ta.value = '';
       await startLogin('composer', p.id);
       return;
@@ -1506,10 +1299,7 @@ function composer(p, kind) {
     }
   };
 
-  // Slash-command completion. The agent advertises its own commands over ACP
-  // right after session/new (70 of them under Claude), so nothing here is a
-  // hardcoded list -- a skill Craig adds shows up in the next pane he opens.
-  // Craig: "they don't autocomplete... You have to know the skill."
+  // Slash-command completion from the commands the agent advertises over ACP.
   const ac = el('div', 'ac hide');
   let hits = [], sel = 0;
   const hide = () => { ac.className = 'ac hide'; hits = []; };
@@ -1553,19 +1343,9 @@ function composer(p, kind) {
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); return accept(sel); }
       if (e.key === 'Escape') { e.preventDefault(); return hide(); }
     }
-    // The native dialog keys, on an EMPTY composer only (typed text always
-    // wins): with a permission pending, 1..9 answers by number — the card's
-    // buttons carry the same numbers — and Esc picks the refusal. With no
-    // permission up, Esc on a busy pane interrupts the turn, exactly the
-    // TUI's esc. Fresh state from S.panes: `p` here is the snapshot the
-    // composer was built from, and the composer outlives it by design.
-    //
-    // Consent guards (2026-08-30 panel, 3/3 arms on the identity hazard):
-    // digits act ONLY when exactly one request is pending — every card
-    // numbers its buttons from 1, so with two cards key 1 is ambiguous and
-    // must do nothing (PRINCIPLES 17: key N and button N the same option,
-    // always). And only a fresh, unmodified press: a held key (e.repeat) or
-    // a chorded one is not a deliberate answer to a displayed card.
+    // Native dialog keys, on an empty composer only: with exactly one permission
+    // pending, 1..9 answers by number and Esc refuses; otherwise Esc on a busy
+    // pane interrupts. Ignores repeats and chords; reads fresh state from S.panes.
     if (ta.value === '' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const cur = S.panes.get(p.id) || p;
       const d = (cur.pending || []).length === 1 ? pendingPerm(cur) : null;
@@ -1592,9 +1372,7 @@ function composer(p, kind) {
       }
     }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      // One prompt, every pane that can take one: the blind half of a panel.
-      // Explicit chord, never the plain Enter -- broadcasting by accident is
-      // N mistakes at once.
+      // Broadcast to every pane that can take a prompt; explicit chord only.
       e.preventDefault();
       const t = ta.value.trim(); if (!t || sending) return;
       const ids = composablePanes().map(x => x.id);
@@ -1622,11 +1400,7 @@ function composer(p, kind) {
   return c;
 }
 
-// The only clock formatting Light still needs. The full Corral also carries
-// fmtWhen (a FUTURE time — scheduled jobs) and fmtAgo (a past ISO timestamp —
-// heartbeats, last-run rows); neither has a caller once the scheduler and the
-// fleet rooms are gone, and a dead formatter is a thing to keep in sync with
-// nothing.
+// Formats an age in seconds as s/m/h.
 function fmtAge(s) {
   s = Math.max(0, Math.round(s || 0));
   if (s < 90) return `${s}s`;
@@ -1634,37 +1408,16 @@ function fmtAge(s) {
   return `${Math.round(s / 3600)}h`;
 }
 
-/* ── rendering: shell ────────────────────────────────────────────────── */
-/* ── the display projection ───────────────────────────────────────────────
- * Mirrors corral_core/sessions.py `display_state()` — the one opinion on what
- * a pane's raw state MEANS to a human. Mirrored rather than read off the wire
- * because the browser reduces events locally between polls: a `permission`
- * event flips a pane to needs-you in the same tick it arrives, and a
- * server-computed `display` would be stale exactly when it matters most. The
- * two implementations are pinned to ONE case table,
- * corral_core/display_cases.json, by selftest_display.mjs here and
- * corral_core/test_display_state.py there — so this cannot drift quietly,
- * which is the only way a mirror is honest.
- *
- * The raw `p.state` is still rendered beside it and still on the tooltip:
- * this is triage, not a replacement for the record. `gateHold` is full
- * Corral's runbook park and never arrives here; the branch stays so the two
- * skins share one rule.
- */
+/* ── the display projection ──────────────────────────────────────────────
+ * Mirrors corral_core/sessions.py display_state(): the browser reduces events
+ * locally, so a server-computed value would lag. Both sides are pinned to
+ * corral_core/display_cases.json by tests. */
 const IDLE_DISPLAY_S = 1800;
-// How often the browser re-asks "has any pane aged into `idle`?". The roster
-// otherwise re-renders only when an event arrives, so a pane that went quiet
-// kept `your-turn` in the tab title until some OTHER pane spoke (DESIGN-5
-// section 7, T1.7). A minute is coarse against a 30-minute threshold on
-// purpose: the tick is cheap because it renders only when a state CHANGED.
+// How often to re-check whether any pane has aged into `idle`; renders only on change.
 const DISPLAY_TICK_MS = 60000;
 
-/* Seconds since this pane last said anything, advanced by THIS browser's own
- * clock: the hub's `idleS` at the moment the snapshot arrived, plus the time
- * elapsed here since. Deliberately not `Date.now() - Date.parse(ev.at)`: that
- * compares the hub's clock with the viewer's, and a phone ten minutes fast
- * would age every pane ten minutes early. Differences on one clock cannot be
- * skewed. The reducer resets the base whenever the pane emits. */
+/* Seconds since this pane last emitted, on this browser's own clock (hub idleS at
+ * snapshot plus local elapsed), so hub/browser clock skew cannot age panes early. */
 function paneAge(p, nowMs) {
   const base = p.idleS || 0;
   if (!p._idleAt) return base;
@@ -1695,15 +1448,13 @@ const DISPLAY_LABEL = {
   'your-turn': 'your turn', 'idle': 'idle', 'paused': 'paused', 'dead': 'dead',
 };
 
-/* Where a turn came from when the human did not start it at the glass: the
- * core's AGENT_ORIGIN_VIAS (corral_core/sessions.py), pinned by the shared
- * display_cases.json. A `ready` pane whose last turn came this way is `idle`. */
+/* Turn origins that are not the human's (mirrors the core's AGENT_ORIGIN_VIAS);
+ * a `ready` pane whose last turn came this way is `idle`. */
 const AGENT_ORIGIN_VIAS = ['peer', 'rig'];
 const ASK_PREVIEW_CHARS = 80;           // the roster line; the banner shows it all
 
-/* ask_human: the agent's open question, as the pane's banner. The AGENT's
- * words, labelled as the agent's -- never styled as the human's bubble and
- * never as a system line (P20). textContent only. null when none is open. */
+/* ask_human: the agent's open question as the pane's banner, labelled as the
+ * agent's words. textContent only. null when none is open. */
 function questionBanner(p) {
   const q = p.question;
   if (!q || !q.text) return null;
@@ -1748,9 +1499,7 @@ function displayTick() {
   if (displaySignature(panes) !== displaySig) render();
 }
 
-/* The tab title: where the eye lands first when Corral is one tab among
- * twenty. What needs you outranks what is merely waiting, and a quiet wall
- * says nothing at all rather than inventing a reassuring number. */
+/* The tab title: needs-you count, else your-turn count, else plain. */
 function setTitle(panes) {
   let need = 0, turn = 0;
   for (const p of panes) {
@@ -1772,16 +1521,11 @@ function render() {
 
   // roster
   const r = $('#roster');
-  // Same hazard as the composer: the rename box is a live text input, and
-  // rebuilding the roster under an agent's event stream would eat the name
-  // mid-word. Renaming is brief and modal, so the roster simply holds still
-  // until it ends.
+  // Hold the roster still while the rename box is open, so the name isn't eaten.
   if (!(S.renaming && r.querySelector('.ren'))) {
   r.innerHTML = '';
-  // Pinned and the pane you are looking at always show; everything else
-  // rolls up under "Other" (Craig, 2026-08-23) — same collapsible shape as
-  // Archive below, but open by default: unlike Archive's closed history,
-  // these are live conversations, so the default is visible, not hidden.
+  // Pinned panes and the focused pane always show; the rest roll up under
+  // "Other", open by default.
   const paneRow = p => {
     const disp = displayState(p);
     // Both classes: `rit needs-you` is what the eye reads, and the raw state
@@ -1811,39 +1555,28 @@ function render() {
     }
 
     t.appendChild(el('div', 't', p.title || p.label));
-    // `busy` was a pulsing dot with nothing behind it — the same animation at
-    // three seconds and at forty minutes. Saying how long since the pane last
-    // said anything is the difference between "working" and "wedged", which is
-    // the question a roster of ten agents exists to answer.
+    // Time since the pane last emitted separates "working" from "wedged".
     const quiet = (p.state === 'busy' || p.state === 'uncertain') && p.idleS >= 30
       ? ` · quiet ${fmtAge(p.idleS)}` : '';
-    // The directory tail alone reads as an agent badge when it happens to BE
-    // one -- Craig's daily-driver repo is named "CC", so every non-Claude
-    // pane opened there showed "· CC" here and looked like a Claude Code
-    // conversation. Tag the agent explicitly for every lane but the default.
+    // Tag the agent for every lane but the default, so a directory name is never
+    // mistaken for an agent badge.
     const agentTag = p.agent !== 'claude' ? p.label + ' · ' : '';
     const sub = el('div', 's',
       (DISPLAY_LABEL[disp] || disp) + quiet + ' · ' + agentTag +
       p.cwd.split('/').pop());
-    // The raw enum is the record and stays one hover away: the projection
-    // collapses six values into five words, and "which of the two busy-ish
-    // states is this" is a real question when a pane looks wedged.
+    // The raw state stays one hover away.
     sub.title = p.state;
     t.appendChild(sub);
     const ask = askLine(p);            // ask_human: the question, on the row
     if (ask) t.appendChild(ask);
     it.appendChild(t);
 
-    // A minimized pane blocked on a permission must still SHOW that it is —
-    // otherwise minimizing becomes a way to make an agent wait forever while
-    // the UI looks calm.
+    // A minimized pane blocked on a permission still shows its count.
     if (p.pending.length) it.appendChild(el('span', 'badge', String(p.pending.length)));
 
     const acts = el('div', 'acts');
     if (p.state === 'dead' && p.resumable) {
-      // ↻ beside ✕: a pane whose agent stopped on its own comes back in one
-      // click, on the same conversation (P0-a', 2026-09-28). Before this the
-      // only way back was dismiss -> Archived -> reopen -> resume.
+      // ↻ resumes a self-stopped pane on the same conversation.
       const r = el('button', 'a', '↻'); r.title = 'resume — restart the agent on this conversation';
       r.onclick = async e => { e.stopPropagation(); await resumePane(p); };
       acts.appendChild(r);
@@ -1866,9 +1599,7 @@ function render() {
     };
     const ren = el('button', 'a', '✎'); ren.title = 'rename';
     ren.onclick = e => { e.stopPropagation(); S.renaming = p.id; render(); };
-    // Pause is the missing middle. Close ends the conversation and files it;
-    // pause just stops the process and keeps everything, which is what you
-    // actually want for work you mean to come back to.
+    // Pause stops the process and keeps the conversation; close ends and files it.
     if (p.state !== 'detached' && p.state !== 'dead') {
       const ps = el('button', 'a', '⏸'); ps.title = 'pause — stop the agent, keep the conversation';
       ps.onclick = async e => {
@@ -1884,8 +1615,7 @@ function render() {
     acts.append(pin, ren, mm);
     it.appendChild(acts);
 
-    // Drag to order. Craig's original complaint was that a terminal cannot
-    // arrange running work; creation order is not an arrangement.
+    // Drag to reorder.
     it.draggable = true;
     it.dataset.pid = p.id;
     it.ondragstart = e => { S.drag = p.id; it.classList.add('dragging');
@@ -1915,8 +1645,7 @@ function render() {
   const others = panes.filter(p => !p.pinned && S.focus !== p.id);
   for (const p of pinned) r.appendChild(paneRow(p));
   if (others.length) {
-    // "Other", not "Recent" — this same roster already has a "Recent"
-    // group in the same list.
+    // "Other", not "Recent": the roster already has a "Recent" group.
     const lab = el('div', 'lab clicky',
                    `Other · ${others.length} ${S.hideOther ? '▸' : '▾'}`);
     lab.onclick = () => { S.hideOther = !S.hideOther; render(); };
@@ -1924,9 +1653,7 @@ function render() {
     if (!S.hideOther) for (const p of others) r.appendChild(paneRow(p));
   }
   if (!panes.length) r.appendChild(el('div', 'calm', 'None yet.'));
-  // Say what the cap kept off the screen. A pane that is on disk and absent
-  // from the roster, with nothing said about it, is indistinguishable from a
-  // pane the product threw away.
+  // Say what the restore cap left off the roster.
   if (S.notRestored) {
     const n = el('div', 'calm',
       `${S.notRestored} saved conversation${S.notRestored > 1 ? 's' : ''} not ` +
@@ -1935,9 +1662,7 @@ function render() {
     r.appendChild(n);
   }
 
-  // Archive. Closing used to be the end of a conversation as far as the
-  // product was concerned, while its transcript sat on disk untouched — a
-  // deletion nobody asked for. Collapsed by default: it is history, not work.
+  // Archive: closed conversations, reopenable. Collapsed by default.
   const arc = S.archived || [];
   if (arc.length) {
     const lab = el('div', 'lab clicky',
@@ -1962,8 +1687,7 @@ function render() {
     }
   }
 
-  // Scheduled (schedule.py): what will start on its own, and any one-shot that
-  // failed or was missed — a record until dismissed, never silently gone.
+  // Scheduled jobs, plus failed or missed one-shots kept until dismissed.
   const jobs = S.schedule || [];
   if (jobs.length) {
     r.appendChild(el('div', 'lab', `Scheduled · ${jobs.length}`));
@@ -1994,9 +1718,7 @@ function render() {
   const mins = panes.filter(p => p.minimized);
   g.className = 'grid' + (shown.length === 1 ? ' one' : '');
 
-  // The minbar and the empty-state are disposable; the panes are not (see
-  // PANES above). So clear only the disposable children and reconcile the
-  // rest by identity.
+  // Clear only the disposable children (minbar, empty state); panes reconcile by identity.
   for (const c of [...g.children]) {
     if (!c.dataset.pane) c.remove();
   }
@@ -2004,18 +1726,15 @@ function render() {
   if (mins.length) {
     const bar = el('div', 'minbar');
     for (const p of mins) {
-      // A semantic <button>: a click-only div never takes focus, so
-      // keyboard and :focus-visible can't reach it (panel, 2026-08-24).
+      // A <button> so keyboard focus can reach it.
       const cdisp = displayState(p);
       const c = el('button', 'minchip d-' + cdisp + ' ' + p.state);
       c.type = 'button';
       c.appendChild(el('span', 'd'));
       c.appendChild(el('span', 'mt', p.title || p.label));
       if (p.pending.length) c.appendChild(el('span', 'badge', String(p.pending.length)));
-      // Full identity in the name: the visible label ellipsizes, and the
-      // state must not live in the dot's color alone. The projection leads
-      // (it is what the roster and the tab title say); the raw enum follows
-      // in parentheses so the chip and the record never disagree.
+      // Full title and state in the name: the label ellipsizes and colour alone
+      // is not enough. Display state first, raw state in parentheses.
       const full = `${p.title || p.label} — ${DISPLAY_LABEL[cdisp] || cdisp}`
                  + ` (${p.state}), click to restore`;
       c.title = full;
@@ -2026,18 +1745,9 @@ function render() {
     g.insertBefore(bar, g.firstChild);          // above the panes, which stay put
   }
 
-  // Reconcile panes by id. Retire what is gone, create what is new, update
-  // the rest IN PLACE, and move a node only when its position actually
-  // changed — moving a DOM node blurs whatever is focused inside it, which
-  // is the bug this whole structure exists to avoid.
-  // A minimized pane is HIDDEN, not gone. Deleting its PANES record here was
-  // the same mistake buildPane's persistent-DOM rule exists to prevent, one
-  // layer up: minimize destroyed the composer (unsent draft text), the find
-  // query, and the scroll position, then rebuilt a blank one on restore --
-  // contradicting the "composer is created once" design a few lines above.
-  // Only a pane that has left `panes` entirely (closed, forgotten, archived)
-  // should lose its record; minimizing must not silently do the same thing
-  // closing does.
+  // Reconcile panes by id: drop gone panes, update the rest in place, and move a
+  // node only when its position changed (moving blurs focus). Minimized panes
+  // keep their record so the draft, find query and scroll survive.
   const exists = new Set(panes.map(p => p.id));
   const want = new Set(shown.map(p => p.id));
   for (const [id, rec] of [...PANES]) {
@@ -2051,10 +1761,7 @@ function render() {
     let rec = PANES.get(p.id);
     if (!rec) { PANES.set(p.id, rec = buildPane(p)); }
     updatePane(rec, p);
-    // Full-size is a STATE the pane must wear, not something inferred from
-    // an empty grid (Craig, 2026-08-30: "show clearly when a pane is at its
-    // full size"). Class on the persistent root — CSS renders the tag, so
-    // reconciliation can never orphan it.
+    // Full-size state as a class on the persistent root; CSS renders the tag.
     rec.root.classList.toggle('solo', shown.length === 1);
     const slot = prev ? prev.nextSibling : g.firstChild;
     if (rec.root !== slot) g.insertBefore(rec.root, slot);
@@ -2064,13 +1771,8 @@ function render() {
   if (!shown.length) {
     const e = el('div', 'empty');
     if (!panes.length) {
-      // The FIRST screen a new install shows, and it used to be two
-      // sentences that describe the emptiness without saying what to do
-      // about it. Three lines now: the thing to press, the thing that gets
-      // you around, and where your conversations live on disk — the last
-      // because "is this in someone's cloud?" is the first question a
-      // self-hosted agent workspace has to answer, and silence answers it
-      // badly. createElement only: `dataDir` comes off the wire.
+      // First-run screen: what to press, how to get around, and where transcripts
+      // live. createElement only: `dataDir` comes off the wire.
       e.appendChild(el('h2', null, 'Nothing running.'));
       const start = el('button', 'btn go emptygo', '＋ New conversation');
       start.type = 'button';
@@ -2099,24 +1801,12 @@ function render() {
     g.appendChild(e);
   }
 
-  // THE rail. In the full Corral this is a view of /api/attention — a
-  // server-side queue that merges permissions with fleet mailbox tasks,
-  // scheduled-run failures, estate health and the Docket. None of those
-  // sources exist here, so Light does NOT keep a hollow queue with one
-  // member: the rail is composed directly from the panes, which is the one
-  // authority it has.
-  //
-  // What survives the cut is the property that matters: a permission is
-  // answered HERE, with its exact bytes, not by scrolling to the pane. The
-  // rail used to render a summary and scroll you to the conversation — and
-  // if that pane was minimized there was no node to scroll to, so the click
-  // did nothing at all and the agent stayed blocked.
+  // THE rail. Built directly from the panes; permissions are answered here with
+  // their exact bytes, so a minimized pane can still be unblocked.
   const n = $('#needs'); n.innerHTML = '';
   let items = 0;
-  // The Claude login, ahead of the pane it would kill (2026-09-30: a pane
-  // died at its first prompt on a lapsed refresh token that the credential
-  // had been announcing for days). Expired reads as a dead card; expiring
-  // reads as a plain one. Both carry the exact remedy. Gone when it is fine.
+  // The Claude login, ahead of the pane it would kill: expired renders as a dead
+  // card, expiring as a plain one, each with the remedy. Hidden when fine.
   const ca = S.claudeAuth;
   const claudeLane = (S.agents || []).some(a => a.key === 'claude');
   if (ca && (ca.ok === false || ca.warn || (ca.ok === null && claudeLane))) {
@@ -2143,9 +1833,8 @@ function render() {
       if (ev) {
         c.appendChild(permCard(p, ev.data, null, true));
       } else {
-        // The payload aged out of the bounded ring. Never offer buttons for a
-        // request whose contents can no longer be shown — an approval proves
-        // only what the human could see (P17).
+        // The payload aged out of the ring: never offer buttons for a request
+        // whose contents can no longer be shown.
         c.appendChild(el('div', 'fnote',
           'this request is older than the kept transcript — open the pane'));
       }
@@ -2160,9 +1849,7 @@ function render() {
       n.appendChild(c); items++;
     }
   }
-  // A pane that died on its own is news and stays until dismissed; a pane you
-  // closed is finished business and never appears here (the manager drops it
-  // from the roster on close, so this loop cannot see one).
+  // A pane that died on its own stays until dismissed; closed panes never appear.
   for (const p of panes) {
     if (p.state !== 'dead') continue;
     const c = el('div', 'ncard dead');
@@ -2185,11 +1872,8 @@ function render() {
     }
     n.appendChild(c); items++;
   }
-  // An `uncertain` pane is alive, mid-turn, and has emitted nothing for
-  // minutes. It is not blocked on anything, so it carries no action — but it
-  // is exactly the state the operator would otherwise never notice, because
-  // the roster's pulsing dot looks identical at three seconds and at forty
-  // minutes. It says so and offers the pane; deciding it is wedged is Craig's.
+  // An `uncertain` pane is alive, mid-turn, and silent for minutes: surfaced with
+  // no action, since whether it is wedged is the operator's call.
   for (const p of panes) {
     if (p.state !== 'uncertain') continue;
     const c = el('div', 'ncard');
@@ -2228,14 +1912,7 @@ function render() {
   railFold(items, panes.reduce((a, p) => a + p.pending.length, 0));
 }
 
-// Every minimize/restore click goes through here — the roster row, the pane
-// header's own button, the minbar chip, and the rail's "restore" action all
-// call it. Dropped during the trim that cut this file from the full Corral's
-// app.js (loadAttention/loadFleet/askResolve sat right next to it and the cut
-// boundary took setMin with them); every CALLER survived the trim, so every
-// click threw a silent ReferenceError in the console instead of doing
-// anything — `node --check` catches a syntax error, not a missing runtime
-// reference, so this shipped unnoticed until Craig actually clicked minimize.
+// Minimize/restore, shared by the roster row, pane header, minbar chip and rail.
 async function setMin(p, flag) {
   try {
     await api('/api/session/minimize', { pane: p.id, minimized: flag });
@@ -2244,32 +1921,15 @@ async function setMin(p, flag) {
 }
 
 /* ── the needs-you rail folds ─────────────────────────────────────────────
- * Craig, 2026-08-01: "needs to be collapsible and collapse when nothing is in
- * it. More screenspace for reading is always appreciated."
- *
- * Two rules, and the second is the one that matters:
- *   1. Empty folds itself. A 300px column reserved for "Nothing." is 300px
- *      of transcript he is not reading.
- *   2. Folded is a STRIP, never `display:none`. The strip carries the count,
- *      and wears the attention colour when an agent is actually blocked. This
- *      is the same rule minimize follows for panes — hiding the surface must
- *      never hide the state, or folding the rail becomes a way to leave an
- *      agent waiting forever while the window looks calm. It is also exactly
- *      how the <1100px media query broke this once: it deleted the rail
- *      outright and every permission went with it.
- *
- * A hand-fold is sticky, because a control that reopens itself is not a
- * control. An auto-fold is not: it follows the contents.
- */
+ * Empty folds itself. Folded is a strip that still shows the count (hot when an
+ * agent is blocked), never display:none. A hand-fold is sticky; an auto-fold
+ * follows the contents. */
 function railFold(items, blocked) {
   const open = S.railShut === null ? items > 0 : !S.railShut;
   $('#app').classList.toggle('railshut', !open);
   $('#rrail').classList.toggle('shut', !open);
   $('#railhead').textContent = `Needs you${items ? ' · ' + items : ''} ▾`;
-  // Always a digit, including 0 (Craig, DESIGN-2: the rail IS the silence
-  // metric). An empty badge and a genuine zero were visually identical when
-  // collapsed — measured 2026-08-22, rival-reviewed unanimously as hiding
-  // the win condition behind a click.
+  // Always a digit, including 0, so an empty rail is distinguishable when collapsed.
   const tab = $('#railtabnum');
   tab.textContent = String(items);
   tab.className = 'railtabnum' + (blocked ? ' hot' : '') + (items ? '' : ' zero');
@@ -2292,18 +1952,11 @@ function wireRail() {
   $('#railtab').onclick = () => set(false);
 }
 
-// Resolve is a dialog, not a button, ON PURPOSE. A rail where one tap closes a
-// card gets that tap used on every card — measured, 2026-08-01. The evidence
-// box is the friction, and the server refuses anything under 12 characters
-// whatever this form does.
 /* ── data ────────────────────────────────────────────────────────────── */
 let refreshSeq = 0;
-/* ── seen: what a human actually had in front of them (P0-e') ─────────────
- * The hub turns an unseen `permission` / `dead` into a desktop notification
- * after a short grace. An open stream is not a pair of eyes — a background
- * tab keeps one — so this reports only while the page is VISIBLE and
- * FOCUSED, and only seqs this tab has rendered. Throttled: one batch per
- * SEEN_MS at most, one POST per pane whose seq moved. */
+/* ── seen ────────────────────────────────────────────────────────────────
+ * Report seqs a human actually had on screen (page visible and focused), so the
+ * hub can skip notifying them. Throttled to one batch per SEEN_MS. */
 const SEEN = new Map();
 const SEEN_MS = 1000;
 let seenTimer = null;
@@ -2324,18 +1977,12 @@ function markSeen() {
 }
 
 async function refresh() {
-  // Ask only for events past what we already hold. Replacing the map wholesale
-  // was the other half of the reload bug: a snapshot taken while a turn was
-  // streaming clobbered locally-received events with a staler server view.
+  // Ask only for events past what we already hold, so a snapshot cannot clobber
+  // newer locally received events.
   const since = {};
   for (const [id, p] of S.panes) since[id] = p.seq || 0;
-  // refresh() is called from a dozen unrelated places -- a user action and an
-  // SSE-driven refresh can fire back to back, and two concurrent /api/state
-  // requests are not guaranteed to RESOLVE in the order they were sent. An
-  // older response landing after a newer one used to win outright, silently
-  // reverting any pane the newer response had already discovered. Only the
-  // most recently STARTED call is allowed to apply its result, whichever
-  // order the network hands the responses back.
+  // Only the most recently started call applies its result: concurrent /api/state
+  // responses can resolve out of order.
   const seq = ++refreshSeq;
   let d;
   try {
@@ -2384,9 +2031,8 @@ function connect() {
   };
   es.onerror = () => {
     $('#conn').textContent = 'reconnecting…'; $('#conn').className = 'conn off';
-    // A 401 on reconnect is TERMINAL for EventSource (WHATWG): it stops
-    // retrying and stays CLOSED. Ask the hub once whether we are still paired
-    // rather than sitting on "reconnecting…" forever (2026-09-24 review).
+    // A 401 on reconnect closes EventSource for good: check once whether we are
+    // still paired rather than showing "reconnecting…" forever.
     if (es.readyState === EventSource.CLOSED) {
       api('/api/state').catch(e => { if (e.status === 401) relock(); });
     }
@@ -2417,20 +2063,15 @@ function connect() {
       render();
       return;
     }
-    // The server emits this when it had to throw away our backlog because this
-    // browser fell behind. Everything after a drop is untrustworthy — a lost
-    // `permission` followed by a delivered `turn_end` reads as `ready` for a
-    // pane that is actually blocked — so refetch rather than carry on.
+    // The server dropped our backlog because this browser fell behind: refetch,
+    // since anything after a drop is untrustworthy.
     if (ev.kind === 'resync') { refresh().catch(() => {}); return; }
     const p = S.panes.get(ev.pane);
     if (!p) { refresh(); return; }        // a pane we don't know yet
     const last = p.events.length ? p.events[p.events.length - 1].seq : (p.seq || 0);
     if (ev.seq <= last) return;                 // already have it
-    // A GAP means events went missing between the server and here. The old
-    // check only rejected duplicates, so a gap was accepted silently and the
-    // pane's state was then derived from a partial story. Debounced: a burst
-    // of events arriving mid-gap used to fire one concurrent refresh() PER
-    // event (each still sees the same stale `last`), flooding the server.
+    // A gap means events went missing: refetch rather than derive state from a
+    // partial story. Debounced so a burst does not fire one refresh per event.
     if (last && ev.seq > last + 1) {
       if (!S.refreshing) { S.refreshing = true; refresh().catch(() => {}).finally(() => { S.refreshing = false; }); }
       return;
@@ -2438,11 +2079,7 @@ function connect() {
     p.events.push(ev);
     // It just spoke: its age restarts on this browser's clock (paneAge).
     p.idleS = 0; p._idleAt = Date.now();
-    // The cap is a ceiling on ONE turn's live growth, not on history "load
-    // earlier" (below) just fetched from disk -- the old fixed 4000 deleted
-    // exactly the events a click just loaded, the instant the next live
-    // event arrived. Float the floor to whatever's already loaded, bounded
-    // so a long run of loads still can't grow the ring without limit.
+    // Cap live growth without dropping history just loaded from disk; bounded.
     const cap = Math.min(20000, Math.max(4000, p.events.length - 1));
     if (p.events.length > cap) p.events.splice(0, p.events.length - cap);
     p.seq = ev.seq || p.seq || 0;
@@ -2452,19 +2089,14 @@ function connect() {
       p.pending = p.pending.filter(x => x !== d.requestId);
       p.state = p.pending.length ? 'needs-you' : 'busy';
     }
-    // The server clears `pending` when a request times out or the agent dies.
-    // The browser did not, so the rail kept offering buttons for a request
-    // nothing was waiting on any more, and the pane stayed `needs-you`
-    // forever. A fix that only landed on one side of the wire is half a fix.
+    // Mirror the server: an expired request is no longer pending.
     if (ev.kind === 'permission_expired') {
       p.pending = p.pending.filter(x => x !== d.requestId);
       refresh().catch(() => {});          // server owns what the state is now
     }
     if (ev.kind === 'paused') { p.state = 'detached'; p.pending = []; }
     if (ev.kind === 'user') { p.state = 'busy'; p.turnVia = d.via || null; }
-    // A peer message starts a turn exactly as a human's does; without this
-    // the roster and title said `your turn` for the whole of a peer-driven
-    // turn while the server said busy (DESIGN-5 section 7, T7.18).
+    // A peer message starts a turn just as a human's does.
     if (ev.kind === 'peer') { p.state = 'busy'; p.turnVia = 'peer'; }
     // ask_human: the agent raised (or replaced) its question; a human turn,
     // a close or the agent's death closed it. The server owns both.
@@ -2476,8 +2108,7 @@ function connect() {
     if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; p.deadCause = d.cause || null; }
     if (ev.kind === 'closed') { p.state = 'dead'; p.error = null; refresh(); }
     if (ev.kind === 'ready') p.state = 'ready';
-    // snapshot()'s observed edges (busy→uncertain, poll()-detected dead):
-    // the server-side mutation now broadcasts, and this is the receiving end.
+    // Server-observed state edges (busy→uncertain, detected dead).
     if (ev.kind === 'state' && d.state) p.state = d.state;
     if (ev.kind === 'resumed') { p.state = 'ready'; refresh(); }
     if (ev.kind === 'renamed') p.title = d.title;
@@ -2487,21 +2118,16 @@ function connect() {
       if (d.effort) p.effort = d.effort;
       if (d.config) p.config = d.config;
     }
-    // The command list arrives once, unprompted, just after session/new. The
-    // event carries only a count -- 70 names and descriptions replayed on
-    // every reload is transcript bloat -- so pull the list itself from state.
+    // The commands event carries only a count; pull the list from state.
     if (ev.kind === 'commands') refresh();
     if (ev.kind === 'note') toast(d.text, true);
     render();
   };
 }
 
-/* ── Rigs… (DESIGN-5 S12, ported in DESIGN-6 S1) ──────────────────────────
- * The server does everything: preflight, the per-seat work, and the ONE
- * rendering of each outcome (corral_core/rigs.render). This dialog lists,
- * saves, removes and brings a rig up, and shows the server's lines verbatim
- * -- as text, never markup -- one row per seat. A refused rig shows every
- * reason and started nothing. */
+/* ── Rigs ────────────────────────────────────────────────────────────────
+ * The server does preflight, per-seat work and renders each outcome; this dialog
+ * lists, saves, removes and brings rigs up, showing those lines as text. */
 const RIG_PROBLEM = new Set(['failed', 'withheld', 'not-restored']);
 
 function rigOutcomeRows(r) {
@@ -2523,13 +2149,9 @@ function rigRefusedRows(e) {
   return rows;
 }
 
-/* DESIGN-6 S4: Sign in starts the VENDOR's own login (`claude auth login`) in a
- * window on the hub's screen. The hub never sees a URL, code or token; these
- * functions only ask it to open the window and say what became of it.
- *
- * `/login` typed into the composer is a sign-in only where it cannot mean
- * anything else: a Claude pane that died of its login. Anywhere else it is
- * sent as typed, exactly as before. */
+/* Sign in runs the vendor's own login (`claude auth login`) in a window on the
+ * hub's screen; the hub never sees a URL, code or token. `/login` in the composer
+ * is a sign-in only on a Claude pane that died of its login. */
 function isLoginCommand(p, text) {
   return String(text || '').trim().toLowerCase() === '/login' && !!p &&
          p.agent === 'claude' && p.state === 'dead' && p.deadCause === 'auth';
@@ -2566,12 +2188,8 @@ function loginLine(cl) {
   return cl.why ? `${what}: ${cl.why}` : what;
 }
 
-/* What Save would write and what Up would refuse, from the panes on screen
- * (DESIGN-6 S2). Both mirror the server (rigs.save, rigs.preflight) so the
- * dialog can say it BEFORE the click: a pane counts as seated when it holds
- * its seat (a withheld seat is not saved), and a seat is live when its holder
- * is neither dead nor detached. The client never blocks Up on this -- the
- * server's preflight is the authority; the marker is only a forecast. */
+/* Forecasts what Save would write and what Up would refuse, mirroring the server's
+ * rigs.save / rigs.preflight. Advisory only: the server's preflight decides. */
 function rigSaveHint(panes) {
   const seated = panes.filter(p => p.seat).map(p => '@' + p.seat);
   const unseated = panes.length - seated.length;
@@ -2685,10 +2303,7 @@ function wireRigDialog() {
 }
 
 /* ── new-conversation dialog ─────────────────────────────────────────── */
-// Descriptions are the agent's own, from session/new's configOptions — not my
-// paraphrase. The first version claimed auto meant "nothing will ask", which
-// was simply wrong: auto runs a classifier and still escalates what it will
-// not approve.
+// Posture descriptions, matching the agent's own configOptions wording.
 const HINTS = {
   strict: 'Prompts on dangerous operations. Most approvals land in your rail.',
   edits: 'File edits apply without asking; commands and network still ask.',
@@ -2696,8 +2311,7 @@ const HINTS = {
 };
 function wireDialog() {
   const dlg = $('#newdlg');
-  // Roles (roles.py): fetched each time the dialog opens — a role file edited
-  // a minute ago must show up without a reload. A role with a lane selects it.
+  // Roles are fetched each time the dialog opens; a role with a lane selects it.
   const fillRoles = async () => {
     const sel = $('#f-role'), hint = $('#rolehint');
     let d = { roles: [] };
@@ -2723,12 +2337,8 @@ function wireDialog() {
     }
   };
   $('#new').onclick = () => {
-    // Agents that belong to a GROUP collapse to one entry (Craig, 2026-08-31:
-    // "consolidate the SSH connections under one main SSH tab and then break it
-    // out into each individual session if we choose SSH"). One row per box meant
-    // the handful of lanes that are genuinely different kinds of thing were
-    // outnumbered by machines. `group:<id>` is a UI-only sentinel — the real
-    // lane key is resolved from the host picker before anything is submitted.
+    // Agents in a GROUP collapse to one entry. `group:<id>` is a UI-only sentinel,
+    // resolved to the real lane key from the host picker before submit.
     const groups = S.agentGroups || {};
     const sel = $('#f-agent'); sel.innerHTML = '';
     const seen = new Set();
@@ -2751,9 +2361,7 @@ function wireDialog() {
       o.value = a.key; o.disabled = !a.available;
       sel.appendChild(o);
     }
-    // Which member of the selected group, when one is selected. Members keep
-    // their own availability + reason here, so a destroyed box still shows up
-    // greyed with why rather than vanishing.
+    // The group's members, each greyed with its own reason when unavailable.
     const fillHost = () => {
       const v = $('#f-agent').value;
       const gid = v.startsWith('group:') ? v.slice(6) : null;
@@ -2788,26 +2396,19 @@ function wireDialog() {
         si.appendChild(signInButton('picker'));
       }
     }
-    // Land on the FIRST group's first live member (today: Agents → Claude), so
-    // reorganising the menu costs nothing on the overwhelmingly common path —
-    // open the dialog, press Start. A grouping that adds a click to the default
-    // case would be a worse dialog wearing a tidier one's clothes.
+    // Select the first enabled option, so the common path is open and press Start.
     const firstOpt = sel.options?.find?.(o => !o.disabled)
                   || [...(sel.options || [])].find(o => !o.disabled);
     if (firstOpt) sel.value = firstOpt.value;
     $('#f-cwd').value = S.lastCwd || S.defaultCwd || '~';
-    // Real directories on the host, so choosing one does not require already
-    // knowing its absolute path. The input stays free text — this only means
-    // the common cases are one click away instead of typed from memory.
+    // Directory suggestions; the input stays free text.
     const dl = $('#cwdlist'); dl.innerHTML = '';
     for (const d of S.cwdSuggestions || []) {
       const o = document.createElement('option'); o.value = d;
       dl.appendChild(o);
     }
-    // Model/effort options come from the server's remembered catalog for the
-    // SELECTED agent, not from a live pane. Scraping a live pane meant that
-    // with nothing running -- i.e. every fresh start -- the pickers offered
-    // only "Default" and the first conversation could not choose a model.
+    // Model/effort options come from the server's catalog for the selected agent,
+    // so they work with nothing running.
     const fillCfg = () => {
       const cat = (S.catalog || {})[chosenAgent()] || {};
       for (const [sel, cid, hintSel] of
@@ -2818,19 +2419,12 @@ function wireDialog() {
         const entry = cat[cid] || {};
         const opts = entry.options || [];
         if (!opts.length && entry.value) {
-          // A disabled dropdown next to a working one reads as broken, not
-          // explained -- Craig's "issue with the Grok model picker" report,
-          // root-caused by the 2026-08-23 bugbash panel (all 3 agreed):
-          // Grok really does run one fixed model, Corral really does know
-          // which one, and a picker offering nothing to pick was the wrong
-          // affordance for that fact. Name it instead of graying it out.
+          // The agent runs one fixed model: name it instead of a disabled picker.
           label.style.display = 'none';
           hint.textContent = `${entry.name || cid}: ${entry.value} — set by ` +
             `the agent, not choosable here.`;
         } else if (!opts.length) {
-          // Honest empty state: we have never seen this agent's list at all
-          // (distinct from the case above, which HAS seen it and knows there
-          // is truly nothing to pick).
+          // Never seen this agent's list: offer only the agent's default.
           label.style.display = '';
           hint.textContent = '';
           const o = el('option', null, 'Default (agent decides)'); o.value = '';
@@ -2839,16 +2433,8 @@ function wireDialog() {
           label.style.display = '';
           hint.textContent = '';
           node.disabled = false;
-          // A real options list with no explicit "leave it to the agent"
-          // entry left the browser defaulting the <select> to its FIRST
-          // option -- and the dialog always sends `.value` on close, so
-          // just opening the dialog and clicking Start (never touching this
-          // control) silently submitted an explicit want_model/want_effort
-          // Craig never chose. Harmless when the adapter's own list already
-          // self-describes a default choice (Claude's "Default
-          // (recommended)" does, value "default" round-trips correctly);
-          // real for any adapter that only lists concrete choices (Codex's
-          // does). Found 2026-08-23 bugbash panel (GPT-5.6-sol).
+          // Add an explicit "agent decides" entry unless the list has its own
+          // default; otherwise pressing Start would submit the first option.
           const hasOwnDefault = opts.some(o => /^default\b/i.test(o.name || ''));
           if (!hasOwnDefault) {
             const def = el('option', null, 'Default (agent decides)'); def.value = '';
@@ -2862,20 +2448,15 @@ function wireDialog() {
         }
       }
     };
-    // Do not offer a posture Corral cannot impose. Only agents launched
-    // through a CLAUDE_CONFIG_DIR obey it; for the rest the picker was a
-    // control that did nothing and then displayed its imaginary result.
+    // Do not offer a posture Corral cannot impose (only lanes launched through a
+    // CLAUDE_CONFIG_DIR obey it).
     const fillPosture = () => {
       const a = S.agents.find(x => x.key === chosenAgent()) || {};
       const sel = $('#f-posture'), hint = $('#posturehint');
       if (a.postureEnforced === false) {
         sel.disabled = true;
-        // Blank it, do not merely grey it. The close handler reads `.value`,
-        // so a leftover `strict` from the previously selected lane was posted
-        // for an agent nothing can make strict — the same imaginary result
-        // this control was disabled for, arriving through a different door.
-        // Empty means "the lane's own default", which is the truth; the close
-        // handler then omits the key entirely.
+        // Blank it, not just grey it: the close handler reads `.value`, and empty
+        // means the lane's own default (the key is then omitted).
         sel.value = '';
         hint.textContent = `${a.label} manages its own permissions — Corral ` +
                            `cannot set this, and will not pretend it did.`;
@@ -2887,10 +2468,7 @@ function wireDialog() {
     };
     // Order matters: fillHost resolves which lane the other two describe.
     $('#f-agent').onchange = () => { fillHost(); fillCfg(); fillPosture(); };
-    // Switching host inside a group changes the lane, so the model/posture
-    // panels have to follow it — a stale "Default (agent decides)" left over
-    // from the previous host is the same lying control this dialog keeps
-    // getting fixed for.
+    // Switching host changes the lane, so model and posture follow it.
     $('#f-host').onchange = () => { fillCfg(); fillPosture(); };
     fillHost();
     fillCfg();
@@ -2901,26 +2479,20 @@ function wireDialog() {
     dlg.showModal();
   };
   $('#f-posture').onchange = e => { $('#posturehint').textContent = HINTS[e.target.value]; };
-  // "Later…" (schedule.py, 2026-09-29): with a time set, Start ARMS the
-  // conversation instead of opening it — the same form posted to
-  // /api/session/schedule/add. Without a time it is Start, now, as before.
+  // With a Later time set, Start arms the conversation via schedule/add instead
+  // of opening it.
   dlg.addEventListener('close', async () => {
     if (dlg.returnValue !== 'ok') return;
     const cwd = $('#f-cwd').value.trim();
     S.lastCwd = cwd;
-    // Remember the posture only when it was a CHOICE. On a lane that cannot
-    // enforce one the control is blanked, and storing that emptiness would
-    // quietly forget a `strict` the operator had set on a lane where it means
-    // something.
+    // Remember the posture only when it was a choice, not a blanked control.
     const posture = $('#f-posture').disabled ? '' : $('#f-posture').value;
     if (posture) localStorage.setItem('corral.posture', posture);
     const common = { agent: dlg._chosenAgent(), cwd,
                      model: $('#f-model').value, effort: $('#f-effort').value,
                      role: $('#f-role').value };
-    // ABSENT, not empty. The hub reads `b.get("posture") or DEFAULT_POSTURE`
-    // either way, but a key that is not there cannot be misread later as "the
-    // operator chose nothing on purpose" — and the stored meta is the thing
-    // 244 of 446 panes were wrong about.
+    // Omit posture rather than send it empty, so it is never read as a deliberate
+    // "none".
     if (posture) common.posture = posture;
     if ($('#f-quick').checked) {
       const a = S.agents.find(x => x.key === common.agent) || {};
@@ -2966,8 +2538,7 @@ async function startConversation(common) {
   try {
     const d = await api('/api/session/new', common);
     S.panes.set(d.pane.id, d.pane);
-    // Starting a conversation IS focusing it — otherwise the pane you just
-    // opened is not the one ⌘K would attach a note to.
+    // Starting a conversation focuses it, so ⌘K attaches to it.
     S.focus = d.pane.id;
     render();
     if (d.pane.state === 'dead') toast('agent failed to start: ' + (d.pane.error || ''), true);
@@ -2984,10 +2555,8 @@ function defaultAgent() {
   return (S.agents || []).find(a => a.available) || null;
 }
 
-// ⚡ — the dialog's defaults, without the dialog. Model and effort are left to
-// the agent (the dialog's own default), no role, posture as last chosen.
-// The saved ⚡ preset, if its lane still exists and can start. A preset whose
-// lane is down does NOT silently become a different agent: it says so.
+// ⚡ starts the saved preset, or the dialog's defaults (agent's model/effort, no
+// role, last posture). A preset whose lane is down says so rather than switching.
 function quickPreset() {
   try { return JSON.parse(localStorage.getItem('corral.quick') || 'null'); }
   catch (e) { return null; }
@@ -3024,17 +2593,16 @@ async function quickStart() {
   await startConversation(common);
 }
 
-/* ── port: carry a conversation to another lane (port.py) ────────────────
- * The preview is the EXACT pack; Send posts its sha and the hub recomposes
- * and refuses if the transcript has grown since (P17). */
+/* ── port: carry a conversation to another lane ───────────────────────────
+ * The preview is the exact pack; Send posts its sha and the hub refuses if the
+ * transcript has grown since. */
 async function openPort(src) {
   const dlg = $('#portdlg'), sel = $('#p-agent'), go = $('#p-go');
   sel.replaceChildren();
   for (const a of S.agents.filter(a => a.available && !a.key.startsWith('host:'))) {
     const o = el('option', null, a.label); o.value = a.key; sel.appendChild(o);
   }
-  // A seat does not travel (DESIGN-5 S6 v1): the name stays with this pane,
-  // and the new one starts unaddressable until someone names it.
+  // A seat stays with this pane; the new one starts without one.
   const seatNote = $('#p-seatnote');
   if (seatNote) seatNote.textContent = src.seat
     ? `@${src.seat} stays with this pane — the new one starts without a seat.` : '';
@@ -3064,27 +2632,10 @@ async function openPort(src) {
   await load();
 }
 
-/* ── ⌘K — the one way to get anywhere ──────────────────────────────────────
- * Light has ONE room, so the palette is not a shortcut past a nav bar the way
- * it is in the full Corral — it IS the navigation. That means it has to search
- * everything in one ranked list: the panes you have open, the conversations
- * you closed, and your own notes.
- *
- * Local sources match with zero latency because they are already in memory;
- * content is debounced and folds in when it lands, so typing never waits on
- * the index. A dropped or slow /api/search degrades the palette to its local
- * matches instead of emptying it.
- *
- * WHAT ACTIVATING A CONTENT HIT DOES — and why it isn't "open the page":
- * upstream's Library renders the note in a room. Light never renders your
- * content in the browser at all (see content.py's docstring: that is what
- * lets the whole escape-everything renderer stay deleted). So a hit ATTACHES
- * instead — the server decides whether that means a path reference or a
- * quoted excerpt, based on whether the target lane can read a file itself.
- *   Enter       attach to the focused pane's composer
- *   ⇧Enter      open a NEW pane in that file's directory, then attach
- * Nothing is sent either way. It lands in the box; you read it and press send.
- */
+/* ── ⌘K palette ──────────────────────────────────────────────────────────
+ * Light's navigation: one ranked list of open panes, closed conversations and
+ * notes. A note hit attaches to a composer (Enter: focused pane; ⇧Enter: new
+ * pane in its directory) and is never sent. */
 const PAL = { sel: 0, rows: [], t: null, seq: 0, status: null };
 
 function openPalette() {
@@ -3093,26 +2644,12 @@ function openPalette() {
   paletteResults('');
   $('#palette').showModal();
   requestAnimationFrame(() => q.focus());
-  // Fetched once per open, not per keystroke: it is only needed to explain an
-  // EMPTY result, and explaining that badly ("no results") is the whole
-  // difference between "nothing matches" and "you never pointed me at
-  // anything".
+  // Fetched once per open, to explain an empty result.
   api('/api/content/status').then(s => { PAL.status = s; }).catch(() => {});
 }
 
-/* Which pane an attach lands in.
- *
- * S.focus alone is wrong, and measured wrong: it is only set by clicking a
- * roster row, so with exactly one conversation open — the overwhelmingly
- * common case, and the whole shape of a one-room app — every content hit
- * offered "open a new pane" while the pane you were plainly looking at sat
- * right there. An attach target that ignores the only pane on screen is a
- * feature explaining itself to a user who can see the answer.
- *
- * A minimized, detached, dead, or SSH pane is never the target: attaching
- * into a composer that is not on screen, or into a shell command line, is a
- * message you cannot see or a command you did not mean to type.
- */
+/* Which pane an attach lands in: the focused pane, else the only usable one.
+ * Never a minimized, detached, dead or shell pane. */
 function attachTarget() {
   const focused = S.panes.get(S.focus);
   const usable = p => !p.minimized && p.state !== 'dead' &&
@@ -3130,24 +2667,20 @@ function paletteResults(query) {
   const rows = [];
   const focused = attachTarget();
 
-  // Action rows first, as in full Corral (rooms, actions, then panes): a
-  // verb's own name must reach it -- "rig" + Enter used to focus a pane
-  // titled rig-b, because panes ranked above the Rigs row (DESIGN-6 S2b).
+  // Action rows first, so a verb's own name reaches it before a pane title.
   if (!needle || 'new conversation'.includes(needle)) {
     rows.push({ kind: 'action', label: 'New conversation', sub: 'action' });
   }
   if (!needle || 'what the agents did digest'.includes(needle)) {
     rows.push({ kind: 'digest', label: 'What the agents did — last 24h', sub: 'digest' });
   }
-  // Light has no PAL_ACTIONS table; the one verb full Corral keeps there is
-  // pushed inline, matched the same way (by its label).
+  // The Rigs verb, matched by its label.
   const rigsRow = { kind: 'rigs', label: 'Rigs · save or bring up your seats', sub: 'rigs' };
   if (!needle || rigsRow.label.toLowerCase().includes(needle)) rows.push(rigsRow);
 
   for (const [id, p] of S.panes || []) {
     const label = p.title || p.label;
-    // A seat is searchable with or without its @ (DESIGN-5 S6): "revi" and
-    // "@revi" both find @reviewer.
+    // A seat is searchable with or without its @.
     const seat = p.seat ? '@' + p.seat : '';
     if (!needle || label.toLowerCase().includes(needle)
         || (p.cwd || '').toLowerCase().includes(needle)
@@ -3166,13 +2699,9 @@ function paletteResults(query) {
   renderPalette(rows.slice(0, 30), needle);
   if (needle.length < 2) return;
 
-  // Debounced, and guarded by a sequence number: keystrokes outrun the
-  // network, and an older response landing after a newer one would repaint
-  // the list with results for a query that is no longer in the box.
+  // Debounced and sequence-guarded so a stale response cannot repaint the list.
   PAL.t = setTimeout(async () => {
-    // Two sources, each allowed to fail alone: notes (/api/search) and what
-    // was SAID in any pane, live or archived (/api/session/search,
-    // transcripts.py). One broken index must not empty the other's rows.
+    // Notes and pane transcripts are searched separately; either may fail alone.
     const [d, t] = await Promise.all([
       api('/api/search?q=' + encodeURIComponent(needle)).catch(() => ({ hits: [] })),
       api('/api/session/search?q=' + encodeURIComponent(needle)).catch(() => ({ hits: [] }))]);
@@ -3180,9 +2709,8 @@ function paletteResults(query) {
     const hits = (d.hits || []).map(h => ({
       kind: 'content', label: h.title, id: h.id,
       sub: h.corpus, snippet: h.snippet,
-      // The pane this would attach to, decided when the row is BUILT so the
-      // row can say what it will do. `focused` may be undefined — the row
-      // then offers to open a pane, which is the honest fallback.
+      // The attach target, decided at build time so the row can say what it does;
+      // undefined means it offers to open a pane.
       pane: focused }));
     const said = (t.hits || []).slice(0, 15).map(h => ({
       kind: 'said', label: h.title, paneId: h.pane, closed: h.closed,
@@ -3199,10 +2727,7 @@ function renderPalette(rows, needle, contentError) {
   res.innerHTML = '';
   if (contentError) res.appendChild(el('div', 'palnote', contentError));
   if (!rows.length) {
-    // An empty palette has two very different causes and they need different
-    // sentences. A bare "Nothing matches." on a box with no configured roots
-    // is a lie by omission — it says your query failed when the truth is the
-    // index is empty.
+    // Distinguish "nothing matches" from an empty or unconfigured index.
     const s = PAL.status;
     if (s && !(s.roots || []).length) {
       res.appendChild(el('div', 'calm', s.error
@@ -3220,18 +2745,14 @@ function renderPalette(rows, needle, contentError) {
     row.appendChild(el('span', 'pill corp', r.sub));
     const t = el('div', 'palt');
     t.appendChild(el('span', 't', r.label));
-    // The snippet is FILE-DERIVED TEXT on an authed control surface, so it is
-    // set as textContent by el() and never parsed as markup (P20). This is
-    // the only content-derived string the page renders at all.
+    // The snippet is file-derived text: set via textContent, never parsed as markup.
     if (r.snippet) t.appendChild(el('span', 'palsnip', r.snippet));
     row.appendChild(t);
     if (r.kind === 'content') {
       row.appendChild(el('span', 'palhint',
         r.pane ? '↵ attach · ⇧↵ new pane' : '↵ new pane here'));
     } else if (r.kind === 'pane') {
-      // Quote is offered only when there is somewhere for the words to go
-      // that is not the row's own pane; a hint for an action that would
-      // refuse is a lie in small type.
+      // Offer quote only when there is another pane for the words to go to.
       const t = attachTarget();
       row.appendChild(el('span', 'palhint',
         t && t.id !== r.paneId && !r.ssh
@@ -3257,8 +2778,8 @@ async function activatePalette(row, newPane) {
     return focusPane(row.paneId);
   }
   if (row.kind === 'digest') {
-    // Mechanical, counted from events — no model. Composition, not dispatch:
-    // it lands in a composer (or the clipboard), never sent by itself.
+    // A mechanical digest counted from events; lands in a composer or the
+    // clipboard, never sent.
     let d;
     try { d = await api('/api/session/digest?hours=24'); }
     catch (e) { return toast(e.message, true); }
@@ -3286,18 +2807,14 @@ async function activatePalette(row, newPane) {
   await attachContent(row.id, target ? target.id : null);
 }
 
-/* Attach a note to a pane's composer — or to a new pane opened where it
- * lives. The SERVER decides what the inserted text is (a path for a lane with
- * tools, a quoted excerpt for one without); this only has to put it in the
- * right box and leave the cursor after it. */
+/* Attach a note to a pane's composer, or to a new pane opened in its directory.
+ * The server decides the text (a path for a lane with tools, else an excerpt). */
 async function attachContent(id, paneId) {
   let d;
   try { d = await api('/api/content/attach', { id, pane: paneId || '' }); }
   catch (e) { return toast(e.message, true); }
   if (!paneId) {
-    // No pane to attach to (none focused, or ⇧↵). Open one where the file
-    // lives — the directory is the context an agent with tools actually
-    // needs, and it is the same create a click on New makes.
+    // No pane to attach to: open one in the file's directory.
     try {
       const from = attachTarget();
       const agent = (from && from.agent)
@@ -3309,9 +2826,7 @@ async function attachContent(id, paneId) {
       S.panes.set(r.pane.id, r.pane);
       paneId = r.pane.id;
       render();
-      // The new pane is a different LANE from the one the text was computed
-      // for, so ask again rather than pasting an excerpt into a pane that can
-      // read the file perfectly well (or a bare path into one that cannot).
+      // Ask again: the new pane's lane decides path vs excerpt.
       d = await api('/api/content/attach', { id, pane: paneId });
     } catch (e) { return toast(e.message, true); }
   }
@@ -3331,8 +2846,7 @@ function insertIntoComposer(paneId, text, msg) {
     if (!box) return toast('attached, but that pane has no composer', true);
     box.value = text + (box.value || '');
     box.focus();
-    // Cursor AFTER the inserted text: you are about to type the question, and
-    // landing at position 0 means typing in front of your own attachment.
+    // Cursor after the inserted text, ready for the question.
     const at = text.length;
     box.setSelectionRange(at, at);
     box.dispatchEvent(new Event('input', { bubbles: true }));
@@ -3364,15 +2878,11 @@ const CROSSFEED_DEFAULT = 'Round two. Below are the other arms\' answers to the 
   + 'does your own answer change? Say what you now reject and end with your '
   + 'revised answer.';
 
-/* Round two of a panel: each composable pane gets every other's last answer
- * under one preamble. The preamble is shown for editing before anything is
- * sent, and the composed prompt lands in every pane as its own user turn, so
- * the transcript shows exactly what each arm was given. */
+/* Round two of a panel: each composable pane gets every other's last answer under
+ * an editable preamble, sent as its own user turn. */
 async function crossfeed() {
-  // An arm is a pane that has been ASKED something. A fresh pane on the
-  // wall is not one, and feeding it would only earn the server's refusal;
-  // it is left out here and named in the confirmation so nothing is
-  // dropped silently.
+  // Only panes that have been asked something take part; the rest are named in
+  // the confirmation.
   const all = composablePanes();
   const asked = (p) => (p.events || []).some(e => e.kind === 'user');
   const panes = all.filter(asked);
@@ -3419,9 +2929,7 @@ function wirePalette() {
       if (PAL.rows[PAL.sel]) activatePalette(PAL.rows[PAL.sel], e.shiftKey);
     }
   };
-  // Global, and deliberately NOT swallowed inside a composer: ⌘K is how you
-  // reach a note while writing the message that needs it, which is the whole
-  // point of attach. Escape is the dialog's own.
+  // Global, and not swallowed inside a composer, so ⌘K works while writing.
   document.addEventListener('keydown', e => {
     for (const k of KEYS) {
       if (k.match && k.match(e)) { e.preventDefault(); k.run(); return; }
@@ -3429,19 +2937,10 @@ function wirePalette() {
   });
 }
 
-/* ── the keyboard, in one place ──────────────────────────────────────────
- * ONE table. The global key handler dispatches from it and the `?` overlay
- * lists it, so a binding cannot exist without being documented and the
- * overlay cannot advertise a key that does nothing. That second direction is
- * the one that matters: a help screen listing a shortcut the code dropped is
- * worse than no help screen, because it is believed.
- *
- * Entries WITHOUT `match` are bindings owned by a control that already has
- * focus (the composer, the find bar). They are documented here and
- * implemented there — the table cannot dispatch them, because the composer
- * has to see the event first. Each says where it applies, so nobody presses
- * Enter on the roster and wonders why nothing sent.
- */
+/* ── the keyboard ────────────────────────────────────────────────────────
+ * One table: the global handler dispatches from it and the `?` overlay lists it.
+ * Entries without `match` are handled by the focused control (composer, find
+ * bar) and only documented here. */
 const KEYS = [
   { combo: '⌘K', alt: 'Ctrl+K', what: 'Search conversations and jump to one',
     match: e => (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k',
@@ -3467,9 +2966,7 @@ const KEYS = [
     what: 'Interrupt the running command' },
 ];
 
-/* A key that means "help" must not swallow a question mark someone is
- * typing. Checked by what has focus, not by a flag somebody has to remember
- * to set. */
+/* True when focus is in a text field, so `?` can still be typed there. */
 function isTypingTarget(t) {
   if (!t) return false;
   const tag = (t.tagName || '').toUpperCase();
@@ -3490,8 +2987,7 @@ function toggleKeys(want) {
     row.appendChild(combo);
     const what = el('span', 'keyswhat', k.what);
     row.appendChild(what);
-    // Where it applies, when that is not "anywhere". Silence here means
-    // global, which is the only claim this overlay makes implicitly.
+    // Where it applies; omitted means global.
     if (k.where) row.appendChild(el('span', 'keyswhere', k.where));
     body.appendChild(row);
   }
@@ -3500,8 +2996,7 @@ function toggleKeys(want) {
 
 function wireKeysButton() {
   const b = $('#keysbtn');
-  // A page served without the button wires nothing rather than throwing on
-  // boot — the same posture every other wire* function here takes.
+  // A page without the button wires nothing rather than throwing.
   if (b) b.onclick = () => toggleKeys();
 }
 
@@ -3514,14 +3009,7 @@ function wireMobileActions() {
 }
 
 /* ── focus ───────────────────────────────────────────────────────────────
- * Light has one room, so "open this conversation" is only ever: remember it
- * as focused (the roster keeps it out of "Other" and highlights it) and
- * scroll it into view. The full Corral's version also had to switch rooms
- * first — several call sites there once set `location.hash = '#pane=' + id`
- * instead, a hash nothing routed, so clicking a conversation from the rail
- * silently did nothing. One function, called from everywhere, is the fix
- * that keeps working.
- */
+ * Open a conversation: mark it focused and scroll it into view. */
 function focusPane(id) {
   S.focus = id;
   render();
@@ -3531,11 +3019,8 @@ function focusPane(id) {
 }
 
 /* ── PWA ─────────────────────────────────────────────────────────────── */
-// Registered only so Brave/Chrome will offer "Install app"; it caches nothing
-// (see sw.js). Requires a secure context, so on plain http this silently
-// no-ops — which is why the install affordance may not appear. Reaching Light
-// at http://127.0.0.1:8098 IS a secure context, so the default local bind is
-// also the one where install works.
+// Registered only so the browser offers "Install app"; it caches nothing (see
+// sw.js). Needs a secure context (https or localhost), else it no-ops.
 if ('serviceWorker' in navigator && window.isSecureContext) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
@@ -3552,19 +3037,13 @@ async function start() {
   wireSeat();
   wireKeysButton();
   wireMobileActions();
-  // Stream FIRST, then snapshot. The reverse order left a window between the
-  // snapshot and the EventSource opening in which every event was dropped and
-  // never recoverable — the actual cause of "reload loses running work".
+  // Stream first, then snapshot, so no event falls in the gap between them.
   connect();
   await refresh();
-  // The roster's own clock: a pane that goes quiet must age into `idle`
-  // with no event to prompt a render (DESIGN-5 section 7, T1.7).
+  // Re-check display state periodically so quiet panes age into `idle`.
   setInterval(displayTick, DISPLAY_TICK_MS);
-  // A backgrounded tab has its timers throttled, and Light has no polling
-  // loop left to be throttled — every update arrives on the SSE stream. But a
-  // tab that was asleep long enough for the browser to drop the connection
-  // comes back with a stale view and an `onerror` that may not have fired
-  // yet, so re-sync on the way in rather than trusting the stream survived.
+  // Re-sync when the tab becomes visible: a sleeping tab may have lost the
+  // stream before onerror fired.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') refresh().catch(() => {});
     markSeen();

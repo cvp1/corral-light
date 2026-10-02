@@ -1,35 +1,8 @@
-"""WebAuthn assertion verification for pairing by touching a key (DESIGN-6 S6).
+"""WebAuthn ES256 assertion verification for pairing by touching a key.
 
-Pure functions, standard library only, Python 3.9+. The one thing the
-standard library cannot do -- check an ECDSA P-256 signature -- is handed to
-the `openssl` binary with a fixed argv, a timeout, and a private temp dir that
-is removed whatever happens. Nothing here stores, enrolls or decides policy;
-the hub's auth module does that (S7) and asks this module one question:
-"is this assertion, for this challenge, from this origin, by this known key?"
-
-The credential is WebAuthn ES256 (COSE alg -7) on P-256, user verification
-required, attestation `none`. It is scoped per origin and is separate from any
-SSH signing key.
-
-What this is, and is not (the C threat model):
-  * What it is: convenience, plus protection against actors without a shell.
-    `key-only` is a workflow guard against well-meaning agents using the
-    documented pairing command. It is NOT a boundary.
-  * What it does not stop:
-      - A process running as the same UNIX user can read `session.key` and
-        forge a cookie, and can edit `keys.json`.
-      - Script running on the hub's own origin plus one touch now mints a
-        cookie; before key pairing, a page bug could not pair.
-      - Attestation `none` accepts software authenticators.
-  * What the hub learns is "the authenticator reported presence and
-    verification" -- not that a PIN, specifically, was entered.
-  * The real fix is a controller/worker UID split, which is out of scope.
-
-Signature encoding: ES256 assertion signatures are expected to be ASN.1 DER
-(ECDSA-Sig-Value). [NEEDS VERIFICATION] against a real key: the spec text was
-not fetchable when this was planned, and the real-key vector captured in the
-live key-pairing check settles it. If that vector is raw R||S, the conversion
-and its test go here.
+Pure, stdlib-only; the P-256 signature check shells out to `openssl` with a
+fixed argv, a timeout and a private temp dir. A workflow guard, not a security
+boundary: a process running as the hub's user can still forge a cookie.
 """
 import base64
 import hashlib
@@ -47,7 +20,6 @@ SYSTEM_OPENSSL = "/usr/bin/openssl"   # root-owned where it exists; PATH is the 
 
 # SubjectPublicKeyInfo DER for an uncompressed P-256 point, up to the point
 # itself: SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING (66) }.
-# Proven by probe on 2026-09-30 against OpenSSL 3.6.4 and LibreSSL 3.3.6.
 SPKI_PREFIX = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
 
 FLAG_UP = 0x01              # user present
@@ -61,7 +33,7 @@ KTY_EC2, ALG_ES256, CRV_P256 = 2, -7, 1
 _P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
 _B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
 
-# Every refusal has its own words, so a log line says WHICH check failed.
+# Distinct refusal reasons, one per check.
 WRONG_TYPE = "clientData type is not webauthn.get"
 WRONG_CHALLENGE = "challenge does not match"
 BAD_ORIGIN = "origin not allowed"
@@ -76,7 +48,7 @@ MALFORMED_DER = "signature is not well-formed DER"
 SHORT_AUTH_DATA = "authData shorter than 37 bytes"
 NOT_JSON = "clientData is not JSON"
 OVER_CAP = "clientData over the size cap"
-UNAVAILABLE = "unavailable"   # no openssl, or it would not answer: say so, never pass
+UNAVAILABLE = "unavailable"   # no usable openssl; never passes
 
 
 class Refused(ValueError):
@@ -154,8 +126,7 @@ def cose_to_spki(cose):
 def der_signature_ok(sig):
     """Strict DER shape of ECDSA-Sig-Value: SEQUENCE { INTEGER r, INTEGER s },
     short-form lengths, minimal positive integers of at most 33 bytes, and
-    nothing after. Checked here so a malformed blob is named as such rather
-    than as a failed signature."""
+    nothing after."""
     if not isinstance(sig, (bytes, bytearray)):
         return False
     sig = bytes(sig)

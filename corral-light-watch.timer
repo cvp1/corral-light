@@ -1,6 +1,4 @@
-# Every ten minutes, and once shortly after login. Ten, because the thing it
-# catches (a hub that died or whose observer stopped) is not fixed faster by
-# noticing it sooner than a person can act on the page.
+# Runs the outside watcher every ten minutes, and once shortly after boot.
 [Unit]
 Description=Corral Light — outside watcher every 10 minutes
 

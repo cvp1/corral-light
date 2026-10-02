@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """Small ACP bridge for Google's Antigravity CLI review lane.
 
-Antigravity does not yet expose native ACP.  Corral still needs an ACP peer,
-so this adapter translates each ACP prompt into AGY's documented headless
-``stream-json`` mode and preserves the returned conversation id for later
-turns.  It deliberately runs in ``plan`` mode: this is the review/bug-bash
-lane Craig already uses, and it must not gain an invisible write bypass just
-because AGY cannot send interactive permission cards over ACP yet.
-
-No credential is read or copied.  The official ``agy`` binary owns auth.
+Translates each ACP prompt into AGY's headless ``stream-json`` mode, keeping
+the conversation id for later turns. Runs in ``plan`` mode. No credential is
+read or copied; the official ``agy`` binary owns auth.
 """
 from __future__ import annotations
 
@@ -28,15 +23,7 @@ SESSIONS: dict[str, dict] = {}
 RUNNING: dict[str, subprocess.Popen] = {}
 LOCK = threading.RLock()
 WRITE_LOCK = threading.Lock()
-# CORRAL_LIGHT_STATE, not CORRAL_STATE. This module arrived from the full
-# Corral still reading ITS state dir, which on a host running both builds is a
-# genuine cross-wire and not a cosmetic one: this lane's session records would
-# land in the other product's directory, and CATALOG below is the OTHER
-# Corral's `catalog.json` — so Light's Antigravity picker would be seeded from
-# a model list a different hub negotiated, on a different account, possibly
-# with a different vendor build. Found 2026-08-31 by auditing exactly the
-# question "can both run on one host"; the separate port, cookie, MCP config
-# and codex home were all already right, and this one was not.
+# CORRAL_LIGHT_STATE, not CORRAL_STATE, so it never shares full Corral's state.
 SESSION_DIR = Path(os.environ.get(
     "CORRAL_LIGHT_STATE",
     str(Path.home() / ".local/share/corral-light"))) / "agy-sessions"
@@ -71,8 +58,7 @@ def error(rid, message):
 
 
 def _session_path(sid: str) -> Path:
-    # ACP session ids are generated here as hex, but load input is still
-    # untrusted wire data. Never let it choose a path.
+    # Session ids from the wire are untrusted; never let them choose a path.
     safe = "".join(c for c in str(sid) if c in "0123456789abcdef")
     if safe != sid or not safe:
         raise ValueError("invalid session id")
@@ -133,11 +119,8 @@ def _cached_models() -> list[dict]:
 
 
 def _config_options(session: dict, agy: str) -> list[dict]:
-    # Manager.seed_catalogs owns the live vendor query off Corral's startup
-    # path. Reuse it here: asking AGY again inside session/new occasionally
-    # contends on its own state lock for the full timeout, turning one click
-    # into a 90-second blank pane. A short live fallback covers direct adapter
-    # use before Corral has seeded anything.
+    # Prefer the seeded catalog: a live query in session/new can block on
+    # AGY's state lock. Short live fallback for direct use.
     models = _cached_models() or _models(agy, timeout=15)
     options = []
     if models:
@@ -145,10 +128,8 @@ def _config_options(session: dict, agy: str) -> list[dict]:
         session["model"] = current
         options.append({"id": "model", "name": "Model",
                         "currentValue": current, "options": models})
-    # AGY's catalog IDs encode effort (`gemini-3.7-flash-medium`). Offering a
-    # second independent effort picker let Corral submit contradictory flags,
-    # e.g. model=...-medium plus effort=high, which AGY correctly refuses.
-    # The model picker is the one authority for both dimensions.
+    # No separate effort picker: catalog ids encode effort, and AGY refuses
+    # contradictory flags.
     return options
 
 
@@ -168,19 +149,15 @@ def _emit_text(sid: str, text: str):
 def _prompt_argv(agy: str, prompt: str, session: dict) -> list[str]:
     model = session.get("model") or ""
     argv = [agy, "-p", prompt, "--mode", "plan",
-            # TEMPORARY, explicitly authorized by Craig on 2026-08-31 so the
-            # AGY review lane can be exercised before it has an ACP permission
-            # bridge. Plan mode remains enabled, but AGY tool confirmations are
-            # auto-approved. Remove once approvals can reach Corral's rail.
+            # Temporary until approvals can reach Corral's permission rail;
+            # plan mode stays on.
             "--dangerously-skip-permissions",
             "--output-format", "stream-json",
-            # AGY does not infer its active workspace from the process cwd.
-            # Without this it silently falls back to ~/.gemini/.../scratch.
+            # AGY does not infer its workspace from the process cwd.
             "--add-dir", session["cwd"]]
     if model:
         argv += ["--model", model]
-    # Some non-Gemini catalog entries do not encode effort in their id. Only
-    # those receive the separate flag; encoded model ids must stand alone.
+    # Only model ids that do not encode effort get the separate flag.
     if not re.search(r"-(?:low|medium|high)$", model):
         argv += ["--effort", session.get("effort", "high")]
     if session.get("conversation_id"):
@@ -238,9 +215,7 @@ def _run_prompt(rid, params, agy: str):
         if rc:
             return error(rid, last_error or stderr.strip() or f"AGY exited rc={rc}")
         if not emitted:
-            # AGY print mode can soft-deny a requested tool permission, emit a
-            # SUCCESS result with an empty response, and exit zero. Treating
-            # that as end_turn makes a refused request look like silence.
+            # An empty SUCCESS usually means a soft-denied tool permission.
             return error(rid, last_error or
                          "AGY completed without a response. In the Corral "
                          "review lane this usually means Antigravity requested "
@@ -309,9 +284,7 @@ def _handle(msg, agy: str):
 def main() -> int:
     agy = resolve_agy()
     if not agy:
-        # flush=True: this is the last thing the process says before exiting
-        # 127, and acp.py surfaces the stderr tail as the pane's death reason.
-        # A refusal the operator cannot read is indistinguishable from a crash.
+        # Flushed: the stderr tail becomes the pane's exit reason.
         print("Antigravity unavailable: official agy binary not installed",
               file=sys.stderr, flush=True)
         return 127

@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Seats in the core (DESIGN-5 S6): the grammar and the collision rule.
-
-  T6.2  uppercase, a leading digit, 33 characters, unicode -> refused, with
-        the rule in the message.
-  and   withheld_seats(): two open metas naming one seat -> the EARLIER-created
-        keeps it; a closed meta holds nothing; the answer is a pure function
-        of the files, so it is re-derivable and costs nothing to reverse.
+"""Seat names: the grammar and the collision rule (earliest-created wins).
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
 """
@@ -30,8 +24,7 @@ class TheGrammar(unittest.TestCase):
         self.assertEqual(S.check_seat("  reviewer "), "reviewer")
 
     def test_bad_names_are_refused_with_the_rule(self):
-        """T6.2. Uppercase is REFUSED, not folded: a name silently changed on
-        the way in is not the name the operator typed."""
+        """Invalid names, including uppercase, are refused rather than folded."""
         for bad in ("Reviewer", "2fast", "x" * 33, "révieweur", "has space",
                     "-lead", "under_score", "a.b", "@reviewer"):
             with self.assertRaises(ValueError, msg=bad) as e:
@@ -65,7 +58,7 @@ class TheCollisionRule(unittest.TestCase):
         self.assertEqual(out, {"b": ("x", "a"), "c": ("x", "a")})
 
     def test_a_closed_meta_holds_nothing(self):
-        """T6.4 at the rule: closing a pane frees its name."""
+        """Closing a pane frees its name."""
         out = S.withheld_seats([meta("old", "x", "1", closed=True),
                                 meta("new", "x", "2")])
         self.assertEqual(out, {})
@@ -75,8 +68,7 @@ class TheCollisionRule(unittest.TestCase):
                                            meta("c", "x"), meta("d", "y")]), {})
 
     def test_a_tie_on_created_is_broken_by_id_so_the_answer_is_stable(self):
-        """Two hubs could stamp the same second. The winner must not depend
-        on directory listing order, or two restarts could disagree."""
+        """Equal timestamps break by id, independent of listing order."""
         a = S.withheld_seats([meta("bbb", "x", "same"), meta("aaa", "x", "same")])
         b = S.withheld_seats([meta("aaa", "x", "same"), meta("bbb", "x", "same")])
         self.assertEqual(a, b)

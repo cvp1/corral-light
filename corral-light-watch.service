@@ -1,8 +1,6 @@
-# Corral Light's OUTSIDE watcher — systemd USER oneshot, fired by
-# corral-light-watch.timer. It pages (STATE/DEAD + a desktop notification,
-# quiet 21:00–05:00) and NEVER restarts the hub: a restart kills every live
-# pane's agent, and a stale observer tick is more often one bad pane than a
-# dead hub (resilience review 2026-09-28, P0-d'; Astra and Grok).
+# Corral Light's outside watcher — systemd user oneshot, fired by
+# corral-light-watch.timer. It pages but never restarts the hub (a restart
+# kills every live pane's agent).
 #
 # Install next to corral-light.service:
 #   sed "s|%HERE%|$PWD|" corral-light-watch.service > ~/.config/systemd/user/corral-light-watch.service

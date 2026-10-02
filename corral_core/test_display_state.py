@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
-"""One projection of a pane, and it must not raise.
+"""display_state(): matches the shared table and never raises.
 
-`display_state()` is what the roster, the minimized chips, the pane header,
-the tab title and the TUI's four sections all read. Before it there were three
-copies of the rule and they disagreed: a `ready` pane nobody had looked at in
-two hours sat under YOUR TURN looking exactly like one that had just finished,
-and `document.title` said nothing at all.
-
-Two properties are tested here, and they are different:
-
-  1. THE TABLE (`display_cases.json`) is the contract, shared with the two
-     JavaScript mirrors (`selftest_display.mjs` in each skin). Both languages
-     answer the same cases, so the mirrors cannot drift quietly. Every value
-     in DISPLAY_STATES must be reachable from it.
-  2. IT NEVER RAISES. It is handed a core Pane (`pending` dict, `_gate_hold`,
-     `last_activity`), a Light pane (no `_gate_hold` at all) and test doubles.
-     A projection that throws takes the whole roster down with it, so an
-     object missing everything must still classify.
+`display_cases.json` is shared with the JavaScript mirrors; every value in
+DISPLAY_STATES must be reachable from it. Any pane-like object must classify.
 
     python3 -m unittest discover -s corral_core -p 'test_*.py'
 """
@@ -35,8 +21,7 @@ CASES = json.loads((Path(__file__).resolve().parent / "display_cases.json")
 
 
 class _Pane:
-    """Exactly the attributes a case names, and not one more — the point is
-    that display_state reads what is there rather than what it wishes for."""
+    """Exactly the attributes a case names, and no others."""
 
     def __init__(self, spec):
         for k, v in spec.items():
@@ -59,8 +44,7 @@ class TheSharedTable(unittest.TestCase):
             self.assertIn(got["state"], S.DISPLAY_STATES)
 
     def test_every_declared_state_is_reachable_from_the_table(self):
-        """A value in the enum that no case produces is a value no consumer
-        has ever been shown -- the mirrors could omit it and still pass."""
+        """Every DISPLAY_STATES value is produced by some case."""
         seen = {S.display_state(_Pane(c["pane"]))["state"] for c in CASES["cases"]}
         self.assertEqual(seen, set(S.DISPLAY_STATES))
 
@@ -110,9 +94,7 @@ class WhatItReports(unittest.TestCase):
         self.assertEqual(S.display_state(P(), now=1042.0)["since_s"], 42)
 
     def test_since_s_prefers_the_wires_own_idle_s(self):
-        """The TUI's client-side Pane carries `idle_s` already differenced by
-        the hub; recomputing it from a local clock would be wrong on any host
-        whose time differs from the hub's."""
+        """`idle_s` from the hub wins over a local-clock recomputation."""
         class P:
             state = "busy"
             pending = ()
@@ -121,10 +103,7 @@ class WhatItReports(unittest.TestCase):
         self.assertEqual(S.display_state(P(), now=9e9)["since_s"], 7)
 
     def test_there_is_no_read_receipt_in_the_core(self):
-        """DESIGN-5 section 7. No core source for "has a human read this reply"
-        exists, so the projection must not take one or report one: a core
-        `unread` would be a guess rendered with the face of a measurement.
-        Each surface overlays its own."""
+        """The core projection neither takes nor reports an `unread` flag."""
         import inspect
         self.assertNotIn("unread", inspect.signature(S.display_state).parameters)
 
@@ -135,9 +114,7 @@ class WhatItReports(unittest.TestCase):
         self.assertEqual(set(S.display_state(P())), {"state", "since_s"})
 
     def test_a_detached_pane_is_paused_not_idle(self):
-        """A detached pane never becomes ready without a human resuming it.
-        Filing it under `idle` told anything waiting on it that waiting would
-        work -- and after every hub restart, every pane is detached."""
+        """A detached pane needs a human to resume it, so it shows paused."""
         class P:
             state = "detached"
             pending = ()

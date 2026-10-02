@@ -1,14 +1,8 @@
 #!/usr/bin/python3
 """ledger — a durable, bounded record of every turn a pane accepted.
 
-WHY (resilience review v2, P0-ledger; Astra 2026-09-28)
-    `/api/session/send` answered ok after a VOLATILE queue insert. A hub
-    that died between that ack and the agent finishing the turn left no
-    record that the turn was ever accepted, dispatched, or cut off: the
-    `user` event on disk says what was typed, not whether it ran. Neither a
-    SIGTERM handler (SIGKILL and OOM skip it) nor a socket closes that window.
-    This file does: `accepted` is on disk — flushed AND fsynced — before the
-    send is acknowledged, and every later edge is appended as it happens.
+`accepted` is fsynced before the send is acknowledged; every later edge is
+appended as it happens (append-only JSONL, one file per pane).
 
 STATES, one line per edge, keyed by turn id
     accepted -> dispatched -> completed | interrupted | uncertain
@@ -21,20 +15,10 @@ STATES, one line per edge, keyed by turn id
     uncertain    something in Corral itself failed around the turn; whether
                  the agent ran it is not known.
 
-    Nothing here is ever replayed. A turn left `accepted` or `dispatched`
-    when a hub died is marked `interrupted` by the next boot (recover()) and
-    surfaced in the pane as a note; re-sending it is the operator's call,
-    because a half-run turn re-run is a second set of side effects (P17).
+    Nothing is ever replayed: open turns are marked `interrupted` at the
+    next boot (recover()) and surfaced as a note.
 
-WHY A FILE PER PANE AND NOT A `turns` SECTION IN meta.json
-    meta.json is rewritten whole, atomically, on every human edit. Four
-    edges per turn would mean four full rewrites per turn contending with
-    save_meta's callers, and only one of those edges (`accepted`) needs to
-    be synchronous. An append-only JSONL line is the cheapest durable write
-    there is, and the transcript already set the pattern (events.jsonl).
-
-BOUNDED (P8): the file is folded back to the newest LEDGER_TURNS turns,
-atomically, once it passes LEDGER_MAX_LINES lines.
+Folded back to the newest LEDGER_TURNS turns once past LEDGER_MAX_LINES.
 """
 import hashlib
 import json
@@ -44,11 +28,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-LEDGER_TURNS = 200          # turns kept after a fold: days of normal use per
-                            # pane, and small enough that a fold is one quick read
+LEDGER_TURNS = 200          # turns kept after a fold
 LEDGER_MAX_LINES = LEDGER_TURNS * 5   # ~4 edges per turn plus slack; past this, fold
-LEDGER_TEXT_CHARS = 2000    # of each prompt kept, with its full length and sha256:
-                            # enough to name it in a note, never a second transcript
+LEDGER_TEXT_CHARS = 2000    # prompt prefix kept, alongside full length and sha256
 
 OPEN = ("accepted", "dispatched")
 TERMINAL = ("completed", "interrupted", "uncertain")
@@ -86,13 +68,10 @@ class TurnLedger:
                 self._fold_locked()
 
     def accept(self, text, kind=None):
-        """Record an accepted turn DURABLY and return its id. Raises OSError
-        when that is impossible — the caller must then refuse the send rather
-        than acknowledge a turn nothing recorded.
+        """Record an accepted turn durably and return its id. Raises OSError
+        when that is impossible; the caller must then refuse the send.
 
-        `kind` is "peer" for a message another pane's agent sent (DESIGN-5
-        S7) and absent for the human's, so a turn a restart cut off is named
-        for what it was when recover() reports it."""
+        `kind` is "peer" for a message another pane's agent sent."""
         text = text or ""
         tid = uuid.uuid4().hex[:12]
         rec = {"turn": tid, "state": "accepted", "at": _now(),
@@ -105,8 +84,7 @@ class TurnLedger:
         return tid
 
     def mark(self, tid, state, why=None, **extra):
-        """Append one edge. Never raises: a ledger that cannot write must not
-        take the turn it describes down with it."""
+        """Append one edge. Never raises."""
         if not tid or state not in STATES:
             return
         rec = {"turn": tid, "state": state, "at": _now()}

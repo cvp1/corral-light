@@ -1,11 +1,8 @@
 #!/usr/bin/python3
 """claude_login — start the vendor's own Claude login, in a window you can see.
 
-WHY (DESIGN-6 S4; decision note "corral-starts-vendor-login", 2026-09-30)
-    A lapsed Claude login killed a pane at its first prompt, and the way back
-    was a terminal the operator had to open and a command they had to know.
-    The rule changed from "Corral never runs the login" to "Corral STARTS the
-    vendor's login on your click; it never completes, reads, or relays it".
+Corral starts the vendor's login on the user's click; it never completes,
+reads, or relays it.
 
 WHAT IT DOES
     start(requester, local=...) writes a fixed wrapper script into STATE and
@@ -51,7 +48,7 @@ LOGIN_POLL_S = 5        # the watch thread's pulse
 LOGIN_WATCH_S = 600     # stop watching (never killing) after this
 STARTUP_GRACE_S = 10    # `open` returns before the wrapper process exists
 STATUS_TIMEOUT_S = 15   # `claude auth status` may touch the Keychain
-LEDGER_MAX_LINES = 400  # fold the ledger back to LEDGER_KEEP past this (P8)
+LEDGER_MAX_LINES = 400  # fold the ledger back to LEDGER_KEEP past this
 LEDGER_KEEP = 200
 COMMAND = "claude auth login"
 _REQUESTER_RE = re.compile(r"[^A-Za-z0-9 @._:/()-]")
@@ -71,10 +68,9 @@ def clean_requester(raw):
 def claude_bin(env=None, home=None):
     """The absolute path of the `claude` CLI, or None.
 
-    CORRAL_CLAUDE_BIN when set (and nothing else: a bad override is None,
-    not a quiet fallback), else PATH, else ~/.local/bin/claude — where the
-    vendor's native installer puts it, and a directory launchd's PATH does
-    not include, so a hub run as a service found no CLI (DESIGN-6 F-LB3)."""
+    CORRAL_CLAUDE_BIN when set (a bad override is None, not a fallback), else
+    PATH, else ~/.local/bin/claude (the native installer's location, absent
+    from launchd's PATH)."""
     env = os.environ if env is None else env
     home = Path.home() if home is None else Path(home)
     explicit = env.get("CORRAL_CLAUDE_BIN")

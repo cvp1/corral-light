@@ -2,9 +2,7 @@
 """Launch Google's native Antigravity ACP server with a private file mode.
 
 The vendor server keeps its own OAuth token and conversation state below
-``~/.gemini/antigravity-acp``.  It is deliberately launched directly rather
-than translated through the AGY CLI: ACP messages, permissions, cancellation,
-and session identity remain Google's protocol end to end.
+``~/.gemini/antigravity-acp`` and speaks ACP natively end to end.
 """
 import argparse
 import json
@@ -22,9 +20,8 @@ PRIVATE_UMASK = 0o077
 
 
 def server_argv(binary=None, row=None):
-    """Exact vendor command for the build pinned on this platform. The flags
-    differ by build (install_antigravity_acp.RELEASES, `args`); a host with no
-    row keeps the Linux registration, since nothing was installed there by us."""
+    """Exact vendor command for the build pinned on this platform; a host with
+    no pinned row gets the Linux flags."""
     if row is None:
         from install_antigravity_acp import release_for
         row = release_for()
@@ -85,13 +82,10 @@ def main(argv=None):
         return 0 if ok else 1
     problem = unavailable_reason()
     if problem:
-        # flush=True: the last words before exit 127, and acp.py reports the
-        # stderr tail as the pane's death reason.
+        # Flushed: the stderr tail becomes the pane's exit reason.
         print(f"corral-light: {problem}", file=sys.stderr, flush=True)
         return 127
-    # The vendor creates conversation transcripts itself.  Its default process
-    # umask inherited the login shell (002), leaving those files group-readable.
-    # Set this immediately before exec so all future state is owner-only.
+    # Owner-only umask so the vendor's transcripts are not group-readable.
     os.umask(PRIVATE_UMASK)
     os.execv(str(BINARY), server_argv())
 

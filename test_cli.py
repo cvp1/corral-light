@@ -89,9 +89,9 @@ class TheCli(HubCase):
         self.cli("close", pid)
 
     def test_seat_binds_lists_refuses_and_unbinds(self):
-        """DESIGN-5 S6 from a terminal: `seat` is the same human verb the
-        browser's dialog is, `panes` shows the column, a held name is refused
-        with the holder named, and `-` unbinds."""
+        """`seat` binds, `panes` shows the column, a held name is refused with the
+        holder named, and `-` unbinds.
+        """
         a, b = self.open(), self.open()
         rc, out, err = self.cli("seat", a, "author")
         self.assertEqual((rc, out.strip()), (0, "@author"), err)

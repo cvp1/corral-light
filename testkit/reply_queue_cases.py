@@ -1,14 +1,12 @@
-"""DESIGN-5 S11b -- a bounded reply queue for a waiting pane -- as ONE set of
-cases both products run against their own skin's real drain.
+"""Bounded reply-queue cases for a waiting pane, shared by both products and
+run against each skin's real drain.
 
 Mixed into a TestCase that provides `self.mgr` (a Manager with a `fake` lane
-registered) and `self.agent_dir`: full Corral's `test_peer.ReplyQueue` and
-Light's `test_corral_light.LightReplyQueue`. The agent is
-testkit/fake_acp_agent.py, whose `sleep <s>` line holds a turn open -- the
-author's turn stands in for a turn blocked in `seat_wait`, and
-`peer_turn(...)` is exactly the poll seat_wait's child makes.
+registered) and `self.agent_dir`. The fake agent's `sleep <s>` line holds the
+author's turn open, standing in for a turn blocked in `seat_wait`;
+`peer_turn(...)` is the poll seat_wait's child makes.
 
-    T11b.1 the measured scenario: queued, delivered as the next turn, one peer
+    T11b.1 queued, delivered as the next turn, one peer
     T11b.2 anyone the waiter is not waiting on is still `busy`
     T11b.3 a second message while one is queued -> `queue-full`
     T11b.4 TTL expiry recorded on both panes
@@ -99,12 +97,12 @@ class ReplyQueueCases:
                              f"_turn_lock taken twice by one thread on {p.id}")
 
     def waiting_pair(self, a_sleep=3, b_sleep=2):
-        """author (a) is mid-turn and waiting on the turn it sent reviewer
-        (b), which b is running now. -> (a, b, a's turn, b's turn).
+        """author (a) is mid-turn and waiting on the turn it sent reviewer (b),
+        which b is running now. -> (a, b, a's turn, b's turn).
 
-        Both panes get a NestCheckLock (T11b.8) in EVERY case: a path that
-        re-took `_turn_lock` would otherwise deadlock the drain and hang the
-        suite (S7's mutation run measured exactly that) instead of failing."""
+        Both panes get a NestCheckLock, so a path that re-took `_turn_lock` fails
+        instead of deadlocking the drain.
+        """
         a = self.mgr.create("fake", self.agent_dir)
         b = self.mgr.create("fake", self.agent_dir)
         self.assertEqual((a.state, b.state), ("ready", "ready"), (a.error, b.error))
@@ -122,7 +120,6 @@ class ReplyQueueCases:
         self.assertEqual((w["result"], w["ended"]), ("turn", False), w)
         return a, b, ta, r["turn"]
 
-    # ── T11b.1 ───────────────────────────────────────────────────────────
     def test_T11b_1_a_reply_to_a_pane_waiting_on_its_sender_is_queued_then_delivered(self):
         a, b, ta, tb = self.waiting_pair()
         r = self.mgr.deliver_peer(b.id, "author", "my review: looks fine")
@@ -152,7 +149,6 @@ class ReplyQueueCases:
         self.assertNotIn("text", rec[0], "the queued record carried the body")
         self.assertEqual(rec[-1]["turn"], p["turn"])
 
-    # ── T11b.2 ───────────────────────────────────────────────────────────
     def test_T11b_2_anyone_the_waiter_is_not_waiting_on_is_still_busy(self):
         a, b, ta, tb = self.waiting_pair(a_sleep=4, b_sleep=1)
         c = self.mgr.create("fake", self.agent_dir)
@@ -173,7 +169,6 @@ class ReplyQueueCases:
         self.assertEqual(self._q(a), [], "something was queued")
         c.cancel()
 
-    # ── T11b.3 ───────────────────────────────────────────────────────────
     def test_T11b_3_a_second_message_while_one_is_queued_is_queue_full(self):
         a, b, ta, tb = self.waiting_pair()
         self.assertEqual(self.mgr.deliver_peer(b.id, "author", "one")["result"], "queued")
@@ -184,7 +179,6 @@ class ReplyQueueCases:
         self.assertTrue(wait_for(lambda: len(self._ends(a)) == 2))
         self.assertEqual(self._k(a).count("peer"), 1)
 
-    # ── T11b.4 ───────────────────────────────────────────────────────────
     def test_T11b_4_an_undelivered_message_expires_on_both_panes(self):
         a, b, ta, tb = self.waiting_pair(a_sleep=3)
         with mock.patch.object(core, "PEER_QUEUE_TTL_S", 0.3):
@@ -199,7 +193,6 @@ class ReplyQueueCases:
         self.assertNotIn("peer", self._k(a), "an expired message was delivered")
         self.assertEqual(a.__dict__.get("_peer_held"), [])
 
-    # ── T11b.5 ───────────────────────────────────────────────────────────
     def test_T11b_5_close_cancel_pause_or_death_of_the_waiter_drops_it(self):
         def kill(a):
             os.kill(a.client.p.pid, signal.SIGKILL)
@@ -248,7 +241,6 @@ class ReplyQueueCases:
         self.assertEqual([(d["qid"], d["reason"]) for d in drops], [("q1", "hub-restart")])
         self.assertNotIn("peer", self._k(a))
 
-    # ── T11b.6 ───────────────────────────────────────────────────────────
     def test_T11b_6_a_card_on_the_waiter_refuses_it_at_delivery(self):
         a, b, ta, tb = self.waiting_pair(a_sleep=2)
         self.assertEqual(self.mgr.deliver_peer(b.id, "author", "x")["result"], "queued")
@@ -263,7 +255,6 @@ class ReplyQueueCases:
         finally:
             a.pending.clear()
 
-    # ── T11b.7 ───────────────────────────────────────────────────────────
     def test_T11b_7_the_hop_bound_is_enforced_at_delivery(self):
         a, b, ta, tb = self.waiting_pair(a_sleep=2)
         with mock.patch.object(core, "MAX_PEER_HOPS", 1):
@@ -277,7 +268,6 @@ class ReplyQueueCases:
         rec = [e["data"] for e in a.events if e["kind"] == "peer_queue"]
         self.assertNotIn("hop", rec[0], "the hop was stamped at enqueue")
 
-    # ── T11b.8 ───────────────────────────────────────────────────────────
     def test_T11b_8_the_lock_is_taken_once_and_never_nested(self):
         a, b, ta, tb = self.waiting_pair()
         lock = a._turn_lock

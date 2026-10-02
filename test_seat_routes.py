@@ -1,25 +1,11 @@
 #!/usr/bin/env python3
-"""The seat tools' hub routes, over a real socket (DESIGN-5 S8, section 7.8).
+"""The seat tools' hub routes, over a real socket.
 
-  T8.2  refused with no token, an unknown token, and a closed pane's token;
-        a `from` in the body is ignored -- the token IS the sender.
-  T8.5  the branch runs BEFORE the cookie check and never consults the
-        cookie (a paired browser cannot send as a pane; a pane needs no
-        cookie); a token from a previous spawn is refused; every OTHER route
-        still 401s without the cookie.
-  S10   POST /api/peer/broadcast: the token is the source, one answer per seat.
-  S11   GET /api/peer/turn?seat=&turn=: the hub reads the QUERY (a GET has no
-        body), answers only about a turn the token's pane sent, and a
-        turn_end with another id does not end it (T11.3 over the wire).
-
-The panes are restored from metas (detached, no agent process), so a delivery
-comes back `refused: paused` -- which is the hub answering through
-deliver_peer, the thing under test.
+The token, never the cookie or a body `from`, identifies the sending pane; the
+panes are restored from metas (detached), so deliveries come back
+`refused: paused` through deliver_peer, the thing under test.
 
     python3 test_seat_routes.py     (also collected by test_corral_light.py)
-
-Corral Light's copy of full Corral's test: the route logic is the core's
-(ManagerBase.peer_http), but each hub owns its own pre-cookie branch.
 """
 import http.client
 import json
@@ -63,9 +49,7 @@ class Routes(unittest.TestCase):
                        for m in (sessions, sessions._core)]
         for p in cls.patches:
             p.start()
-        # Distinct `created`: the roster orders by pinned, order, then age,
-        # and leaves an exact tie to restore order (the UI does the same).
-        # Identical stamps made the saved seat order depend on the disk.
+        # Distinct `created`, so the saved seat order does not depend on the disk.
         write_meta(cls.root, "aaa", seat="author", created="2026-09-29T10:00:00Z")
         write_meta(cls.root, "bbb", seat="reviewer", created="2026-09-29T10:00:01Z")
         write_meta(cls.root, "ccc", created="2026-09-29T10:00:02Z")
@@ -108,9 +92,9 @@ class Routes(unittest.TestCase):
         return r.status, out
 
     def test_rig_routes_are_behind_the_pairing_cookie(self):
-        """DESIGN-5 S12: 401 before routing -- no cookie, or only a pane's
-        token, reaches no rig verb. Paired, a refused rig starts nothing and
-        says why, and `save` writes the seated panes."""
+        """401 before routing without the cookie; paired, a refused rig starts
+        nothing and says why, and `save` writes the seated panes.
+        """
         tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])
         for token in (None, tok):
             self.assertEqual(self.req("GET", "/api/session/rigs", token=token)[0], 401)
@@ -180,9 +164,9 @@ class Routes(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "the uid check is Linux-only")
     def test_another_unix_user_or_an_unknown_caller_is_refused(self):
-        """A token alone is not enough: the Claude adapter puts it on a
-        world-readable command line, so the kernel's record of who opened
-        the calling socket decides (measured live, S9)."""
+        """A token alone is not enough (it sits on a world-readable command line);
+        the kernel's record of who opened the socket decides.
+        """
         tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])
         from corral_core import edge
         for fake, why in ((os.getuid() + 1, "another user"), (None, "unknown")):
@@ -194,8 +178,9 @@ class Routes(unittest.TestCase):
                          "the real check refused this test's own user")
 
     def test_broadcast_is_the_token_holders_and_answers_per_seat(self):
-        """S10 over the wire: the token is the source (so it is left out),
-        the cookie is not enough, and the answer is a list, one per seat."""
+        """The token is the source, the cookie is not enough, and the answer is a
+        list, one per seat.
+        """
         st, _ = self.req("POST", "/api/peer/broadcast", {"text": "x"}, cookie=True)
         self.assertEqual(st, 401, "a cookie alone reached the broadcast route")
         tok = self.mgr.mint_pane_token(self.mgr.panes["aaa"])

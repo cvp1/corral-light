@@ -1,27 +1,10 @@
 #!/usr/bin/python3
 """auth — personal identity for Corral, proved by UNIX account possession.
 
-WHY NOT THE EXISTING SSO
-------------------------
-ranch-hub authenticates against a SHARED credential set (`ranch`/`dash`) — it
-proves "someone with the household password", not "Craig". That is a knowing
-compromise for viewing a dashboard, and it is documented as one
-(`06 Logs/Decisions/2026-08-01 fleet approval authority reaches the ranch dash`).
-
-It is NOT acceptable for Corral, because a Corral session drives real agents
-with real tools in real directories. Anyone holding the shared password would
-be able to start an agent and answer its permission prompts. So conversation
-features require a personal gate, and this is it.
-
-THE MECHANISM
-    Browser shows a one-time code. Craig runs, in a shell he already trusts:
-        corral pair <code>
-    That command can only run as his UNIX user (over ssh or locally), so
-    possession of the account IS the proof. No password, no new identity
-    provider, no dependency — the estate already treats ssh access as identity.
-
-The session cookie is HMAC-signed with a key in the state dir (0600). Expired
-or unknown codes fail closed; a code is single-use and dies on first claim.
+The browser shows a one-time code; the user approves it with `corral pair
+<code>` from their own shell, so account possession is the proof. Session
+cookies are HMAC-signed with a 0600 key in the state dir; codes are single-use
+and fail closed when expired or unknown.
 """
 import base64
 import contextlib
@@ -36,20 +19,16 @@ import time
 import uuid
 from pathlib import Path
 
-# Its own state dir, NOT the full Corral's. The session key lives here, so
-# sharing one would mean either hub could mint a cookie the other accepts.
+# Separate from full Corral's state dir, so neither hub accepts the other's cookies.
 STATE = Path(os.environ.get("CORRAL_LIGHT_STATE",
                             Path.home() / ".local/share/corral-light"))
 KEYFILE = STATE / "session.key"
 LOCKFILE = STATE / "pair.lock"
 PAIRFILE = STATE / "pairing.json"
 
-CODE_TTL = 300               # 5 min to walk to a shell
-SESSION_TTL = 12 * 3600      # re-pair twice a day
-MAX_PENDING = 8              # bounded: a code mill is a brute-force surface. Kept
-                             # above MAX_MINTS so one legitimate rate-limited
-                             # burst never trips this cap on its own — see
-                             # new_code()'s pending-cap branch.
+CODE_TTL = 300
+SESSION_TTL = 12 * 3600
+MAX_PENDING = 8              # kept above MAX_MINTS so one rate-limited burst never trips it
 CLAIM_WINDOW = 60            # seconds
 MAX_CLAIMS = 40              # claim attempts per window; the browser polls ~40/min
 MINT_WINDOW = 60             # seconds
@@ -70,14 +49,7 @@ def _secret():
 
 @contextlib.contextmanager
 def _locked():
-    """Serialize load-modify-save ACROSS PROCESSES.
-
-    `approve()` runs in the `corral pair` CLI while the server is serving
-    /api/pair/claim, so these are genuinely two processes racing on one file.
-    Unlocked, a claim and an approval could each read, each write, and the
-    later write would silently undo the earlier one — including undoing the
-    single-use removal, which is how one approved code mints two sessions.
-    """
+    """Serialize load-modify-save across processes (the pair CLI and the server)."""
     STATE.mkdir(parents=True, exist_ok=True)
     with open(LOCKFILE, "a+b") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -95,9 +67,7 @@ def _load():
 
 
 def _save(d):
-    """Atomic. A plain write_text can be interrupted mid-file, and a truncated
-    pairing file reads as "no pending codes" — which locks the browser out and
-    looks like the server forgot the pairing, not like a crash."""
+    """Atomically write the pairing file."""
     STATE.mkdir(parents=True, exist_ok=True)
     tmp = PAIRFILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
@@ -106,10 +76,7 @@ def _save(d):
 
 
 def _rate_ok(d, now):
-    """Throttle claim attempts. /api/pair/claim is UNAUTHENTICATED by
-    necessity — it is how you become authenticated — so it is the one endpoint
-    an attacker on the LAN can hammer. 32^6 is a large space, but "large" is
-    not a rate limit, and the failures were free."""
+    """Throttle claim attempts on the unauthenticated /api/pair/claim."""
     win = [t for t in d.get("attempts", []) if t > now - CLAIM_WINDOW]
     d["attempts"] = win[-MAX_CLAIMS:]
     return len(win) < MAX_CLAIMS
@@ -123,11 +90,8 @@ def _prune(d, now=None):
 
 
 def host_id():
-    """An opaque tag for THIS machine, served with every pairing code so a
-    client can tell "the hub's store is on my host but is not the one I read"
-    (fail fast) from "the hub is elsewhere, maybe behind an ssh -L tunnel to
-    127.0.0.1" (wait for its human). A URL cannot tell those apart; this can.
-    Salted hash: /api/pair/new is unauthenticated, so the tag names nothing."""
+    """An opaque salted-hash tag for this machine, served with pairing codes so
+    a client can tell a local hub from one behind a tunnel."""
     raw = ""
     for f in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
         try:
@@ -146,11 +110,7 @@ def new_code(now=None):
     now = now or time.time()
     with _locked():
         d = _prune(_load(), now)
-        # /api/pair/new is unauthenticated too — it has to be, that is how
-        # pairing bootstraps identity in the first place — so the server can
-        # never tell Craig's own mint from an attacker's. A miss-counting
-        # limiter is wrong here (every call is a "hit"), so this one is a
-        # plain ceiling on how fast codes may be minted at all.
+        # /api/pair/new is unauthenticated, so cap the mint rate outright.
         mints = [t for t in d.get("mints", []) if t > now - MINT_WINDOW]
         if len(mints) >= MAX_MINTS:
             d["mints"] = mints[-MAX_MINTS:]
@@ -159,17 +119,8 @@ def new_code(now=None):
                 f"too many pairing codes requested — wait {MINT_WINDOW}s. "
                 f"An existing code is still good for its full {CODE_TTL}s.")
         if len(d["pending"]) >= MAX_PENDING:
-            # REFUSE, never evict. This used to push the OLDEST pending code
-            # out to make room — which meant an attacker who stayed under the
-            # mint-rate ceiling above could still repeatedly evict Craig's
-            # own live, about-to-be-approved code and deny him pairing
-            # indefinitely: the rate limit bounded the SPEED of the attack,
-            # never stopped it. gpt-5.6-sol, third-pass review, finding 6.
-            # Refusing costs only a NEW mint while the pool is full; any code
-            # already displayed is untouched and stays good for its full
-            # CODE_TTL. This check runs BEFORE the mint is recorded, so a
-            # pending-cap refusal does not also burn mint-rate budget — the
-            # two limits stay independent.
+            # Refuse, never evict: eviction would let an attacker push out a
+            # live code. Checked before the mint is recorded.
             _save(d)
             raise TooMany(
                 f"too many pairing codes are already pending — an "
@@ -178,11 +129,7 @@ def new_code(now=None):
                 f"shortly.")
         mints.append(now)
         d["mints"] = mints[-MAX_MINTS:]
-        # Six symbols from a 32-char alphabet with the ambiguous glyphs (0/O,
-        # 1/I) removed: 30 bits. A 2026-08-01 review read this as losing a
-        # character to the slicing; measured across 400 codes, every position
-        # carries the full alphabet. Built plainly now so nobody has to
-        # re-derive that.
+        # Six symbols from a 32-char alphabet without 0/O, 1/I: 30 bits.
         alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
         raw = "".join(secrets.choice(alphabet) for _ in range(6))
         code = f"{raw[:3]}-{raw[3:]}"
@@ -192,7 +139,7 @@ def new_code(now=None):
 
 
 def approve(code, now=None):
-    """Called by the `corral pair` CLI, i.e. by Craig's own UNIX account."""
+    """Called by the `corral pair` CLI, i.e. by the user's own UNIX account."""
     now = now or time.time()
     code = (code or "").strip().upper()
     with _locked():
@@ -214,10 +161,7 @@ def claim(code, now=None):
         d = _prune(_load(), now)
         entry = d["pending"].get(code)
         if not entry:
-            # Only a MISS counts against the limit. The browser polls its own
-            # live code roughly every 1.5s while it waits, so counting every
-            # call would throttle the one flow this is meant to protect — the
-            # rate limiter would lock Craig out and leave a guesser unbothered.
+            # Only a miss counts against the limit; the browser polls its live code.
             if not _rate_ok(d, now):
                 _save(d)
                 return None, "slow down"
@@ -226,17 +170,15 @@ def claim(code, now=None):
             return None, "expired"
         if not entry.get("approved"):
             return None, "pending"
-        # Single use, and the removal is committed INSIDE the lock — that is
-        # what makes it single use rather than single-use-if-nobody-else-is-
-        # looking.
+        # Single use: the removal is committed inside the lock.
         d["pending"].pop(code, None)
         _save(d)
     return mint(now=now), "ok"
 
 
 def mint(now=None, ttl=SESSION_TTL, user="craig"):
-    # `user` is the token's audience: "craig" everywhere, or edge.SERVE_USER
-    # for a cookie minted through Tailscale Serve (corral_core/edge.py).
+    # `user` is the token's audience: the default, or edge.SERVE_USER for a
+    # cookie minted through Tailscale Serve.
     if "." in user:
         raise ValueError("a token user may not contain '.'")
     now = int(now or time.time())

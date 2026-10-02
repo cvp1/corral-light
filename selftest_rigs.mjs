@@ -1,7 +1,6 @@
-/* Rigs… in the browser (DESIGN-5 S12, ported to Light in DESIGN-6 S1): what
- * the dialog shows for each seat, what it shows for a refused rig, that
- * Remove takes two clicks, and that the two doors to it exist -- the `Rigs…`
- * item in New and the ⌘K row.
+/* Rigs… in the browser: what the dialog shows for each seat, what it shows
+ * for a refused rig, that Remove takes two clicks, and that the two doors to
+ * it exist -- the `Rigs…` item in New and the ⌘K row.
  *
  * Driven against the real functions in static/app.js with a capturing DOM
  * whose innerHTML setter throws; the server's lines are the rendering
@@ -31,7 +30,7 @@ function fn(name) {
 let bad = 0;
 const check = (ok, why) => { if (!ok) { console.error(`FAIL: ${why}`); bad++; } };
 
-// T1.6: any markup path throws, so a row that passes was built from text.
+// Any markup path throws, so a row that passes was built from text.
 const mk = (tag, cls, text) => {
   const n = { tag, className: cls || '', textContent: text ?? '', kids: [],
               disabled: false, type: '', onclick: null, dataset: {},
@@ -42,7 +41,7 @@ const mk = (tag, cls, text) => {
 };
 const RIG_PROBLEM = new Set(['failed', 'withheld', 'not-restored']);
 
-/* ── T1.1 one row per seat, as text ──────────────────────────────────────── */
+/* ── one row per seat, as text ───────────────────────────────────────────── */
 const rows = new Function('el', 'RIG_PROBLEM', `${fn('rigOutcomeRows')} return rigOutcomeRows;`)(
   mk, RIG_PROBLEM);
 const OUT = ['resumed', 'rebuilt', 'started-fresh', 'fresh-primed', 'withheld',
@@ -59,7 +58,7 @@ got.forEach((row, i) => {
         `row ${i} (${OUT[i]}) problem styling: ${row.className}`);
 });
 
-/* ── T1.2 a refusal shows every reason; api() keeps the body ─────────────── */
+/* ── a refusal shows every reason; api() keeps the body ─────────────── */
 const refused = new Function('el', `${fn('rigRefusedRows')} return rigRefusedRows;`)(mk);
 const e = new Error('rig refused'); e.body = { refused: ['@a: unknown agent', '@b: named twice'] };
 const rr = refused(e);
@@ -83,7 +82,7 @@ check(thrown && thrown.body && thrown.body.refused && thrown.body.refused.length
 check(thrown && refused(thrown).length === 3,
       'a real api() refusal does not reach the dialog as one row per reason');
 
-/* ── T1.3 rigUp: the answer lands in #rig-out; the button always returns ── */
+/* ── rigUp: the answer lands in #rig-out; the button always returns ── */
 function upHarness(apiImpl) {
   const nodes = { '#rig-out': mk('div') };
   const seen = { posted: [], refreshed: 0, nodes };
@@ -113,7 +112,7 @@ check(no.nodes['#rig-out'].kids.length === 3
       && /nothing was started/.test(no.nodes['#rig-out'].kids[0].textContent),
       'a refused up does not show the refusal and every reason');
 
-/* ── T1.4 + T1.6 the list: Remove takes two clicks; names are text ───────── */
+/* ── the list: Remove takes two clicks; names are text ───────── */
 const listNodes = { '#rig-list': mk('div'), '#rig-error': mk('p') };
 const listPosts = [];
 let renders = 0;
@@ -123,7 +122,7 @@ const listApi = async (path, body) => {
   return { rigs: [{ name: '<b>x</b>', seats: ['author', 'reviewer'] },
                   { name: 'broken', error: 'bad toml' }] };
 };
-// S2 helpers, real, shared by T1.4 and T2.2.
+// Real helpers, shared by the list and live-seat checks.
 const hintFns = new Function(`${fn('rigSaveHint')} ${fn('rigLiveSeats')} ${fn('rigLiveText')}
   return { rigSaveHint, rigLiveSeats, rigLiveText };`)();
 function listHarness(nodes, apiImpl, panes, rigUpImpl) {
@@ -152,7 +151,7 @@ await rm.onclick();
 check(listPosts.length === 1 && listPosts[0][0] === '/api/session/rigs/rm'
       && listPosts[0][1].name === '<b>x</b>', `second click posted ${JSON.stringify(listPosts)}`);
 
-/* ── T1.5 the two doors ──────────────────────────────────────────────────── */
+/* ── the two doors ──────────────────────────────────────────────────── */
 const ndStart = html.indexOf('<dialog id="newdlg">');
 const newdlg = html.slice(ndStart, html.indexOf('</dialog>', ndStart));
 check(/id="rigsbtn"[^>]*>Rigs…</.test(newdlg), 'no Rigs… item inside the New dialog');
@@ -174,8 +173,8 @@ for (const q of ['', 'rig', 'rigs', 'RIGS'])
 // The control: a needle that matches nothing must not conjure the row.
 check(!palette('zzqx').some(x => x.kind === 'rigs'), '⌘K shows Rigs for a needle it does not match');
 
-// S2b: action rows rank above panes, as in full Corral. The live failure:
-// "rig" + Enter focused a pane titled rig-b instead of opening Rigs.
+// Action rows rank above panes: "rig" + Enter opens Rigs, not a pane
+// titled rig-b.
 const RIGB = [{ id: 'p1', title: 'rig-b', state: 'idle', cwd: '/x/rig-b', agent: 'claude', seat: null }];
 const ARCH = [{ id: 'a1', title: 'rig-old' }];
 const firstForRig = palette('rig', RIGB, ARCH);
@@ -196,7 +195,7 @@ await activate({ kind: 'rigs' });
 check(opened === 1 && closed === 1, `the palette row opened ${opened}, closed ${closed}`);
 check(newClicked === 0, 'the Rigs row fell through to New conversation');
 
-/* ── T2.1 the Save hint counts what Save would write ─────────────────────── */
+/* ── the Save hint counts what Save would write ─────────────────────── */
 // A fixture snapshot: the same pane fields the server sends (sessions.snapshot).
 const SNAP = [
   { id: 'p1', seat: 'author', seatWithheld: null, state: 'idle' },
@@ -236,7 +235,7 @@ refreshHints(closedDlg, []);
 check(closedDlg['#rig-save'].disabled === false && closedDlg['#rig-savehint'].textContent === '',
       'a closed dialog was repainted');
 
-/* ── T2.2 a live seat is marked; Up still POSTs ──────────────────────────── */
+/* ── a live seat is marked; Up still POSTs ──────────────────────────── */
 const t2Nodes = { '#rig-list': mk('div'), '#rig-error': mk('p'), '#rig-out': mk('div') };
 const t2Posts = [];
 const t2Api = async (path, body) => {
