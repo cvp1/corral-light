@@ -67,12 +67,15 @@ MAX_PROMPT = 200_000
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 
 # ── own-branch worktrees (docs/worktree-review-plan.md) ──────────────────────
-# Lanes that passed the Phase 0 matrix (docs/worktree-phase0.md). Gemini is held:
-# its lane runs `yolo` whatever the posture. Never host:* (cwd ignored) or ollama
-# (no tools). Override with CORRAL_LIGHT_WORKTREE_LANES=a,b; kill switch
-# CORRAL_LIGHT_WORKTREES_ENABLED=0 refuses new worktree panes (existing ones
-# still resume and can still be discarded).
-WORKTREE_LANES = ("claude", "codex", "grok")
+# Lanes that passed the Phase 0 matrix ON THIS PLATFORM: Linux in
+# docs/worktree-phase0.md; macOS none until its own matrix runs on dogma-2
+# (docs/worktree-plan-macos.md M2: Codex's sandbox there is Seatbelt, a
+# different mechanism). Gemini is held: its lane runs `yolo` whatever the
+# posture. Never host:* (cwd ignored) or ollama (no tools). Override with
+# CORRAL_LIGHT_WORKTREE_LANES=a,b; kill switch CORRAL_LIGHT_WORKTREES_ENABLED=0
+# refuses new worktree panes (existing ones still resume and can be discarded).
+WORKTREE_LANES = {"linux": ("claude", "codex", "grok"), "darwin": ()}
+PLATFORM_NAMES = {"linux": "Linux", "darwin": "macOS"}
 WORKTREE_PREAMBLE = (
     "[Corral] You are working in a git worktree on your own branch. Work only "
     "inside this folder. Do not push, rebase, reset, or touch other branches; "
@@ -81,7 +84,9 @@ WORKTREE_PREAMBLE = (
 
 def worktree_lanes():
     raw = os.environ.get("CORRAL_LIGHT_WORKTREE_LANES")
-    return tuple(x.strip() for x in raw.split(",") if x.strip()) if raw else WORKTREE_LANES
+    if raw:
+        return tuple(x.strip() for x in raw.split(",") if x.strip())
+    return WORKTREE_LANES.get(sys.platform, ())
 
 
 def worktree_refusal(agent):
@@ -92,6 +97,11 @@ def worktree_refusal(agent):
         return "remote lanes ignore the folder, so they cannot use an own branch"
     if agent == "ollama":
         return "the local lane has no tools, so an own branch would do nothing"
+    if agent not in worktree_lanes() and not os.environ.get("CORRAL_LIGHT_WORKTREE_LANES") \
+            and agent in WORKTREE_LANES["linux"]:
+        where = PLATFORM_NAMES.get(sys.platform, sys.platform)
+        return (f"own branches are not enabled for the {agent} lane on {where} yet: its "
+                f"lane matrix has not run there (docs/worktree-plan-macos.md)")
     if agent not in worktree_lanes():
         return f"own branches are not enabled for the {agent} lane yet"
     return None
