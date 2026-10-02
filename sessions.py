@@ -2258,6 +2258,32 @@ class Manager(_core.ManagerBase):
             finally:
                 p._action_lock.release()
 
+    def worktree_remotes(self, pane_id):
+        """Remotes the Publish confirmation can show: name, effective push URLs, GitHub repo."""
+        p = self.get(pane_id)
+        e = self.worktree_entry(p)
+        if not e:
+            raise ValueError("this pane is not on its own branch")
+        names = _wt.git(["remote"], cwd=e["path"]).text.split()
+        out = []
+        for n in names:
+            urls = _wt.push_urls(e, n)
+            out.append({"name": n, "pushUrls": urls,
+                        "githubRepo": _wt.github_repo(urls[0]) if len(urls) == 1 else None})
+        return out
+
+    def worktree_list(self):
+        """Every registry entry, for the browser and the CLI. No common_dir, ever."""
+        keep = ("id", "phase", "owner_pane", "path", "subdir", "branch", "repo_top",
+                "base_ref", "base_sha", "created", "last_commit", "published",
+                "trash_path", "recovery_refs", "error", "unreadable")
+        out = []
+        for e in self.worktree_registry().all(include_unreadable=True):
+            row = {k: e.get(k) for k in keep if k in e}
+            row["unknownOps"] = sum(1 for o in e.get("ops") or [] if o.get("state") == "unknown")
+            out.append(row)
+        return out
+
     def worktree_snapshot(self, pane_id):
         """Open review: snapshot (a tree OID) plus its diff."""
         def go(p, e):
