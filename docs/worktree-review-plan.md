@@ -108,7 +108,7 @@ separate, explicit, typed-confirmation purge.
 
 ```
 browser                     hub.py                              sessions.Manager / Pane        worktrees.py (only git caller)
-New dialog ──probe──────▶ GET  /api/worktree/probe ─────────────────────────────────────────▶ probe()
+New dialog ──probe──────▶ GET  /api/session/worktree/probe ────────────────────────────────▶ probe()
            ──start──────▶ POST /api/session/new {worktree:true} ─▶ create() ─▶ registry intent ▶ create()
 Pane head  ◀─SSE "worktree"── emit("worktree", summary) ◀── on turn_end ◀───────────────────── summary()
 Review     ──open───────▶ POST /api/session/worktree/snapshot ─▶ hold queue, refuse if busy ─▶ snapshot() → tree OID
@@ -292,13 +292,13 @@ All behind cookie and same-origin checks. User errors raise `ValueError`
 
 | Route | Body / query | Returns |
 |---|---|---|
-| `GET /api/worktree/probe?cwd=` | | probe dict + `lane_ok` map |
+| `GET /api/session/worktree/probe?cwd=` | | probe dict + `lane_ok` map |
 | `POST /api/session/new` | existing + `worktree: true` | as today; snapshot has `worktree` |
 | `POST /api/session/worktree/snapshot` | `{pane}` | `{tree, head, files:[{path, old_path, status, add, del, binary, too_big, hunks}], ignored:{count, sample}, summary, merge_check?}` |
 | `POST /api/session/worktree/commit` | `{pane, tree, head, index_id, message}` | `{ok, commit}`; 409 `busy`, `changed`, `identity` |
 | `POST /api/session/worktree/publish` | `{pane, oid, remote, push_url, pr:{repo, title, body}|null}` | `{ok, pushed, pr_url | compare_url}`; 409 `remote_changed`, `uncommitted`, `non_ff` |
 | `POST /api/session/worktree/discard` | `{pane, tree, confirm?}` | `{ok, recovery_ref, trash_path}` |
-| `GET /api/worktrees` | | registry entries (no `common_dir`) |
+| `GET /api/session/worktrees` | | registry entries (no `common_dir`) |
 
 Snapshot is a POST because it writes objects and holds the pane.
 
@@ -585,7 +585,7 @@ detached child that keeps writing after the turn ends), `checkout <branch>`,
 - T-RTE-4..6 snapshot (shape, size cap, non-worktree pane 400).
 - T-RTE-7..12 commit, publish, discard: success emits a `worktree` event; each 409 reason is machine-readable.
 - T-RTE-13 every new route 401 without the cookie; every POST 403 with a foreign Origin.
-- T-RTE-14 `/api/worktrees` never returns `common_dir` or absolute paths outside root and repo.
+- T-RTE-14 `/api/session/worktrees` never returns `common_dir` or absolute paths outside root and repo.
 
 **browser logic (Node)**
 - T-UI-1 probe row hidden for non-repos and disabled lanes; refusal reasons shown in place of the checkbox.

@@ -9,6 +9,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import signal
 import sys
 import threading
@@ -30,6 +31,7 @@ import claude_auth
 import claude_login
 import notify
 import sessions
+import worktrees
 from corral_core import edge
 
 ROOT = Path(__file__).resolve().parent
@@ -295,6 +297,40 @@ class Handler(BaseHTTPRequestHandler):
     def _peer(self):
         return self.client_address[0] if self.client_address else None
 
+    # ── own-branch worktrees (worktrees.py) ─────────────────────────────────
+
+    def _worktree_probe(self, cwd):
+        if not cwd or not os.path.isdir(os.path.expanduser(cwd)):
+            return self._json({"error": "not a directory"}, 400)
+        pr = worktrees.probe(os.path.expanduser(cwd))
+        pr.pop("common_dir", None)
+        lanes = {a: sessions.worktree_refusal(a) for a in sessions.AGENTS}
+        return self._json({"probe": pr, "laneRefusals": lanes})
+
+    def _worktree_post(self, action, b):
+        """Snapshot / commit / publish / discard. A refusal is 409 with a reason."""
+        pane = b.get("pane", "")
+        try:
+            if action == "snapshot":
+                r = MGR.worktree_snapshot(pane)
+                r["remotes"] = MGR.worktree_remotes(pane)
+            elif action == "commit":
+                r = MGR.worktree_commit(pane, _oid(b.get("tree")), _oid(b.get("head")),
+                                        str(b.get("index_id") or ""), str(b.get("message") or ""))
+            elif action == "publish":
+                pr = b.get("pr") if isinstance(b.get("pr"), dict) else None
+                r = MGR.worktree_publish(pane, _oid(b.get("oid")), _oid(b.get("tree")),
+                                         str(b.get("remote") or ""), str(b.get("push_url") or ""), pr)
+            elif action == "discard":
+                r = MGR.worktree_discard(pane, _oid(b.get("tree")))
+            else:
+                return self._json({"error": "not found"}, 404)
+        except worktrees.Refused as e:
+            return self._json({"error": str(e.detail)[:400], "reason": e.reason}, 409)
+        except worktrees.GitError as e:
+            return self._json({"error": str(e)[:400], "reason": "git"}, 409)
+        return self._json(dict(r, ok=True))
+
     def _user(self):
         tok = self._token()
         user = auth.verify(tok) if tok else None
@@ -396,6 +432,11 @@ class Handler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json({"error": "not paired"}, 401)
+
+        if p == "/api/session/worktree/probe":
+            return self._worktree_probe((q.get("cwd") or [""])[0])
+        if p == "/api/session/worktrees":
+            return self._json({"worktrees": MGR.worktree_list()})
 
         # Rigs: shared core route, past the pairing check.
         if p == "/api/session/rigs":
@@ -580,7 +621,9 @@ class Handler(BaseHTTPRequestHandler):
                     role_sha, preamble, notes = r.sha256, r.preamble, r.notes
                 pane = MGR.create(agent, b.get("cwd") or str(sessions.default_cwd()),
                                   posture, (b.get("model") or "").strip() or None,
-                                  effort, role=role, role_sha=role_sha)
+                                  effort, role=role, role_sha=role_sha,
+                                  worktree=b.get("worktree") is True,
+                                  title=(b.get("title") or "").strip()[:80] or None)
                 # The preamble is returned to the composer, not sent from here.
                 return self._json({"ok": True, "pane": pane.snapshot(),
                                    "preamble": preamble, "notes": notes})
@@ -697,6 +740,8 @@ class Handler(BaseHTTPRequestHandler):
                 # the page is visible and focused).
                 return self._json({"ok": True, "seen": mark_seen(
                     b.get("pane", ""), b.get("seq") or 0)})
+            if p.startswith("/api/session/worktree/"):
+                return self._worktree_post(p[len("/api/session/worktree/"):], b)
             if p == "/api/session/cancel":
                 return self._json({"ok": MGR.get(b.get("pane", "")).cancel()})
             if p == "/api/session/close":
@@ -710,6 +755,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(e)}, 400)
         except Exception as e:                      # noqa: BLE001
             return self._json({"error": f"{type(e).__name__}: {e}"[:300]}, 500)
+
+
+_OID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _oid(v):
+    """A full object id from the browser, or ValueError (400)."""
+    if not isinstance(v, str) or not _OID_RE.fullmatch(v):
+        raise ValueError("expected a full git object id")
+    return v
 
 
 class Server(ThreadingHTTPServer):

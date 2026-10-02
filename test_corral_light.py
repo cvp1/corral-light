@@ -3540,6 +3540,8 @@ from test_seats import *                         # noqa: F401,F403,E402
 from test_peer_consumers import ThePortPack, TheIndex   # noqa: F401,E402
 # The seat tools' routes on this hub, over a real socket.
 from test_seat_routes import Routes as SeatRoutes      # noqa: F401,E402
+# Own-branch worktree routes (WS3), over a real socket.
+from test_worktree_routes import WorktreeRoutes        # noqa: F401,E402
 
 
 if __name__ == "__main__":
