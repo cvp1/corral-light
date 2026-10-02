@@ -168,12 +168,32 @@ function relock() {
 
 /* ── pairing ─────────────────────────────────────────────────────────── */
 let pairTimers = [];
+// The ?pair= code from `corral-light launch`, read once and removed from the
+// URL so a reload or a later relock() never replays it.
+function presetPairCode() {
+  let u;
+  try { u = new URL(location.href); } catch (e) { return null; }
+  const raw = (u.searchParams.get('pair') || '').trim().toUpperCase();
+  if (!raw) return null;
+  u.searchParams.delete('pair');
+  try { history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (e) { }
+  return /^[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(raw) ? raw : null;
+}
 async function pair() {
   pairTimers.forEach(clearInterval); pairTimers = [];
   $('#pair').classList.remove('hide');
   let code, ttl, how;
-  try { ({ code, ttl, how } = await api('/api/pair/new')); }
-  catch (e) { $('#pairnote').textContent = 'Cannot reach Corral Light: ' + e.message; return; }
+  // `corral-light launch` opens /?pair=<code> with a code it already approved
+  // (same proof as typing `corral-light pair`: the account owns the hub). Use
+  // that code once and drop it from the address bar; an unknown or expired
+  // code claims as 'expired' and falls through to a fresh one below.
+  const preset = presetPairCode();
+  if (preset) {
+    code = preset; ttl = 300; how = `corral-light pair ${code}`;
+  } else {
+    try { ({ code, ttl, how } = await api('/api/pair/new')); }
+    catch (e) { $('#pairnote').textContent = 'Cannot reach Corral Light: ' + e.message; return; }
+  }
   $('#paircode').textContent = code;
   // The command comes from the server: Light and the full Corral have different CLI names.
   $('#paircmd').textContent = how || `corral-light pair ${code}`;
