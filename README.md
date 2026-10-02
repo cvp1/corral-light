@@ -1,94 +1,124 @@
-# Corral Light
+<p align="center">
+  <img src="static/icon-512.png" width="112" alt="Corral Light — three rails, two posts">
+</p>
 
-**The window for AIOS.**
+<h1 align="center">Corral Light</h1>
 
-A local workspace for the AI coding assistants you already pay for — Claude,
-ChatGPT, Grok, Gemini — side by side in one browser tab, with one permission
-rail: every file write and every command is shown to you before it runs. The
-floor underneath — schedule, vault, run log, memory — is
-[AI-OS Seed](https://github.com/cvp1/ai-os-seed). Two repos, one folder.
+<p align="center"><strong>The window for AIOS.</strong><br>
+One fence. Four assistants. You hold the gate.</p>
 
-Nothing leaves your computer except what each assistant sends to its own
-vendor, on the account you signed into. No API keys. No cloud in the middle.
+<p align="center">
+  <a href="#saddle-up--the-one-line-install-linux"><img alt="Linux" src="https://img.shields.io/badge/Linux-x86--64%20%7C%20arm64-d5813f?style=flat-square&logo=linux&logoColor=white"></a>
+  <img alt="Python 3.9+" src="https://img.shields.io/badge/Python-3.9%2B-8fae6d?style=flat-square&logo=python&logoColor=white">
+  <img alt="stdlib only" src="https://img.shields.io/badge/dependencies-stdlib%20only-1d1a16?style=flat-square">
+  <img alt="runs on your machine" src="https://img.shields.io/badge/runs%20on-your%20machine-d5813f?style=flat-square">
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-8fae6d?style=flat-square"></a>
+</p>
 
 ---
 
-## Install on Linux — one line
+You already pay for Claude, ChatGPT, Grok, Gemini. Each one lives in its own
+app, its own tab, its own terminal, and none of them can see the others.
+Corral Light puts them **side by side in one browser tab, on your machine,
+on the logins you already have** — and runs every one of them behind the
+same fence: before an assistant writes a file or runs a command, the pane
+stops and shows you exactly what, down to the byte. You open the gate, or
+you don't.
 
-Open a terminal and paste this:
+Underneath is the floor: [AI-OS Seed](https://github.com/cvp1/ai-os-seed) —
+scheduled jobs, a run log, a secrets vault, and a memory that remembers *why*.
+Two repos, one folder. This README covers the window; the floor has its own.
+
+**What you will not find here:** API keys, a cloud relay, a vendor in the
+middle. Each assistant talks to its own maker, as you, and nothing else
+leaves the ranch.
+
+---
+
+## Saddle up — the one-line install (Linux)
+
+Open a terminal (Ctrl+Alt+T on most desktops) and paste:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash
 ```
 
-(No `curl`? `wget -qO- https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash` does the same.)
+<sub>No `curl`? `wget -qO- https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash` does the same.</sub>
 
-That is the whole install. It asks two questions at the start — which
-assistants you have an account for (Enter means Claude only), and whether
-Claude may remember past conversations — then works on its own for about five minutes on a
-normal connection (twenty with Gemini, which is a 1.5 GB download). At the
-end it offers each assistant's sign-in, one at a time, and opens your browser
-on Corral Light, already paired. Then you can start typing.
+That is the whole ride. It asks you two things first — **which assistants
+you have an account for** (just press Enter for Claude), and **whether Claude
+may remember your past conversations** — then goes to work on its own for
+about five minutes (twenty if you picked Gemini, which is a 1.5 GB download).
+At the end it walks you through each assistant's own sign-in, one at a time,
+and opens your browser on the wall, already paired. Start typing.
 
-Honest limit: on Linux there is no safe way to make a web link run an
-installer, so this is one line to paste into a terminal (Ctrl+Alt+T opens
-one on most desktops). Everything after that is the installer's job.
+> **The honest part.** On Linux there is no safe way to make a web link run an
+> installer, so this is one line to paste. Everything after the paste is the
+> installer's job, and it was built to be run by someone who has never opened
+> a terminal before.
 
-**What you need**
+### What you need
 
 | | |
 |---|---|
-| Computer | Linux on x86-64 or arm64 — Ubuntu, Debian, Fedora, Arch, openSUSE, Alpine. A desktop, so a browser can open. |
-| Accounts | At least one of: Claude (Pro or Max), ChatGPT (Plus, Pro or Team), Grok (SuperGrok or X Premium), a Google account for Gemini. The installer asks you to sign in to each one you chose; you can skip any of them and come back later. |
-| Disk | About 600 MB; 2.1 GB with Gemini. |
-| Your password | Only if a basic tool is missing (`git`, `python3`, `curl`, `cron`). The installer names what it will install and runs your distro's own package manager, nothing else. Nothing shows while you type the password; that is normal. |
+| **A Linux computer** | x86-64 or arm64 — Ubuntu, Debian, Fedora, Arch, openSUSE. A desktop, so a browser can open. |
+| **An account** | At least one of: Claude (Pro or Max), ChatGPT (Plus, Pro or Team), Grok (SuperGrok or X Premium), or a Google account for Gemini. You pick which; you can skip any sign-in and come back later. |
+| **Disk** | About 600 MB. 2.1 GB with Gemini. |
+| **Your password** | Only if a basic tool is missing (`git`, `python3`, `curl`, `cron`). The installer names what it will install and runs your distro's own package manager, nothing else. Nothing shows while you type the password; that is normal. |
 
-**What the installer does, in order**
+### What happens, fence post by fence post
 
-| Step | What it checks, then does |
-|---|---|
-| 1 | Confirms Linux, your CPU, glibc and a desktop. Refuses to run as root. Then asks its two questions, before anything is installed or downloaded. |
-| 2 | Installs any missing base tools with your package manager, after showing you the command. Checks the internet and free disk space. |
-| 3 | Clones this repo to `~/tools/corral-light` and AI-OS Seed to `~/tools/ai-os-seed`, each at a pinned version. Puts the `corral-light` command on your PATH. |
-| 4 | Downloads a private copy of Node.js (checksum verified) into `~/.local/share/corral-light/node`. Your system's Node, if any, is not touched. |
-| 5 | Installs the Claude and ChatGPT adapters from the lock file (`npm ci`). |
-| 6 | Installs Claude Code (a pinned version, through Anthropic's own installer, which verifies the binary; Claude Code then keeps itself current), the Grok CLI (pinned, into a private prefix) and the Antigravity runtime for Gemini (pinned, checksum verified). |
-| 7 | Installs AI-OS Seed into `~/aios`, runs its selftests and its demo job through the real run logger, writes your `CLAUDE.md` through Seed's stage-then-approve gate, starts the memory mesh, wires the memory hooks if you said yes, and syncs the scheduler to cron. Then runs Seed's post-install audit. On a re-run, each of these is checked separately, so a run that stopped halfway finishes next time. |
-| 8 | Refuses a port another program holds. Installs Corral Light as a **user** service (systemd), starts it (or restarts it if the code changed), enables it to survive logout, and enables the watchdog timer. Waits until a hub that identifies itself as Corral Light answers. |
-| 9 | Offers each assistant's own sign-in, one at a time. Each opens your browser (or prints a device code if there is no display). Any of them can be skipped. |
-| 10 | Opens Corral Light in your browser, already paired (`corral-light launch`). |
-| 11 | Writes a receipt and prints what is done and what is still to do, per assistant, with the exact command for each. |
+| | Post | What it checks, then does |
+|---|---|---|
+| 1 | **The ground** | Confirms Linux, your CPU, glibc and a desktop. Refuses to run as root. Then asks its two questions — before anything is installed or downloaded. |
+| 2 | **Tools** | Installs any missing base tools with your package manager, after showing you the command. Checks the internet and free disk space. |
+| 3 | **Posts** | Clones this repo to `~/tools/corral-light` and AI-OS Seed to `~/tools/ai-os-seed`, each at a pinned version. Puts the `corral-light` command on your PATH. |
+| 4 | **Node** | A private copy of Node.js (checksum verified) in `~/.local/share/corral-light/node`. Your system's Node, if any, is not touched. |
+| 5 | **Rails** | The Claude and ChatGPT adapters, from the lock file (`npm ci`). |
+| 6 | **The herd** | Claude Code (a pinned version through Anthropic's own installer, which verifies the binary; it then keeps itself current), the Grok CLI (pinned, into a private prefix), and the Antigravity runtime for Gemini (pinned, checksum verified) if you chose it. |
+| 7 | **The floor** | AI-OS Seed into `~/aios`: selftests, the demo job through the real run logger, your `CLAUDE.md` through Seed's stage-then-approve gate, the memory mesh, the memory hooks if you said yes, the scheduler synced to cron, then Seed's post-install audit. On a re-run each piece is checked separately, so a run that stopped halfway finishes next time. |
+| 8 | **Lights on** | Refuses a port another program holds. Installs Corral Light as a **user** service (systemd), starts it, keeps it alive across logout, enables the watchdog timer, and waits for a hub that identifies itself as Corral Light. |
+| 9 | **Sign-ins** | Each assistant's own login, one at a time. Each opens your browser, or prints a device code if there is no display. Any can be skipped. |
+| 10 | **The gate** | Opens the wall in your browser, already paired (`corral-light launch`). |
+| 11 | **The brand** | Writes a receipt with every version actually installed, and prints what is done and what is still to do, per assistant, with the exact command for each. |
 
-Every step checks before it changes anything, so **running the same line
-again is safe**: it updates what moved and repairs what is missing, and never
+Every post checks before it changes anything, so **running the same line
+again is safe**: it updates what moved, repairs what is missing, and never
 installs twice. Everything it prints also goes to
 `~/.local/share/corral-light/install.log`, and the versions it actually
-installed (down to the git commit) go to `install-receipt.json` beside it.
+installed — down to the git commit — go to `install-receipt.json` beside it.
 
-What is pinned, and what is not: Seed's tag, Node, the two adapters (lock
-file), the Grok CLI and the Antigravity runtime are pinned and
-checksum-verified where a checksum exists. Corral Light itself installs from
-`master` unless you set `CORRAL_LIGHT_REF` to a commit; the commit used is
-in the receipt. Claude Code is installed at a pinned version through
-Anthropic's installer and then updates itself, which is Anthropic's policy.
+<details>
+<summary><strong>What is pinned, and what is not</strong></summary>
 
-**Choosing what to install**
+Seed's tag, Node, the two adapters (lock file), the Grok CLI and the
+Antigravity runtime are pinned, and checksum-verified where a checksum
+exists. Corral Light itself installs from `master` unless you set
+`CORRAL_LIGHT_REF` to a commit; the commit used is in the receipt. Claude
+Code is installed at a pinned version through Anthropic's installer and then
+updates itself, which is Anthropic's policy, not ours.
+</details>
 
-The one-liner asks which assistants you have; pressing Enter means Claude
-only. To decide up front, download the script and pass options:
+<details>
+<summary><strong>Choosing what to install</strong></summary>
+
+The one-liner asks which assistants you have; Enter means Claude only. To
+decide up front, download the script and pass options:
 
 ```
 curl -fsSLO https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh
-bash install.sh --lanes claude,grok          # just these two (otherwise it asks; Enter = Claude only)
+bash install.sh --lanes claude,grok          # just these two
 bash install.sh --workspace ~/work/aios      # Seed somewhere other than ~/aios
 bash install.sh --skip-logins                # sign in later (see below)
 bash install.sh --yes                        # no questions: all four assistants, memory on
 bash install.sh --help                       # every option, and every version it pins
 ```
+</details>
 
-**If something goes wrong**
+<details>
+<summary><strong>If something goes wrong</strong></summary>
 
-The installer stops at the step that failed, says what it was, and points at
+The installer stops at the post that failed, says which one, and points at
 the log. Fix what it names and run the same line again. After that:
 
 ```
@@ -96,27 +126,37 @@ corral-light doctor              # which assistants are ready, and why not
 corral-light diagnose claude     # one full conversation, with every error shown
 journalctl --user -u corral-light -n 50   # the hub's own log
 ```
+</details>
 
-**Updating** — run the install line again. **Removing it** —
+**Updating** — run the install line again. **Leaving** —
 `bash ~/tools/corral-light/install.sh --uninstall` (the installer keeps a copy
 of itself in the clone) asks before each thing it removes; your sign-ins and
 your files are never part of it.
 
-### Your first five minutes
+---
+
+## The first ride
 
 1. The browser tab that opened is **the wall**. Click **New**, pick an
    assistant, choose a folder (the default is `~/aios`), and type.
-2. When an assistant wants to write a file or run a command, the pane pauses
-   and shows you exactly what — bytes and a digest. **Approve** or **Refuse**.
-   Nothing happens until you do.
-3. Open a new terminal (the one the installer ran in has the old PATH), run
-   `cd ~/aios && claude`, and type `/status`. That is
-   the floor answering: every scheduled job, its last run, and anything that
-   has gone quiet.
-4. Closed the tab? `corral-light launch` opens it again, paired. The hub keeps
-   running in the background; `systemctl --user status corral-light` shows it.
+2. When an assistant wants to write a file or run a command, the pane
+   stops at the gate and shows you exactly what — bytes and a digest.
+   **Approve** or **Refuse**. Nothing moves until you do.
+3. Open a new terminal (the one the installer ran in still has the old
+   PATH), run `cd ~/aios && claude`, and type `/status`. That is the floor
+   answering: every scheduled job, its last run, and anything that has gone
+   quiet.
+4. Closed the tab? `corral-light launch` opens it again, paired. The hub
+   keeps running in the background; `systemctl --user status corral-light`
+   shows it.
 
-### Signing in later
+From there, the wall has more tricks than a one-pane chat: give two panes
+**seats** and let them message each other, fan one question out to every
+assistant with ⌘↵, make them argue with ⇄, save your seated panes as a
+**rig** and bring the whole posse back with one verb. All of that is in the
+[reference](#reference) below.
+
+## Signing in later
 
 Each assistant signs in with its own tool, as you, and keeps its own
 credential. Corral Light never sees a password or a token.
@@ -130,7 +170,8 @@ credential. Corral Light never sees a password or a token.
 
 `corral-light doctor` tells you which ones are done.
 
-### Install by hand (any Linux, or macOS)
+<details>
+<summary><strong>Install by hand (any Linux, or macOS)</strong></summary>
 
 You already have Claude Code. Python 3.9+. Node.js 20+.
 
@@ -157,16 +198,22 @@ One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is
 4. Done when `/status` answers.
 
 The server runs in the foreground. Data lives at `~/.local/share/corral-light` — not in `~/aios`, and not in this clone. `doctor` lists the assistants that are ready and explains what is missing for the others.
+</details>
 
 ---
 
 ## Reference
 
-- [Supported assistants](#supported-assistants) · [Keeping them current](#keeping-the-assistants-current)
-- [Search and attach files](#search-and-attach-files) · [Passing work between assistants](#passing-work-between-assistants)
-- [Seats](#seats-panes-that-can-message-each-other) · [Asking the human](#asking-the-human) · [Rigs](#rigs-bring-your-seats-back-with-one-verb)
-- [Security](#security) · [Configuration](#configuration) · [Run in the background](#run-in-the-background) · [Watching the hub](#watching-the-hub)
-- [From the command line](#from-the-command-line) · [Troubleshooting](#troubleshooting) · [Development](#development)
+Everything past the gate. Each section stands on its own.
+
+| | |
+|---|---|
+| **The herd** | [Supported assistants](#supported-assistants) · [Keeping them current](#keeping-the-assistants-current) |
+| **Working the wall** | [Search and attach files](#search-and-attach-files) · [Passing work between assistants](#passing-work-between-assistants) |
+| **Seats and rigs** | [Seats: panes that can message each other](#seats-panes-that-can-message-each-other) · [Asking the human](#asking-the-human) · [Rigs: bring your seats back](#rigs-bring-your-seats-back-with-one-verb) |
+| **The fence** | [Security](#security) · [Configuration](#configuration) |
+| **Keeping it running** | [Run in the background](#run-in-the-background) · [Watching the hub](#watching-the-hub) · [From the command line](#from-the-command-line) |
+| **When it limps** | [Troubleshooting](#troubleshooting) · [Development](#development) |
 
 ## Supported assistants
 
