@@ -8,8 +8,8 @@ Pairing normally takes two steps: the browser shows a code, and you type
 `corral-light pair <code>` in a shell. Both halves prove the same thing —
 that you own this UNIX account — so a command that runs as that account can
 do both halves itself: mint the code, approve it, and hand it to the browser
-in the URL (`/?pair=<code>`). The page claims the code once and drops it from
-the address bar. The code is single-use and expires in five minutes.
+in the URL fragment (`/#pair=<code>`), which the browser never sends to any
+server. The page claims the code once and drops it from the address bar. The code is single-use and expires in five minutes.
 
 What this does not change: a browser on another machine still needs
 `corral-light pair`, and nothing here reads or relays a session cookie — the
@@ -62,7 +62,7 @@ def paired_url(base):
     ok, msg = auth.approve(code)
     if not ok:
         raise RuntimeError(msg)
-    return f"{base}/?pair={code}"
+    return f"{base}/#pair={code}"
 
 
 def opener(platform=None, env=None):

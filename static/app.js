@@ -168,22 +168,21 @@ function relock() {
 
 /* ── pairing ─────────────────────────────────────────────────────────── */
 let pairTimers = [];
-// The ?pair= code from `corral-light launch`, read once and removed from the
-// URL so a reload or a later relock() never replays it.
+// The #pair= code from `corral-light launch` — in the fragment, so the browser
+// never sends it in a request line — read once and removed from the URL so a
+// reload or a later relock() never replays it.
 function presetPairCode() {
-  let u;
-  try { u = new URL(location.href); } catch (e) { return null; }
-  const raw = (u.searchParams.get('pair') || '').trim().toUpperCase();
-  if (!raw) return null;
-  u.searchParams.delete('pair');
-  try { history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (e) { }
+  const m = /^#pair=([^&]*)$/.exec(location.hash || '');
+  if (!m) return null;
+  const raw = decodeURIComponent(m[1]).trim().toUpperCase();
+  try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { }
   return /^[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(raw) ? raw : null;
 }
 async function pair() {
   pairTimers.forEach(clearInterval); pairTimers = [];
   $('#pair').classList.remove('hide');
   let code, ttl, how;
-  // `corral-light launch` opens /?pair=<code> with a code it already approved
+  // `corral-light launch` opens /#pair=<code> with a code it already approved
   // (same proof as typing `corral-light pair`: the account owns the hub). Use
   // that code once and drop it from the address bar; an unknown or expired
   // code claims as 'expired' and falls through to a fresh one below.

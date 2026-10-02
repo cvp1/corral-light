@@ -36,7 +36,7 @@ class _TempState(unittest.TestCase):
 class PairedUrl(_TempState):
     def test_code_is_approved_single_use_and_claimable(self):
         url = launch.paired_url("http://127.0.0.1:8098")
-        m = re.fullmatch(r"http://127\.0\.0\.1:8098/\?pair=([A-Z0-9]{3}-[A-Z0-9]{3})", url)
+        m = re.fullmatch(r"http://127\.0\.0\.1:8098/#pair=([A-Z0-9]{3}-[A-Z0-9]{3})", url)
         self.assertIsNotNone(m, url)
         code = m.group(1)
         tok, status = auth.claim(code)
@@ -65,13 +65,13 @@ class HubUrl(unittest.TestCase):
 
     def test_print_mode_prints_url_and_opens_nothing(self):
         with mock.patch.object(launch, "hub_alive", return_value=True), \
-             mock.patch.object(launch, "paired_url", return_value="http://127.0.0.1:8098/?pair=ABC-DEF"), \
+             mock.patch.object(launch, "paired_url", return_value="http://127.0.0.1:8098/#pair=ABC-DEF"), \
              mock.patch.object(launch.subprocess, "Popen") as popen:
             out = io.StringIO()
             with redirect_stdout(out):
                 rc = launch.main(["--print"])
         self.assertEqual(rc, 0)
-        self.assertEqual(out.getvalue().strip(), "http://127.0.0.1:8098/?pair=ABC-DEF")
+        self.assertEqual(out.getvalue().strip(), "http://127.0.0.1:8098/#pair=ABC-DEF")
         popen.assert_not_called()
 
     def test_hub_down_is_exit_2_with_the_start_command(self):
@@ -93,9 +93,8 @@ class BrowserSide(unittest.TestCase):
 
     def test_app_js_reads_and_strips_the_param(self):
         js = (HERE / "static" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("searchParams.get('pair')", js)
-        self.assertIn("searchParams.delete('pair')", js)
-        self.assertIn("history.replaceState", js)
+        self.assertIn("/^#pair=([^&]*)$/.exec(location.hash", js)
+        self.assertIn("history.replaceState(null, '', location.pathname + location.search)", js)
         self.assertIn("/^[A-Z0-9]{3}-[A-Z0-9]{3}$/", js)
         # The preset path must still poll claim, never mint a second code.
         self.assertIn("const preset = presetPairCode();", js)
