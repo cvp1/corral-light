@@ -460,6 +460,84 @@ role's instructions go ahead of the prompt, as a role's first turn always
 does; a role with no prompt sends nothing. Prompts are capped at 8,000
 characters, a rig at 12 seats.
 
+## Own branches: one agent, one git branch
+
+Two panes on one repository normally share one working tree, so two agents
+can overwrite each other's files. Tick **Own branch** in the New dialog and
+the pane gets its own git worktree on a new branch, `corral/<name>`, cut from
+the branch your checkout is on. Your checkout is not touched: its uncommitted
+changes stay where they are, and the dialog says so. The row appears only
+when the folder is inside a git repository and the lane can use it (Claude,
+Codex and Grok; Gemini is held back because its lane runs without asking
+whatever the posture). When the repository cannot take one (no commits yet,
+on tmpfs, submodules, a sparse checkout, Git LFS without git-lfs, git older
+than 2.38), the row says why instead of offering the box.
+
+The pane's header shows the branch and what changed, e.g.
+`⎇ fix-login · 4 files +120 −8`. The line counts are for tracked files; new
+files count as files. Click it, or press `r` on the focused pane, to review.
+When the agent finishes a turn with changes you have not reviewed, a card
+says so in the rail. It never counts as blocked, and on a phone it does not
+pop the rail open.
+
+**Review freezes what you see.** Opening review takes a snapshot of the
+worktree. Commit, Push and Discard act on exactly that snapshot; if a file
+changed since (the agent, a background process, you), the action is refused
+and the review refreshes to show the current files.
+
+- **Commit** commits the files shown, with `git commit-tree`: the
+  repository's commit hooks (pre-commit, commit-msg) do not run. Pre-push
+  hooks still run when you push.
+- **Push** sends the committed branch to the remote you pick. It needs
+  exactly one push URL, which is shown before you press it, and never
+  force-pushes. For a GitHub remote it can open a pull request with `gh`, or
+  give you the compare link when `gh` is missing.
+- **Copy merge command** copies `git -C <repo> merge --no-ff corral/<name>`
+  for merging into your own branch yourself.
+- Untracked files over 512 KiB are left out of review and commit, named in a
+  banner, and block Push until you move them or add them to `.gitignore`.
+  Ignored files are never in a review; Discard keeps them in trash.
+
+**It is not a sandbox.** A worktree is a separate checkout, not a sandbox. An
+agent with shell access can still write anywhere you can, by absolute path.
+Own branches prevent accidental collisions between agents; they do not
+confine a hostile one. When an agent's file-edit tool touches a path outside
+its worktree, its turn is stopped and you are told which path. Shell commands
+usually report only their working folder, so a shell command writing
+elsewhere is not caught; Codex reports no paths at all, and its own sandbox
+is the guard there.
+
+**Nothing here deletes your work without a typed confirmation.**
+
+- **Discard** stops the agent, saves everything (untracked files included) as
+  `refs/corral/recovery/<id>/<time>` in your repository, and moves the whole
+  worktree, ignored files too, into `<root>/.trash/`. The branch stays.
+- **Close** keeps the worktree; reopening the conversation brings it back.
+- `corral-light worktrees restore <id>` moves a discarded worktree back, and
+  the pane resumes there.
+- `corral-light worktrees purge <id>` deletes a discarded worktree for good.
+  You type the branch name. It deletes the trash folder, and the branch only
+  if it has not moved since discard. Recovery refs are never deleted; remove
+  one yourself with `git update-ref -d <ref>` when you are sure.
+- After a restart, a worktree that is missing or was changed underneath
+  Corral is reported, never repaired. An action cut short (commit, push, pull
+  request, discard) is finished by checking git, or marked "outcome unknown",
+  which blocks the pane until you settle it with
+  `corral-light worktrees resolve <id>`.
+
+```
+./corral-light worktrees                       # every worktree, its pane, its way out; writes nothing
+./corral-light worktrees list --json
+./corral-light worktrees restore <id>
+./corral-light worktrees purge <id>            # asks for the branch name (or --confirm <branch>)
+./corral-light worktrees resolve <id> [--op <op_id>]
+./corral-light doctor                          # git version, where worktrees live, trash size
+```
+
+Worktrees live in `~/.local/share/corral-light/worktrees` (beside the
+registry, never inside the repository). `CORRAL_LIGHT_WORKTREES` moves them;
+it must be on disk, not tmpfs.
+
 ## Security
 
 The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
@@ -500,6 +578,9 @@ Diagnostic output includes command names, configuration details, environment var
 | `CORRAL_NODE_BIN` | An available Node.js installation | Optional Node.js path override. |
 | `CORRAL_LIGHT_URL` | `http://127.0.0.1:8098` | Where `corral-light consult` finds the hub. |
 | `CORRAL_LIGHT_CONSULT_CFG` | `~/.config/corral-light/consult-session.json` | The paired session `consult` keeps (0600). |
+| `CORRAL_LIGHT_WORKTREES` | `<state>/worktrees` | Where own-branch worktrees live. Must be on disk, not tmpfs. |
+| `CORRAL_LIGHT_WORKTREES_ENABLED` | `1` | `0` refuses new own-branch panes; existing ones still resume and can be discarded. |
+| `CORRAL_LIGHT_WORKTREE_LANES` | `claude,codex,grok` | Lanes allowed an own branch. |
 
 The default address is local-only by design. If you change `CORRAL_LIGHT_BIND` to expose the server on a network, protect access with your network controls and pairing code.
 

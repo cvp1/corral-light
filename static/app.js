@@ -1283,7 +1283,10 @@ function reviewActions(snap, o) {
   const uncommitted = snap.tree !== snap.head_tree;
   const ahead = snap.head !== snap.base_sha;
   const commit = !uncommitted ? no('nothing to commit: the reviewed files match the last commit')
-               : !String(o.message || '').trim() ? no('write a commit message first') : yes;
+               : !String(o.message || '').trim() ? no('write a commit message first')
+               : { ok: true, why: '', note: 'Commits exactly the files shown, with git commit-tree: ' +
+                   "this repo's commit hooks, such as pre-commit and commit-msg, do not run. " +
+                   'Its pre-push hooks still run when you push.' };
   const remote = (snap.remotes || [])[o.remote || 0];
   const urls = remote ? remote.pushUrls || [] : [];
   // Left out for size, yet still untracked work: the hub refuses to push past it.
@@ -1498,7 +1501,7 @@ function paintReview() {
                          ['#rev-discard', 'discard'], ['#rev-copy', 'copy'],
                          ['#rev-refresh', 'refresh']]) {
     $(id).disabled = !ra[k].ok;
-    $(id).title = ra[k].why;
+    $(id).title = ra[k].ok ? ra[k].note || '' : ra[k].why;
   }
   $('#rev-why').textContent = snap && !R.busy
     ? [!ra.commit.ok && `Commit: ${ra.commit.why}.`, !ra.publish.ok && `Push: ${ra.publish.why}.`]
