@@ -45,7 +45,8 @@ class GitCase(unittest.TestCase):
         self._env = mock.patch.dict(os.environ, TEST_ENV)
         self._env.start()
         self.addCleanup(self._env.stop)
-        self.tmp = Path(tempfile.mkdtemp(prefix="corral-wt-test-"))
+        # realpath: on macOS mkdtemp answers /var/folders/..., a symlink into /private.
+        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="corral-wt-test-")))
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         wt.git(["init", "-q", "-b", "main"], cwd=self.repo)
@@ -2179,3 +2180,28 @@ class TheMacDiscardScan(CreateCase):
             with self.assertRaises(wt.ScanFailed):
                 wt.processes_in(self.p)
         self._noproc.start()
+
+
+class TheMacPaths(CreateCase):
+    """M3: letter case on case-insensitive APFS, and /private temp paths."""
+
+    def test_M3_T_CRT_8_one_repo_under_two_letter_cases_gives_one_repo_dir(self):
+        pr = wt.probe(self.repo)
+        other = dict(pr, common_dir=str(self.repo / ".GIT"), repo_top=str(self.repo))
+        with mock.patch.object(wt.sys, "platform", "darwin"):
+            self.assertEqual(wt._true_case(str(self.repo / ".GIT")), str(self.repo / ".git"))
+            self.assertEqual(wt.repo_dir(other), wt.repo_dir(pr))
+        with mock.patch.object(wt.sys, "platform", "linux"):
+            self.assertNotEqual(wt.repo_dir(other), wt.repo_dir(pr),
+                                "Linux is case-sensitive: two spellings are two paths")
+
+    def test_M3_true_case_prefers_an_exact_match_and_leaves_the_unknown_alone(self):
+        (self.tmp / "ab").mkdir()
+        (self.tmp / "AB").mkdir()
+        with mock.patch.object(wt.sys, "platform", "darwin"):
+            self.assertEqual(wt._true_case(str(self.tmp / "AB")), str(self.tmp / "AB"))
+            self.assertEqual(wt._true_case(str(self.tmp / "nope" / "x")), str(self.tmp / "nope" / "x"))
+
+    def test_M3_the_suite_realpaths_its_temp_roots(self):
+        self.assertEqual(str(self.tmp), os.path.realpath(self.tmp),
+                         "on macOS mkdtemp is behind /var -> /private/var; T-CRT-6 would refuse")
