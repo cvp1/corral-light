@@ -447,3 +447,142 @@ class Registry:
                     out.append({"id": f.stem, "unreadable": str(e)})
         out.sort(key=lambda e: (e.get("created") or "", e.get("id")))
         return out
+
+
+# ── probe (F1) ────────────────────────────────────────────────────────────────
+
+MIN_GIT = (2, 38)
+PROBE_TIMEOUT_S = 20
+_VERSION = []
+
+
+def git_version():
+    """The git binary's version as a tuple of ints, e.g. (2, 55, 0). Cached."""
+    if not _VERSION:
+        r = git(["--version"], cwd=os.getcwd() if os.path.isdir(os.getcwd()) else "/",
+                timeout=PROBE_TIMEOUT_S)
+        m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", r.text)
+        _VERSION.append(tuple(int(x or 0) for x in m.groups()) if m else (0, 0, 0))
+    return _VERSION[0]
+
+
+def _existing_ancestor(p):
+    p = Path(p).absolute()
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    return p
+
+
+def _fstype(path):
+    """The filesystem type of the mount holding `path` (or its nearest existing ancestor)."""
+    target = os.path.realpath(_existing_ancestor(path))
+    best, kind = "", None
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8") as f:
+            for line in f:
+                left, _, right = line.partition(" - ")
+                mnt = left.split()[4].replace("\\040", " ")
+                if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) >= len(best):
+                    best, kind = mnt, right.split()[0]
+    except OSError:
+        return None
+    return kind
+
+
+def _lfs_installed(cwd):
+    try:
+        return git(["lfs", "version"], cwd=cwd, check=False, timeout=PROBE_TIMEOUT_S).rc == 0
+    except OSError:
+        return False
+
+
+def probe(path):
+    """Can a pane started in `path` get its own worktree? Writes nothing.
+
+    Returns facts plus `refusals` (reasons, in words, that the checkbox is
+    replaced by) and `warnings` (shown beside it).
+    """
+    path = Path(path)
+    if not path.is_dir():
+        raise ValueError(f"not a directory: {path}")
+    q = dict(cwd=path, check=False, timeout=PROBE_TIMEOUT_S, optional_locks_off=True)
+    ver = git_version()
+    root = worktree_root()
+    out = {"inside": False, "top": None, "repo_top": None, "subdir": "", "common_dir": None,
+           "branch": None, "head": None, "detached": False, "unborn": False, "dirty": False,
+           "bare": False, "submodules": False, "sparse": False, "lfs_needed": False,
+           "lfs_ok": None, "git_version": list(ver), "root": str(root),
+           "root_tmpfs": _fstype(root) == "tmpfs", "same_fs_as_root": None,
+           "refusals": [], "warnings": []}
+    refuse = out["refusals"].append
+    if ver[:2] < MIN_GIT:
+        refuse(f"git {'.'.join(map(str, ver))} is too old; own branches need git "
+               f"{'.'.join(map(str, MIN_GIT))} or newer")
+    r = git(["rev-parse", "--is-bare-repository", "--is-inside-git-dir",
+             "--git-common-dir", "--absolute-git-dir"], **q)
+    if r.rc != 0:
+        refuse("this folder is not inside a git repository")
+        return out
+    bare, in_git_dir, common, _gitdir = r.text.splitlines()[:4]
+    common = Path(common) if os.path.isabs(common) else (path / common)
+    out["common_dir"] = str(common.resolve())
+    if bare == "true" or in_git_dir == "true":
+        out["bare"] = True
+        refuse("this is a bare repository (or its .git folder); pick a folder in a checkout")
+        return out
+    r = git(["rev-parse", "--show-toplevel", "--show-prefix"], **q)
+    lines = r.text.splitlines() + ["", ""]
+    out["inside"] = True
+    out["top"] = str(Path(lines[0]).resolve())
+    out["subdir"] = lines[1].rstrip("/")
+    main = Path(out["common_dir"])
+    out["repo_top"] = str(main.parent if main.name == ".git" else Path(out["top"]))
+    sym = git(["symbolic-ref", "-q", "HEAD"], **q)
+    if sym.rc != 0:
+        out["detached"] = True
+        refuse("HEAD is detached; check out a branch first, so there is a base to merge back to")
+    else:
+        out["branch"] = sym.text.strip()
+    head = git(["rev-parse", "--verify", "-q", "HEAD^{commit}"], **q)
+    if head.rc == 0:
+        out["head"] = head.text.strip()
+    elif not out["detached"]:
+        out["unborn"] = True
+        refuse("this repository has no commits yet; make a first commit, then try again")
+    st = git(["status", "--porcelain=v1", "-z", "--untracked-files=normal",
+              "--ignore-submodules=none"], **q)
+    out["dirty"] = bool(st.out.strip(b"\0"))
+    if out["dirty"]:
+        out["warnings"].append(f"your uncommitted changes in {out['top']} stay there; "
+                               "the new branch starts from the last commit")
+    top = out["top"]
+    ls = git(["ls-files", "-s", "-z"], cwd=top, check=False, timeout=PROBE_TIMEOUT_S,
+             optional_locks_off=True, max_out=64 << 20)
+    if (Path(top) / ".gitmodules").exists() or any(
+            rec.startswith(b"160000 ") for rec in ls.out.split(b"\0")):
+        out["submodules"] = True
+        refuse("this repository has submodules; own branches do not support them yet")
+    sp = git(["config", "--type=bool", "--get", "core.sparseCheckout"], **q)
+    if sp.text.strip() == "true":
+        out["sparse"] = True
+        refuse("this checkout is sparse; own branches do not support sparse checkouts yet")
+    lfs = git(["grep", "-q", "-I", "filter=lfs", "--", ".gitattributes",
+               ":(glob)**/.gitattributes"], cwd=top, check=False, timeout=PROBE_TIMEOUT_S,
+              optional_locks_off=True)
+    if lfs.rc == 0:
+        out["lfs_needed"] = True
+        out["lfs_ok"] = _lfs_installed(top)
+        if not out["lfs_ok"]:
+            refuse("this repository uses Git LFS and git-lfs is not installed")
+    if git(["show-ref", "--verify", "-q", "refs/heads/corral"], **q).rc == 0:
+        refuse("a branch named exactly 'corral' exists; it blocks the corral/<name> "
+               "branches own branches use")
+    if out["root_tmpfs"]:
+        refuse(f"the worktree folder {root} is on tmpfs (memory); point "
+               "CORRAL_LIGHT_WORKTREES at a disk")
+    try:
+        out["same_fs_as_root"] = (os.stat(_existing_ancestor(root)).st_dev
+                                  == os.stat(top).st_dev)
+    except OSError:
+        pass
+    return out

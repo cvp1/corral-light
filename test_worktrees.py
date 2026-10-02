@@ -214,6 +214,11 @@ class RegCase(GitCase):
                                                  "CORRAL_LIGHT_WORKTREES": str(self.tmp / "wtroot")})
         self._st.start()
         self.addCleanup(self._st.stop)
+        # The suite's temp dirs live on /tmp, which is tmpfs here; probe would
+        # rightly refuse it. Pretend a disk, except where a test says otherwise.
+        self._fs = mock.patch.object(wt, "_fstype", lambda p: "btrfs")
+        self._fs.start()
+        self.addCleanup(self._fs.stop)
         self.reg = wt.Registry()
 
 
@@ -290,6 +295,134 @@ class TheRegistry(RegCase):
             order.append("first")
         t.join(5)
         self.assertEqual(order, ["first", "second"])
+
+
+def _tree_snapshot(d):
+    """Every file under `d` with size and mtime, to prove nothing was written."""
+    out = {}
+    for root, dirs, files in os.walk(d):
+        for f in files:
+            st = os.stat(os.path.join(root, f))
+            out[os.path.join(root, f)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+class TheProbe(RegCase):
+
+    def refusal(self, pr, word):
+        self.assertTrue(any(word in r for r in pr["refusals"]), (word, pr["refusals"]))
+
+    def test_T_PRB_1_a_plain_dir_is_not_inside(self):
+        d = self.tmp / "plain"
+        d.mkdir()
+        pr = wt.probe(d)
+        self.assertFalse(pr["inside"])
+        self.refusal(pr, "not inside a git")
+
+    def test_T_PRB_2_repo_top(self):
+        pr = wt.probe(self.repo)
+        self.assertTrue(pr["inside"])
+        self.assertEqual(pr["refusals"], [])
+        self.assertEqual(Path(pr["top"]), self.repo.resolve())
+        self.assertEqual(Path(pr["repo_top"]), self.repo.resolve())
+        self.assertEqual(pr["subdir"], "")
+        self.assertEqual(pr["branch"], "refs/heads/main")
+        self.assertRegex(pr["head"], r"^[0-9a-f]{40}$")
+        self.assertFalse(pr["dirty"])
+        self.assertGreaterEqual(tuple(pr["git_version"]), (2, 38))
+
+    def test_T_PRB_3_a_subdir_gives_subdir(self):
+        (self.repo / "pkg" / "deep").mkdir(parents=True)
+        pr = wt.probe(self.repo / "pkg" / "deep")
+        self.assertEqual(pr["subdir"], "pkg/deep")
+        self.assertEqual(Path(pr["top"]), self.repo.resolve())
+
+    def test_T_PRB_4_detached_head_is_refused(self):
+        wt.git(["checkout", "-q", "--detach"], cwd=self.repo)
+        pr = wt.probe(self.repo)
+        self.assertTrue(pr["detached"])
+        self.refusal(pr, "detached")
+
+    def test_T_PRB_5_unborn_head_is_refused(self):
+        d = self.tmp / "unborn"
+        d.mkdir()
+        wt.git(["init", "-q", "-b", "main"], cwd=d)
+        pr = wt.probe(d)
+        self.assertTrue(pr["unborn"])
+        self.refusal(pr, "no commits")
+
+    def test_T_PRB_6_bare_is_refused(self):
+        d = self.tmp / "bare.git"
+        wt.git(["init", "-q", "--bare", str(d)], cwd=self.tmp)
+        pr = wt.probe(d)
+        self.assertTrue(pr["bare"])
+        self.refusal(pr, "bare")
+
+    def test_T_PRB_7_submodules_are_refused(self):
+        sub = self.tmp / "sub"
+        sub.mkdir()
+        wt.git(["init", "-q", "-b", "main"], cwd=sub)
+        (sub / "s").write_text("s")
+        wt.git(["add", "-A"], cwd=sub)
+        wt.git(["commit", "-qm", "s"], cwd=sub)
+        wt.git(["-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sub"],
+               cwd=self.repo)
+        wt.git(["commit", "-qm", "add sub"], cwd=self.repo)
+        pr = wt.probe(self.repo)
+        self.assertTrue(pr["submodules"])
+        self.refusal(pr, "submodule")
+
+    def test_T_PRB_8_sparse_checkout_is_refused(self):
+        wt.git(["config", "core.sparseCheckout", "true"], cwd=self.repo)
+        pr = wt.probe(self.repo)
+        self.assertTrue(pr["sparse"])
+        self.refusal(pr, "sparse")
+
+    def test_T_PRB_9_lfs_attributes_without_git_lfs_are_refused(self):
+        (self.repo / ".gitattributes").write_text("*.bin filter=lfs diff=lfs merge=lfs -text\n")
+        wt.git(["add", ".gitattributes"], cwd=self.repo)
+        wt.git(["commit", "-qm", "lfs"], cwd=self.repo)
+        with mock.patch.object(wt, "_lfs_installed", lambda cwd: False):
+            pr = wt.probe(self.repo)
+        self.assertTrue(pr["lfs_needed"])
+        self.refusal(pr, "LFS")
+        with mock.patch.object(wt, "_lfs_installed", lambda cwd: True):
+            self.assertEqual(wt.probe(self.repo)["refusals"], [])
+
+    def test_T_PRB_10_a_root_on_tmpfs_is_refused(self):
+        with mock.patch.object(wt, "_fstype", lambda p: "tmpfs"):
+            pr = wt.probe(self.repo)
+        self.assertTrue(pr["root_tmpfs"])
+        self.refusal(pr, "tmpfs")
+        with mock.patch.object(wt, "_fstype", lambda p: "btrfs"):
+            self.assertEqual(wt.probe(self.repo)["refusals"], [])
+
+    def test_T_PRB_11_probe_writes_nothing(self):
+        (self.repo / "a.txt").write_text("changed\n")          # dirty: status would refresh
+        (self.repo / "u.txt").write_text("untracked\n")
+        before = _tree_snapshot(self.repo / ".git")
+        pr = wt.probe(self.repo)
+        self.assertTrue(pr["dirty"])
+        self.assertEqual(_tree_snapshot(self.repo / ".git"), before)
+        self.assertFalse(wt.registry_dir().exists())
+        self.assertFalse(wt.worktree_root().exists())
+
+    def test_T_PRB_12_a_linked_worktree_resolves_to_the_main_repo(self):
+        linked = self.tmp / "linked"
+        wt.git(["worktree", "add", "-q", "-b", "feature", str(linked)], cwd=self.repo)
+        pr = wt.probe(linked)
+        self.assertEqual(Path(pr["repo_top"]), self.repo.resolve())
+        self.assertEqual(Path(pr["top"]), linked.resolve())
+        self.assertEqual(pr["branch"], "refs/heads/feature")
+        self.assertEqual(Path(pr["common_dir"]), (self.repo / ".git").resolve())
+
+    def test_a_branch_named_corral_blocks_the_namespace(self):
+        wt.git(["branch", "corral"], cwd=self.repo)
+        self.refusal(wt.probe(self.repo), "corral")
+
+    def test_old_git_is_refused(self):
+        with mock.patch.object(wt, "git_version", lambda: (2, 37, 0)):
+            self.refusal(wt.probe(self.repo), "2.38")
 
 
 def _alive(pid):
