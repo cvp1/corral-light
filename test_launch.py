@@ -82,6 +82,18 @@ class HubUrl(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("corral-light serve", err.getvalue())
 
+    def test_opener_that_fails_fast_is_exit_4_with_the_url(self):
+        fake = mock.Mock(); fake.wait.return_value = 1
+        with mock.patch.object(launch, "hub_alive", return_value=True), \
+             mock.patch.object(launch, "paired_url", return_value="http://127.0.0.1:8098/#pair=ABC-DEF"), \
+             mock.patch.object(launch, "opener", return_value=["/usr/bin/xdg-open"]), \
+             mock.patch.object(launch.subprocess, "Popen", return_value=fake):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = launch.main([])
+        self.assertEqual(rc, 4)
+        self.assertIn("#pair=ABC-DEF", out.getvalue())
+
     def test_no_display_means_no_opener(self):
         self.assertIsNone(launch.opener(platform="linux", env={}))
         with mock.patch.object(launch.shutil, "which", side_effect=lambda n: "/usr/bin/xdg-open" if n == "xdg-open" else None):

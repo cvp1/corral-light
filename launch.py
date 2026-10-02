@@ -101,7 +101,7 @@ def main(argv=None):
 
     try:
         url = paired_url(base)
-    except auth.TooMany as e:
+    except (auth.TooMany, RuntimeError, OSError) as e:
         print(f"could not mint a pairing code: {e}", file=sys.stderr, flush=True)
         return 3
 
@@ -117,13 +117,20 @@ def main(argv=None):
         return 0
     try:
         # Detached: a browser that inherits this terminal would hold it open.
-        subprocess.Popen(cmd + [url], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        proc = subprocess.Popen(cmd + [url], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
     except OSError as e:
         print(f"could not start {cmd[0]}: {e}\nOpen this address yourself:\n  {url}",
               flush=True)
-        return 0
+        return 4
+    try:
+        # xdg-open hands off and exits quickly; a fast non-zero exit is a failure.
+        if proc.wait(timeout=3) != 0:
+            print(f"{cmd[0]} could not open a browser. Open this address yourself:\n  {url}", flush=True)
+            return 4
+    except subprocess.TimeoutExpired:
+        pass
     print(f"opening {base}/ in your browser (paired)", flush=True)
     return 0
 

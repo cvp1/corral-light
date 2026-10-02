@@ -97,9 +97,10 @@ corral-light diagnose claude     # one full conversation, with every error shown
 journalctl --user -u corral-light -n 50   # the hub's own log
 ```
 
-**Updating** — run the install line again. **Removing it** — `bash install.sh --uninstall`
-asks before each thing it removes; your sign-ins and your files are never
-part of it.
+**Updating** — run the install line again. **Removing it** —
+`bash ~/tools/corral-light/install.sh --uninstall` (the installer keeps a copy
+of itself in the clone) asks before each thing it removes; your sign-ins and
+your files are never part of it.
 
 ### Your first five minutes
 
@@ -108,7 +109,8 @@ part of it.
 2. When an assistant wants to write a file or run a command, the pane pauses
    and shows you exactly what — bytes and a digest. **Approve** or **Refuse**.
    Nothing happens until you do.
-3. Open a terminal, run `cd ~/aios && claude`, and type `/status`. That is
+3. Open a new terminal (the one the installer ran in has the old PATH), run
+   `cd ~/aios && claude`, and type `/status`. That is
    the floor answering: every scheduled job, its last run, and anything that
    has gone quiet.
 4. Closed the tab? `corral-light launch` opens it again, paired. The hub keeps

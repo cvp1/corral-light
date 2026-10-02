@@ -42,7 +42,7 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.1.1"
 
 # ── pins ────────────────────────────────────────────────────────────────────
 CORRAL_LIGHT_REPO="${CORRAL_LIGHT_REPO:-https://github.com/cvp1/corral-light}"
@@ -189,6 +189,8 @@ on_error() {
   exit "$rc"
 }
 trap on_error ERR
+on_int() { printf '\n\n  Interrupted. Nothing is half-written that a re-run cannot finish: run the same command again to continue.\n' >&2; exit 130; }
+trap on_int INT
 
 # ── logging: everything also goes to the log file ───────────────────────────
 mkdir -p "$STATE"
@@ -708,7 +710,7 @@ EOF
       else
         printf '  %sClaude:%s your browser will open to sign in with your Claude account (Pro or Max).\n' "$B" "$N"
         if press_enter; then
-          if "$(claude_bin)" auth login < "$TTY_IN"; then ok "Claude: signed in"; else warn "Claude sign-in did not finish — later: claude auth login"; fi
+          if timeout --foreground 600 "$(claude_bin)" auth login < "$TTY_IN"; then ok "Claude: signed in"; else warn "Claude sign-in did not finish (ten-minute limit) — later: claude auth login"; fi
         else skip "Claude sign-in skipped"; fi
       fi
     fi
@@ -717,8 +719,9 @@ EOF
       else
         printf '  %sGrok:%s sign in with your X / Grok account.\n' "$B" "$N"
         if press_enter; then
-          if { [ "$HEADLESS" = 1 ] && "$BIN/grok" login --device-auth < "$TTY_IN"; } || { [ "$HEADLESS" = 0 ] && "$BIN/grok" login < "$TTY_IN"; }; then
-            ok "Grok: signed in"; else warn "Grok sign-in did not finish — later: grok login"; fi
+          grok_login=("$BIN/grok" login); [ "$HEADLESS" = 1 ] && grok_login+=(--device-auth)
+          if timeout --foreground 600 "${grok_login[@]}" < "$TTY_IN"; then ok "Grok: signed in"
+          else warn "Grok sign-in did not finish (ten-minute limit) — later: grok login"; fi
         else skip "Grok sign-in skipped"; fi
       fi
     fi
@@ -729,7 +732,7 @@ EOF
         if press_enter; then
           mkdir -p "$CODEX_HOME_DIR"; chmod 700 "$CODEX_HOME_DIR"
           codex_login=("$CL/spike/node_modules/.bin/codex" login); [ "$HEADLESS" = 1 ] && codex_login+=(--device-auth)
-          if CODEX_HOME="$CODEX_HOME_DIR" "${codex_login[@]}" < "$TTY_IN"; then ok "ChatGPT: signed in"
+          if CODEX_HOME="$CODEX_HOME_DIR" timeout --foreground 600 "${codex_login[@]}" < "$TTY_IN"; then ok "ChatGPT: signed in"
           else warn "ChatGPT sign-in did not finish — later: CODEX_HOME=$CODEX_HOME_DIR $CL/spike/node_modules/.bin/codex login"; fi
         else skip "ChatGPT sign-in skipped"; fi
       fi
@@ -778,9 +781,10 @@ PY
   fi
   printf '\n  The wall:        http://127.0.0.1:%s/   (any time: %scorral-light launch%s)\n' "$PORT" "$B" "$N"
   printf '  Your workspace:  %s\n' "$AIOS"
-  if has_lane claude; then printf '  Try next:        open a terminal, run  %scd %s && claude%s  and type  %s/status%s\n' "$B" "$AIOS" "$N" "$B" "$N"; fi
+  if has_lane claude; then printf '  Try next:        open a NEW terminal, run  %scd %s && claude%s  and type  %s/status%s\n' "$B" "$AIOS" "$N" "$B" "$N"; fi
   printf '  Health:          corral-light doctor   ·   Log: %s\n' "$LOG"
-  printf '  Run this installer again any time to update; --uninstall removes it.\n\n'
+  printf '  Update:          run the same install line again (a copy is at %s/install.sh)\n' "$CL"
+  printf '  Remove:          bash %s/install.sh --uninstall\n\n' "$CL"
 }
 
 trap - ERR
