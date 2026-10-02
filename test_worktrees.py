@@ -1555,6 +1555,100 @@ class TheReconcile(CreateCase):
             self.assertEqual(got["ops"][-1]["state"], "done")
 
 
+# Create, push and pull request, killed mid-way in a real subprocess (T-CRS-1, 3, 4).
+CRASH_SCRIPT_PUB = r"""
+import os, sys, json
+sys.path.insert(0, sys.argv[1])
+import worktrees as wt
+wt._fstype = lambda p: "btrfs"          # the suite's temp dirs are on tmpfs
+a = json.loads(sys.argv[2])
+if a["action"] == "create":
+    wt.create(wt.probe(a["repo"]), a["title"], a["owner"])
+else:
+    e = wt.Registry().read(a["id"])
+    if a["action"] == "push":
+        wt.push(e, "origin", a["url"], a["oid"], a["tree"])
+    elif a["action"] == "pr":
+        wt.open_pr(e, "Fix login", "body", "o/r")
+"""
+
+
+class TheCrashes(PubCase):
+    """Every journalled step of create, push and PR survives a SIGKILL: the
+    restart reports the truth, finishes nothing by guessing, repeats nothing."""
+
+    stub_gh = ThePullRequest.stub_gh
+
+    def crash(self, at, gh=None, **a):
+        import json
+        import subprocess
+        import sys
+        env = dict(os.environ, CORRAL_WT_TEST="1", CORRAL_WT_CRASH_AT=at)
+        if gh:
+            env["CORRAL_TEST_GH"] = gh
+        r = subprocess.run([sys.executable, "-c", CRASH_SCRIPT_PUB, str(ROOT), json.dumps(a)],
+                           env=env, capture_output=True, timeout=120)
+        self.assertEqual(r.returncode, -signal.SIGKILL, (at, r.stderr.decode()[-800:]))
+
+    def test_T_CRS_1_create_killed_leaves_a_live_branch_or_a_listed_entry(self):
+        before = {e["id"] for e in self.reg.all()}
+        for i, at in enumerate(("create:intent", "create:added")):
+            self.crash(at, action="create", repo=str(self.repo), title=f"crash create {i}",
+                       owner=f"crash{i}")
+            notes = wt.reconcile(self.reg)
+            [e] = [x for x in self.reg.all() if x["id"] not in before]
+            before.add(e["id"])
+            self.assertEqual(wt.orphans(registry=self.reg), [], (at, notes))
+            if at == "create:intent":
+                self.assertEqual(e["phase"], "missing", at)
+                self.assertIn("did not finish", " ".join(n["note"] for n in notes))
+                self.assertFalse(os.path.lexists(e["path"]))
+            else:
+                self.assertEqual(e["phase"], "active", (at, notes))
+                wt.verify(e)
+                self.assertEqual(wt.git(["rev-parse", e["branch"]], cwd=self.repo).text.strip(),
+                                 e["base_sha"])
+
+    def test_T_CRS_3_push_killed_is_recorded_only_if_the_remote_has_it(self):
+        ref = self.e["branch"]
+        self.crash("push:before", action="push", id=self.e["id"], url=self.url, oid=self.oid,
+                   tree=self.tree)
+        wt.reconcile(self.reg)
+        got = self.reg.read(self.e["id"])
+        self.assertEqual((got["ops"][-1]["state"], got["ops"][-1]["stage"]), ("done", "not_done"))
+        self.assertIsNone(got["published"])
+        self.assertIsNone(self.remote_ref(ref))
+        self.crash("push:after", action="push", id=self.e["id"], url=self.url, oid=self.oid,
+                   tree=self.tree)
+        self.assertEqual(self.remote_ref(ref), self.oid)
+        self.assertEqual(self.reg.read(self.e["id"])["ops"][-1]["state"], "intent")
+        notes = wt.reconcile(self.reg)
+        got = self.reg.read(self.e["id"])
+        self.assertEqual(got["ops"][-1]["state"], "done", notes)
+        self.assertEqual((got["published"]["oid"], got["published"]["url"]), (self.oid, self.url))
+        self.assertIn("outcome checked after restart", " ".join(n["note"] for n in notes))
+
+    def test_T_CRS_4_pr_killed_is_found_on_restart_and_never_made_twice(self):
+        gh, state = self.stub_gh()
+        self.crash("pr:before", gh=gh, action="pr", id=self.e["id"])
+        with mock.patch.object(wt, "GH_BIN", gh):
+            wt.reconcile(self.reg)
+        got = self.reg.read(self.e["id"])
+        self.assertEqual(got["ops"][-1]["stage"], "not_done")
+        self.assertNotIn("pr create", (state / "argv").read_text())
+        self.crash("pr:after", gh=gh, action="pr", id=self.e["id"])
+        self.assertEqual((state / "argv").read_text().count("pr create"), 1)
+        with mock.patch.object(wt, "GH_BIN", gh):
+            notes = wt.reconcile(self.reg)
+            got = self.reg.read(self.e["id"])
+            self.assertEqual(got["ops"][-1]["state"], "done", notes)
+            self.assertEqual(got["published"]["pr_url"], "https://github.com/o/r/pull/7")
+            again = wt.open_pr(got, "Fix login", "body", "o/r", registry=self.reg)
+        self.assertEqual(again["pr_url"], "https://github.com/o/r/pull/7")
+        self.assertEqual((state / "argv").read_text().count("pr create"), 1,
+                         "a restart made a second pull request")
+
+
 from test_resilience import FakeLaneCase, wait_for  # noqa: E402
 
 

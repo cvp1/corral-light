@@ -176,9 +176,18 @@ def git(args, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OU
                 optional_locks_off)
 
 
+def _iso_log(cwd):
+    """T-ISO-1's spy: record where each call runs. Inert outside the test suite."""
+    log = os.environ.get("CORRAL_WT_ISO_LOG")
+    if log and os.environ.get("CORRAL_WT_TEST") == "1":
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(os.path.realpath(str(cwd)) + "\n")
+
+
 def _run(cmd, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OUT,
          env_extra=None, input=None, optional_locks_off=False):
     """The process runner behind git() (and gh): see git()."""
+    _iso_log(cwd)
     proc = subprocess.Popen(
         cmd, cwd=str(cwd), env=git_env(env_extra, optional_locks_off),
         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -726,6 +735,7 @@ def create(pr, title, owner_pane, registry=None):
             branch=BRANCH_PREFIX + slug, admin_name=slug, repo_top=pr["repo_top"],
             common_dir=pr["common_dir"], common_dir_id=repo_lock_key(pr),
             base_ref=pr["branch"], base_sha=pr["head"])
+        _crash_point("create:intent")
         try:
             rdir.mkdir(parents=True, exist_ok=True, mode=0o700)
             _refuse_symlink(rdir, "repository folder")
@@ -733,6 +743,7 @@ def create(pr, title, owner_pane, registry=None):
                 raise ValueError(f"{rdir} resolves outside the worktree root")
             git(["worktree", "add", "-q", "-b", "corral/" + slug, "--", str(path), pr["head"]],
                 cwd=pr["top"], timeout=ADD_TIMEOUT_S)
+            _crash_point("create:added")
             verify(entry)
         except BaseException as e:
             registry.update(entry["id"], phase="missing", error=str(e)[:ERR_SNIPPET])
@@ -1274,6 +1285,7 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
             raise GitError(["gh", "pr", "create"], made.rc if made else None,
                            made.err_text if made else "gh vanished")
         url = (made.text.strip().splitlines() or [""])[-1]
+        _crash_point("pr:after")
         registry.set_op(entry["id"], op, state="done", stage="done", url=url)
     prev = registry.read(entry["id"]).get("published") or {}
     registry.update(entry["id"], published=dict(prev, pr_url=url))
