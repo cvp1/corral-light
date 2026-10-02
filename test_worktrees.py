@@ -480,6 +480,175 @@ class TheSlug(RegCase):
             self.slug("x")
 
 
+class CreateCase(RegCase):
+
+    def make(self, title="fix login", owner="pane0001", cwd=None):
+        return wt.create(wt.probe(cwd or self.repo), title, owner, registry=self.reg)
+
+
+class TheCreate(CreateCase):
+
+    def test_T_CRT_1_a_worktree_on_its_own_branch_under_the_root(self):
+        e = self.make()
+        self.assertEqual(e["phase"], "active")
+        self.assertEqual(e["branch"], "refs/heads/corral/fix-login")
+        p = Path(e["path"])
+        self.assertTrue(p.is_dir())
+        self.assertTrue(str(p.resolve()).startswith(str(wt.worktree_root().resolve()) + "/"))
+        self.assertEqual(wt.git(["symbolic-ref", "HEAD"], cwd=p).text.strip(), e["branch"])
+        self.assertEqual(wt.git(["rev-parse", "HEAD"], cwd=p).text.strip(), e["base_sha"])
+        self.assertEqual(e["base_ref"], "refs/heads/main")
+        self.assertEqual(self.reg.read(e["id"])["phase"], "active")
+        self.assertEqual(wt.verify(e)["oid"], e["base_sha"])
+
+    def test_T_CRT_2_the_main_checkout_is_byte_for_byte_unchanged(self):
+        idx = self.repo / ".git" / "index"
+        before = (idx.read_bytes(), (self.repo / ".git" / "HEAD").read_bytes(),
+                  (self.repo / "a.txt").read_bytes())
+        self.make()
+        after = (idx.read_bytes(), (self.repo / ".git" / "HEAD").read_bytes(),
+                 (self.repo / "a.txt").read_bytes())
+        self.assertEqual(before, after)
+
+    def test_T_CRT_3_a_dirty_main_stays_dirty_and_the_worktree_starts_clean(self):
+        (self.repo / "a.txt").write_text("dirty\n")
+        (self.repo / "new.txt").write_text("n\n")
+        e = self.make()
+        p = Path(e["path"])
+        self.assertEqual((p / "a.txt").read_text(), "a\n")
+        self.assertFalse((p / "new.txt").exists())
+        self.assertEqual((self.repo / "a.txt").read_text(), "dirty\n")
+
+    def test_T_CRT_3b_the_subdir_is_kept(self):
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "m.py").write_text("x = 1\n")
+        wt.git(["add", "-A"], cwd=self.repo)
+        wt.git(["commit", "-qm", "pkg"], cwd=self.repo)
+        e = self.make(cwd=self.repo / "pkg")
+        self.assertEqual(e["subdir"], "pkg")
+        self.assertTrue(wt.agent_cwd(e).is_dir())
+        self.assertEqual(wt.agent_cwd(e), Path(e["path"]) / "pkg")
+
+    def test_T_CRT_4_two_spellings_of_one_repo_share_one_lock(self):
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.repo)
+        self.assertEqual(wt.repo_lock_key(wt.probe(alias)), wt.repo_lock_key(wt.probe(self.repo)))
+
+    def test_T_CRT_5_twelve_concurrent_creates_give_twelve_branches(self):
+        results, errors = [], []
+
+        def go(i):
+            try:
+                results.append(self.make(title="same title", owner=f"pane{i:04d}"))
+            except Exception as e:          # noqa: BLE001 — collected for the assert
+                errors.append(e)
+        ts = [threading.Thread(target=go, args=(i,)) for i in range(12)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(120)
+        self.assertEqual(errors, [])
+        self.assertEqual(len({e["branch"] for e in results}), 12)
+        self.assertEqual(len({e["path"] for e in results}), 12)
+        listed = wt.git(["worktree", "list", "--porcelain"], cwd=self.repo).text
+        self.assertEqual(listed.count("branch refs/heads/corral/same-title"), 12)
+
+    def test_T_CRT_6_a_symlinked_root_is_refused(self):
+        real = self.tmp / "realroot"
+        real.mkdir()
+        link = self.tmp / "linkroot"
+        link.symlink_to(real)
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREES": str(link)}):
+            with self.assertRaises(ValueError) as cm:
+                self.make()
+        self.assertIn("symlink", str(cm.exception))
+        self.assertEqual(self.reg.all(), [])
+
+    def test_T_CRT_7_an_existing_target_path_is_refused(self):
+        pr = wt.probe(self.repo)
+        with mock.patch.object(wt, "plan_slug", lambda *a, **k: "taken"):
+            (wt.repo_dir(pr) / "taken").mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                wt.create(pr, "x", "pane", registry=self.reg)
+
+    def test_a_refused_probe_creates_nothing(self):
+        wt.git(["checkout", "-q", "--detach"], cwd=self.repo)
+        with self.assertRaises(ValueError):
+            self.make()
+        self.assertEqual(self.reg.all(), [])
+        self.assertFalse(wt.worktree_root().exists())
+
+    def test_T_REG_2_the_intent_is_written_before_git_worktree_add(self):
+        seen = []
+        real_git = wt.git
+
+        def spy(args, *a, **k):
+            if args[:2] == ["worktree", "add"]:
+                seen.append([e["phase"] for e in self.reg.all()])
+            return real_git(args, *a, **k)
+        with mock.patch.object(wt, "git", spy):
+            self.make()
+        self.assertEqual(seen, [["intent"]])
+
+    def test_a_failed_add_leaves_the_entry_marked_not_silently_gone(self):
+        real_git = wt.git
+
+        def boom(args, *a, **k):
+            if args[:2] == ["worktree", "add"]:
+                raise wt.GitError(["git", "worktree", "add"], 128, "fatal: simulated")
+            return real_git(args, *a, **k)
+        with mock.patch.object(wt, "git", boom):
+            with self.assertRaises(wt.GitError):
+                self.make()
+        [e] = self.reg.all()
+        self.assertEqual(e["phase"], "missing")
+        self.assertIn("simulated", e["error"])
+
+
+class TheVerify(CreateCase):
+
+    def test_T_VER_1_another_branch_checked_out_is_an_identity_failure(self):
+        e = self.make()
+        wt.git(["checkout", "-q", "-b", "elsewhere"], cwd=e["path"])
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "identity")
+
+    def test_T_VER_2_a_moved_branch_shows_as_a_new_oid(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "z.txt").write_text("z\n")
+        wt.git(["add", "z.txt"], cwd=p)
+        wt.git(["commit", "-qm", "z"], cwd=p)
+        v = wt.verify(e)
+        self.assertNotEqual(v["oid"], e["base_sha"])
+
+    def test_T_VER_3_a_path_replaced_by_a_symlink_is_tampered(self):
+        e = self.make()
+        p = Path(e["path"])
+        p.rename(p.with_name("moved-away"))
+        p.symlink_to(p.with_name("moved-away"))
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+
+    def test_T_VER_4_a_dot_git_file_pointing_elsewhere_is_tampered(self):
+        e = self.make()
+        other = self.make(title="other", owner="pane0002")
+        (Path(e["path"]) / ".git").write_text((Path(other["path"]) / ".git").read_text())
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+
+    def test_a_deleted_worktree_is_missing(self):
+        e = self.make()
+        import shutil
+        shutil.rmtree(e["path"])            # the test's own temp tree
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "missing")
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)

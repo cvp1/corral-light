@@ -639,3 +639,125 @@ def plan_slug(title, pr, fallback):
             continue
         return slug
     raise ValueError("no free branch name after 999 tries")
+
+
+# ── create and verify (F2, D13, D14) ──────────────────────────────────────────
+
+ADD_TIMEOUT_S = 300
+
+
+class IdentityError(Exception):
+    """A worktree is not what the registry says. `reason`: missing | tampered | identity."""
+
+    def __init__(self, reason, detail):
+        self.reason = reason
+        super().__init__(f"{reason}: {detail}")
+
+
+def repo_lock_key(pr):
+    """dev:inode of the common dir, so two spellings of one repo share a lock."""
+    st = os.stat(pr["common_dir"])
+    return f"{st.st_dev}-{st.st_ino}"
+
+
+@contextlib.contextmanager
+def repo_lock(pr):
+    """Held for every mutating function on one repository, across threads and processes."""
+    d = registry_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(d / f".repo-{repo_lock_key(pr)}.lock", "a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _refuse_symlink(p, what):
+    if os.path.islink(p):
+        raise ValueError(f"the {what} {p} is a symlink; refusing (point "
+                         "CORRAL_LIGHT_WORKTREES at a real folder)")
+
+
+def agent_cwd(entry):
+    """The folder the agent starts in: the worktree plus the subdir the user chose."""
+    return Path(entry["path"]) / (entry.get("subdir") or "")
+
+
+def create(pr, title, owner_pane, registry=None):
+    """Register intent, then `git worktree add -b corral/<slug>` under the root.
+
+    Never: reuses a path, creates outside the root, or runs where probe
+    refused. A failure after the intent leaves the entry in phase `missing`
+    with the error, never silently gone.
+    """
+    if pr.get("refusals"):
+        raise ValueError(pr["refusals"][0])
+    if not pr.get("inside") or not pr.get("head") or not pr.get("branch"):
+        raise ValueError("probe did not find a branch with commits here")
+    registry = registry or Registry()
+    root = worktree_root()
+    _refuse_symlink(root, "worktree root")
+    with repo_lock(pr):
+        rdir = repo_dir(pr)
+        _refuse_symlink(rdir, "repository folder")
+        slug = plan_slug(title, pr, fallback=owner_pane)
+        path = rdir / slug
+        if os.path.lexists(path):
+            raise ValueError(f"{path} already exists; refusing to reuse it")
+        entry = registry.create(
+            owner_pane=owner_pane, path=str(path), subdir=pr.get("subdir") or "",
+            branch=BRANCH_PREFIX + slug, admin_name=slug, repo_top=pr["repo_top"],
+            common_dir=pr["common_dir"], common_dir_id=repo_lock_key(pr),
+            base_ref=pr["branch"], base_sha=pr["head"])
+        try:
+            rdir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _refuse_symlink(rdir, "repository folder")
+            if not os.path.realpath(rdir).startswith(os.path.realpath(root) + os.sep):
+                raise ValueError(f"{rdir} resolves outside the worktree root")
+            git(["worktree", "add", "-q", "-b", "corral/" + slug, "--", str(path), pr["head"]],
+                cwd=pr["top"], timeout=ADD_TIMEOUT_S)
+            verify(entry)
+        except BaseException as e:
+            registry.update(entry["id"], phase="missing", error=str(e)[:ERR_SNIPPET])
+            raise
+        return registry.update(entry["id"], phase="active")
+
+
+def _registered_paths(entry):
+    r = git(["worktree", "list", "--porcelain", "-z"], cwd=entry["common_dir"])
+    return {os.path.realpath(f[len(b"worktree "):].decode("utf-8", "surrogateescape"))
+            for f in r.out.split(b"\0") if f.startswith(b"worktree ")}
+
+
+def verify(entry):
+    """Is the worktree still the one we registered? Returns {"oid"}; raises IdentityError.
+
+    Checks: the path is not a symlink and resolves under the root; its .git
+    file points at our admin dir; git lists it for this common dir; its HEAD
+    is symbolic and names our branch. Repairs nothing.
+    """
+    p = entry["path"]
+    if os.path.islink(p):
+        raise IdentityError("tampered", f"{p} is now a symlink")
+    if not os.path.isdir(p):
+        raise IdentityError("missing", f"{p} is gone")
+    root = os.path.realpath(worktree_root())
+    if not os.path.realpath(p).startswith(root + os.sep):
+        raise IdentityError("tampered", f"{p} resolves outside {root}")
+    want_admin = os.path.realpath(Path(entry["common_dir"]) / "worktrees" / entry["admin_name"])
+    try:
+        dotgit = Path(p, ".git").read_text(encoding="utf-8").strip()
+    except OSError:
+        raise IdentityError("tampered", f"{p}/.git is not a worktree link") from None
+    if not dotgit.startswith("gitdir: ") or os.path.realpath(
+            os.path.join(p, dotgit[len("gitdir: "):])) != want_admin:
+        raise IdentityError("tampered", f"{p}/.git points somewhere else")
+    if os.path.realpath(p) not in _registered_paths(entry):
+        raise IdentityError("missing", f"git no longer lists {p} as a worktree")
+    sym = git(["symbolic-ref", "-q", "HEAD"], cwd=p, check=False)
+    if sym.rc != 0 or sym.text.strip() != entry["branch"]:
+        raise IdentityError("identity", f"{p} is on {sym.text.strip() or 'a detached HEAD'}, "
+                                        f"not {entry['branch']}")
+    oid = git(["rev-parse", "--verify", "-q", entry["branch"] + "^{commit}"], cwd=p).text.strip()
+    return {"oid": oid}
