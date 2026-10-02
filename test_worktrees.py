@@ -425,6 +425,61 @@ class TheProbe(RegCase):
             self.refusal(wt.probe(self.repo), "2.38")
 
 
+class TheSlug(RegCase):
+
+    def slug(self, title, fallback="11d02ed1a81d"):
+        return wt.plan_slug(title, wt.probe(self.repo), fallback=fallback)
+
+    def test_T_SLG_1_ascii_titles_become_readable_slugs(self):
+        self.assertEqual(self.slug("Fix the login bug!"), "fix-the-login-bug")
+        self.assertEqual(self.slug("  --Weird__name..here--  "), "weird-name-here")
+
+    def test_T_SLG_2_unicode_folds_to_ascii_else_the_fallback(self):
+        self.assertEqual(self.slug("Café résumé"), "cafe-resume")
+        self.assertEqual(self.slug("日本語"), "11d02ed1a81d")
+        self.assertEqual(self.slug(""), "11d02ed1a81d")
+
+    def test_T_SLG_3_a_taken_name_gets_a_numeric_suffix(self):
+        wt.git(["branch", "corral/fix"], cwd=self.repo)
+        self.assertEqual(self.slug("fix"), "fix-2")
+        wt.git(["branch", "corral/fix-2"], cwd=self.repo)
+        self.assertEqual(self.slug("fix"), "fix-3")
+
+    def test_T_SLG_4_reserved_names_are_refused(self):
+        for t in ("HEAD", "head"):
+            self.assertNotEqual(self.slug(t), "head")
+
+    def test_T_SLG_5_length_is_capped_with_room_for_the_suffix(self):
+        long = "a" * 80
+        s1 = self.slug(long)
+        self.assertEqual(len(s1), 40)
+        wt.git(["branch", f"corral/{s1}"], cwd=self.repo)
+        s2 = self.slug(long)
+        self.assertLessEqual(len(s2), 40)
+        self.assertTrue(s2.endswith("-2"), s2)
+        self.assertRegex(s2, r"^[a-z0-9-]{1,40}$")
+
+    def test_T_SLG_6_a_stale_admin_dir_or_existing_path_forces_a_new_name(self):
+        (self.repo / ".git" / "worktrees" / "fix").mkdir(parents=True)
+        self.assertEqual(self.slug("fix"), "fix-2")
+        rd = wt.repo_dir(wt.probe(self.repo))
+        (rd / "fix-2").mkdir(parents=True)
+        self.assertEqual(self.slug("fix"), "fix-3")
+
+    def test_the_repo_dir_is_named_and_hashed_under_the_root(self):
+        rd = wt.repo_dir(wt.probe(self.repo))
+        self.assertEqual(rd.parent, wt.worktree_root())
+        self.assertRegex(rd.name, r"^repo-[0-9a-f]{6}$")
+        linked = self.tmp / "l"
+        wt.git(["worktree", "add", "-q", "-b", "f", str(linked)], cwd=self.repo)
+        self.assertEqual(wt.repo_dir(wt.probe(linked)), rd, "one repo, one dir")
+
+    def test_a_branch_named_corral_refuses_slugging(self):
+        wt.git(["branch", "corral"], cwd=self.repo)
+        with self.assertRaises(ValueError):
+            self.slug("x")
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)

@@ -22,6 +22,7 @@ WHAT THIS MODULE NEVER DOES
 Stdlib only.
 """
 import contextlib
+import hashlib
 import fcntl
 import json
 import os
@@ -32,6 +33,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import namedtuple
 from pathlib import Path
 
@@ -586,3 +588,54 @@ def probe(path):
     except OSError:
         pass
     return out
+
+
+# ── names (D3) ────────────────────────────────────────────────────────────────
+
+SLUG_MAX = 40
+_SLUG_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+RESERVED_SLUGS = {"head"}
+BRANCH_PREFIX = "refs/heads/corral/"
+
+
+def repo_dir(pr):
+    """<root>/<repo name>-<hash6>: one dir per repository, from the common dir's realpath."""
+    common = os.path.realpath(pr["common_dir"])
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(pr["repo_top"]).name).strip("-.") or "repo"
+    return worktree_root() / f"{name[:40]}-{hashlib.sha256(common.encode()).hexdigest()[:6]}"
+
+
+def _slugify(text):
+    folded = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+    return re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", folded.lower())).strip("-")
+
+
+def plan_slug(title, pr, fallback):
+    """A free `corral/<slug>` name for a new worktree. Never trusts user text.
+
+    Unique against existing corral/* branches, admin dirs under
+    <common_dir>/worktrees/, and paths in this repo's dir under the root.
+    The full ref must pass `git check-ref-format`. Raises ValueError if a
+    branch named exactly `corral` blocks the namespace.
+    """
+    common = Path(pr["common_dir"])
+    top = pr["top"]
+    if git(["show-ref", "--verify", "-q", "refs/heads/corral"], cwd=top, check=False).rc == 0:
+        raise ValueError("a branch named exactly 'corral' blocks corral/<name> branches")
+    base = _slugify(title)[:SLUG_MAX].strip("-")
+    if not base or base in RESERVED_SLUGS:
+        base = _slugify(fallback)[:SLUG_MAX].strip("-") or "pane"
+    taken = set(git(["for-each-ref", "--format=%(refname)", BRANCH_PREFIX], cwd=top).text.split())
+    rdir = repo_dir(pr)
+    for n in range(1, 1000):
+        suffix = "" if n == 1 else f"-{n}"
+        slug = base[:SLUG_MAX - len(suffix)].rstrip("-") + suffix
+        if (BRANCH_PREFIX + slug in taken or (common / "worktrees" / slug).exists()
+                or os.path.lexists(rdir / slug)):
+            continue
+        if not _SLUG_RE.match(slug):
+            continue
+        if git(["check-ref-format", BRANCH_PREFIX + slug], cwd=top, check=False).rc != 0:
+            continue
+        return slug
+    raise ValueError("no free branch name after 999 tries")
