@@ -45,3 +45,34 @@ from an empty scratch directory.
 - Grok: build v2's shape; do not implement Commit or Discard until the index step is pinned and replayable and Discard kills writers and drops the queue first.
 
 All three conditions are addressed in v3 §2.2 (commit protocol, discard) and the ship gate items 6–8.
+
+## Status after the build (2026-10-02, branch `worktrees`)
+
+Every converged finding, with where it now lives and the test that holds it.
+
+| Finding | Status | Evidence |
+|---|---|---|
+| No merge into an open checkout | Fixed | Review offers Commit, Push (& PR) and Copy merge command only; nothing merges. README "Own branches". |
+| Never automatic `git worktree prune` | Fixed | T-RMV-9 (source has no prune), T-REC-2 and T-REC-5 (spy: no prune call). |
+| Discard must not delete | Fixed | Recovery ref, move to trash, typed purge: T-RMV-1..8, T-CLI-11..13. |
+| Actions bind to an immutable reviewed tree | Fixed | T-SNP-*, T-SAFE-1/2, T-RTE-8/12, T-UI-9/10; the browser posts the tree it showed. |
+| Hub commit by plumbing, no hooks, said on the button | Fixed | `commit_tree`; enabled Commit's tooltip and the README say commit hooks do not run (selftest_review). |
+| Stop writers before discard; no drain into a trashed pane | Fixed | T-RMV-11, T-RMV-11b, T-RMV-13, T-RMV-14. |
+| Replace the `read-tree` epilogue with a journalled protocol | Fixed | T-CMT-9..12; T-CRS-2 kills at every journalled stage. |
+| Pre-trusting Claude only if narrow | Fixed (not done) | T-LIF-14: no trust entry, no permission-mode change. |
+| No `safe.directory=*` | Fixed | Not set anywhere in product code. |
+
+Still split, settled:
+
+- **Location.** the operator chose the state dir (D2, v3.1). `CORRAL_LIGHT_WORKTREES` moves it; tmpfs is refused.
+- **`worktree move` on a dirty tree.** Phase 0 step 0.5: it moves without `--force`; T-RMV-12 keeps it so.
+- **`merge-tree --name-only`.** Phase 0 step 0.3 froze the argv from fixtures, on git 2.38.5 and 2.55.
+
+Round 2 conditions: Sol (index reconciliation, disposal dispatch), Gemini (dirty move, post-commit index) and Grok (pinned, replayable index step; Discard kills writers and drops the queue) are covered by the rows above.
+
+Crash coverage: T-CRS-1 (create), T-CRS-2 (commit), T-CRS-3 (push), T-CRS-4 (PR) and T-CRS-5 (discard) kill a real subprocess at each journalled point. They exercise `worktrees.py` and `reconcile`. They do not kill a running hub. The plan's "real hub restart with live worktree panes" stays a P4 manual check.
+
+Open before ship (plan §5.4), none of them code:
+
+- Lane matrix rerun on the built feature (P4), including a `gh` PR on a throwaway GitHub repo.
+- One week of dogfood with no lost work.
