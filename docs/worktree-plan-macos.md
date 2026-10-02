@@ -10,6 +10,20 @@ dogma-2 is a Mac mini M4 on macOS 27 with APFS. The facts below were checked the
 the running hub's code and config. Phase 0's v3.2 results are taken as given for Linux.
 Each item says whether they carry over to macOS.
 
+## Status (2026-10-02, built and tested on omarchy-laptop)
+
+Code for M1 to M4 is on `master` once merged; each was tested on Linux by
+forcing the darwin path. What only dogma-2 can prove is still Phase 0.7.
+
+| Item | Built | Still for 0.7 on dogma-2 |
+|---|---|---|
+| M1 | Off Linux, discard scans with `lsof +D` under a 20 s timeout; any failure (missing, error, timeout) refuses. lsof's exit code is ignored: it is 1 both on a find and on a bad path. Darwin T-RMV-13 runs here against the real lsof. | Run it under macOS lsof. |
+| M2 | Lanes are keyed by platform. macOS has none, so own branches are refused there with the reason. `CORRAL_LIGHT_WORKTREE_LANES` opts lanes in for the matrix run. | The §5.3 matrix for Claude, Codex, Grok; then list the passing lanes. |
+| M3 | On darwin the repo dir hash uses the common dir in its on-disk letter case (T-CRT-8). The suite realpaths its temp roots. | Run the suite on dogma-2. |
+| M4 | A darwin T-LIF-14 shows the hub leaves `~/.claude` and `~/.claude.json` byte-identical. `doctor` lists `~/.claude/projects` folders of gone worktrees. | Assert the same with real Claude Code. The `session_git_guard.py` hook must skip the worktree root before it is ever re-wired. |
+| M5 | Nothing to build yet. | Record memory behaviour for an `~/ai-os` worktree. |
+| Facts | git is resolved once and `doctor` prints its path; `doctor` reads the filesystem from `mount` without `/proc`. | None. |
+
 ## Changes design or tests
 
 ### M1. Discard's `/proc` scan does not exist on macOS
