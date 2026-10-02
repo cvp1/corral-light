@@ -739,6 +739,20 @@ class TheSnapshot(CreateCase):
         self.assertEqual(snap["tree"], wt.git(["write-tree"], cwd=p).text.strip())
         self.assertEqual(snap["head"], e["base_sha"])
 
+    def test_T_SNP_1b_head_tree_says_whether_the_review_is_committed(self):
+        """The review dialog enables Commit or Publish from this, not from a guess."""
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("changed\n")
+        snap = wt.snapshot(e)
+        base_tree = wt.git(["rev-parse", e["base_sha"] + "^{tree}"], cwd=p).text.strip()
+        self.assertEqual(snap["head_tree"], base_tree)
+        self.assertNotEqual(snap["tree"], snap["head_tree"])
+        wt.commit_tree(e, snap["tree"], snap["index_id"], "m", expect_head=snap["head"],
+                       registry=self.reg)
+        again = wt.snapshot(e)
+        self.assertEqual(again["tree"], again["head_tree"])
+
     def test_T_SNP_2_same_content_same_tree_one_byte_different_tree(self):
         e = self.make()
         p = Path(e["path"])

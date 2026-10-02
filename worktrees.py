@@ -912,6 +912,7 @@ def _snapshot_locked(entry, tmp_dir=None):
     except FileNotFoundError:
         real, idx_mtime = b"", None
     head = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=p).text.strip()
+    head_tree = git(["rev-parse", "--verify", head + "^{tree}"], cwd=p).text.strip()
     too_big = []
     for path in _names(p, ["ls-files", "--others", "--exclude-standard", "-z"]):
         try:
@@ -933,7 +934,7 @@ def _snapshot_locked(entry, tmp_dir=None):
     pin = git(["commit-tree", tree, "-p", head], cwd=p,
               input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
     git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
-    return {"tree": tree, "head": head, "base_sha": entry["base_sha"],
+    return {"tree": tree, "head": head, "head_tree": head_tree, "base_sha": entry["base_sha"],
             "index_id": hashlib.sha256(real).hexdigest(),
             "staged_differs": sorted(staged & unstaged), "too_big": too_big,
             "ignored": {"count": len(ignored), "sample": ignored[:IGNORED_SAMPLE]}}
