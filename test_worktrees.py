@@ -1252,6 +1252,146 @@ esac
         self.assertNotIn("noenv", argv)
 
 
+class TheDiscard(CreateCase):
+
+    def setUp(self):
+        super().setUp()
+        self.e = self.make()
+        self.p = Path(self.e["path"])
+
+    def discard(self, **kw):
+        snap = wt.snapshot(self.e)
+        return wt.discard(self.e, snap["tree"], registry=self.reg, **kw), snap
+
+    def test_T_RMV_1_the_recovery_ref_holds_the_snapshot_tree(self):
+        (self.p / "wip.txt").write_text("untracked work\n")
+        r, snap = self.discard()
+        self.assertTrue(r["recovery_ref"].startswith(f"refs/corral/recovery/{self.e['id']}/"))
+        self.assertEqual(wt.git(["rev-parse", r["recovery_ref"] + "^{tree}"], cwd=self.repo).text.strip(),
+                         snap["tree"])
+        self.assertEqual(wt.git(["show", r["recovery_ref"] + ":wip.txt"], cwd=self.repo).text,
+                         "untracked work\n")
+
+    def test_T_RMV_2_and_12_the_dir_moves_to_trash_with_ignored_and_dirty_files(self):
+        (self.p / ".gitignore").write_text(".env\ndata/\nnested/\n")
+        (self.p / ".env").write_text("SECRET=1\n")
+        (self.p / "data").mkdir()
+        (self.p / "data" / "big.bin").write_bytes(os.urandom(5 << 20))
+        nested = self.p / "nested"
+        nested.mkdir()
+        wt.git(["init", "-q"], cwd=nested)
+        (self.p / "a.txt").write_text("modified\n")
+        (self.p / "u.txt").write_text("untracked\n")
+        r, _ = self.discard()
+        t = Path(r["trash_path"])
+        self.assertFalse(self.p.exists())
+        self.assertEqual(t.parent, wt.worktree_root() / ".trash")
+        self.assertEqual((t / ".env").read_text(), "SECRET=1\n")
+        self.assertEqual((t / "data" / "big.bin").stat().st_size, 5 << 20)
+        self.assertTrue((t / "nested" / ".git").is_dir())
+        self.assertEqual((t / "a.txt").read_text(), "modified\n")
+        self.assertEqual((t / "u.txt").read_text(), "untracked\n")
+        e = self.reg.read(self.e["id"])
+        self.assertEqual(e["phase"], "trashed")
+        self.assertIn(".env", e["ignored_at_discard"])
+
+    def test_T_RMV_3_the_branch_survives_discard(self):
+        self.discard()
+        self.assertEqual(wt.git(["rev-parse", self.e["branch"]], cwd=self.repo).text.strip(),
+                         self.e["base_sha"])
+
+    def test_T_RMV_4_restore_brings_it_back_and_it_verifies(self):
+        (self.p / "u.txt").write_text("keep\n")
+        self.discard()
+        e = wt.restore(self.reg.read(self.e["id"]), registry=self.reg)
+        self.assertEqual(e["phase"], "active")
+        self.assertEqual((self.p / "u.txt").read_text(), "keep\n")
+        wt.verify(e)
+
+    def test_T_RMV_5_purge_needs_the_typed_branch_name(self):
+        self.discard()
+        e = self.reg.read(self.e["id"])
+        for wrong in ("", "fix-login", "yes", "corral/other"):
+            with self.assertRaises(ValueError):
+                wt.purge(e, wrong, registry=self.reg)
+        self.assertTrue(Path(e["trash_path"]).exists())
+
+    def test_purge_removes_trash_and_branch_and_keeps_recovery(self):
+        r, _ = self.discard()
+        e = self.reg.read(self.e["id"])
+        wt.purge(e, "corral/fix-login", registry=self.reg)
+        self.assertFalse(Path(e["trash_path"]).exists())
+        self.assertEqual(wt.git(["branch", "--list", "corral/fix-login"], cwd=self.repo).text, "")
+        self.assertEqual(self.reg.read(self.e["id"])["phase"], "purged")
+        self.assertTrue(wt.git(["rev-parse", "--verify", r["recovery_ref"]], cwd=self.repo).text)  # T-RMV-8
+
+    def test_T_RMV_6_purge_never_deletes_a_moved_branch(self):
+        self.discard()
+        (self.repo / "a.txt").write_text("main moved\n")
+        wt.git(["commit", "-qam", "main moved"], cwd=self.repo)
+        wt.git(["update-ref", "refs/heads/corral/fix-login", "main"], cwd=self.repo)
+        e = self.reg.read(self.e["id"])
+        r = wt.purge(e, "corral/fix-login", registry=self.reg)
+        self.assertFalse(r["branch_deleted"])
+        self.assertIn("corral/fix-login", wt.git(["branch", "--list", "corral/fix-login"], cwd=self.repo).text)
+
+    def test_T_RMV_7_purge_refuses_a_path_outside_trash(self):
+        self.discard()
+        e = self.reg.read(self.e["id"])
+        bad = dict(e, trash_path=str(self.repo))
+        with self.assertRaises(ValueError):
+            wt.purge(bad, "corral/fix-login", registry=self.reg)
+        self.assertTrue((self.repo / "a.txt").exists())
+        bad = dict(e, branch="refs/heads/main")
+        with self.assertRaises(ValueError):
+            wt.purge(bad, "main", registry=self.reg)
+
+    def test_T_RMV_9_the_module_deletes_nothing_except_its_own_temp_files(self):
+        import ast
+        tree = ast.parse((ROOT / "worktrees.py").read_text())
+        allowed = {"_unlink_own_temp"}
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Attribute) and n.attr in ("rmtree", "remove", "unlink",
+                                                               "rmdir", "removedirs"):
+                    if isinstance(n.value, ast.Name) and n.value.id in ("os", "shutil") or n.attr == "unlink":
+                        self.assertIn(fn.name, allowed, f"{fn.name} calls {n.attr}")
+        src = (ROOT / "worktrees.py").read_text()
+        self.assertNotIn("worktree\", \"prune", src)
+        self.assertNotIn('"prune"', src)
+
+    def test_T_RMV_10_published_but_not_integrated_is_not_merged(self):
+        (self.p / "a.txt").write_text("x\n")
+        snap = wt.snapshot(self.e)
+        new = wt.commit_tree(self.e, snap["tree"], snap["index_id"], "m",
+                             expect_head=snap["head"], registry=self.reg)["commit"]
+        self.reg.update(self.e["id"], published={"oid": new, "url": "x", "ref": self.e["branch"]})
+        self.assertFalse(wt.is_integrated(self.reg.read(self.e["id"])))
+        wt.git(["merge", "-q", "--ff-only", "corral/fix-login"], cwd=self.repo)
+        self.assertTrue(wt.is_integrated(self.reg.read(self.e["id"])))
+
+    def test_T_RMV_13_a_process_inside_the_worktree_blocks_discard_by_name(self):
+        import subprocess
+        child = subprocess.Popen(["sleep", "30"], cwd=self.p, start_new_session=True)
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        with self.assertRaises(wt.Refused) as cm:
+            self.discard()
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertIn(str(child.pid), cm.exception.detail)
+        self.assertIn("sleep", cm.exception.detail)
+        self.assertTrue(self.p.exists())
+
+    def test_discard_refuses_when_files_changed_since_review(self):
+        snap = wt.snapshot(self.e)
+        (self.p / "late.txt").write_text("late\n")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.discard(self.e, snap["tree"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "changed")
+        self.assertTrue(self.p.exists())
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
