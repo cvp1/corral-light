@@ -1277,3 +1277,166 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
     prev = registry.read(entry["id"]).get("published") or {}
     registry.update(entry["id"], published=dict(prev, pr_url=url))
     return {"pr_url": url, "compare_url": None}
+
+
+# ── discard, restore, purge (D9) ──────────────────────────────────────────────
+
+LOCK_WAIT_S = 5
+IGNORED_INVENTORY_MAX = 500
+
+
+def processes_in(path):
+    """[(pid, command)] of this user's processes whose cwd or an open fd is inside `path`.
+
+    Reads /proc, so it catches setsid'd grandchildren and the user's own
+    shells, not just the processes the hub started. Never includes us.
+    """
+    root = os.path.realpath(path)
+    me, uid, found = os.getpid(), os.getuid(), []
+    try:
+        pids = [int(d) for d in os.listdir("/proc") if d.isdigit()]
+    except OSError:
+        return found
+    for pid in pids:
+        if pid == me:
+            continue
+        base = f"/proc/{pid}"
+        try:
+            if os.stat(base).st_uid != uid:
+                continue
+            hits = [os.readlink(f"{base}/cwd")]
+        except OSError:
+            continue
+        try:
+            for fd in os.listdir(f"{base}/fd"):
+                with contextlib.suppress(OSError):
+                    hits.append(os.readlink(f"{base}/fd/{fd}"))
+        except OSError:
+            pass
+        if any(h == root or h.startswith(root + os.sep) for h in hits):
+            try:
+                with open(f"{base}/cmdline", "rb") as f:
+                    cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            except OSError:
+                cmd = "?"
+            found.append((pid, cmd[:120]))
+    return found
+
+
+def _wait_lock_gone(idx):
+    deadline = time.monotonic() + LOCK_WAIT_S
+    while os.path.exists(idx + ".lock"):
+        if time.monotonic() > deadline:
+            raise Refused("busy", "a git process still holds the worktree's index.lock")
+        time.sleep(0.05)
+
+
+def trash_dir():
+    return worktree_root() / ".trash"
+
+
+def discard(entry, tree, registry=None, tmp_dir=None):
+    """Recovery ref, then move the whole worktree into <root>/.trash/. Deletes nothing.
+
+    The caller stops the pane's writers first (D11); this refuses, naming
+    them, if any process still has its cwd or an open file inside. Then:
+    verify; wait for index.lock; under the repo lock re-snapshot and require
+    the reviewed `tree`; point refs/corral/recovery/<id>/<ts> at a commit of
+    it; inventory ignored files; journal the move; plain `git worktree move`
+    (Phase 0: a dirty worktree moves without --force; never any --force).
+    The branch is kept.
+    """
+    registry = registry or Registry()
+    p = entry["path"]
+    busy = processes_in(p)
+    if busy:
+        raise Refused("busy", "still running inside the worktree: " +
+                      ", ".join(f"pid {pid} ({cmd})" for pid, cmd in busy))
+    verify(entry)
+    _wait_lock_gone(_index_path(p))
+    with repo_lock(entry):
+        now = _snapshot_locked(entry, tmp_dir or registry_dir() / "tmp")
+        if now["tree"] != tree:
+            raise Refused("changed", "files changed since you opened review; refresh it")
+        ts = _ts()
+        keep = git(["commit-tree", tree, "-p", now["head"]], cwd=p,
+                   input=f"corral: discarded {entry['id']}\n".encode()).text.strip()
+        ref = f"{RECOVERY_REF}{entry['id']}/{ts}"
+        git(["update-ref", ref, keep, ""], cwd=p)
+        ignored = _names(p, ["ls-files", "--others", "--ignored", "--exclude-standard",
+                             "--directory", "-z"])
+        tdir = trash_dir()
+        tdir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _refuse_symlink(tdir, "trash folder")
+        dest = tdir / f"{entry['id']}-{ts}"
+        oid = verify(entry)["oid"]
+        registry.update(entry["id"], recovery_refs=list(
+            registry.read(entry["id"]).get("recovery_refs") or []) + [ref],
+            ignored_at_discard=ignored[:IGNORED_INVENTORY_MAX], branch_oid_at_discard=oid)
+        op = registry.begin_op(entry["id"], "discard", src=p, dst=str(dest))
+        _crash_point("discard:journalled")
+        git(["worktree", "move", "--", p, str(dest)], cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
+        _crash_point("discard:moved")
+        registry.set_op(entry["id"], op, state="done", stage="done")
+        registry.update(entry["id"], phase="trashed", trash_path=str(dest))
+    return {"recovery_ref": ref, "trash_path": str(dest)}
+
+
+def restore(entry, registry=None):
+    """Move a trashed worktree back to its path. Never overwrites an existing path."""
+    registry = registry or Registry()
+    if entry.get("phase") != "trashed" or not entry.get("trash_path"):
+        raise ValueError("this worktree is not in trash")
+    if os.path.lexists(entry["path"]):
+        raise ValueError(f"{entry['path']} exists; refusing to overwrite it")
+    with repo_lock(entry):
+        op = registry.begin_op(entry["id"], "restore", src=entry["trash_path"], dst=entry["path"])
+        git(["worktree", "move", "--", entry["trash_path"], entry["path"]],
+            cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
+        registry.set_op(entry["id"], op, state="done", stage="done")
+        e = registry.update(entry["id"], phase="active", trash_path=None)
+    verify(e)
+    return e
+
+
+def purge(entry, confirm, registry=None):
+    """Really delete a TRASHED worktree: typed confirmation of the branch name required.
+
+    Removes only a path under <root>/.trash/; deletes the branch only if it
+    is a corral/* branch still at the OID recorded at discard; never deletes
+    recovery refs.
+    """
+    registry = registry or Registry()
+    branch = entry.get("branch") or ""
+    if not branch.startswith(BRANCH_PREFIX):
+        raise ValueError(f"{branch!r} is not a corral/* branch; refusing")
+    short = branch[len("refs/heads/"):]
+    if confirm != short:
+        raise ValueError(f"type the branch name ({short}) to confirm deletion")
+    if entry.get("phase") != "trashed":
+        raise ValueError("only a discarded (trashed) worktree can be purged")
+    t = entry.get("trash_path") or ""
+    tdir = os.path.realpath(trash_dir())
+    if os.path.islink(t) or not os.path.realpath(t).startswith(tdir + os.sep):
+        raise ValueError(f"{t} is not inside {tdir}; refusing")
+    with repo_lock(entry):
+        op = registry.begin_op(entry["id"], "purge", path=t)
+        git(["worktree", "remove", "--force", "--", t], cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
+        want = entry.get("branch_oid_at_discard")
+        deleted = bool(want) and git(["update-ref", "-d", branch, want],
+                                     cwd=entry["common_dir"], check=False).rc == 0
+        registry.set_op(entry["id"], op, state="done", stage="done", branch_deleted=deleted)
+        registry.update(entry["id"], phase="purged", trash_path=None)
+    return {"branch_deleted": deleted}
+
+
+def is_integrated(entry):
+    """True only if the branch tip is already contained in the base branch's tip.
+
+    Having been pushed, or having an upstream, does not count as merged.
+    """
+    c = entry["common_dir"]
+    tip = git(["rev-parse", "--verify", "-q", entry["branch"]], cwd=c, check=False).text.strip()
+    if not tip:
+        return False
+    return git(["merge-base", "--is-ancestor", tip, entry["base_ref"]], cwd=c, check=False).rc == 0
