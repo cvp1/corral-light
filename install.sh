@@ -351,11 +351,13 @@ case ":$PATH:" in
   *":$BIN:"*) ;;
   *)
     line='export PATH="$HOME/.local/bin:$PATH"'
+    added=0
     for rc in "$HOME/.profile" "$HOME/.bashrc"; do
-      if ! grep -qsF "$line" "$rc"; then printf '\n# added by the Corral Light installer\n%s\n' "$line" >> "$rc"; fi
+      if ! grep -qsF "$line" "$rc"; then printf '\n# added by the Corral Light installer\n%s\n' "$line" >> "$rc"; added=1; fi
     done
     export PATH="$BIN:$PATH"
-    ok "added ~/.local/bin to PATH (in ~/.profile and ~/.bashrc; new terminals pick it up)"
+    if [ "$added" = 1 ]; then ok "added ~/.local/bin to PATH (in ~/.profile and ~/.bashrc; new terminals pick it up)"
+    else skip "~/.local/bin is already in ~/.profile and ~/.bashrc (this shell just has not reloaded them)"; fi
     ;;
 esac
 
