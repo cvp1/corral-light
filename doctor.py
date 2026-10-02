@@ -54,6 +54,28 @@ def _human(n):
     return f"{n:.1f} GiB"
 
 
+def claude_leftovers(entries):
+    """~/.claude/projects folders named for worktrees that are purged or missing.
+
+    Claude keys its transcripts by cwd. Where panes share the real ~/.claude
+    (macOS: docs/worktree-plan-macos.md M4) every worktree path leaves one,
+    and reconcile and purge never touch it.
+    """
+    import re
+    projects = Path.home() / ".claude" / "projects"
+    if not projects.is_dir():
+        return []
+    out = []
+    for e in entries:
+        if e.get("phase") not in ("purged", "missing") or not e.get("path"):
+            continue
+        for p in {e["path"], os.path.join(e["path"], e.get("subdir") or "")}:
+            slug = re.sub(r"[^A-Za-z0-9]", "-", p.rstrip("/"))
+            if (projects / slug).is_dir() and slug not in out:
+                out.append(slug)
+    return out
+
+
 def worktree_lines(registry=None):
     """Own branches: git version, where worktrees live, what is in trash.
     Reads only; repairs nothing."""
@@ -67,7 +89,7 @@ def worktree_lines(registry=None):
         v = None
     if v is not None:
         good = tuple(v[:2]) >= wt.MIN_GIT
-        out.append((ok if good else bad) + f"git {'.'.join(map(str, v))}"
+        out.append((ok if good else bad) + f"git {'.'.join(map(str, v))} ({wt.GIT_BIN})"
                    + ("" if good else f" — own branches needs {'.'.join(map(str, wt.MIN_GIT))} or newer"))
     root = wt.worktree_root()
     fs = wt._fstype(root) or "an unknown filesystem"
@@ -97,6 +119,11 @@ def worktree_lines(registry=None):
         if any(o.get("state") == "unknown" for o in e.get("ops") or []):
             out.append(f"  !   {e['id']}: an action has an unknown outcome — "
                        f"corral-light worktrees resolve {e['id']}")
+    left = claude_leftovers(entries)
+    if left:
+        out.append(f"  !   {len(left)} Claude transcript folder{'s' if len(left) != 1 else ''} in "
+                   f"~/.claude/projects belong{'s' if len(left) == 1 else ''} to worktrees that are gone (listed, never "
+                   f"deleted): " + ", ".join(left[:5]) + (" …" if len(left) > 5 else ""))
     strays = wt.orphans(registry=reg)
     if strays:
         out.append(f"  !   {len(strays)} orphan{'s' if len(strays) != 1 else ''} under the "
