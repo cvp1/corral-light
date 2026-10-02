@@ -233,6 +233,10 @@ let ra = reviewActions(snap, { message: '', remote: 0, busy: false });
 check(!ra.commit.ok && /message/.test(ra.commit.why), 'Commit needs a message, and says so');
 ra = reviewActions(snap, { message: 'm', remote: 0, busy: false });
 check(ra.commit.ok, 'Commit is enabled for uncommitted changes with a message');
+check(/commit hooks/.test(ra.commit.note) && /do not run/.test(ra.commit.note) && /pre-push/.test(ra.commit.note),
+      'an enabled Commit says, on hover, that commit hooks do not run (plan §6)');
+check(/ra\[k\]\.ok \? ra\[k\]\.note \|\| '' : ra\[k\]\.why/.test(fn('paintReview')),
+      'the tooltip shows the note when enabled and the reason when not');
 check(!ra.publish.ok && /commit/i.test(ra.publish.why), 'Publish waits for a commit, and says so');
 ra = reviewActions(done, { message: '', remote: 0, busy: false });
 check(!ra.commit.ok && /nothing to commit/.test(ra.commit.why), 'nothing to commit says so');
