@@ -12,6 +12,7 @@ import os
 import signal
 import socketserver
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -20,6 +21,8 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
+# Before anything imports sessions (STATE binds at import time): never the live store.
+os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="corral-light-test-"))
 FIXTURES = ROOT / "testkit" / "fixtures" / "merge-tree"
 
 # Isolate every git call in this suite from the user's config.
@@ -1536,6 +1539,386 @@ class TheReconcile(CreateCase):
                 self.assertEqual(got["phase"], "trashed")
                 self.assertTrue(Path(got["trash_path"], "w.txt").exists())
             self.assertEqual(got["ops"][-1]["state"], "done")
+
+
+from test_resilience import FakeLaneCase, wait_for  # noqa: E402
+
+
+class LifecycleCase(RegCase):
+    """A Manager with the `fake` lane (a real ACP process) allowed own branches."""
+
+    def setUp(self):
+        RegCase.setUp(self)
+        FakeLaneCase.setUp(self)
+        self._lanes = mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": "fake"})
+        self._lanes.start()
+        self.addCleanup(self._lanes.stop)
+
+    _close_all = FakeLaneCase._close_all
+    texts = FakeLaneCase.texts
+    turn_ends = FakeLaneCase.turn_ends
+
+    def pane(self, cwd=None, **kw):
+        p = self.mgr.create("fake", str(cwd or self.repo), worktree=True, **kw)
+        self.assertEqual(p.state, "ready", p.error)
+        return p
+
+    def say(self, p, text, timeout=15):
+        n = self.turn_ends(p)
+        p.send(text)
+        self.assertTrue(wait_for(lambda: self.turn_ends(p) > n and p.state != "busy",
+                                 timeout=timeout), self.texts(p)[-300:])
+
+    def entry(self, p):
+        return self.reg.read(p.worktree_id)
+
+    def events(self, p, kind):
+        return [e for e in p.events if e["kind"] == kind]
+
+
+class LifecycleBasics(LifecycleCase):
+
+    def test_T_LIF_1_2_worktree_id_round_trips_and_old_metas_load(self):
+        p = self.pane()
+        meta = wt.json.loads((p.dir / "meta.json").read_text())
+        self.assertEqual(meta["worktree_id"], p.worktree_id)
+        q = self.sessions.Pane.from_meta(meta, self.mgr)
+        self.assertEqual(q.worktree_id, p.worktree_id)
+        old = {k: v for k, v in meta.items() if k != "worktree_id"}
+        self.assertIsNone(self.sessions.Pane.from_meta(old, self.mgr).worktree_id)
+
+    def test_T_LIF_3_the_agent_runs_in_the_worktree_plus_subdir(self):
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "m.py").write_text("x\n")
+        wt.git(["add", "-A"], cwd=self.repo)
+        wt.git(["commit", "-qm", "pkg"], cwd=self.repo)
+        p = self.pane(cwd=self.repo / "pkg")
+        self.say(p, "pwd")
+        e = self.entry(p)
+        self.assertIn(os.path.realpath(Path(e["path"]) / "pkg"), self.texts(p))
+        self.assertEqual(p.snapshot()["worktree"]["subdir"], "pkg")
+
+    def test_T_LIF_4_a_full_roster_refuses_before_any_registry_entry_or_branch(self):
+        with mock.patch.object(self.sessions, "MAX_PANES", 0):
+            with self.assertRaises(ValueError):
+                self.mgr.create("fake", str(self.repo), worktree=True)
+        self.assertEqual(self.reg.all(), [])
+        self.assertEqual(wt.git(["branch", "--list", "corral/*"], cwd=self.repo).text, "")
+
+    def test_T_LIF_5_16_a_failed_start_leaves_a_dead_owner_and_resume_retries_there(self):
+        real = self.sessions.AGENTS["fake"]
+        broken = dict(real, env=dict(real["env"], FAKE_ACP_AUTH_FAIL="1"))
+        bad_argv = dict(real, argv=[sys.executable, "-c", "import sys; sys.exit(3)"])
+        self.sessions.AGENTS["fake"] = bad_argv
+        p = self.mgr.create("fake", str(self.repo), worktree=True)
+        self.assertEqual(p.state, "dead")
+        self.assertIn(p.id, self.mgr.panes)
+        self.assertEqual(self.entry(p)["phase"], "active")
+        self.assertEqual(self.entry(p)["owner_pane"], p.id)
+        self.sessions.AGENTS["fake"] = real
+        p.resume()
+        self.assertEqual(p.state, "ready", p.error)
+        self.say(p, "pwd")
+        self.assertIn(os.path.realpath(self.entry(p)["path"]), self.texts(p))
+        del broken
+
+    def test_T_LIF_6_the_manager_lock_is_never_held_during_git(self):
+        held = []
+        real = wt.git
+
+        def spy(args, *a, **k):
+            held.append(self.mgr._lock.locked())
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", spy):
+            p = self.pane()
+            self.say(p, "write a.txt hi")
+            wait_for(lambda: p.worktree_summary is not None, timeout=10)
+            self.mgr.worktree_snapshot(p.id)
+        self.assertTrue(held)
+        self.assertFalse(any(held), "Manager._lock was held during a git call")
+
+    def test_T_LIF_7_a_turn_end_gives_one_worktree_event_and_a_failure_is_a_note(self):
+        p = self.pane()
+        self.say(p, "write a.txt changed")
+        self.assertTrue(wait_for(lambda: len(self.events(p, "worktree")) == 1, timeout=10))
+        s = self.events(p, "worktree")[0]["data"]["summary"]
+        self.assertEqual((s["files"], s["added"], s["deleted"]), (1, 1, 1))
+        with mock.patch.object(wt, "summary", side_effect=wt.GitError(["git"], 128, "boom")):
+            self.say(p, "pwd")
+            self.assertTrue(wait_for(lambda: any("could not count" in (e["data"] or {}).get("text", "")
+                                                 for e in self.events(p, "note")), timeout=10))
+        self.assertEqual(p.state, "ready")
+
+    def test_T_LIF_8_no_git_call_on_the_observe_tick(self):
+        p = self.pane()
+        calls = []
+        with mock.patch.object(wt, "git", lambda *a, **k: calls.append(a)):
+            for _ in range(5):
+                snap = p.snapshot()
+                self.mgr.state() if hasattr(self.mgr, "state") else None
+        self.assertEqual(calls, [])
+        self.assertEqual(snap["worktree"]["branch"], "corral/" + Path(self.entry(p)["path"]).name)
+
+    def test_T_LIF_9_after_a_restart_the_pane_resumes_on_its_branch(self):
+        p = self.pane()
+        self.say(p, "write a.txt before restart")
+        meta = wt.json.loads((p.dir / "meta.json").read_text())
+        self.mgr.panes[p.id].pause()
+        q = self.sessions.Pane.from_meta(meta, self.mgr)
+        self.mgr.panes[p.id] = q
+        self.mgr._worktree_restore()
+        self.mgr._wt_reconcile_thread.join(10)
+        self.assertEqual(q.state, "detached")
+        self.assertIsNone(q.worktree_blocked)
+        q.resume()
+        self.say(q, "pwd")
+        self.assertIn(os.path.realpath(self.entry(q)["path"]), self.texts(q))
+
+    def test_T_LIF_10_a_missing_worktree_at_restart_refuses_resume_with_the_reason(self):
+        p = self.pane()
+        meta = wt.json.loads((p.dir / "meta.json").read_text())
+        p.pause()
+        import shutil
+        shutil.rmtree(self.entry(p)["path"])          # the test's own temp tree
+        q = self.sessions.Pane.from_meta(meta, self.mgr)
+        self.mgr.panes[p.id] = q
+        self.mgr._worktree_restore()
+        self.mgr._wt_reconcile_thread.join(10)
+        with self.assertRaises(ValueError) as cm:
+            q.resume()
+        self.assertIn("missing", str(cm.exception))
+
+    def test_T_LIF_11_close_keeps_the_worktree_and_reopen_restores_it(self):
+        p = self.pane()
+        path = self.entry(p)["path"]
+        self.mgr.close(p.id)
+        self.assertTrue(Path(path).is_dir())
+        q = self.mgr.reopen(p.id)
+        self.assertEqual(q.worktree_id, p.worktree_id)
+        self.assertIsNone(q.worktree_blocked)
+
+    def test_T_LIF_12_port_of_a_worktree_pane_is_refused(self):
+        p = self.pane()
+        with self.assertRaises(ValueError) as cm:
+            self.mgr.port(p.id, "fake", sha="x")
+        self.assertIn("own branch", str(cm.exception))
+
+    def test_T_LIF_13_lanes_that_cannot_use_an_own_branch_are_refused(self):
+        for lane in ("host:box", "ollama", "gemini"):
+            self.assertIsNotNone(self.sessions.worktree_refusal(lane), lane)
+        self.assertIsNone(self.sessions.worktree_refusal("fake"))
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": ""}):
+            self.assertIsNone(self.sessions.worktree_refusal("claude"))
+            self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREES_ENABLED": "0"}):
+            with self.assertRaises(ValueError):
+                self.mgr.create("fake", str(self.repo), worktree=True)
+
+    def test_T_LIF_14_the_hub_writes_no_claude_trust_for_worktrees(self):
+        src = (ROOT / "sessions.py").read_text() + (ROOT / "worktrees.py").read_text()
+        self.assertNotIn("hasTrustDialogAccepted", src)
+
+    def test_T_LIF_15_concurrent_creates_at_the_cap_admit_one(self):
+        out, errs = [], []
+        live = len([p for p in self.mgr.panes.values() if p.state not in ("dead", "detached")])
+
+        def go():
+            try:
+                out.append(self.mgr.create("fake", str(self.repo), worktree=True))
+            except ValueError as e:
+                errs.append(e)
+        with mock.patch.object(self.sessions, "MAX_PANES", live + 1):
+            ts = [threading.Thread(target=go) for _ in range(2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(60)
+        self.assertEqual((len(out), len(errs)), (1, 1))
+        self.assertEqual(len(self.reg.all()), 1)
+
+    def test_T_LIF_17_a_plain_create_inside_the_root_is_refused(self):
+        p = self.pane()
+        with self.assertRaises(ValueError):
+            self.mgr.create("fake", self.entry(p)["path"])
+
+    def test_T_LIF_18_the_preamble_comes_first_and_once(self):
+        p = self.pane()
+        self.say(p, "hello")
+        self.say(p, "again")
+        t = self.texts(p)
+        self.assertTrue(t.startswith("preamble received; echo: hello"), t[:120])
+        self.assertEqual(t.count("preamble received"), 1)
+        self.assertNotIn("[Corral]", " ".join((e["data"] or {}).get("text", "")
+                                              for e in self.events(p, "user")))
+
+    def test_T_LIF_19_an_edit_outside_the_worktree_stops_the_turn(self):
+        p = self.pane()
+        e = self.entry(p)
+        outside = str(self.tmp / "elsewhere.txt")
+        admin = str(Path(e["common_dir"]) / "worktrees" / e["admin_name"] / "index")
+        inside = "notes.txt"
+        for path in (inside, admin):
+            self.say(p, f"tool-edit {path}", timeout=10)
+        self.say(p, f"tool-read {outside}", timeout=10)
+        self.assertEqual([x for x in self.events(p, "worktree") if "escape" in x["data"]], [])
+        t0 = time.monotonic()
+        self.say(p, f"tool-edit {outside}", timeout=10)
+        self.assertLess(time.monotonic() - t0, 2.5, "the turn was not cancelled")
+        [esc] = [x for x in self.events(p, "worktree") if "escape" in x["data"]]
+        self.assertEqual(esc["data"]["escape"]["paths"], [outside])
+        self.assertTrue(any("outside its own branch" in (n["data"] or {}).get("text", "")
+                            for n in self.events(p, "note")))
+
+    def test_allow_always_is_never_offered_on_a_worktree_pane(self):
+        p = self.pane()
+        p.send("perm-always")
+        self.assertTrue(wait_for(lambda: p.pending, timeout=10))
+        [perm] = self.events(p, "permission")
+        kinds = [o["kind"] for o in perm["data"]["options"]]
+        self.assertNotIn("allow_always", kinds)
+        rid = next(iter(p.pending))
+        with self.assertRaises(ValueError):
+            p.answer(rid, "always", perm["data"]["digest"])
+        p.answer(rid, "deny", perm["data"]["digest"])
+
+
+class LifecycleSafety(LifecycleCase):
+
+    def test_T_SNP_4_review_is_refused_mid_turn(self):
+        p = self.pane()
+        p.send("sleep 5")
+        self.assertTrue(wait_for(lambda: "sleeping" in self.texts(p)))
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_snapshot(p.id)
+        self.assertEqual(cm.exception.reason, "busy")
+        p.cancel()
+
+    def test_T_SAFE_1_an_agent_write_between_review_and_commit_refuses(self):
+        p = self.pane()
+        self.say(p, "write a.txt reviewed")
+        snap = self.mgr.worktree_snapshot(p.id)
+        self.say(p, "write a.txt sneaky")
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "m")
+        self.assertEqual(cm.exception.reason, "changed")
+
+    def test_T_SAFE_2_a_background_writer_after_the_turn_blocks_commit(self):
+        p = self.pane()
+        self.say(p, "bg-write-setsid bg.txt 40 0.05")
+        snap = self.mgr.worktree_snapshot(p.id)
+        time.sleep(0.3)
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "m")
+        self.assertEqual(cm.exception.reason, "changed")
+
+    def test_T_SAFE_3_a_send_during_an_action_is_queued_then_delivered(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        real = wt.commit_tree
+        sent = []
+
+        def slow(*a, **k):
+            sent.append(p.send("during commit"))
+            time.sleep(0.3)
+            self.assertNotIn("echo: during commit", self.texts(p))
+            return real(*a, **k)
+        with mock.patch.object(wt, "commit_tree", slow):
+            self.mgr.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "m")
+        self.assertTrue(wait_for(lambda: "echo: during commit" in self.texts(p), timeout=10))
+
+    def test_T_SAFE_4_two_actions_at_once_the_second_is_busy(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        gate = threading.Event()
+        real = wt.snapshot
+        errs = []
+
+        def slow(*a, **k):
+            gate.wait(5)
+            return real(*a, **k)
+        with mock.patch.object(wt, "snapshot", slow):
+            t = threading.Thread(target=lambda: self.mgr.worktree_snapshot(p.id))
+            t.start()
+            time.sleep(0.2)
+            try:
+                self.mgr.worktree_snapshot(p.id)
+            except wt.Refused as e:
+                errs.append(e.reason)
+            gate.set()
+            t.join(10)
+        self.assertEqual(errs, ["busy"])
+
+    def test_T_SAFE_5_the_main_checkout_is_untouched_by_every_action(self):
+        remote = self.tmp / "remote.git"
+        wt.git(["init", "-q", "--bare", str(remote)], cwd=self.tmp)
+        wt.git(["remote", "add", "origin", str(remote)], cwd=self.repo)
+        (self.repo / "untracked-in-main.txt").write_text("mine\n")
+        idx = self.repo / ".git" / "index"
+        before = (idx.read_bytes(), (self.repo / ".git" / "HEAD").read_bytes(),
+                  wt.git(["ls-files", "--others", "-z"], cwd=self.repo).out)
+        decoy = self.tmp / "decoy-index"
+        with mock.patch.dict(os.environ, {"GIT_INDEX_FILE": str(decoy)}):
+            p = self.pane()
+            self.say(p, "write a.txt changed")
+            s = self.mgr.worktree_snapshot(p.id)
+            c = self.mgr.worktree_commit(p.id, s["tree"], s["head"], s["index_id"], "m")
+            self.mgr.worktree_publish(p.id, c["commit"], s["tree"], "origin", str(remote))
+            self.say(p, "write b.txt more")
+            s2 = self.mgr.worktree_snapshot(p.id)
+            self.mgr.worktree_discard(p.id, s2["tree"])
+        after = (idx.read_bytes(), (self.repo / ".git" / "HEAD").read_bytes(),
+                 wt.git(["ls-files", "--others", "-z"], cwd=self.repo).out)
+        self.assertEqual(before, after)
+        self.assertFalse(decoy.exists())
+
+    def test_T_RMV_11_discard_ends_the_agent_and_its_group_first(self):
+        """A writer in the agent's group keeps changing files after review. The
+        first Discard stops the agent (and so the writer), then refuses because
+        the files moved on; review refreshes, and the second Discard succeeds."""
+        p = self.pane()
+        self.say(p, "bg-write bg.txt 400 0.05")
+        [bg] = [int(f.name[3:]) for f in Path(self.agent_dir).glob("bg-*")]
+        snap = self.mgr.worktree_snapshot(p.id)
+        time.sleep(0.2)
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(cm.exception.reason, "changed")
+        self.assertTrue(wait_for(lambda: not _alive(bg), timeout=5),
+                        "the agent's background child survived")
+        fresh = self.mgr.worktree_snapshot(p.id)
+        r = self.mgr.worktree_discard(p.id, fresh["tree"])
+        self.assertTrue(Path(r["trash_path"], "bg.txt").exists())
+        with self.assertRaises(ValueError):
+            p.resume()
+
+    def test_T_RMV_11b_discard_kills_a_live_agents_group(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        agent_pids = [int(f.name[4:]) for f in Path(self.agent_dir).glob("pid-*")]
+        snap = self.mgr.worktree_snapshot(p.id)
+        self.mgr.worktree_discard(p.id, snap["tree"])
+        for pid in agent_pids:
+            self.assertFalse(_alive(pid))
+        self.assertEqual(self.entry(p)["phase"], "trashed")
+
+    def test_T_RMV_14_a_message_sent_during_discard_is_never_dispatched(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        real = wt.discard
+
+        def with_send(*a, **k):
+            with contextlib.suppress(Exception):
+                p._queue.append(self.sessions._QueuedText("during discard", "t-x"))
+            return real(*a, **k)
+        import contextlib
+        with mock.patch.object(wt, "discard", with_send):
+            self.mgr.worktree_discard(p.id, snap["tree"])
+        time.sleep(0.3)
+        self.assertNotIn("echo: during discard", self.texts(p))
+        self.assertTrue(any("not be sent" in (e["data"] or {}).get("text", "")
+                            for e in self.events(p, "note")))
 
 
 def _alive(pid):

@@ -19,7 +19,22 @@ Prompt verbs (the text of the prompt):
     perm, or any text with "touch " in it
                       -> asks session/request_permission and reports the
                          answer (it never runs anything, whatever the answer)
+    write <rel> <text> -> writes <text> (+ newline) to <rel> under the cwd
+    rm <rel>          -> deletes <rel> under the cwd
+    commit <msg>      -> git add -A && git commit -m <msg> in the cwd
+    bg-write <rel> <n> <interval>
+                      -> spawns a child (in the agent's process group) that
+                         appends to <rel> n times, every <interval> s, after
+                         the turn ends; bg-write-setsid detaches it instead
+    checkout <branch> -> git checkout -q -b <branch>
+    reset-hard <rev>  -> git reset -q --hard <rev>
+    pwd               -> answers with os.getcwd()
+    perm-always       -> like perm, but also offers an allow_always option
+    tool-edit <path>, tool-read <path>
+                      -> reports a tool_call of that kind at <path>, then waits
+                         3 s (a cancel ends the turn early)
     anything else     -> "echo: <text>"
+    (file verbs refuse any path containing "..")
 
 State lives in $FAKE_ACP_DIR: one JSON file per session, plus `pid-<pid>`
 marker files so a test can find and kill the process.
@@ -79,9 +94,55 @@ def _sleep_line(text):
     return None
 
 
+def _file_verb(words, text):
+    """The worktree tests' verbs; paths are relative to the agent's cwd."""
+    import subprocess
+    verb = words[0]
+    if verb == "pwd":
+        return os.getcwd()
+    if any(".." in w for w in words[1:2]):
+        return "refused: .. in path"
+    if verb == "write":
+        rel, body = words[1], text.split(None, 2)[2] if len(words) > 2 else ""
+        Path(rel).parent.mkdir(parents=True, exist_ok=True)
+        Path(rel).write_text(body + "\n")
+        return f"wrote {rel}"
+    if verb == "rm":
+        Path(words[1]).unlink()
+        return f"removed {words[1]}"
+    if verb == "commit":
+        msg = text.split(None, 1)[1] if len(words) > 1 else "fake commit"
+        r = subprocess.run(["sh", "-c", 'git add -A && git commit -q -m "$1"', "sh", msg],
+                           capture_output=True, text=True)
+        return f"commit rc={r.returncode} {r.stderr.strip()[:200]}"
+    if verb in ("bg-write", "bg-write-setsid"):
+        rel, n, every = words[1], int(words[2]), float(words[3])
+        script = ("import time,sys\n"
+                  "for i in range(%d):\n"
+                  "    open(%r,'a').write('bg %%d\\n' %% i); time.sleep(%r)\n" % (n, rel, every))
+        child = subprocess.Popen([sys.executable, "-c", script],
+                                 start_new_session=(verb == "bg-write-setsid"),
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        (DIR / f"bg-{child.pid}").write_text(str(child.pid))
+        return f"bg-write started pid {child.pid}"
+    if verb == "checkout":
+        r = subprocess.run(["git", "checkout", "-q", "-b", words[1]], capture_output=True, text=True)
+        return f"checkout rc={r.returncode}"
+    if verb == "reset-hard":
+        r = subprocess.run(["git", "reset", "-q", "--hard", words[1]], capture_output=True, text=True)
+        return f"reset rc={r.returncode}"
+    return "?"
+
+
 def prompt(rid, params):
     sid = params.get("sessionId")
     text = "".join(p.get("text", "") for p in params.get("prompt") or [])
+    if text.startswith("[Corral] ") and "\n\n" in text:
+        # An own-branch preamble (sessions.WORKTREE_PREAMBLE): acknowledge it,
+        # then treat what follows as the prompt, as a real agent would.
+        chunk(sid, "preamble received; ")
+        text = text.split("\n\n", 1)[1]
     m = mem(sid)
     words = text.split()
     low = text.lower()
@@ -101,6 +162,36 @@ def prompt(rid, params):
         if _cancel.is_set():
             send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
             return
+    elif words[:1] in (["write"], ["rm"], ["commit"], ["bg-write"], ["bg-write-setsid"], ["checkout"],
+                       ["reset-hard"], ["pwd"]):
+        chunk(sid, _file_verb(words, text))
+    elif words[:1] in (["tool-edit"], ["tool-read"]):
+        kind = "edit" if words[0] == "tool-edit" else "read"
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": sid, "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-" + kind,
+                                         "title": f"{kind} {words[1]}", "kind": kind,
+                                         "status": "completed",
+                                         "locations": [{"path": words[1]}]}}})
+        chunk(sid, f"{kind} reported")
+        _cancel.clear()
+        _cancel.wait(3)
+        if _cancel.is_set():
+            send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
+            return
+    elif text == "perm-always":
+        _next[0] += 1
+        pid = _next[0]
+        ev = threading.Event()
+        _answers[pid] = {"ev": ev}
+        send({"jsonrpc": "2.0", "id": pid, "method": "session/request_permission",
+              "params": {"sessionId": sid, "toolCall": {
+                  "toolCallId": "t2", "title": "git commit", "kind": "execute",
+                  "rawInput": {"command": "git commit"}},
+                  "options": [{"optionId": "always", "name": "Always allow", "kind": "allow_always"},
+                              {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                              {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]}})
+        ev.wait()
+        chunk(sid, "permission: " + json.dumps(_answers[pid].get("result")))
     elif text == "die":
         chunk(sid, "dying")
         os._exit(3)
