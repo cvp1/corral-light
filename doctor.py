@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,76 @@ def npm_problem(root=None):
             f"nobody mentioned.")
 
 
+def _size(path):
+    """Bytes under `path`, never following symlinks."""
+    total = 0
+    for d, dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(d, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _human(n):
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024 or unit == "GiB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GiB"
+
+
+def worktree_lines(registry=None):
+    """Own branches: git version, where worktrees live, what is in trash.
+    Reads only; repairs nothing."""
+    import worktrees as wt
+    ok, bad = "  ok  ", "  --  "
+    out = ["", "  own branches"]
+    try:
+        v = wt.git_version()
+    except Exception as e:                       # noqa: BLE001 — a line, never a crash
+        out.append(f"{bad}git: could not run it ({e})")
+        v = None
+    if v is not None:
+        good = tuple(v[:2]) >= wt.MIN_GIT
+        out.append((ok if good else bad) + f"git {'.'.join(map(str, v))}"
+                   + ("" if good else f" — own branches needs {'.'.join(map(str, wt.MIN_GIT))} or newer"))
+    root = wt.worktree_root()
+    fs = wt._fstype(root) or "an unknown filesystem"
+    shown = str(root).replace(str(Path.home()), "~", 1)
+    if fs == "tmpfs":
+        out.append(f"{bad}worktree root {shown} on tmpfs — memory, gone on reboot, so own "
+                   f"branches are refused; set CORRAL_LIGHT_WORKTREES to a folder on disk")
+    else:
+        out.append(f"{ok}worktree root {shown} on {fs}")
+    reg = registry or wt.Registry()
+    entries = reg.all(include_unreadable=True)
+    if not entries:
+        out.append(f"{ok}no own-branch worktrees yet")
+    else:
+        phases = {}
+        for e in entries:
+            k = "unreadable" if e.get("unreadable") else e.get("phase", "?")
+            phases[k] = phases.get(k, 0) + 1
+        parts = ", ".join(f"{n} {k}" for k, n in sorted(phases.items()))
+        line = f"{ok}{len(entries)} worktree{'s' if len(entries) != 1 else ''} ({parts})"
+        trash = wt.trash_dir()
+        if phases.get("trashed") and trash.is_dir():
+            line += (f"; trash holds {_human(_size(trash))} — "
+                     f"`corral-light worktrees purge <id>` frees it")
+        out.append(line)
+    for e in entries:
+        if any(o.get("state") == "unknown" for o in e.get("ops") or []):
+            out.append(f"  !   {e['id']}: an action has an unknown outcome — "
+                       f"corral-light worktrees resolve {e['id']}")
+    strays = wt.orphans(registry=reg)
+    if strays:
+        out.append(f"  !   {len(strays)} orphan{'s' if len(strays) != 1 else ''} under the "
+                   f"worktree root — `corral-light worktrees` lists them")
+    return out
+
+
 def report(root=None, agents=None):
     """The lines `doctor` prints. Returns a list of strings so a test can read
     them; main() is the only thing that writes to stdout."""
@@ -56,6 +127,7 @@ def report(root=None, agents=None):
     for n in notes:
         out.append("")
         out.append("  !   " + n)
+    out.extend(worktree_lines())
     return out
 
 

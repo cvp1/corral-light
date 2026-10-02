@@ -224,6 +224,65 @@ class TheResolve(CliCase):
         self.assertIn("not unknown", err)
 
 
+class TheDoctor(CliCase):
+    """`corral-light doctor`: git version, root filesystem, trash size (WS5.2)."""
+
+    def lines(self):
+        import doctor
+        return doctor.worktree_lines(registry=self.reg)
+
+    def test_T_DOC_1_the_git_version_against_the_minimum(self):
+        from unittest import mock
+        blob = "\n".join(self.lines())
+        v = ".".join(map(str, wt.git_version()))
+        self.assertIn(f"git {v}", blob)
+        with mock.patch.object(wt, "git_version", lambda: (2, 30, 1)):
+            old = "\n".join(self.lines())
+        self.assertIn("git 2.30.1", old)
+        self.assertIn("needs 2.38", old)
+        self.assertRegex(old, r"(?m)^\s*--\s+git 2\.30\.1")
+
+    def test_T_DOC_2_the_root_filesystem_and_tmpfs(self):
+        from unittest import mock
+        self.assertRegex("\n".join(self.lines()), r"(?m)^\s*ok\s+worktree root .* on btrfs")
+        with mock.patch.object(wt, "_fstype", lambda p: "tmpfs"):
+            blob = "\n".join(self.lines())
+        self.assertRegex(blob, r"(?m)^\s*--\s+worktree root .* on tmpfs")
+        self.assertIn("CORRAL_LIGHT_WORKTREES", blob)
+
+    def test_T_DOC_3_counts_and_the_trash_size_with_the_way_to_free_it(self):
+        self.make(owner="p1")
+        e, r = self.trashed(owner="p2")
+        Path(r["trash_path"], "big.bin").write_bytes(b"x" * (3 << 20))
+        blob = "\n".join(self.lines())
+        self.assertIn("2 worktrees (1 active, 1 trashed)", blob)
+        self.assertRegex(blob, r"trash holds 3\.0 MiB")
+        self.assertIn("corral-light worktrees purge", blob)
+
+    def test_T_DOC_4_unknown_outcomes_and_orphans_are_flagged(self):
+        e = self.make()
+        op = self.reg.begin_op(e["id"], "push", url="u", ref="r", oid="o")
+        self.reg.set_op(e["id"], op, state="unknown")
+        (Path(e["path"]).parent / "stray").mkdir()
+        blob = "\n".join(self.lines())
+        self.assertIn(f"corral-light worktrees resolve {e['id']}", blob)
+        self.assertIn("1 orphan", blob)
+
+    def test_T_DOC_5_doctor_writes_nothing_and_reports_into_the_main_list(self):
+        import doctor
+        self.make()
+        self.trashed(owner="p2")
+        before = {d: _tree_snapshot(d) for d in (self.state, self.repo / ".git")}
+        lines = doctor.report(root=self.tmp, agents=[])
+        self.assertEqual({d: _tree_snapshot(d) for d in (self.state, self.repo / ".git")}, before)
+        self.assertIn("own branches", "\n".join(lines))
+
+    def test_T_DOC_6_an_empty_install_is_one_quiet_line_each(self):
+        blob = "\n".join(self.lines())
+        self.assertIn("no own-branch worktrees yet", blob)
+        self.assertNotIn("trash holds", blob)
+
+
 class TheDispatch(unittest.TestCase):
 
     def test_T_CLI_17_the_launcher_routes_worktrees_and_documents_it(self):
