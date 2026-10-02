@@ -631,6 +631,8 @@ class Pane(_core.PaneBase):
         self._log = None
         self.last_activity = time.time()
         self._lock = threading.Lock()
+        self._text_lock = threading.Lock()   # coalesced streamed text (core)
+        self._text_acc, self._text_timer, self._text_last = "", None, 0.0
 
 
 
@@ -868,10 +870,16 @@ class Pane(_core.PaneBase):
         return {"on_event": on_event, "on_permission": on_permission}
 
     def _on_event(self, kind, data):
+        # Each buffer flushes when anything else arrives, so stream order holds.
+        if kind != "agent_message_chunk":
+            self._flush_text()
         if kind != "agent_thought_chunk":
             self._flush_thought()       # one coalesced event, in stream order
         if kind == "agent_message_chunk":
-            self.emit("text", {"text": (data.get("content") or {}).get("text", "")})
+            # Coalesced (TEXT_FLUSH_S): a replayed chunk is dropped here, not
+            # buffered, or it would surface after the replay guard lifts.
+            if not self._replaying:
+                self._buffer_text((data.get("content") or {}).get("text", ""))
         elif kind == "agent_thought_chunk":
             # Coalesced: buffered here and emitted once by _flush_thought when any other
             # event arrives, so thought fragments cannot flood the event ring.
@@ -935,6 +943,8 @@ class Pane(_core.PaneBase):
         died under, so auth_sweep resumes them only after a new sign-in.
         """
         cause = "auth" if claude_auth.is_auth_error(reason) else None
+        self._flush_text()              # its last words land before `dead`
+        self._flush_thought()
         self.state = "dead"
         self.error = claude_auth.explain(reason)
         self.dead_cause = cause
@@ -1248,6 +1258,7 @@ class Pane(_core.PaneBase):
                     return
                 self._in_flight = None
             lg.mark(tid, "completed", stopReason=(r or {}).get("stopReason"))
+            self._flush_text()          # a throttled tail is written before turn_end
             self._flush_thought()       # a turn ending on a thought still shows it
             self.emit("turn_end", {"stopReason": (r or {}).get("stopReason"),
                                    "usage": self.usage, "turn": tid,

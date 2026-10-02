@@ -14,6 +14,7 @@ import acp
 CACHE_S = 120
 _cache = {}             # key -> (at, result)
 _lock = threading.Lock()
+_refreshing = set()     # keys with a background re-probe in flight
 
 
 def probe(key, cwd=None, force=False):
@@ -22,13 +23,34 @@ def probe(key, cwd=None, force=False):
         {"ok": bool, "config": {id: {...}}, "error": str}
 
     `config` is the agent's own configOptions, verbatim.
+
+    Cached CACHE_S. A stale entry is served as is while one background thread
+    re-probes, so the handshake (about two seconds of subprocess) never runs
+    inside the /api/state request that happened to find the cache expired.
     """
-    import sessions                      # local: sessions imports this module
     with _lock:
         hit = _cache.get(key)
-    if hit and not force and time.time() - hit[0] < CACHE_S:
-        return hit[1]
+        if hit and not force:
+            if time.time() - hit[0] < CACHE_S:
+                return hit[1]
+            if key not in _refreshing:
+                _refreshing.add(key)
+                threading.Thread(target=_refresh, args=(key, cwd),
+                                 daemon=True, name=f"lane-probe-{key}").start()
+            return hit[1]
+    return _probe_now(key, cwd)
 
+
+def _refresh(key, cwd):
+    try:
+        _probe_now(key, cwd)
+    finally:
+        with _lock:
+            _refreshing.discard(key)
+
+
+def _probe_now(key, cwd):
+    import sessions                      # local: sessions imports this module
     result = {"ok": False, "config": {}, "error": ""}
     spec = sessions.AGENTS.get(key)
     if not spec:

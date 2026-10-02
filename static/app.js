@@ -653,18 +653,32 @@ function renderLog(p) {
   for (const k of [...xopen]) if (!xseen.has(k)) xopen.delete(k);
   TEXPAND.set(p.id, xopen);
   if (p.state === 'busy') {
-    // Native spinner shape; elapsed is computed per render, so no timer is needed.
+    // Native spinner shape; the seconds advance in place (workingTick), so a
+    // quiet pane needs no rebuild to keep counting.
     let t0 = null;
     for (let i = visible.length - 1; i >= 0; i--) {
       if (visible[i].kind === 'user' || visible[i].kind === 'peer') { t0 = visible[i].at; break; }
     }
-    const secs = t0 ? Math.max(0, Math.round((Date.now() - new Date(t0)) / 1000)) : null;
     const w = el('div', 'sys working');
-    w.append(el('span', 'wstar', '\u2733'),
-             ' working\u2026' + (secs != null ? ` ${secs}s` : '') + '  (esc to interrupt)');
+    if (t0) w.dataset.t0 = t0;
+    w.append(el('span', 'wstar', '\u2733'), el('span', 'wtext', workingLabel(t0)));
     log.appendChild(w);
   }
   return log;
+}
+
+function workingLabel(t0) {
+  const secs = t0 ? Math.max(0, Math.round((Date.now() - new Date(t0)) / 1000)) : null;
+  return ' working\u2026' + (secs != null ? ` ${secs}s` : '') + '  (esc to interrupt)';
+}
+
+/* Once a second: advance every visible spinner's elapsed time without touching
+ * the rest of the log. */
+function workingTick() {
+  for (const w of document.querySelectorAll('.pane > .log .working[data-t0]')) {
+    const t = w.querySelector('.wtext');
+    if (t) t.textContent = workingLabel(w.dataset.t0);
+  }
 }
 
 // The permission card: shows exactly what is being approved. `live` is passed in
@@ -811,6 +825,28 @@ async function resumePane(p) {
   catch (e) { toast(e.message, true); }
 }
 
+/* Everything renderLog's output depends on, as one string. A render whose
+ * signature matches the last paint leaves the log's DOM alone: with several
+ * panes on the wall, one pane's stream must not rebuild the others. The busy
+ * spinner's seconds are not in it; workingTick updates them in place. */
+function logSignature(p) {
+  const evs = p.events || [];
+  return [evs.length, evs.length ? evs[0].seq : 0, evs.length ? evs[evs.length - 1].seq : 0,
+          S.detail.has(p.id) ? 1 : 0, LOG_CAP.get(p.id) || DEFAULT_LOG_CAP,
+          p.state, (p.pending || []).join(','), p.deadCause || '', p.agent,
+          isTerm(p) ? 1 : 0].join('|');
+}
+
+/* The same for the header: title, state, pills and the buttons' modes. */
+function headSignature(p) {
+  const cfg = p.config || {}, u = p.usage || {};
+  return [p.title, p.label, p.state, displayState(p), p.idleS >= 30 ? fmtAge(p.idleS) : '',
+          p.seat, p.seatWithheld, p.posture, p.postureEnforced,
+          (cfg.model || {}).value, (cfg.effort || {}).value, u.size, u.used,
+          S.detail.has(p.id) ? 1 : 0, FIND.pane === p.id ? 1 : 0,
+          p.portedFrom ? JSON.stringify(p.portedFrom) : '', p.cwd].join('|');
+}
+
 function updatePane(rec, p) {
   // Hold the log still while a selection lives in it: a rebuild would delete the
   // selection, and re-anchoring by offset could land on different text.
@@ -820,11 +856,17 @@ function updatePane(rec, p) {
                        (p.state === 'dead' ? ' dead' : '') +
                        (hold ? ' selhold' : '') +
                        (isTerm(p) ? ' term' : '');
-  rec.head.replaceChildren(...paneHead(p).childNodes);
+  const hsig = headSignature(p);
+  if (hsig !== rec.headSig) {
+    rec.headSig = hsig;
+    rec.head.replaceChildren(...paneHead(p).childNodes);
+  }
   const qb = questionBanner(p);
   if (rec.ask) rec.ask.replaceChildren(...(qb ? [qb] : []));
 
-  if (!hold) {
+  // Rebuild the log only when what it shows changed; a held selection defers
+  // the rebuild (the stale signature stays, so the next render catches up).
+  if (!hold && logSignature(p) !== rec.logSig) {
     const wasPinned = rec.pinned;
     const oldHeight = rec.log.scrollHeight, oldTop = rec.log.scrollTop;
     rec.log.replaceChildren(...renderLog(p).childNodes);
@@ -836,6 +878,7 @@ function updatePane(rec, p) {
       LOG_CAP.set(p.id, (LOG_CAP.get(p.id) || DEFAULT_LOG_CAP) + 1000);
       rec.log.replaceChildren(...renderLog(p).childNodes);
     }
+    rec.logSig = logSignature(p);         // after the cap may have moved
     if (wasPinned) {
       rec.log.scrollTop = rec.log.scrollHeight;
     } else {
@@ -1518,6 +1561,20 @@ function displayTick() {
   if (displaySignature(panes) !== displaySig) render();
 }
 
+/* Renders coalesce to one per animation frame. A streamed answer arrives as
+ * many events a second across several panes; painting the wall once per event
+ * was what froze it. Hidden tabs get no frames, so a slow timer stands in and
+ * keeps the title's counts current. */
+const HIDDEN_RENDER_MS = 1000;
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  const run = () => { renderQueued = false; render(); };
+  if (document.visibilityState === 'hidden') setTimeout(run, HIDDEN_RENDER_MS);
+  else requestAnimationFrame(run);
+}
+
 /* The tab title: needs-you count, else your-turn count, else plain. */
 function setTitle(panes) {
   let need = 0, turn = 0;
@@ -1843,8 +1900,12 @@ function render() {
   }
   for (const p of panes) {
     for (const rid of p.pending) {
-      const ev = [...p.events].reverse()
-        .find(e => e.kind === 'permission' && e.data.requestId === rid);
+      // Newest card for this id, scanning back from the tail (no copy of the ring).
+      let ev = null;
+      for (let i = p.events.length - 1; i >= 0; i--) {
+        const e = p.events[i];
+        if (e.kind === 'permission' && e.data.requestId === rid) { ev = e; break; }
+      }
       const c = el('div', 'ncard');
       c.appendChild(el('div', 't', p.title || p.label));
       c.appendChild(el('div', 'm', `${p.label} · ${p.cwd.split('/').pop()}` +
@@ -2079,7 +2140,7 @@ function connect() {
         return 0;
       });
       S.panes = new Map(ordered.map(p => [p.id, p]));
-      render();
+      scheduleRender();
       return;
     }
     // The server dropped our backlog because this browser fell behind: refetch,
@@ -2140,7 +2201,7 @@ function connect() {
     // The commands event carries only a count; pull the list from state.
     if (ev.kind === 'commands') refresh();
     if (ev.kind === 'note') toast(d.text, true);
-    render();
+    scheduleRender();
   };
 }
 
@@ -3061,6 +3122,7 @@ async function start() {
   await refresh();
   // Re-check display state periodically so quiet panes age into `idle`.
   setInterval(displayTick, DISPLAY_TICK_MS);
+  setInterval(workingTick, 1000);     // the busy spinners' seconds
   // Re-sync when the tab becomes visible: a sleeping tab may have lost the
   // stream before onerror fired.
   document.addEventListener('visibilitychange', () => {

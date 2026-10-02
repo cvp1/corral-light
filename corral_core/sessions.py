@@ -126,6 +126,14 @@ DEFAULT_POSTURE = "auto"
 
 IDLE_DISPLAY_S = 1800          # a `ready` pane quiet this long is idle, not your turn
 
+# Streamed text is coalesced before it becomes an event. Adapters deliver a few
+# characters per agent_message_chunk (measured: 3.7 chars on average), so one
+# answer arrived as thousands of events — each a disk write, an SSE frame and a
+# browser repaint — and filled the ring and the display window with fragments.
+# The first chunk of a run is emitted at once (nothing waits to appear); later
+# chunks ride a TEXT_FLUSH_S throttle, or go out early past TEXT_FLUSH_CHARS.
+TEXT_FLUSH_S = 0.15
+TEXT_FLUSH_CHARS = 4096
 MAX_EVENTS = 4000               # per-pane ring in memory; JSONL on disk is the record
 
 MAX_LOG_BYTES = 64 * 1024 * 1024   # per-pane transcript on disk, then rotate
@@ -462,6 +470,10 @@ class PaneBase:
     # The QueuedText whose prompt() is running now, or None (set by _drain
     # under `_turn_lock`).
     _in_flight = None
+    # Coalesced streamed text (see TEXT_FLUSH_S); guarded by `_text_lock`.
+    _text_acc = ""
+    _text_timer = None
+    _text_last = 0.0
 
     # Config ids adapters use for effort (e.g. codex reports `reasoning_effort`).
     _EFFORT_ALIASES = ("effort", "reasoning_effort", "reasoningEffort")
@@ -478,6 +490,7 @@ class PaneBase:
         self.role_sha = None
         self.role_delivery = None
         self._replaying = False
+        self._text_lock = threading.Lock()
         self.title = self._default_title(agent, cwd)
         self.title_locked = False      # True once the user renames it by hand
         self.minimized = False
@@ -655,6 +668,41 @@ class PaneBase:
         self.mgr.broadcast(ev)
         return ev
 
+    def _buffer_text(self, text):
+        """Queue streamed text. The first chunk after a quiet TEXT_FLUSH_S goes
+        out now; the rest of a burst is emitted once, when the throttle lapses
+        (a timer) or the buffer passes TEXT_FLUSH_CHARS."""
+        if not text:
+            return
+        lock = self.__dict__.setdefault("_text_lock", threading.Lock())
+        with lock:
+            self._text_acc += text
+            now = time.monotonic()
+            wait = TEXT_FLUSH_S - (now - self._text_last)
+            due = wait <= 0 or len(self._text_acc) >= TEXT_FLUSH_CHARS
+            if not due and self._text_timer is None:
+                t = threading.Timer(wait, self._flush_text)
+                t.daemon = True
+                self._text_timer = t
+                t.start()
+        if due:
+            self._flush_text()
+
+    def _flush_text(self):
+        """Emit the buffered text as one `text` event, in stream order.
+
+        Idempotent and thread-safe: the reader, the throttle timer and a turn's
+        end may all call it."""
+        lock = self.__dict__.setdefault("_text_lock", threading.Lock())
+        with lock:
+            acc, self._text_acc = self._text_acc, ""
+            timer, self._text_timer = self._text_timer, None
+            self._text_last = time.monotonic()
+        if timer is not None:
+            timer.cancel()          # a no-op when this IS the timer firing
+        if acc:
+            self.emit("text", {"text": acc})
+
     def _flush_thought(self):
         acc = getattr(self, "_thought_acc", "")
         if acc and acc.strip():
@@ -761,6 +809,7 @@ class PaneBase:
             # A reply held for this turn's end is not delivered.
             self._drop_held_peers("cancelled")
             self.client.cancel(self.acp_session)
+            self._flush_text()          # what it said so far, before the mark
             self.emit("cancelled", {})
             return True
         return False
@@ -786,6 +835,8 @@ class PaneBase:
         self.client = None
         self.pid = self.pgid = self.pid_start = None   # stopped on purpose
         self.error = None                 # paused is not a fault
+        self._flush_text()                # nothing streamed is left unwritten
+        self._flush_thought()
         self.emit("paused", {"dropped": dropped})
         self.save_meta()
         # Release the transcript handle while detached; resume() reopens it.
@@ -802,6 +853,8 @@ class PaneBase:
         if self.client:
             self.client.close()
         self.pid = self.pgid = self.pid_start = None   # stopped on purpose
+        self._flush_text()                # before the log handle closes
+        self._flush_thought()
         self.state = "dead"
         self.error = self.error or "closed by you"
         # Mark closed on disk so restore() skips it; the transcript is kept.
