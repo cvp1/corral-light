@@ -1025,8 +1025,10 @@ def snapshot(entry, tmp_dir=None):
         return _snapshot_locked(entry, tmp_dir)
 
 
-def _snapshot_locked(entry, tmp_dir=None):
-    """snapshot() for a caller that already holds repo_lock(entry)."""
+def _snapshot_locked(entry, tmp_dir=None, pin=True):
+    """snapshot() for a caller that already holds repo_lock(entry).
+
+    `pin=False` only looks: the review pin keeps naming what the user sees."""
     p = entry["path"]
     idx = _index_path(p)
     try:
@@ -1054,9 +1056,10 @@ def _snapshot_locked(entry, tmp_dir=None):
     unstaged = set(_names(p, ["diff", "--name-only", "-z", "--no-renames", "--"]))
     ignored = _names(p, ["ls-files", "--others", "--ignored", "--exclude-standard",
                          "--directory", "-z"])
-    pin = git(["commit-tree", tree, "-p", head], cwd=p,
-              input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
-    git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
+    if pin:
+        pin = git(["commit-tree", tree, "-p", head], cwd=p,
+                  input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
+        git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
     return {"tree": tree, "head": head, "head_tree": head_tree, "base_sha": entry["base_sha"],
             "index_id": hashlib.sha256(real).hexdigest(),
             "staged_differs": sorted(staged & unstaged), "too_big": too_big,
@@ -1298,8 +1301,13 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
                                      f"updated ({err}); staged work was left as it is. Resolve "
                                      "it with `corral-light worktrees`") from None
         _crash_point("commit:index")
-        ok = (git(["rev-parse", entry["branch"]], cwd=p).text.strip() == new
-              and _tree_of_index(p, Path(idx).read_bytes(), tmp_dir) == tree)
+        try:
+            ok = (git(["rev-parse", entry["branch"]], cwd=p).text.strip() == new
+                  and _tree_of_index(p, Path(idx).read_bytes(), tmp_dir) == tree)
+        except Exception as err:            # noqa: BLE001 — the ref moved: never `intent`
+            registry.set_op(entry["id"], op, state="unknown", error=str(err)[:ERR_SNIPPET])
+            raise Refused("unknown", f"the commit is on the branch but checking it failed "
+                                     f"({err}); resolve it with `corral-light worktrees`") from None
         if not ok:
             registry.set_op(entry["id"], op, state="unknown", stage="done")
             raise Refused("unknown", "the commit landed but the index does not match; "
@@ -1396,6 +1404,7 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
     always explicit, so gh never chooses between a fork and its parent.
     """
     registry = registry or Registry()
+    refuse_open_ops(entry, registry)      # before anything, found PR or not
     p = entry["path"]
     branch = entry["branch"][len("refs/heads/"):]
     base = entry["base_ref"][len("refs/heads/"):]
@@ -1522,7 +1531,9 @@ def _procs_lsof(root):
         raise ScanFailed("lsof is not installed, so open files cannot be checked")
     try:
         # cwd: beside the worktree, never inside it (lsof would count itself).
-        r = _run([lsof, "-nP", "-w", "-a", "-u", str(os.getuid()), "+D", root, "-F", "pc"],
+        where = ["+D", root] if os.path.isdir(root) else []
+        r = _run([lsof, "-nP", "-w", "-a", "-u", str(os.getuid()), *where, "-F", "pc",
+                  *([] if where else ["--", root])],
                  os.path.dirname(root), timeout=SCAN_TIMEOUT_S, check=False, max_out=8 << 20)
     except GitTimeout:
         raise ScanFailed(f"lsof took over {SCAN_TIMEOUT_S}s") from None
@@ -1542,21 +1553,29 @@ def _procs_lsof(root):
 
 
 def _set_aside_stale_lock(idx, record):
-    """Move index.lock aside if `record` proves our own stopped agent left it.
+    """Move index.lock aside only if nothing can still be writing it.
 
-    `record` is {"pid", "start", "lock", "stopped_at"} from the pane whose
-    agent the hub stopped. The lock must name the same file, its owner pid
-    must be gone (lock_is_ours_and_stale), and the lock must predate the stop,
-    so a git started since is never touched. Renamed, not deleted.
+    `record` is {"lock", "stopped_at", "pid"?} from the pane whose agent is
+    stopped or dead. The lock must name the same file and predate the stop
+    (a git started since is never touched); the stopped writer, when its pid
+    is known, must be gone; and no process may hold the lock open. git keeps
+    its lock file open for as long as it holds the lock, so a live git from
+    anywhere (outside the worktree included) keeps it. Renamed, not deleted.
     """
     lock = idx + ".lock"
-    if not record or not lock_is_ours_and_stale(lock, record):
+    if not record or os.path.realpath(record.get("lock") or "") != os.path.realpath(lock):
         return False
     try:
+        if record.get("pid") is not None:
+            pid = int(record["pid"])
+            if pid <= 1 or _pid_running(pid):
+                return False
         if os.stat(lock).st_mtime > float(record.get("stopped_at") or 0):
             return False
+        if processes_in(lock):
+            return False
         os.replace(lock, f"{lock}.corral-stale-{_ts()}")
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, ScanFailed):
         return False
     return True
 
@@ -1575,13 +1594,32 @@ def trash_dir():
     return worktree_root() / ".trash"
 
 
-def discard_preflight(entry, registry=None, agent_pgids=()):
+def _admin_dir(entry):
+    """The worktree's git admin dir (.git/worktrees/<name>): its index and index.lock."""
+    return str(Path(entry["common_dir"]) / "worktrees" / entry["admin_name"])
+
+
+def _processes_using(entry):
+    """processes_in() over the worktree and its admin dir, de-duplicated."""
+    seen = {}
+    for root in (entry["path"], _admin_dir(entry)):
+        if os.path.isdir(root):
+            for pid, cmd in processes_in(root):
+                seen.setdefault(pid, cmd)
+    return sorted(seen.items())
+
+
+PREFLIGHT_SETTLE_S = 0.5       # two looks this far apart tell "outdated" from "still writing"
+
+
+def discard_preflight(entry, registry=None, agent_pgids=(), tree=None, tmp_dir=None):
     """What can refuse a discard before the agent is stopped (converged finding 3).
 
     Unsettled ops, a worktree that is not ours any more, an unusable trash
     folder, and processes inside the worktree that are NOT in the agent's
     process groups (`agent_pgids`): stopping the agent cannot clear those,
-    so killing it first would only lose its turn. Raises Refused or
+    so killing it first would only lose its turn. With `tree`, a review
+    that no longer matches the files refuses here too. Raises Refused or
     ValueError; returns the processes the agent's stop will end.
     """
     registry = registry or Registry()
@@ -1590,7 +1628,7 @@ def discard_preflight(entry, registry=None, agent_pgids=()):
     tdir = trash_dir()
     _refuse_symlink(tdir, "trash folder")
     try:
-        busy = processes_in(entry["path"])
+        busy = _processes_using(entry)
     except ScanFailed as e:
         raise Refused("busy", f"could not check for processes inside the worktree ({e}); "
                               "nothing was moved") from None
@@ -1606,6 +1644,19 @@ def discard_preflight(entry, registry=None, agent_pgids=()):
         raise Refused("busy", "still running inside the worktree: " +
                       ", ".join(f"pid {pid} ({cmd})" for pid, cmd in foreign) +
                       "; the agent was left running")
+    if tree is not None:
+        # An outdated review refuses here, before the stop. But if the files
+        # are still changing, the agent (or something it started) is writing:
+        # stopping it is what lets the next review hold (T-RMV-11).
+        def now():
+            with repo_lock(entry):
+                return _snapshot_locked(entry, tmp_dir, pin=False)["tree"]
+        first = now()
+        if first != tree:
+            time.sleep(PREFLIGHT_SETTLE_S)
+            if now() == first:
+                raise Refused("changed", "files changed since you opened review; refresh "
+                                         "it (the agent was left running)")
     return [pid for pid, _ in busy]
 
 
@@ -1624,7 +1675,7 @@ def discard(entry, tree, registry=None, tmp_dir=None, stale_lock=None):
     p = entry["path"]
     refuse_open_ops(entry, registry)
     try:
-        busy = processes_in(p)
+        busy = _processes_using(entry)
     except ScanFailed as e:
         raise Refused("busy", f"could not check for processes inside the worktree ({e}); "
                               "nothing was moved") from None
@@ -1670,6 +1721,7 @@ def restore(entry, registry=None):
     if os.path.lexists(entry["path"]):
         raise ValueError(f"{entry['path']} exists; refusing to overwrite it")
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         op = registry.begin_op(entry["id"], "restore", src=entry["trash_path"], dst=entry["path"])
         git(["worktree", "move", "--", entry["trash_path"], entry["path"]],
             cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
@@ -1770,6 +1822,12 @@ def resolve_op(entry, op, registry):
         if tip == new and new:
             idx = _index_path(p)
             if _tree_of_index(p, Path(idx).read_bytes(), tmp) != op.get("tree"):
+                if not op.get("index_id"):
+                    # Journalled before the index identity existed: nothing can
+                    # tell staged work apart from the review, so touch nothing.
+                    return unknown("commit interrupted; the branch has it, but this journal "
+                                   "predates the index check, so the index was left as it "
+                                   "is; outcome unknown")
                 _wait_lock_gone(idx)
                 try:
                     # The identity journalled with the commit: anything staged
@@ -1857,7 +1915,16 @@ def reconcile(registry=None):
         by_repo.setdefault(e.get("common_dir"), []).append(e)
     known = set()
     for common, group in by_repo.items():
-        reg = _registered(common) if common else None
+        try:
+            reg = _registered(common) if common else None
+        except Exception as err:            # noqa: BLE001 — one repo never stops the rest
+            for e in group:
+                for op in [o for o in e.get("ops") or [] if o.get("state") == "intent"]:
+                    registry.set_op(e["id"], op["op_id"], state="unknown",
+                                    error=str(err)[:ERR_SNIPPET])
+                note(e, "error", f"could not list the worktrees of {e.get('repo_top') or common} "
+                                 f"({err}); {e.get('branch') or e['id']} was not checked")
+            continue
         for e in group:
             try:
                 _reconcile_entry(e, reg, registry, note, known)

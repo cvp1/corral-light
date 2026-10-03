@@ -59,3 +59,11 @@ Verdicts: Codex DO NOT SHIP. Gemini FIX FIRST.
 ## Fix order
 Gate first (1, 6, 7, 10, 3), then Discard ordering and the lock rule (2, 5),
 then restart safety (4, 8, 9), then 12 and the lying test.
+
+## Status (2026-10-03)
+All twelve findings and the lying test are fixed in the commit after this
+file, with a test each (BugBash2Library, BugBash2Publish, BugBash2Hub in
+test_worktrees.py). Discard's stale-review check refuses before the stop only
+when the files have stopped changing; files still changing mean the agent is
+writing, so it is stopped first, as T-RMV-11 requires. Grok's seat was not
+rerun.

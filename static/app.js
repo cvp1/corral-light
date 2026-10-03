@@ -1411,7 +1411,9 @@ async function forgetPane(p) {
     if (!(err.status === 409 && err.body && err.body.reason === 'own_branch')) {
       toast(err.message, true); return;
     }
-    if (confirm(err.message + '\n\nOpen review to discard the branch?')) { openReview(p); return; }
+    // Review opens only on an active branch; any other phase goes straight to keep-and-dismiss.
+    if (p.worktree && p.worktree.phase === 'active' &&
+        confirm(err.message + '\n\nOpen review to discard the branch?')) { openReview(p); return; }
     if (!confirm('Dismiss the pane and keep the branch? Reopen it from the archive to get back to it.')) return;
     try { await api('/api/session/forget', { pane: p.id, keep_branch: true }); await refresh(); }
     catch (e2) { toast(e2.message, true); }
