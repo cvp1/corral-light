@@ -50,7 +50,7 @@ const texts = n => [n.textContent, ...n.children.flatMap(texts)].join('\n');
 
 /* ── T-UI-1..3: the New dialog's own-branch row ─────────────────────────── */
 const wtRowModel = load('wtRowModel', ['shortSha', 'homeTilde']);
-const repo = { inside: true, top: '/home/u/aios', branch: 'main', head: '3f2a1c9d00aa',
+const repo = { inside: true, top: '/home/USER/aios', branch: 'main', head: '3f2a1c9d00aa',
                detached: false, refusals: [], warnings: [] };
 
 eq(wtRowModel({ inside: false, refusals: [] }, null, false).show, false,
@@ -67,7 +67,7 @@ check(m.show && !m.checkbox, 'T-UI-1 a refused repo shows no checkbox');
 check(/tmpfs/.test(m.refusal) && /submodules/.test(m.refusal),
       'T-UI-1 every refusal reason shows in place of the checkbox');
 m = wtRowModel({ ...repo, dirty: true,
-                 warnings: ['your uncommitted changes in /home/u/aios stay there'] }, null, false);
+                 warnings: ['your uncommitted changes in /home/USER/aios stay there'] }, null, false);
 check(m.checkbox && m.warnings.length === 1 && m.warnings[0].includes('~/aios'),
       'a warning shows beside the checkbox, with the home folder as ~');
 m = wtRowModel({ ...repo, detached: true, branch: null }, null, false);
@@ -104,8 +104,8 @@ check(wtSubmit(vis, true, '~/aios', 'codex').error, 'T-UI-3 a lane changed after
 
 /* ── T-UI-4..6: the header ──────────────────────────────────────────────── */
 const wtPillModel = load('wtPillModel', ['shortSha']);
-const wt = { branch: 'corral/fix-login', path: '/home/u/.local/state/corral-light/worktrees/aios-1a2b3c',
-             repo: '/home/u/aios', subdir: '', base: 'main', baseSha: '3f2a1c9d00aa', phase: 'active',
+const wt = { branch: 'corral/fix-login', path: '/home/USER/.local/state/corral-light/worktrees/aios-1a2b3c',
+             repo: '/home/USER/aios', subdir: '', base: 'main', baseSha: '3f2a1c9d00aa', phase: 'active',
              blocked: null, summary: { files: 4, added: 120, deleted: 8, digest: 'aa' } };
 eq(wtPillModel(null), null, 'an ordinary pane has no pill');
 eq(wtPillModel(wt).text, '⎇ fix-login · 4 files +120 −8', 'T-UI-4 pill text');
@@ -127,7 +127,7 @@ eq(paneMeta(wp).text, 'Claude Code · ~/aios', 'T-UI-6 .meta shows the repo path
 eq(paneMeta({ ...wp, worktree: { ...wt, subdir: 'pkg' }, cwd: wt.path + '/pkg' }).text,
    'Claude Code · ~/aios/pkg', 'T-UI-6 with the subdir the agent runs in');
 check(paneMeta(wp).title.includes(wt.path), 'T-UI-6 the worktree path is on the tooltip');
-eq(paneMeta({ label: 'Codex', cwd: '/home/u/x' }).text, 'Codex · ~/x', 'an ordinary pane is unchanged');
+eq(paneMeta({ label: 'Codex', cwd: '/home/USER/x' }).text, 'Codex · ~/x', 'an ordinary pane is unchanged');
 check(/paneMeta\(p\)/.test(fn('paneHead')) && /wtPillModel\(p\.worktree\)/.test(fn('paneHead')),
       'paneHead renders the meta and the pill from these');
 
@@ -143,7 +143,7 @@ for (const [k, v] of [['files', 5], ['added', 121], ['deleted', 9]])
   check(sig(with_({ [k]: v })) !== sig(base), `T-UI-5 ${k} changes the header`);
 check(sig({ ...base, worktree: { ...wt, phase: 'trashed' } }) !== sig(base), 'T-UI-5 phase changes the header');
 check(sig({ ...base, worktree: { ...wt, blocked: 'x' } }) !== sig(base), 'T-UI-5 blocked changes the header');
-check(sig({ ...base, worktree: { ...wt, repo: '/home/u/b' } }) !== sig(base), 'T-UI-5 the repo path changes the header');
+check(sig({ ...base, worktree: { ...wt, repo: '/home/USER/b' } }) !== sig(base), 'T-UI-5 the repo path changes the header');
 
 /* ── T-UI-7: parseUnified ───────────────────────────────────────────────── */
 const parseUnified = load('parseUnified');
@@ -220,8 +220,8 @@ eq(load('publishBody')('p1', done, done.remotes[0], null),
 eq(load('publishBody')('p1', done, done.remotes[0], { repo: 'u/aios', title: 'T', body: '' }).pr,
    { repo: 'u/aios', title: 'T', body: '' }, 'T-UI-9 the PR rides along when asked for');
 eq(load('discardBody')('p1', snap), { pane: 'p1', tree: snap.tree }, 'discard posts the tree it showed');
-eq(load('mergeCommand', ['shq'])({ repo: "/home/u/it's", branch: 'corral/fix-login' }),
-   "git -C '/home/u/it'\\''s' merge --no-ff 'corral/fix-login'", 'the merge command is shell-quoted');
+eq(load('mergeCommand', ['shq'])({ repo: "/home/USER/it's", branch: 'corral/fix-login' }),
+   "git -C '/home/USER/it'\\''s' merge --no-ff 'corral/fix-login'", 'the merge command is shell-quoted');
 const wire = fn('wireReview');
 check(/commitBody\(R\.pane, R\.snap,/.test(wire) && /publishBody\(R\.pane, R\.snap,/.test(wire)
       && /discardBody\(R\.pane, R\.snap\)/.test(wire),
