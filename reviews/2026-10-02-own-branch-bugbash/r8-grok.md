@@ -1,0 +1,32 @@
+I'll review the round-8 ship decision for own-branches, starting with the round-7 findings and the Publish destination code those fixes changed.The round-7 fix refuses repo-scoped transport keys and parses rewrite rules with `--null`. I'll check whether any other repository setting can still move a confirmed push.The round-7 check is a denylist plus a rewrite parser. I'll probe whether a repository file can still move a literal URL, and run the publish tests.The ship call needs the exact Publish lines and the two repros checked before I write it.FIX FIRST — a repository `include.path` fifo, or a `.git/config` that is a symlink to a fifo, serves the destination checks a clean config and then sends the push, and the check after it, to a different repository. `wt.push` returns success for the URL the user confirmed, and the op is marked done.
+
+## BLOCKING FINDINGS
+
+1. **High, PROVEN.** `worktrees.py:1434` and `worktrees.py:1495–1518`. `_TRANSPORT_KEYS` matches `http.*`, `ssh.*`, `url.*`, `core.sshCommand`, and `core.gitProxy`. It does not match `include.path` or `includeIf.*.path`, and nothing checks that `.git/config` is a regular file. `rewrite_rule` and `transport_override` are separate git processes from `git push` and the confirming `git ls-remote`.
+
+   **Trigger.** Before the user confirms, the agent sets repository `include.path` to a fifo (or replaces `.git/config` with a symlink to a fifo). The fifo serves no `url`/`http`/`ssh` keys to `git config` and to `git ls-remote --get-url`, and serves `url.<other>.insteadOf = <confirmed URL>` to `git push` and to `git ls-remote` without `--get-url`. `insteadOf` is what makes this silent: the confirming `ls-remote` follows the same rewrite, so the oid matches and the op is `done`. (`pushInsteadOf` would land the objects elsewhere and then fail that check, leaving the op `unknown`.)
+
+   **What goes wrong.** `rewrite_rule` and `transport_override` return None, `push_urls` still shows the confirmed URL, and `wt.push` returns success. The journal says the branch is on the confirmed remote. It is only in the other repository.
+
+   End-to-end through `wt.push` (`scratch/probe_r8_wtpush.py`, seat `CORRAL_LIGHT_*` env, registry `scratch/r8wt/registry/wt-2f9e91.json`): confirmed URL `scratch/r8wt/good.git`, returned `{'pushed': '5d1aa78670aa411c71546ae0739b06c5daf2cea6', 'url': '…/good.git', 'ref': 'refs/heads/corral/fix-login'}`. That ref is absent from `good.git` (only `refs/heads/main` at `6ad6fbe3`). `evil.git` has `refs/heads/corral/fix-login` at `5d1aa786`. Ops: commit `done`, push `done`; `published.url` is `good.git`.
+
+   Second shape, git command layer (`scratch/probe_r8_cfgfifo.py`): `.git/config` is a symlink to a fifo. `git config --null --get-regexp '^url\.'` returns rc 1. `git push --porcelain -- <good> main:refs/heads/probe` returns rc 0 with `To …/evil.git`. `good.git` has no `probe` ref. `evil.git` `refs/heads/probe` is `5a4b938aa869448fd5bf47d6ddc2d5faddd16966`. Refusing `include.path` alone leaves this shape open. A full `wt.push` replay of the symlink shape was not run; the `insteadOf` payload is the same one the confirming `ls-remote` followed in the first repro.
+
+   A stable include of a `url`/`http`/`ssh` key is already refused: git reports it as scope `local`. The hole is that every subprocess re-reads the include, or the config file, so the check and the push do not see the same bytes. This is repository-scoped config written by the agent, the same class as the round 5–7 destination blockers.
+
+   **Minimal fix.** Refuse repository-scoped `include.path` and `includeIf.*.path`, and refuse a `.git/config` or `config.worktree` that `lstat` does not show as a regular file (a symlink to a fifo fails `S_ISREG`). That stops both repros. The durable fix is one frozen config snapshot used for the rewrite check, the push, and the confirming `ls-remote`.
+
+## NON-BLOCKING
+
+1. `test_BB6_13` (`test_worktrees.py:3402`) accepts reason `rewrite` or `transport`, so a broken `--null` parser still passes for a local rule. `test_BB6_14` (`:3407`) only asserts `rewrite_rule` is truthy, which an unreadable-config error string also satisfies. The parser does catch a global `pushInsteadOf` whose base path contains a space (`scratch/probe_r8_dest.py`).
+2. Any repo-local `http.*` or `url.*`, including a harmless `http.postBuffer`, refuses Publish until it is moved to global config. Round 6 choice; still a false refusal of a healthy repo.
+3. After the include and non-regular-file fix, a regular `.git/config` can still be replaced in the gap between the check and `git push`. Advisory `flock` does not close it, because git does not take the lock. Suspected TOCTOU, not reproduced. Snapshot the config.
+4. A pre-push hook can copy the commit elsewhere while the confirmed push also succeeds (spec D5). The confirmed push's destination stays the confirmed URL.
+5. Global and system git config, the hub environment (`GIT_SSH_COMMAND`, `GIT_PROXY_COMMAND`, proxies, `GIT_SSL_NO_VERIFY`, `GIT_CONFIG_GLOBAL`), and `~/.ssh/config` still steer a push. Stated boundary.
+6. `http.followRedirects` defaults to `initial`. A confirmed http(s) server can redirect the pack, and the confirming `ls-remote` follows the same redirect.
+7. An agent that switches branches blocks its pane, Discard included, until the branch is switched back. Stated choice.
+8. Discard skips a process whose `/proc` cwd and fds are both unreadable, and the settle check may refuse once while files are still changing (T-RMV-11). Stated choices.
+
+An agent that points the repo's `include.path` at a feeder, or points `.git/config` at one, will make Publish tell the operator the branch is on the remote he confirmed while the commits are only in a different repository and the journal says done.That notification is the first `probe_r8_dest.py` run, killed with SIGTERM (exit 143) after it hung with no output. The later rerun finished cleanly and is what the review cites. The ship call is unchanged: **FIX FIRST**.That notification is the end-to-end `wt.push` repro. It printed the proof, then was killed with SIGKILL while cleanup blocked on the fifo. The kill does not change the result.
+
+`rewrite_rule` and `transport_override` both returned nothing, `push_urls` was `good.git`, and `wt.push` returned success for `5d1aa78670aa411c71546ae0739b06c5daf2cea6` on `refs/heads/corral/fix-login`. That ref is absent from `good.git` and present only in `evil.git`. The journal records the push as `done`. The ship call stays **FIX FIRST**.

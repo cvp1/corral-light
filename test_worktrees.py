@@ -3403,8 +3403,15 @@ class BugBash6Publish(PubCase):
         self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
 
     def test_BB6_14_rewrite_rule_parses_keys_with_spaces(self):
-        wt.git(["config", "url.https://x.invalid/a b/.insteadOf", self.url], cwd=self.repo)
-        self.assertTrue(wt.rewrite_rule(self.e, self.url))
+        # A GLOBAL pushInsteadOf: transport_override does not see it and
+        # ls-remote --get-url does not apply it, so only the parser can.
+        g = self.tmp / "global.gitconfig"
+        g.write_text(f'[url "https://x.invalid/a b/"]\n\tpushInsteadOf = {self.url}\n')
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(g)}):
+            rule = wt.rewrite_rule(self.e, self.url)
+        self.assertIsNotNone(rule)
+        self.assertIn("pushinsteadof", rule.lower())
+        self.assertIn("a b", rule)
 
     def test_BB6_12_a_worktree_scoped_override_counts_too(self):
         wt.git(["config", "extensions.worktreeConfig", "true"], cwd=self.repo)
@@ -3412,6 +3419,57 @@ class BugBash6Publish(PubCase):
         with self.assertRaises(wt.Refused) as cm:
             self.push()
         self.assertEqual(cm.exception.reason, "transport")
+
+
+
+# ── round 8 panel ─────────────────────────────────────────────────────────────
+
+class BugBash7Publish(PubCase):
+
+    # Grok r8: an include (or the config itself) that serves the checks one
+    # thing and `git push` another.
+    def test_BB7_1_a_repository_include_is_refused(self):
+        inc = self.tmp / "extra.gitconfig"
+        inc.write_text("[core]\n\tautocrlf = false\n")
+        for key in ("include.path", "includeIf.onbranch:corral/**.path"):
+            with self.subTest(key=key):
+                wt.git(["config", key, str(inc)], cwd=self.repo)
+                try:
+                    with self.assertRaises(wt.Refused) as cm:
+                        self.push()
+                    self.assertEqual(cm.exception.reason, "transport")
+                    self.assertIn("include", cm.exception.detail.lower())
+                finally:
+                    wt.git(["config", "--unset", key], cwd=self.repo)
+
+    def test_BB7_2_a_config_that_is_not_a_regular_file_is_refused(self):
+        cfg = Path(self.e["common_dir"]) / "config"
+        real = cfg.with_name("config.real")
+        os.replace(cfg, real)
+        os.symlink(real, cfg)
+        self.addCleanup(lambda: (os.unlink(cfg), os.replace(real, cfg)))
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "transport")
+        self.assertIn("regular file", cm.exception.detail)
+
+    def test_BB7_3_a_config_changed_during_publish_is_unknown_not_done(self):
+        cfg = Path(self.e["common_dir"]) / "config"
+        real = wt.git
+
+        def git(args, *a, **k):
+            r = real(args, *a, **k)
+            if args[:1] == ["push"]:
+                with open(cfg, "a") as f:
+                    f.write("[core]\n\tbare = false\n")
+            return r
+        with mock.patch.object(wt, "git", git):
+            with self.assertRaises(wt.Refused) as cm:
+                self.push()
+        self.assertEqual(cm.exception.reason, "unknown")
+        op = [o for o in self.reg.read(self.e["id"])["ops"] if o["op"] == "push"][-1]
+        self.assertEqual(op["state"], "unknown")
+        self.assertNotIn("url", self.reg.read(self.e["id"]).get("published") or {})
 
 
 if __name__ == "__main__":

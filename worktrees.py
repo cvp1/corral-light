@@ -1431,8 +1431,29 @@ def rewrite_rule(entry, url):
 # proxies, TLS and redirect settings, and a denylist of names kept missing one.
 # url.* is here too: a repository-scoped rewrite rule is refused outright, not
 # only when rewrite_rule can see that it matches.
-_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..+|ssh\..+|url\..+)$",
-                             re.I)
+# include.* and includeIf.* too: an include (a fifo, say) can serve these
+# checks one config and `git push` another.
+_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..+|ssh\..+|url\..+|"
+                             r"include\..+|includeif\..+)$", re.I)
+
+
+def config_fingerprint(entry):
+    """sha256 of the repository's own config files, each required to be a
+    regular file: the checks before a push and the push itself must read the
+    same bytes. Raises Refused("transport") for a symlink, fifo or other
+    non-regular config."""
+    out = []
+    for f in (Path(entry["common_dir"]) / "config", Path(_admin_dir(entry)) / "config.worktree"):
+        try:
+            st = os.lstat(f)
+        except FileNotFoundError:
+            out.append((str(f), None))
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused("transport", f"{f} is not a regular file, so git may read "
+                                       "something different each time; nothing was pushed")
+        out.append((str(f), hashlib.sha256(Path(f).read_bytes()).hexdigest()))
+    return tuple(out)
 
 
 def transport_override(entry):
@@ -1485,6 +1506,7 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     if st.out.strip(b"\0"):
         raise Refused("uncommitted", "the worktree has changes that are not committed; "
                                      "commit or discard them first")
+    cfg_before = config_fingerprint(entry)      # before any check reads the config
     urls = push_urls(entry, remote)
     if len(urls) != 1:
         raise Refused("remote_changed", f"{remote} has {len(urls)} push URLs; "
@@ -1516,6 +1538,17 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
                                     "it was not overwritten")
         raise GitError(["git", "push"], r.rc, r.err_text)
     there = git(["ls-remote", "--", push_url, ref], cwd=p, timeout=PUSH_TIMEOUT_S).text.split()
+    try:
+        same_cfg = config_fingerprint(entry) == cfg_before
+    except Refused:
+        same_cfg = False
+    if not same_cfg:
+        # The checks and the push may not have read the same config, so where
+        # the push went is not known: never report it done.
+        registry.set_op(entry["id"], op, state="unknown", stage="config_changed")
+        raise Refused("unknown", "the repository's git config changed while publishing, so "
+                                 "where the push went cannot be confirmed; resolve it with "
+                                 "`corral-light worktrees`")
     ok = bool(there) and there[0] == oid
     registry.set_op(entry["id"], op, state="done" if ok else "unknown", stage="done")
     if not ok:
