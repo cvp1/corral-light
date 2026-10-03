@@ -1406,7 +1406,10 @@ def rewrite_rule(entry, url):
             return f"{key} {prefix!r}"
     # A word that names a configured remote is that remote to `git push`, with
     # its own pushurl, whatever its fetch URL says.
-    names = git(["remote"], cwd=entry["path"], check=False).text.split()
+    rr = git(["remote"], cwd=entry["path"], check=False)
+    if rr.rc != 0 or rr.truncated:
+        return "the configured remotes could not be listed"
+    names = rr.text.split("\n")            # names may hold any whitespace but newline
     if url in names:
         return f"it is the name of the remote {url!r}"
     if url and "/" not in url and os.sep not in url and any(
@@ -1417,6 +1420,34 @@ def rewrite_rule(entry, url):
     got = git(["ls-remote", "--get-url", "--", url], cwd=entry["path"], check=False)
     if got.rc != 0 or got.text.strip() != url:
         return f"git reads it as {got.text.strip() or 'something else'}"
+    return None
+
+
+# Keys that change where or how a push travels without changing its URL.
+_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..*proxy|"
+                             r"http\..*sslverify|http\..*sslcainfo|http\..*sslcapath|"
+                             r"http\..*sslbackend|ssh\.variant)$", re.I)
+
+
+def transport_override(entry):
+    """A transport setting from this repository's own config (local or worktree
+    scope, includes followed), as "key=value (scope)", or None.
+
+    An agent can set these from inside its worktree with one `git config`,
+    and git would send the push (and the check after it) wherever they say.
+    The user's global and system config, and the hub's environment, are the
+    user's own and are honoured."""
+    r = git(["config", "--show-scope", "--null", "--get-regexp", "."], cwd=entry["path"],
+            check=False, max_out=8 << 20)
+    if r.rc not in (0, 1) or r.truncated:
+        return "git config could not be read"
+    # --show-scope --null: "<scope>\0<key>\n<value>\0" per entry.
+    fields = r.out.split(b"\0")
+    for i in range(0, len(fields) - 1, 2):
+        scope = fields[i].decode("utf-8", "replace")
+        key, _, value = fields[i + 1].decode("utf-8", "replace").partition("\n")
+        if scope in ("local", "worktree", "command") and _TRANSPORT_KEYS.match(key):
+            return f"{key}={value!r} ({scope})"
     return None
 
 
@@ -1459,6 +1490,12 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     if rule:
         raise Refused("rewrite", f"git would rewrite {push_url} again ({rule}), so the push "
                                  "would not go where you confirmed; nothing was pushed")
+    over = transport_override(entry)
+    if over:
+        raise Refused("transport", f"this repository's own git config changes how pushes "
+                                   f"travel ({over}), so the push and its check could go "
+                                   "somewhere you did not confirm; remove it (or set it in "
+                                   "your global config instead), then publish again")
     ref = entry["branch"]
     op = registry.begin_op(entry["id"], "push", url=push_url, ref=ref, oid=oid)
     _crash_point("push:before")
