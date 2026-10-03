@@ -914,6 +914,14 @@ def verify(entry):
     if not dotgit.startswith("gitdir: ") or os.path.realpath(
             os.path.join(p, dotgit[len("gitdir: "):])) != want_admin:
         raise IdentityError("tampered", f"{p}/.git points somewhere else")
+    # The admin dir's `commondir` file says which repository git really uses
+    # from here; an agent can rewrite it, so ask git, not the registry.
+    cd = git(["rev-parse", "--git-common-dir"], cwd=p, check=False)
+    actual = os.path.realpath(os.path.join(p, cd.text.strip())) if cd.rc == 0 else None
+    if actual != os.path.realpath(entry["common_dir"]):
+        raise IdentityError("tampered", f"{p} now belongs to the repository at "
+                                        f"{actual or 'an unreadable location'}, not "
+                                        f"{entry['common_dir']}")
     if os.path.realpath(p) not in _registered_paths(entry):
         raise IdentityError("missing", f"git no longer lists {p} as a worktree")
     sym = git(["symbolic-ref", "-q", "HEAD"], cwd=p, check=False)
@@ -1385,9 +1393,19 @@ _GITHUB_RE = re.compile(r"^(?:https://github\.com/|git@github\.com:|ssh://git@gi
                         r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
 
+def _repo_git(entry, args, **kw):
+    """git() run against the repository's own git dir (GIT_DIR=common_dir).
+
+    Publish decides and performs a push this way, so nothing in the worktree
+    (its .git file, the admin dir's commondir, a linked config.worktree) can
+    make the checks and the push read different repositories or configs."""
+    env = dict(kw.pop("env_extra", None) or {}, GIT_DIR=entry["common_dir"])
+    return git(args, cwd=entry["common_dir"], env_extra=env, **kw)
+
+
 def push_urls(entry, remote):
     """Where `git push <remote>` would really go: pushurl and pushInsteadOf applied."""
-    r = git(["remote", "get-url", "--push", "--all", "--", remote], cwd=entry["path"])
+    r = _repo_git(entry, ["remote", "get-url", "--push", "--all", "--", remote])
     return [u for u in r.text.splitlines() if u]
 
 
@@ -1396,8 +1414,8 @@ def rewrite_rule(entry, url):
 
     push() passes the confirmed URL to git, and git rewrites a URL argument
     too, so a chained rule would send the push (and its check) elsewhere."""
-    r = git(["config", "--null", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"],
-            cwd=entry["path"], check=False)
+    r = _repo_git(entry, ["config", "--null", "--get-regexp",
+                          r"^url\..*\.(insteadof|pushinsteadof)$"], check=False)
     if r.rc not in (0, 1) or r.truncated:   # 1 is "no such keys"; anything else is unknown
         return f"git config could not be read ({r.err_text.strip()[:120]})"
     # --null: "<key>\n<value>\0"; a key's subsection (the base URL) may hold spaces.
@@ -1409,7 +1427,7 @@ def rewrite_rule(entry, url):
             return f"{key} {prefix!r}"
     # A word that names a configured remote is that remote to `git push`, with
     # its own pushurl, whatever its fetch URL says.
-    rr = git(["remote"], cwd=entry["path"], check=False)
+    rr = _repo_git(entry, ["remote"], check=False)
     if rr.rc != 0 or rr.truncated:
         return "the configured remotes could not be listed"
     names = [n for n in rr.text.split("\n") if n]   # any whitespace but newline is a name
@@ -1420,7 +1438,7 @@ def rewrite_rule(entry, url):
         return f"git reads {url!r} as a remote defined under .git/remotes or .git/branches"
     # What git itself makes of the argument: insteadOf applied, and a word that
     # names a configured remote becomes that remote's URL.
-    got = git(["ls-remote", "--get-url", "--", url], cwd=entry["path"], check=False)
+    got = _repo_git(entry, ["ls-remote", "--get-url", "--", url], check=False)
     if got.rc != 0 or got.text.strip() != url:
         return f"git reads it as {got.text.strip() or 'something else'}"
     return None
@@ -1443,10 +1461,17 @@ def config_fingerprint(entry):
     same bytes. Raises Refused("transport") for a symlink, fifo or other
     non-regular config."""
     out = []
-    for f in (Path(entry["common_dir"]) / "config", Path(_admin_dir(entry)) / "config.worktree"):
+    # The config files publish reads (it runs with GIT_DIR=common_dir), and the
+    # two links that tie the worktree to that repository, which must exist.
+    must = {Path(_admin_dir(entry)) / "commondir", Path(entry["path"]) / ".git"}
+    for f in (Path(entry["common_dir"]) / "config", Path(entry["common_dir"]) / "config.worktree",
+              Path(_admin_dir(entry)) / "config.worktree", *sorted(must)):
         try:
             st = os.lstat(f)
         except FileNotFoundError:
+            if f in must:
+                raise Refused("transport", f"{f} is missing, so which repository this "
+                                           "worktree belongs to cannot be checked") from None
             out.append((str(f), None))
             continue
         if not stat.S_ISREG(st.st_mode):
@@ -1464,8 +1489,8 @@ def transport_override(entry):
     and git would send the push (and the check after it) wherever they say.
     The user's global and system config, and the hub's environment, are the
     user's own and are honoured."""
-    r = git(["config", "--show-scope", "--null", "--get-regexp", "."], cwd=entry["path"],
-            check=False, max_out=8 << 20)
+    r = _repo_git(entry, ["config", "--show-scope", "--null", "--get-regexp", "."],
+                  check=False, max_out=8 << 20)
     if r.rc not in (0, 1) or r.truncated:
         return "git config could not be read"
     # --show-scope --null: "<scope>\0<key>\n<value>\0" per entry.
@@ -1475,6 +1500,18 @@ def transport_override(entry):
         key, _, value = fields[i + 1].decode("utf-8", "replace").partition("\n")
         if scope in ("local", "worktree", "command") and _TRANSPORT_KEYS.match(key):
             return f"{key}={value!r} ({scope})"
+    # The linked worktree's own config.worktree: publish does not read it
+    # (GIT_DIR is the common dir), but the agent's git does; refuse it too.
+    own = Path(_admin_dir(entry)) / "config.worktree"
+    if own.is_file():
+        r = git(["config", "--file", str(own), "--null", "--get-regexp", "."],
+                cwd=entry["common_dir"], check=False, max_out=1 << 20)
+        if r.rc not in (0, 1) or r.truncated:
+            return f"{own} could not be read"
+        for rec in r.out.split(b"\0"):
+            key, _, value = rec.decode("utf-8", "replace").partition("\n")
+            if key and _TRANSPORT_KEYS.match(key):
+                return f"{key}={value!r} (worktree)"
     return None
 
 
@@ -1527,7 +1564,7 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     ref = entry["branch"]
     op = registry.begin_op(entry["id"], "push", url=push_url, ref=ref, oid=oid)
     _crash_point("push:before")
-    r = git(["push", "--porcelain", "--", push_url, f"{oid}:{ref}"], cwd=p, check=False,
+    r = _repo_git(entry, ["push", "--porcelain", "--", push_url, f"{oid}:{ref}"], check=False,
             timeout=PUSH_TIMEOUT_S)
     _crash_point("push:after")
     if r.rc != 0:
@@ -1537,7 +1574,8 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
             raise Refused("non_ff", "the remote branch has commits this one does not; "
                                     "it was not overwritten")
         raise GitError(["git", "push"], r.rc, r.err_text)
-    there = git(["ls-remote", "--", push_url, ref], cwd=p, timeout=PUSH_TIMEOUT_S).text.split()
+    there = _repo_git(entry, ["ls-remote", "--", push_url, ref],
+                      timeout=PUSH_TIMEOUT_S).text.split()
     try:
         same_cfg = config_fingerprint(entry) == cfg_before
     except Refused:
