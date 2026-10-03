@@ -185,6 +185,10 @@ AGENTS = {
         "argv": [sys.executable, str(GROK_LAUNCHER)],
         "requires": (str(GROK_LAUNCHER),),
         "posture_via_config_dir": False,
+        # No ACP mode option and no --permission-mode on `grok agent`: the
+        # posture is realized by argv at spawn (CORRAL_POSTURE -> launcher).
+        # Postures absent here (edits) are reported as not enforced.
+        "posture_via_argv": __import__("grok_launcher").POSTURE_REALIZED,
         "tools": True,
         "needs": "needs Grok CLI authentication",
     },
@@ -421,7 +425,7 @@ vendor_env_present = _core.vendor_env_present
 strip_prefixes = _core.strip_prefixes
 
 
-def spawn_env(spec, config_dir=None):
+def spawn_env(spec, config_dir=None, posture=None):
     """The environment one agent process launches under (start and resume)."""
     env = {}
     if NODE_BIN:
@@ -431,6 +435,10 @@ def spawn_env(spec, config_dir=None):
     # reports postureEnforced: false.
     if spec["posture_via_config_dir"] and config_dir is not None:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    # Argv lanes (grok) read the posture in their launcher and turn it into
+    # the vendor's own flag; other lanes never see it.
+    if spec.get("posture_via_argv") and posture:
+        env["CORRAL_POSTURE"] = posture
     return env
 
 
@@ -469,11 +477,18 @@ def usable_credential(path):
     return has_token(doc)
 
 
-def posture_enforceable(spec):
-    """Can Corral impose a posture on this lane on this host?"""
+def posture_enforceable(spec, posture=None):
+    """Can Corral impose a posture on this lane on this host?
+
+    With `posture`, whether THAT posture can be imposed (an argv lane realizes
+    only the postures its launcher maps); without, whether any can.
+    """
     # ACP mode needs no config dir; the live pane reports what it actually got.
     if spec.get("posture_via_acp_mode"):
         return True
+    via_argv = spec.get("posture_via_argv")
+    if via_argv:
+        return posture is None or posture in via_argv
     if not spec.get("posture_via_config_dir"):
         return False
     if darwin_keychain_blocks_isolation():
@@ -818,7 +833,7 @@ class Pane(_core.PaneBase):
             if self._log is None:      # pause() closed it; reopen for this attachment
                 self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
             spec = AGENTS[self.agent]
-            env = spawn_env(spec, self._config_dir())
+            env = spawn_env(spec, self._config_dir(), self.posture)
             self._expect_exit = False        # a NEW process; its exit is real news
             with self._turn_lock:
                 self._generation += 1        # a new attachment; retire any stale drain
@@ -1132,7 +1147,7 @@ class Pane(_core.PaneBase):
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self):
         spec = AGENTS[self.agent]
-        env = spawn_env(spec, self._config_dir())
+        env = spawn_env(spec, self._config_dir(), self.posture)
         self._expect_exit = False        # a NEW process; its exit is real news
         try:
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
@@ -1200,13 +1215,27 @@ class Pane(_core.PaneBase):
         leaves a note in the pane and returns False.
         """
         spec = AGENTS[self.agent]
+        label = spec["label"]
+        via_argv = spec.get("posture_via_argv")
+        if via_argv:
+            # Argv lanes: the launcher turned the posture into the vendor's own
+            # flag at spawn; say what that flag actually does.
+            realized = via_argv.get(self.posture)
+            if realized is None:
+                self.emit("note", {"text": f"{label} has no mode for posture "
+                                           f"{self.posture!r}; it runs under its "
+                                           f"own default (a card for each shell "
+                                           f"command it does not auto-allow)"})
+                return False
+            self.emit("note", {"text": f"posture {self.posture} on {label}: "
+                                       f"{realized}"})
+            return True
         if not spec.get("posture_via_acp_mode"):
             # Config-dir lanes: the posture was set (or not) at spawn.
             return posture_enforceable(spec)
         want = POSTURE_MODE.get(self.posture)
         cfg = self.config.get("mode") or {}
         allowed = {o["value"] for o in cfg.get("options") or []}
-        label = spec["label"]
         if want is None:
             self.emit("note", {"text": f"no permission mode is mapped for "
                                        f"posture {self.posture!r}; left at "

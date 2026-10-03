@@ -470,7 +470,9 @@ changes stay where they are, and the dialog says so. The row appears only
 when the folder is inside a git repository and the lane can use it. Lanes
 are approved per platform, from a test run on that platform: on Linux,
 Claude, Codex and Grok; on macOS, none yet. Gemini is held back everywhere
-because its lane runs without asking whatever the posture. When the repository cannot take one (no commits yet,
+because its lane runs without asking whatever the posture. (Grok asks under
+`strict`; under `auto` its launcher passes `--always-approve`, so it runs
+without asking by your choice, not the lane's.) When the repository cannot take one (no commits yet,
 on tmpfs, submodules, a sparse checkout, Git LFS without git-lfs, git older
 than 2.38), the row says why instead of offering the box.
 
@@ -670,7 +672,7 @@ Everything the browser does with a pane, a terminal can do too, on every lane �
 | lane | opens | model | first turn | pause → resume | remembers after resume | permission round-trip | notes |
 |---|---|---|---|---|---|---|---|
 | claude | yes | opus | yes | yes | yes | asked, refused | |
-| grok | yes | grok-4.6 | yes | yes | yes | **no card — ran the command without asking** | posture not enforceable on this lane — the pill read `agent-set` when measured and reads `Grok policy` since DESIGN-5 S2; the probe file was created in the scratch dir and removed |
+| grok | yes | grok-4.6 | yes | yes | yes | **no card — ran the command without asking** | posture not enforceable on this lane — the pill read `agent-set` when measured and reads `Grok policy` since DESIGN-5 S2; the probe file was created in the scratch dir and removed. Since 2026-10-02: Grok CLI 1.0.46 runs reads itself but raises a card for each shell command its own policy does not auto-allow (measured on a live pane: 11 cards in 314 tool calls, all `Execute`) and offers no ACP mode option, so the launcher realizes the posture with its only knob — `auto` adds `--always-approve` (Grok approves everything itself; verified: the same pipeline ran with no card), `strict` adds nothing (Grok's own cards), `edits` has no Grok mode and the pill still reads `Grok policy`. |
 | gemini | yes | gemini-3.7-flash-high | yes | yes | yes | asked, refused | |
 | codex | yes | gpt-5.6-sol | yes | yes | yes | **no card — ran the command without asking** | measured 2026-09-29 07:05 MST with the launcher pointed at a fresh `codex login` (`CORRAL_CODEX_HOME=~/.codex`). Not a Light gap: the pane runs Codex's `agent` mode (workspace-write sandbox, `approval_policy = on-request`), where a command inside the working tree is auto-approved and only an escalation outside the sandbox raises a card. Its ACP `mode` option also offers `read-only`; Light does not map its posture onto it (`posture_via_acp_mode` is false for this lane), so the pill read `agent-set` when measured and reads `ChatGPT policy` since DESIGN-5 S2 (the vendor's own policy applies — which the old label could not say). The probe file was created in the scratch dir and removed |
 
