@@ -1348,6 +1348,13 @@ function reviewBanners(snap) {
                     '__pycache__; listed first.');
   if (diff.truncated) out.push('The diff hit its size limit, so some files show no lines. ' +
                                'Their changes are still in what you commit.');
+  const sd = snap.staged_differs || [];
+  if (sd.length) out.push('Staged differently from the file on disk: ' +
+    sd.slice(0, 5).join(', ') + (sd.length > 5 ? ` and ${sd.length - 5} more` : '') +
+    '. Commit takes the files as they are on disk and keeps the staged version as a recovery ref.');
+  if (diff.files_omitted) out.push(`${diff.files_omitted} more changed file` +
+    `${diff.files_omitted === 1 ? ' is' : 's are'} not listed: the review hit its size limit, and ` +
+    'they are still in what you commit.');
   return out;
 }
 
@@ -1547,7 +1554,8 @@ function wireReview() {
     () => api('/api/session/worktree/commit',
               commitBody(R.pane, R.snap, $('#rev-msg').value.trim())),
     async r => {
-      R.done = { text: `committed ${shortSha(r.commit)}` };
+      R.done = { text: r.noop ? 'nothing to commit: the files match the last commit'
+                              : `committed ${shortSha(r.commit)}` };
       $('#rev-msg').value = '';
       await loadReview();
     });

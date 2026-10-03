@@ -467,7 +467,7 @@ detached child that keeps writing after the turn ends), `checkout <branch>`,
 - T-PRB-1 plain dir; T-PRB-2 repo top; T-PRB-3 subdir gives `subdir`.
 - T-PRB-4 detached HEAD refused; T-PRB-5 unborn HEAD refused; T-PRB-6 bare refused.
 - T-PRB-7 submodules refused; T-PRB-8 sparse checkout refused; T-PRB-9 LFS attributes without git-lfs refused.
-- T-PRB-10 root on tmpfs or another filesystem refused.
+- T-PRB-10 root on tmpfs refused. A repo on another filesystem than the root is allowed (D2, §7: trash is under the root, so no move crosses filesystems); `same_fs_as_root` is reported, not refused.
 - T-PRB-11 probe writes nothing (file list and mtimes of `.git` unchanged).
 - T-PRB-12 a cwd that is itself a linked worktree resolves `repo_top` to the main worktree and the base to the linked worktree's branch.
 
@@ -687,7 +687,8 @@ Three places were weighed: the state dir; Gemini's sibling,
 - **Filesystem.** `~/.local/share`, `~/tools` and `~/aios` are all on one
   btrfs subvolume (`/dev/mapper/root[/@home]`). Gemini's "the sibling avoids
   EXDEV" point does not apply on this machine. Trash is under the root
-  anyway, and probe already refuses a root on tmpfs or on another filesystem.
+  anyway, and probe refuses a root on tmpfs. A repo on another filesystem is
+  allowed: worktree moves stay under the root.
 - **Gemini's tooling claims, one at a time.** Pyright and gopls root markers,
   pnpm and cargo workspace members, and `docker run -v $(pwd)` all resolve
   *inside* the worktree, because they are tracked files or the cwd, so they

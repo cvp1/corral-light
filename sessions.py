@@ -2130,7 +2130,8 @@ class Manager(_core.ManagerBase):
             try:
                 e = _wt.create(pr, title or "", pane.id, registry=self.worktree_registry())
             except Exception:
-                self.panes.pop(pane.id, None)  # no worktree, no pane
+                with self._lock:
+                    self.panes.pop(pane.id, None)  # no worktree, no pane
                 raise
             pane.worktree_id = e["id"]
             pane.cwd = str(_wt.agent_cwd(e))
@@ -2140,6 +2141,8 @@ class Manager(_core.ManagerBase):
             if e.get("warning"):
                 pane.emit("note", {"text": f"own branch: {e['warning']}"}, activity=False)
         try:
+            if pane.worktree_id:
+                _wt.check_agent_cwd(e)       # never start an agent outside its branch
             pane.start()
         except Exception as e:
             if pane.worktree_id:
@@ -2148,7 +2151,8 @@ class Manager(_core.ManagerBase):
                 pane.state, pane.error = "dead", f"could not start: {e}"
                 pane.save_meta()
                 raise
-            self.panes.pop(pane.id, None)     # never leave a phantom in the roster
+            with self._lock:
+                self.panes.pop(pane.id, None)     # never leave a phantom in the roster
             raise
         return pane
 
@@ -2386,6 +2390,11 @@ class Manager(_core.ManagerBase):
         if include_intent and any(o.get("state") == "intent" for o in entry.get("ops") or []):
             return ("an action on this branch has not finished; restart the hub to check it, "
                     "or resolve it with `corral-light worktrees`")
+        if phase == "active":
+            try:
+                _wt.check_agent_cwd(entry)
+            except _wt.Refused as e:
+                return e.detail
         return None
 
     def _worktree_restore(self):
@@ -2514,7 +2523,7 @@ class Manager(_core.ManagerBase):
             snap = _wt.snapshot(e, tmp_dir=p.dir)
             snap["diff"] = _wt.diff(e, snap["tree"])
             snap["summary"] = p.worktree_summary = _wt.summary(e)
-            return snap
+            return _wt.fit_review(snap)       # the encoded response fits its cap
         return self._worktree_action(pane_id, go, drain_after=True)
 
     def worktree_commit(self, pane_id, tree, head, index_id, message):
