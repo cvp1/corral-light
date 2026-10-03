@@ -3185,5 +3185,104 @@ class BugBash4Restart(PubCase):
             self.assertTrue(wt.rewrite_rule(self.e, self.url))
 
 
+
+# ── round 4 panel ─────────────────────────────────────────────────────────────
+
+class BugBash5Hub(LifecycleCase):
+
+    # Astra r4: queued turns were sent without the gate being checked again.
+    def test_BB5_1_a_queued_turn_after_a_branch_switch_is_not_sent(self):
+        p = self.pane()
+        path = Path(self.entry(p)["path"])
+        p.send("sleep 0.6")
+        self.assertTrue(wait_for(lambda: p._turn_running))
+        p.send("checkout foreign-branch")                # both queued while on our branch
+        p.send("write after.txt on the foreign branch")
+        self.assertTrue(wait_for(lambda: p.state == "ready" and not p._turn_running,
+                                 timeout=15), p.state)
+        time.sleep(0.3)
+        self.assertFalse((path / "after.txt").exists(), "a queued turn ran on another branch")
+        self.assertIn("foreign-branch", p.worktree_blocked or "")
+
+    def test_BB5_2_a_queued_turn_after_an_op_went_unknown_is_not_sent(self):
+        p = self.pane()
+        path = Path(self.entry(p)["path"])
+        p.send("sleep 0.6")
+        self.assertTrue(wait_for(lambda: p._turn_running))
+        p.send("write late.txt x")
+        _unknown_op(self.reg, p.worktree_id)
+        self.assertTrue(wait_for(lambda: p.state == "ready" and not p._turn_running,
+                                 timeout=15), p.state)
+        time.sleep(0.3)
+        self.assertFalse((path / "late.txt").exists(), "a queued turn ran with an unknown op")
+        notes = [e["data"]["text"] for e in p.events if e["kind"] == "note"]
+        self.assertTrue(any("not sent" in n for n in notes), notes)
+
+
+    # Gemini r4: a start that failed with anything but AgentError left the pane
+    # `starting` for good, and `starting` now refuses every review action.
+    def test_BB5_3_a_failed_start_leaves_the_pane_dead_not_starting(self):
+        import sessions
+        p = self.pane()
+        p.pause()
+        p.acp_session = None                          # the D14 retry path
+        with mock.patch.object(sessions, "spawn_env",
+                               mock.Mock(side_effect=OSError("config dir unreadable"))):
+            try:
+                p.resume()
+            except Exception:                         # noqa: BLE001
+                pass
+        self.assertEqual(p.state, "dead", p.state)
+        self.assertIn("config dir unreadable", p.error or "")
+        snap = self.mgr.worktree_snapshot(p.id)      # not refused as busy
+        self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(self.entry(p)["phase"], "trashed")
+
+    def test_BB5_4_a_failed_clear_leaves_the_pane_dead_not_starting(self):
+        import sessions
+        p = self.pane()
+        with mock.patch.object(sessions, "spawn_env",
+                               mock.Mock(side_effect=OSError("config dir unreadable"))):
+            try:
+                p.send("/clear")
+            except Exception:                         # noqa: BLE001
+                pass
+        self.assertEqual(p.state, "dead", p.state)
+
+
+    def test_BB5_5_a_worktree_still_in_intent_blocks(self):
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        self.assertIn("never finished", m._worktree_blocked_reason({"phase": "intent", "ops": []}))
+
+
+class BugBash5Publish(PubCase):
+
+    # Astra r4: a URL that is also a remote's name, whose fetch URL is its own name.
+    def test_BB5_10_a_url_equal_to_a_remote_name_is_refused(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "dest"], cwd=self.repo)
+        wt.git(["remote", "add", "dest", "dest"], cwd=self.repo)
+        wt.git(["remote", "set-url", "--push", "dest", str(other)], cwd=self.repo)
+        url = wt.push_urls(self.e, "origin")[0]
+        self.assertEqual(url, "dest")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=url)
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    def test_BB5_11_a_legacy_remotes_file_counts_as_a_remote_name(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "legacy"], cwd=self.repo)
+        d = Path(self.e["common_dir"]) / "remotes"
+        d.mkdir(exist_ok=True)
+        (d / "legacy").write_text(f"URL: {other}\n")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url="legacy")
+        self.assertEqual(cm.exception.reason, "rewrite")
+
+
 if __name__ == "__main__":
     unittest.main()

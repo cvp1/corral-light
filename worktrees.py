@@ -1404,6 +1404,14 @@ def rewrite_rule(entry, url):
         key, _, prefix = line.partition(" ")
         if url.startswith(prefix):          # an empty prefix matches every URL
             return f"{key} {prefix!r}"
+    # A word that names a configured remote is that remote to `git push`, with
+    # its own pushurl, whatever its fetch URL says.
+    names = git(["remote"], cwd=entry["path"], check=False).text.split()
+    if url in names:
+        return f"it is the name of the remote {url!r}"
+    if url and "/" not in url and os.sep not in url and any(
+            os.path.lexists(Path(entry["common_dir"]) / d / url) for d in ("remotes", "branches")):
+        return f"git reads {url!r} as a remote defined under .git/remotes or .git/branches"
     # What git itself makes of the argument: insteadOf applied, and a word that
     # names a configured remote becomes that remote's URL.
     got = git(["ls-remote", "--get-url", "--", url], cwd=entry["path"], check=False)
