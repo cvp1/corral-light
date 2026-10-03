@@ -1396,12 +1396,15 @@ def rewrite_rule(entry, url):
 
     push() passes the confirmed URL to git, and git rewrites a URL argument
     too, so a chained rule would send the push (and its check) elsewhere."""
-    r = git(["config", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"],
+    r = git(["config", "--null", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"],
             cwd=entry["path"], check=False)
-    if r.rc not in (0, 1):                  # 1 is "no such keys"; anything else is unknown
+    if r.rc not in (0, 1) or r.truncated:   # 1 is "no such keys"; anything else is unknown
         return f"git config could not be read ({r.err_text.strip()[:120]})"
-    for line in r.text.splitlines():
-        key, _, prefix = line.partition(" ")
+    # --null: "<key>\n<value>\0"; a key's subsection (the base URL) may hold spaces.
+    for rec in r.out.split(b"\0"):
+        if not rec:
+            continue
+        key, _, prefix = rec.decode("utf-8", "replace").partition("\n")
         if url.startswith(prefix):          # an empty prefix matches every URL
             return f"{key} {prefix!r}"
     # A word that names a configured remote is that remote to `git push`, with
@@ -1426,7 +1429,10 @@ def rewrite_rule(entry, url):
 # Keys that can change where or how a push travels without changing its URL.
 # Whole sections, not a list of known keys: http.* alone has curloptResolve,
 # proxies, TLS and redirect settings, and a denylist of names kept missing one.
-_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..+|ssh\..+)$", re.I)
+# url.* is here too: a repository-scoped rewrite rule is refused outright, not
+# only when rewrite_rule can see that it matches.
+_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..+|ssh\..+|url\..+)$",
+                             re.I)
 
 
 def transport_override(entry):
