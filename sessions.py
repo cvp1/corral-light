@@ -800,8 +800,32 @@ class Pane(_core.PaneBase):
                                "parked": parked})
         return parked
 
+    def _no_review_action(self):
+        """Hold this pane's action lock while an agent is attached (resume, /clear),
+        so a review action and a new agent never interleave: Discard cannot
+        move the folder under an agent that is starting, and an agent cannot
+        start while Discard runs. Refuses at once if an action holds it."""
+        if not self.worktree_id:
+            return contextlib.nullcontext()
+        if not self._action_lock.acquire(blocking=False):
+            raise ValueError("a review action is running on this pane; "
+                             "try again when it finishes")
+        lock = self._action_lock
+
+        @contextlib.contextmanager
+        def held():
+            try:
+                yield
+            finally:
+                lock.release()
+        return held()
+
     def resume(self):
         """Attach a fresh agent process to this pane's conversation (from detached or dead)."""
+        with self._no_review_action():
+            return self._resume()
+
+    def _resume(self):
         if self.state not in self.RESUMABLE:
             raise ValueError(f"pane is {self.state}, not detached or dead")
         if self.worktree_id:
@@ -953,6 +977,12 @@ class Pane(_core.PaneBase):
         old turns out of view without deleting a byte (PRINCIPLES 18).
         Returns the turn id of the /clear itself.
         """
+        with self._no_review_action():
+            if self.worktree_id:
+                self._refuse_blocked_worktree()
+            return self._clear_context(via)
+
+    def _clear_context(self, via=None):
         if self.state == "starting":
             raise ValueError("this pane is still starting — try /clear again "
                              "in a moment")
@@ -1495,8 +1525,11 @@ class Pane(_core.PaneBase):
 
     def _refuse_blocked_worktree(self):
         """Raise ValueError if this pane's own branch must not get new work: an
-        op with an unknown outcome, or a worktree that is trashed or gone."""
-        why = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self))
+        op with an unknown outcome or not yet settled, or a worktree that is
+        trashed or gone. While this pane's own action holds it, that action's
+        `intent` op is its own; sends then queue behind the hold (D11)."""
+        why = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self),
+                                                include_intent=not self.held)
         self.worktree_blocked = why
         if why:
             raise ValueError(why)
@@ -2340,7 +2373,7 @@ class Manager(_core.ManagerBase):
         except (OSError, ValueError, _wt.RegistryVersionError):
             return None
 
-    def _worktree_blocked_reason(self, entry):
+    def _worktree_blocked_reason(self, entry, include_intent=True):
         if entry is None:
             return "this pane's own-branch record is missing; see `corral-light worktrees`"
         phase = entry.get("phase")
@@ -2350,6 +2383,9 @@ class Manager(_core.ManagerBase):
             return f"this pane's worktree is {phase}: {entry.get('error') or ''}".strip()
         if any(o.get("state") == "unknown" for o in entry.get("ops") or []):
             return "an action on this branch has an unknown outcome; resolve it with `corral-light worktrees`"
+        if include_intent and any(o.get("state") == "intent" for o in entry.get("ops") or []):
+            return ("an action on this branch has not finished; restart the hub to check it, "
+                    "or resolve it with `corral-light worktrees`")
         return None
 
     def _worktree_restore(self):
@@ -2515,13 +2551,16 @@ class Manager(_core.ManagerBase):
             alive = bool(p.client and p.client.alive)
             # The client's own group id (it starts the agent in a new session).
             pg = getattr(p.client, "pgid", None) if alive else None
-            _wt.discard_preflight(e, reg, agent_pgids={pg} if pg else ())
-            stale = None
+            _wt.discard_preflight(e, reg, agent_pgids={pg} if pg else (),
+                                  tree=tree, tmp_dir=p.dir)
+            # What _wt needs to recognise an index.lock this agent's git left;
+            # with no live client, the agent is already gone.
+            stale = {"pid": (getattr(getattr(p.client, "p", None), "pid", None) or p.pid)
+                     if alive else p.pid,
+                     "start": p.pid_start,
+                     "lock": _wt._index_path(e["path"]) + ".lock",
+                     "stopped_at": time.time()}
             if alive:
-                # What _wt needs to recognise an index.lock this agent's git left.
-                stale = {"pid": getattr(getattr(p.client, "p", None), "pid", None) or p.pid,
-                         "start": p.pid_start,
-                         "lock": _wt._index_path(e["path"]) + ".lock"}
                 p._expect_exit = True
                 with contextlib.suppress(Exception):
                     p.client.cancel(p.acp_session)
