@@ -3362,6 +3362,33 @@ class AnAgentsQuestionRendersAsTheAgentAsking(unittest.TestCase):
         _run_node_selftest(self, "selftest_ask.mjs", "the ask_human banner and reducer")
 
 
+class PairingByKeyInTheBrowser(unittest.TestCase):
+    """DESIGN-6 S8, T8.1-T8.4: Touch your key only under all three
+    conditions, base64url, the localhost link on 127.0.0.1, one fallback on
+    NotAllowedError, and Security keys with no Remove (selftest_keypair.mjs)."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_keypair.mjs", "pairing by key in the page")
+
+    def test_t85_the_browser_files_name_no_host(self):
+        """T8.5. The page, the README and the selftests ship in this PUBLIC
+        repository too, and S8 put the key-pairing text in all three. Same
+        rule as the core's guard. `user@example.com`-style placeholders are
+        fine; a real host, LAN address or home path is not."""
+        import re
+        bad = re.compile(r"linux-host|mac-host|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
+        files = (sorted((ROOT / "static").glob("*.js")) + sorted((ROOT / "static").glob("*.html"))
+                 + sorted((ROOT / "static").glob("*.css")) + sorted(ROOT.glob("selftest_*.mjs"))
+                 + [ROOT / "README.md"])
+        self.assertIn("selftest_keypair.mjs", [f.name for f in files])
+        for f in files:
+            for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+                m = bad.search(line)
+                self.assertIsNone(
+                    m, f"{f.name}:{i} names a host or account in a public "
+                       f"repository: {line.strip()[:90]}")
+
+
 from test_resilience import FakeLaneCase as _FakeLaneCase, wait_for as _wait_for  # noqa: E402
 
 

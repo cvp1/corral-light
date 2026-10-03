@@ -181,6 +181,17 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .cmd{font-family:var(--mono);font-size:14px;background:var(--panel);border:1px solid var(--line);
   border-radius:8px;padding:12px 14px;margin:0;color:var(--sage);user-select:all}
 .note{color:var(--faint);font-size:12.5px;margin-top:22px}
+#pairkeynote:empty{display:none}
+/* DESIGN-6 S8: Touch your key, and the Security keys list */
+.pairkey{margin:22px 0 0}
+.keybtn{font-size:14px;padding:10px 22px}
+.keylink{color:var(--sage);font-size:13px}
+.sklist{display:grid;gap:6px;margin:4px 0 12px}
+.skrow{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:8px 10px;
+  border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.sklabel{color:var(--ink)}
+.skorigin{font-family:var(--mono);font-size:11.5px;color:var(--dim);text-align:right}
+.skused{grid-column:1 / -1;font-size:11.5px;color:var(--faint)}
 
 /* ── shell ── */
 .app{display:grid;grid-template-columns:230px 1fr 300px;height:100vh;

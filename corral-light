@@ -1,6 +1,9 @@
 #!/bin/bash
 # corral-light — pair a client, or run the server.
 #   corral-light pair ABC-123   authorize the browser showing that code
+#                               (--break-glass: even under key-only; audited)
+#   corral-light key list|enroll|rm <id>|policy <p>|recover <code> <id>|--all
+#                               security keys for pairing (key_cli.py)
 #   corral-light serve          run the hub in the foreground
 #   corral-light doctor         say which lanes can start here, and why not
 #   corral-light launch         open the wall in your browser, already paired
@@ -39,7 +42,7 @@ set -euo pipefail
 D="$(cd "$(dirname "$0")" && pwd)"
 PY="${CORRAL_LIGHT_PYTHON:-python3}"
 case "${1:-}" in
-  pair)  exec "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); import auth; ok,msg=auth.approve(sys.argv[2] if len(sys.argv)>2 else ''); print(msg, flush=True); sys.exit(0 if ok else 2)" "$D" "${2:-}" ;;
+  pair|key) exec "$PY" "$D/key_cli.py" "$@" ;;
   serve) exec "$PY" "$D/hub.py" ;;
   doctor) exec "$PY" "$D/doctor.py" ;;
   worktrees) shift; exec "$PY" "$D/worktrees_cli.py" "$@" ;;
@@ -55,5 +58,5 @@ case "${1:-}" in
     exec "$PY" "$D/cli.py" "$@" ;;
   lanes) shift; exec "$PY" "$D/lanes.py" "$@" ;;
   cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
-  *)     echo "usage: corral-light {pair <code>|serve|doctor|launch [--print]|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|rig <save|up|list|rm>|lanes check|lanes update <lane>}"; exit 2 ;;
+  *)     echo "usage: corral-light {pair [--break-glass] <code>|key <list|enroll|rm|policy|recover>|serve|doctor|launch [--print]|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|rig <save|up|list|rm>|lanes check|lanes update <lane>}"; exit 2 ;;
 esac

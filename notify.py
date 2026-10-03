@@ -2,6 +2,8 @@
 """notify — a local desktop notification, or nothing. Stdlib only, no network.
 
 Silent during quiet hours (21:00–05:00 local); never raises.
+security() is the one exception to quiet hours: a silent banner at any hour
+for a break-glass pairing, a key enrolled or removed, or a policy change.
 """
 import shutil
 import subprocess
@@ -20,14 +22,17 @@ def quiet_now(now=None):
     return h >= QUIET_START_H or h < QUIET_END_H
 
 
-def _argv(title, body):
+def _argv(title, body, silent=False):
     if sys.platform == "darwin" and shutil.which("osascript"):
         def q(s):
             return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        # No `sound name` clause: `display notification` is silent without one.
         return ["osascript", "-e",
                 f"display notification {q(body)} with title {q(title)}"]
     if shutil.which("notify-send"):
-        return ["notify-send", "--app-name=corral-light", title, body]
+        return (["notify-send", "--app-name=corral-light"]
+                + (["--hint=boolean:suppress-sound:true"] if silent else [])
+                + [title, body])
     return None
 
 
@@ -38,9 +43,20 @@ def desktop(title, body, now=None, force=False):
     """
     if not force and quiet_now(now):
         return False, "quiet hours (21:00–05:00)"
+    return _show(title, body)
+
+
+def security(title, body, now=None):
+    """A security notice (S9): a SILENT banner at any hour, quiet hours or
+    not. Returns (shown, why) and never raises. `now` is accepted so a caller
+    passes its clock; the hour changes nothing here, which is the point."""
+    return _show(title, body, silent=True)
+
+
+def _show(title, body, silent=False):
     title = " ".join(str(title).split())[:MAX_TITLE]
     body = " ".join(str(body).split())[:MAX_BODY]
-    argv = _argv(title, body)
+    argv = _argv(title, body, silent)
     if argv is None:
         return False, "no notifier on this host (notify-send / osascript)"
     try:

@@ -17,7 +17,13 @@
     <h1>Corral Light</h1>
     <p class="sub">Pair this browser with your account.</p>
     <div class="code" id="paircode">····</div>
-    <p class="how">Run this in a shell you trust:</p>
+    <!-- DESIGN-6 S8: "Touch your key" (or, on 127.0.0.1, a link to the same
+         port on localhost) is built here by showKeyOffer() in app.js. Empty
+         and hidden unless a key is enrolled for this origin; the code below
+         always stays. -->
+    <div id="pairkey" class="pairkey hide"></div>
+    <p class="note" id="pairkeynote"></p>
+    <p class="how" id="pairhow">Run this in a shell you trust:</p>
     <pre class="cmd" id="paircmd">corral-light pair ···</pre>
     <p class="note" id="pairnote">Waiting… the code expires in <span id="pairttl">5:00</span>.</p>
   </div>
@@ -47,6 +53,8 @@
     <div class="foot"><span id="conn" class="conn">connecting…</span>
       <button class="keysbtn" id="keysbtn" type="button" title="Keyboard shortcuts (?)"
               aria-label="Keyboard shortcuts">?</button>
+      <button class="keysbtn" id="seckeysbtn" type="button" title="Security keys"
+              aria-label="Security keys">⚿</button>
       <div class="themes" id="themes"></div></div>
   </aside>
 
@@ -170,6 +178,29 @@
   <form method="dialog" class="dlg">
     <h2>Keyboard</h2>
     <div id="keys-body" class="keysbody"></div>
+    <menu><button value="cancel" class="btn">Close</button></menu>
+  </form>
+</dialog>
+
+<!-- Security keys (DESIGN-6 S8). The list is rendered from
+     /api/pair/key/list by renderSecKeys(), as text. There is no Remove here
+     on purpose: removing a key and changing the policy are shell-only
+     (`corral-light key rm|policy`). Pairing by key is a convenience, not a
+     boundary -- see "Pairing with a security key" in the README. -->
+<dialog id="seckeydlg">
+  <form method="dialog" class="dlg">
+    <h2>Security keys</h2>
+    <p class="hint" id="sk-state"></p>
+    <div id="sk-list" class="sklist"></div>
+    <label id="sk-coderow">Enrollment code<input id="sk-code" autocomplete="off"
+        spellcheck="false" placeholder="from: corral-light key enroll"></label>
+    <label>Label<input id="sk-label" autocomplete="off" spellcheck="false"
+        maxlength="40" placeholder="security key"></label>
+    <button type="button" class="btn go" id="sk-enroll">Enroll</button>
+    <p class="hint" id="sk-msg"></p>
+    <p class="hint">Remove a key or change the policy from a shell:
+      <code>corral-light key rm &lt;id&gt;</code>,
+      <code>corral-light key policy &lt;code|key-or-code|key-only&gt;</code>.</p>
     <menu><button value="cancel" class="btn">Close</button></menu>
   </form>
 </dialog>

@@ -557,6 +557,40 @@ def _argv_piece_present(piece, args):
     return os.path.basename(head).lower().startswith("python")
 
 
+def process_parent(pid):
+    """The parent pid of `pid`, or None. Linux reads /proc; elsewhere `ps`."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text()
+        return int(raw.rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        r = subprocess.run(["ps", "-o", "ppid=", "-p", str(int(pid))],
+                           capture_output=True, text=True, timeout=PS_TIMEOUT_S)
+        return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def owning_hub(pid):
+    """The pid of a RUNNING hub that still parents adapter `pid`, or None.
+
+    An orphan is an adapter whose hub died: the kernel has re-parented it to
+    init/launchd (pid 1) or a subreaper such as `systemd --user`. An adapter
+    whose parent is a live process running a `hub.py` is not an orphan, no
+    matter what a state directory says -- it belongs to a hub that is serving
+    right now. Without this check, any process that built a Manager against a
+    live hub's state (a test that forgot its scratch state, a second hub
+    started by mistake) killed every live pane's agent: measured 2026-10-01,
+    twice, on the pane doing the work. A parent that is this very process is
+    not "another hub" and answers None.
+    """
+    ppid = process_parent(pid)
+    if not ppid or ppid <= 1 or ppid == os.getpid():
+        return None
+    return ppid if "hub.py" in (process_args(ppid) or "") else None
+
+
 def reap_orphans(candidates, term_wait=None, kill_wait=None):
     """SIGTERM every verified orphan group, wait once, SIGKILL survivors.
 
@@ -570,6 +604,10 @@ def reap_orphans(candidates, term_wait=None, kill_wait=None):
         ok, why = is_our_adapter(pid, pgid, start, argv)
         if not ok:
             out[key] = f"left alone: {why}"
+            continue
+        hub = owning_hub(pid)
+        if hub:
+            out[key] = f"left alone: still owned by a running hub (pid {hub})"
             continue
         try:
             os.killpg(int(pgid), signal.SIGTERM)

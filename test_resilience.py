@@ -232,6 +232,92 @@ class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
         self.mgr.restore()
         self.assertIsNotNone(pr.poll())
 
+    # ── F-S7c (2026-10-01): an adapter a RUNNING hub still parents is no orphan.
+    # A test that forgot its scratch state built a Manager against the live
+    # state, and restore() killed the live hub's agents -- twice, on the pane
+    # doing the work. The stand-in hub is a script literally named hub.py that
+    # parents a session-leader adapter (sleep), exactly as the real hub does.
+    STAND_IN_HUB = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen(['sleep', '60'], start_new_session=True,\n"
+        "                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "                     stderr=subprocess.DEVNULL)\n"
+        "open(sys.argv[1], 'w').write(str(p.pid))\n"
+        "p.wait()          # a real hub or subreaper collects its dead child\n"
+        "time.sleep(60)\n")
+
+    def _stand_in_hub(self, name="hub.py"):
+        import acp
+        d = Path(tempfile.mkdtemp(prefix="stand-in-hub-"))
+        (d / name).write_text(self.STAND_IN_HUB)
+        pidfile = d / "adapter.pid"
+        hub = self.subprocess.Popen([sys.executable, str(d / name), str(pidfile)],
+                                    stdin=self.subprocess.DEVNULL, start_new_session=True)
+        self.procs.append(hub)
+        threading.Thread(target=hub.wait, daemon=True).start()
+        self.assertTrue(wait_for(lambda: pidfile.exists() and pidfile.read_text().strip()))
+        apid = int(pidfile.read_text())
+        self.addCleanup(lambda: self._killpg_quietly(apid))
+        self.assertTrue(wait_for(lambda: acp.process_start_token(apid)))
+        return hub, apid
+
+    @staticmethod
+    def _killpg_quietly(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def _write_meta(self, key, apid, start):
+        d = self.state / "panes" / key
+        d.mkdir(parents=True)
+        (d / "meta.json").write_text(json.dumps({
+            "id": key, "agent": "fake", "cwd": self.agent_dir,
+            "created": "2026-10-01T00:00:00Z", "acp_session": "s1",
+            "pid": apid, "pgid": apid, "pid_start": start}))
+
+    @staticmethod
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def test_an_adapter_a_running_hub_still_parents_is_never_signalled(self):
+        import acp
+        hub, apid = self._stand_in_hub()
+        self.assertEqual(acp.owning_hub(apid), hub.pid)
+        self._write_meta("live1", apid, acp.process_start_token(apid))
+        self.mgr.restore()
+        self.assertTrue(self._alive(apid), "a live hub's adapter was signalled")
+        self.assertEqual(self.mgr.orphans["live1"],
+                         f"left alone: still owned by a running hub (pid {hub.pid})")
+
+    def test_once_its_hub_is_dead_the_same_adapter_is_reaped(self):
+        # The control: the stand-in harness itself does not prevent reaping.
+        import acp
+        hub, apid = self._stand_in_hub()
+        os.killpg(hub.pid, signal.SIGKILL)
+        self.assertTrue(wait_for(lambda: acp.owning_hub(apid) is None),
+                        "the adapter was not re-parented after its hub died")
+        self.assertTrue(self._alive(apid))
+        self._write_meta("orphan1", apid, acp.process_start_token(apid))
+        self.mgr.restore()
+        self.assertIn(self.mgr.orphans.get("orphan1"), ("reaped", "killed"))
+        self.assertTrue(wait_for(lambda: not self._alive(apid)), "the orphan is still running")
+
+    def test_a_live_parent_that_is_not_a_hub_does_not_protect_an_orphan(self):
+        # Linux re-parents an orphan to a subreaper (`systemd --user`), a live
+        # process that is no hub. Only a running hub.py keeps an adapter safe.
+        import acp
+        parent, apid = self._stand_in_hub(name="subreaper.py")
+        self.assertIsNone(acp.owning_hub(apid))
+        self._write_meta("orphan2", apid, acp.process_start_token(apid))
+        self.mgr.restore()
+        self.assertIn(self.mgr.orphans.get("orphan2"), ("reaped", "killed"))
+        self.assertTrue(wait_for(lambda: not self._alive(apid)), "the orphan is still running")
+
     def test_unreadable_metas_are_counted_not_skipped(self):
         d = self.state / "panes" / "broken"
         d.mkdir(parents=True)

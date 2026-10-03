@@ -1,4 +1,5 @@
-"""WebAuthn ES256 assertion verification for pairing by touching a key.
+"""WebAuthn ES256 verification for pairing by touching a key: assertions and
+registrations (with the small strict CBOR reader registrations need).
 
 Pure, stdlib-only; the P-256 signature check shells out to `openssl` with a
 fixed argv, a timeout and a private temp dir. A workflow guard, not a security
@@ -226,3 +227,206 @@ def verify_assertion(*, client_data_json, auth_data, signature, credential_id,
         return verify_signature(spki, message, signature, openssl)
     except Refused as e:
         return False, e.reason
+
+
+# ── registration (DESIGN-6 S6b) ─────────────────────────────────────────────
+#
+# Enrollment reads one `navigator.credentials.create()` result. Its
+# attestationObject is CBOR, the one binary format here; the reader below is
+# deliberately small and strict -- it parses exactly the shapes an
+# attestation-`none` registration carries and refuses everything else by name.
+# What it takes out is the credential id, the public key (as SPKI), the
+# signCount and the AAGUID. Attestation is NOT verified: `none` is requested,
+# so a software authenticator enrolls as readily as a hardware one (see the C
+# threat model in the module docstring).
+
+MAX_CBOR_BYTES = 4096       # a whole attestationObject; a real one is ~250
+MAX_CBOR_DEPTH = 6          # top map -> attStmt / COSE key / extensions sit at 2-3
+MAX_CREDENTIAL_ID = 1023    # WebAuthn's own ceiling on credentialIdLength
+FLAG_AT = 0x40              # attested credential data present
+FLAG_ED = 0x80              # extension data present
+
+WRONG_TYPE_CREATE = "clientData type is not webauthn.create"
+NOT_ATTESTATION = "not an attestation object"
+WRONG_FMT = "attestation format is not none"
+ATTSTMT_NOT_EMPTY = "attStmt is not empty for format none"
+NO_AT = "attested credential data (AT) not set"
+BAD_CREDENTIAL_ID = "credential id length out of range"
+TRUNCATED_ATTESTED = "attested credential data is truncated"
+TRAILING_AUTH_DATA = "authData has bytes after the credential key"
+CBOR_OVER_CAP = "CBOR over the size cap"
+CBOR_TOO_DEEP = "CBOR nested too deep"
+CBOR_TRUNCATED = "CBOR truncated or length past the end"
+CBOR_INDEFINITE = "CBOR indefinite length not allowed"
+CBOR_NOT_MINIMAL = "CBOR length or integer not minimally encoded"
+CBOR_DUPLICATE_KEY = "CBOR map has a duplicate key"
+CBOR_BAD_KEY = "CBOR map key is not an integer or text"
+CBOR_UNSUPPORTED = "CBOR type not supported"
+CBOR_BAD_TEXT = "CBOR text is not UTF-8"
+CBOR_TRAILING = "CBOR has bytes after the top item"
+
+
+def _cbor_head(buf, i):
+    """-> (major, value-or-length, next index). Definite, minimal only."""
+    if i >= len(buf):
+        raise Refused(CBOR_TRUNCATED)
+    b = buf[i]
+    major, ai = b >> 5, b & 0x1F
+    i += 1
+    if ai < 24:
+        return major, ai, i
+    if ai == 31:
+        raise Refused(CBOR_INDEFINITE)
+    if ai > 27:
+        raise Refused(CBOR_UNSUPPORTED)
+    n = 1 << (ai - 24)                       # 1, 2, 4 or 8 following bytes
+    if i + n > len(buf):
+        raise Refused(CBOR_TRUNCATED)
+    v = int.from_bytes(buf[i:i + n], "big")
+    # Minimal: each width must be needed (CTAP2 canonical CBOR).
+    floor = 24 if n == 1 else 1 << (8 * (n // 2))
+    if v < floor:
+        raise Refused(CBOR_NOT_MINIMAL)
+    return major, v, i + n
+
+
+def _cbor_item(buf, i, depth):
+    """One CBOR data item at buf[i] -> (value, next index)."""
+    if depth > MAX_CBOR_DEPTH:
+        raise Refused(CBOR_TOO_DEEP)
+    first = buf[i] if i < len(buf) else None
+    if first is not None and (first >> 5 == 6 or
+                              (first >> 5 == 7 and first not in (0xF4, 0xF5, 0xF6))):
+        raise Refused(CBOR_UNSUPPORTED)      # tags, floats, other simple values
+    major, v, i = _cbor_head(buf, i)
+    if major == 0:
+        return v, i
+    if major == 1:
+        return -1 - v, i
+    if major in (2, 3):
+        if i + v > len(buf):
+            raise Refused(CBOR_TRUNCATED)
+        raw = bytes(buf[i:i + v])
+        if major == 2:
+            return raw, i + v
+        try:
+            return raw.decode("utf-8"), i + v
+        except UnicodeDecodeError:
+            raise Refused(CBOR_BAD_TEXT)
+    if major == 4:
+        if v > len(buf) - i:                 # every element takes >= 1 byte
+            raise Refused(CBOR_TRUNCATED)
+        out = []
+        for _ in range(v):
+            item, i = _cbor_item(buf, i, depth + 1)
+            out.append(item)
+        return out, i
+    if major == 5:
+        if v * 2 > len(buf) - i:
+            raise Refused(CBOR_TRUNCATED)
+        out = {}
+        for _ in range(v):
+            key, i = _cbor_item(buf, i, depth + 1)
+            if isinstance(key, bool) or not isinstance(key, (int, str)):
+                raise Refused(CBOR_BAD_KEY)
+            if key in out:
+                raise Refused(CBOR_DUPLICATE_KEY)
+            out[key], i = _cbor_item(buf, i, depth + 1)
+        return out, i
+    return {0xF4: False, 0xF5: True, 0xF6: None}[first], i   # major 7, screened above
+
+
+def cbor_decode_prefix(buf, start=0):
+    """Decode ONE item from buf[start:] -> (value, end index). Bytes after it
+    are left for the caller -- the COSE key inside authData is followed by
+    extensions, or by nothing."""
+    if not isinstance(buf, (bytes, bytearray)):
+        raise Refused(NOT_ATTESTATION)
+    if len(buf) > MAX_CBOR_BYTES:
+        raise Refused(CBOR_OVER_CAP)
+    return _cbor_item(bytes(buf), start, 1)
+
+
+def cbor_decode(buf):
+    """Decode exactly one item with nothing after it."""
+    value, end = cbor_decode_prefix(buf)
+    if end != len(buf):
+        raise Refused(CBOR_TRAILING)
+    return value
+
+
+def parse_attested_auth_data(raw):
+    """authData from a registration -> parse_auth_data fields plus aaguid,
+    credentialId and the decoded COSE key. AT must be set; with ED clear the
+    COSE key must end the buffer, with ED set exactly one extensions map may
+    follow it."""
+    ad = parse_auth_data(raw)
+    if not ad["at"]:
+        raise Refused(NO_AT)
+    rest = ad["rest"]
+    if len(rest) < 18:
+        raise Refused(TRUNCATED_ATTESTED)
+    aaguid, n = rest[:16], int.from_bytes(rest[16:18], "big")
+    if n < 1 or n > MAX_CREDENTIAL_ID:
+        raise Refused(BAD_CREDENTIAL_ID)
+    if 18 + n >= len(rest):
+        raise Refused(TRUNCATED_ATTESTED)
+    cred_id = rest[18:18 + n]
+    cose, end = cbor_decode_prefix(rest, 18 + n)
+    if ad["ed"]:
+        ext, end = cbor_decode_prefix(rest, end)
+        if not isinstance(ext, dict):
+            raise Refused("extensions are not a map")
+    if end != len(rest):
+        raise Refused(TRAILING_AUTH_DATA)
+    ad.update(aaguid=bytes(aaguid), credentialId=bytes(cred_id), cose=cose)
+    return ad
+
+
+def verify_registration(*, client_data_json, attestation_object, challenge,
+                        origins, rp_id):
+    """One `navigator.credentials.create()` result, judged.
+    -> (ok, reason, credential) where credential is None unless ok, else
+    {"id": base64url, "spki": DER bytes, "signCount": int, "aaguid": hex}.
+
+    Checked like an assertion (type, challenge, exact origin, not
+    cross-origin, rpIdHash, UP, UV) plus the registration's own framing:
+    the attestationObject must be exactly {fmt: "none", attStmt: {},
+    authData: bytes}, AT set, a credential id of 1..1023 bytes, an ES256
+    P-256 key on the curve, and nothing unexplained after it. A bare public
+    key, or anything that is not that map, is refused -- enrollment never
+    takes a key on the caller's say-so.
+    """
+    try:
+        cd = parse_client_data(client_data_json)
+        if cd["type"] != "webauthn.create":
+            raise Refused(WRONG_TYPE_CREATE)
+        if not isinstance(challenge, (bytes, bytearray)) or not challenge or \
+                not hmac.compare_digest(cd["challenge"].encode("ascii", "replace"),
+                                        b64url(challenge).encode("ascii")):
+            raise Refused(WRONG_CHALLENGE)
+        allowed = (origins,) if isinstance(origins, str) else tuple(origins or ())
+        if cd["origin"] not in allowed:
+            raise Refused(BAD_ORIGIN)
+        if cd.get("crossOrigin") is True:
+            raise Refused(CROSS_ORIGIN)
+        att = cbor_decode(attestation_object)
+        if not isinstance(att, dict) or set(att) != {"fmt", "attStmt", "authData"} \
+                or not isinstance(att["authData"], bytes):
+            raise Refused(NOT_ATTESTATION)
+        if att["fmt"] != "none":
+            raise Refused(WRONG_FMT)
+        if att["attStmt"] != {}:
+            raise Refused(ATTSTMT_NOT_EMPTY)
+        ad = parse_attested_auth_data(att["authData"])
+        if not hmac.compare_digest(ad["rpIdHash"], hashlib.sha256(rp_id.encode("utf-8")).digest()):
+            raise Refused(RPID_MISMATCH)
+        if not ad["up"]:
+            raise Refused(NO_UP)
+        if not ad["uv"]:
+            raise Refused(NO_UV)
+        spki = cose_to_spki(ad["cose"])
+        return True, "ok", {"id": b64url(ad["credentialId"]), "spki": spki,
+                            "signCount": ad["signCount"], "aaguid": ad["aaguid"].hex()}
+    except Refused as e:
+        return False, e.reason, None
