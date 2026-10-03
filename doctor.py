@@ -128,6 +128,7 @@ def worktree_lines(registry=None):
     if strays:
         out.append(f"  !   {len(strays)} orphan{'s' if len(strays) != 1 else ''} under the "
                    f"worktree root — `corral-light worktrees` lists them")
+    return out
 
 
 # Container section: reports only, never refuses to start.
