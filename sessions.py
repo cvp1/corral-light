@@ -800,14 +800,24 @@ class Pane(_core.PaneBase):
                                "parked": parked})
         return parked
 
-    def _park_held_queue(self):
-        """Drop what queued behind a failed review action, naming each message.
+    def _report_parked(self, parked, live):
+        """Name, in the ledger and a note, what a review action's hold parked.
 
-        Unlike _park_stale_queue, the agent is alive and idle: its attachment
-        (generation) and turn state are left exactly as they are, so its events
-        and permission cards keep arriving."""
-        with self._turn_lock:
-            parked, self._queue = list(self._queue), []
+        `live`: the agent is alive and idle, so its attachment was left as it
+        is (its events and permission cards keep arriving)."""
+        if not live:
+            for t in parked:
+                self._turns().mark(getattr(t, "turn", None), "interrupted",
+                                   why="the agent stopped before it was sent",
+                                   was="accepted")
+            names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
+                                   ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                              for t in parked)
+            self.emit("note", {"text": f"{len(parked)} queued message(s) were "
+                                       f"not sent when the agent stopped, and "
+                                       f"will not be sent now: {names}",
+                               "parked": parked})
+            return
         for t in parked:
             self._turns().mark(getattr(t, "turn", None), "interrupted",
                                why="a review action failed while it waited",
@@ -1202,10 +1212,10 @@ class Pane(_core.PaneBase):
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self):
-        spec = AGENTS[self.agent]
-        env = spawn_env(spec, self._config_dir(), self.posture)
         self._expect_exit = False        # a NEW process; its exit is real news
         try:
+            spec = AGENTS[self.agent]
+            env = spawn_env(spec, self._config_dir(), self.posture)
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         strip_env=strip_prefixes(),
                                         **self._bind(self._generation))
@@ -1238,6 +1248,12 @@ class Pane(_core.PaneBase):
             # rather than orphan it.
             self._reap_failed_client()
             self._dead(str(e))
+        except Exception as e:              # noqa: BLE001
+            # Anything else (an unreadable config dir, a failed save) must not
+            # leave the pane `starting` for good: that refuses resume, /clear
+            # and every review action. Dead is resumable and discardable.
+            self._reap_failed_client()
+            self._dead(f"could not start: {type(e).__name__}: {e}")
         return self
 
 
@@ -1477,6 +1493,8 @@ class Pane(_core.PaneBase):
                 self._in_flight = text
             lg = self._turns()
             tid = getattr(text, "turn", None)
+            if self.worktree_id and self._refuse_queued_into_blocked_branch(text, gen, lg):
+                return
             lg.mark(tid, "dispatched")
             try:
                 r = client.prompt(self.acp_session, text)
@@ -1543,6 +1561,35 @@ class Pane(_core.PaneBase):
                 self.mgr.worktree_turn_ended(self)
 
     # ── own-branch worktrees: the held queue (D11) ──────────────────────────
+
+    def _refuse_queued_into_blocked_branch(self, text, gen, lg):
+        """The gate again, just before a queued turn is sent: the turn before it
+        may have switched the branch, or an op may have become unknown since
+        it was queued. If blocked, this turn and the rest of the queue are not
+        sent, each named in a note. Returns True when it stopped the drain."""
+        why = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self))
+        if not why:
+            return False
+        with self._turn_lock:
+            if self._generation != gen:
+                return True                 # a newer attachment owns the pane
+            lost, self._queue = [text] + list(self._queue), []
+            self._turn_running = False
+            self._in_flight = None
+        self.worktree_blocked = why
+        for t in lost:
+            lg.mark(getattr(t, "turn", None), "interrupted", why=f"not sent: {why}",
+                    was="accepted")
+            if getattr(t, "peer", False):
+                self.emit("peer_result", {"turn": getattr(t, "turn", None),
+                                          "delivered": False, "reason": why}, activity=False)
+        names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
+                               ("…" if len(t) > PARKED_PREVIEW_CHARS else "")) for t in lost)
+        self.emit("note", {"text": f"{len(lost)} queued message(s) were not sent: {why}: "
+                                   f"{names}", "parked": lost})
+        if self.state not in ("dead", "detached"):
+            self.state = "ready"
+        return True
 
     def _refuse_blocked_worktree(self):
         """Raise ValueError if this pane's own branch must not get new work: an
@@ -1624,20 +1671,25 @@ class Pane(_core.PaneBase):
     def release_hold(self, drain):
         """End a review action's hold. `drain`: run what queued meanwhile (after
         Commit or Publish); otherwise keep it visible as not sent (Discard, failure)."""
+        parked, live = [], False
         with self._turn_lock:
+            if not drain and self._queue:
+                # Taken in the same critical section that ends the hold, so a
+                # send arriving now cannot dispatch what is about to be parked.
+                parked, self._queue = list(self._queue), []
+                live = self.client is not None and self.client.alive
+                if not live:                # a dead attachment: retire any stale drain
+                    self._turn_running = False
+                    self._generation += 1
             self.held = False
-            if not self._queue:
-                return
-            if drain and self.state not in ("dead", "detached") and not self._turn_running:
+            if drain and self._queue and self.state not in ("dead", "detached") \
+                    and not self._turn_running:
                 self.state = "busy"
                 self._turn_running = True
                 threading.Thread(target=self._drain, daemon=True).start()
                 return
-        if not drain:
-            if self.client is not None and self.client.alive:
-                self._park_held_queue()     # the agent stays: keep its attachment
-            else:
-                self._park_stale_queue()
+        if parked:
+            self._report_parked(parked, live)
 
     def _on_permission(self, req):
         """Worktree panes never offer "allow always": Phase 0 showed Claude saves
@@ -2414,6 +2466,9 @@ class Manager(_core.ManagerBase):
             return "this branch was discarded; restore it from `corral-light worktrees` to resume"
         if phase in ("missing", "tampered", "purged"):
             return f"this pane's worktree is {phase}: {entry.get('error') or ''}".strip()
+        if phase == "intent":
+            return ("this pane's worktree was never finished being created; restart the hub "
+                    "to check it, or see `corral-light worktrees`")
         if any(o.get("state") == "unknown" for o in entry.get("ops") or []):
             return "an action on this branch has an unknown outcome; resolve it with `corral-light worktrees`"
         if include_intent and any(o.get("state") == "intent" for o in entry.get("ops") or []):
@@ -2424,6 +2479,10 @@ class Manager(_core.ManagerBase):
                 _wt.verify(entry)            # still our branch, our admin dir, under the root
                 _wt.check_agent_cwd(entry)
             except _wt.Refused as e:
+                if e.reason == "identity" and entry.get("branch") and entry.get("path"):
+                    short = entry["branch"][len("refs/heads/"):]
+                    return (f"{e.detail}; switch it back with `git -C {entry['path']} "
+                            f"switch {short}`, then try again")
                 return e.detail
             except (OSError, _wt.GitError) as e:
                 return f"this pane's own branch could not be checked: {e}"

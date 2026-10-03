@@ -1291,10 +1291,12 @@ function reviewActions(snap, o) {
   const urls = remote ? remote.pushUrls || [] : [];
   // Left out for size, yet still untracked work: the hub refuses to push past it.
   const big = (snap.too_big || []).map(b => b.path);
-  const them = big.length === 1 ? 'it' : 'them';
+  const bigN = big.length + (snap.too_big_omitted || 0);   // the review may have trimmed the list
+  const them = bigN === 1 ? 'it' : 'them';
   const publish = uncommitted ? no('commit first: Push sends commits, not uncommitted files')
-                : big.length ? no(`${big.slice(0, 3).join(', ')}${big.length > 3 ? ' and more' : ''} ` +
-                                  `${big.length === 1 ? 'is' : 'are'} untracked and too large to ` +
+                : bigN ? no(`${big.length ? big.slice(0, 3).join(', ') : `${bigN} files`}` +
+                                  `${bigN > Math.min(big.length, 3) && big.length ? ' and more' : ''} ` +
+                                  `${bigN === 1 ? 'is' : 'are'} untracked and too large to ` +
                                   `commit; move ${them} out or add ${them} to .gitignore first`)
                 : !ahead ? no('nothing to push: this branch has no commits past its base')
                 : !remote ? no('this repo has no remote to push to')
@@ -1339,10 +1341,10 @@ function reviewBanners(snap) {
   if (n) out.push(`${n} ignored file${n === 1 ? ' is' : 's are'} not in this review; ` +
                   `Discard keeps ${n === 1 ? 'it' : 'them'} in trash.`);
   const big = snap.too_big || [];
-  if (big.length) out.push('Left out for size, untracked and over 512 KiB: ' +
-    big.slice(0, 5).map(b => b.path).join(', ') +
-    (big.length + (snap.too_big_omitted || 0) > 5
-      ? ` and ${big.length + (snap.too_big_omitted || 0) - 5} more` : '') +
+  const bigN = big.length + (snap.too_big_omitted || 0);
+  if (bigN) out.push('Left out for size, untracked and over 512 KiB: ' +
+    (big.length ? big.slice(0, 5).map(b => b.path).join(', ') : `${bigN} file${bigN === 1 ? '' : 's'}`) +
+    (big.length && bigN > 5 ? ` and ${bigN - Math.min(big.length, 5)} more` : '') +
     '. Commit leaves them out too.');
   const diff = snap.diff || {};
   const bin = (diff.files || []).filter(f => f.binary).length;
