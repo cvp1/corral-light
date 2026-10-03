@@ -1207,11 +1207,12 @@ class Pane(_core.PaneBase):
         cause = "auth" if claude_auth.is_auth_error(reason) else None
         self._flush_text()              # its last words land before `dead`
         self._flush_thought()
-        self.state = "dead"
+        # Reason first, then state: anyone who sees `dead` also sees why.
         self.error = claude_auth.explain(reason)
         self.dead_cause = cause
         self.dead_login = (claude_auth.status().get("refreshExpiresAt")
                            if cause else None)
+        self.state = "dead"
         self.emit("dead", {"reason": self.error, "cause": cause})
 
 
@@ -2592,6 +2593,15 @@ class Manager(_core.ManagerBase):
             raise _wt.Refused("busy", "another action is already running on this pane")
         ok = held = False
         try:
+            # Again under the lock: another action may have settled an op as
+            # unknown, or the worktree changed, between the checks above and now.
+            e = self.worktree_entry(p)
+            if e is None:
+                raise _wt.Refused("missing", "this pane's own-branch record is missing")
+            _wt.refuse_open_ops(e, self.worktree_registry())
+            why = self._worktree_blocked_reason(e)
+            if why:
+                raise _wt.Refused("blocked", why)
             with p._turn_lock:
                 if (p._turn_running or p.pending or
                         p.state in ("busy", "needs-you", "uncertain", "starting")):
