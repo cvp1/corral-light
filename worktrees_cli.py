@@ -181,7 +181,10 @@ def commit_still_unsettled(e, op):
         return None
     idx = wt._index_path(e["path"])
     want = wt.git(["rev-parse", op["new"] + "^{tree}"], cwd=e["path"]).text.strip()
-    have = wt._tree_of_index(e["path"], Path(idx).read_bytes(), wt.registry_dir() / "tmp")
+    try:
+        have = wt._tree_of_index(e["path"], wt._read_index(idx), wt.registry_dir() / "tmp")
+    except (OSError, wt.Refused) as x:
+        return f"the index in {e['path']} cannot be read ({x}); fix it, then resolve again"
     if have != want:
         return (f"the branch has commit {op['new'][:12]}, but the index in {e['path']} does "
                 f"not match it, so a plain `git commit` there would undo it. Make them agree "
