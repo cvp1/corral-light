@@ -198,7 +198,10 @@ AGENTS = {
         "label": "Antigravity (Gemini)",
         "argv": [sys.executable, str(NATIVE_ANTIGRAVITY_LAUNCHER)],
         # The lane's own approval mode, applied at session/new; the vendor enforces it.
-        "default_config": {"mode": "yolo"},
+        # Model: Gemini 3.1 Pro (High), not the vendor's Flash default — Craig
+        # 2026-10-03, for panels. If the id stops being offered, the lane notes
+        # it and stays on the vendor default rather than failing.
+        "default_config": {"mode": "yolo", "model": "gemini-pro-agent"},
         "requires": (str(NATIVE_ANTIGRAVITY_LAUNCHER),
                      str(NATIVE_ANTIGRAVITY_BIN),
                      str(NATIVE_ANTIGRAVITY_HELPER)),
