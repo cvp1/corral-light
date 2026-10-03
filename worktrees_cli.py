@@ -185,8 +185,9 @@ def commit_still_unsettled(e, op):
     if have != want:
         return (f"the branch has commit {op['new'][:12]}, but the index in {e['path']} does "
                 f"not match it, so a plain `git commit` there would undo it. Make them agree "
-                f"(for example `git -C {e['path']} reset -q`, which keeps your files), "
-                f"then resolve again")
+                f"(for example `git -C {e['path']} reset -q`, which keeps your files but "
+                f"drops anything staged only in the index; check `git -C {e['path']} diff "
+                f"--cached` first), then resolve again")
     return None
 
 

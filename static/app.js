@@ -1341,7 +1341,9 @@ function reviewBanners(snap) {
   const big = snap.too_big || [];
   if (big.length) out.push('Left out for size, untracked and over 512 KiB: ' +
     big.slice(0, 5).map(b => b.path).join(', ') +
-    (big.length > 5 ? ` and ${big.length - 5} more` : '') + '. Commit leaves them out too.');
+    (big.length + (snap.too_big_omitted || 0) > 5
+      ? ` and ${big.length + (snap.too_big_omitted || 0) - 5} more` : '') +
+    '. Commit leaves them out too.');
   const diff = snap.diff || {};
   const bin = (diff.files || []).filter(f => f.binary).length;
   if (bin) out.push(`${bin} binary file${bin === 1 ? '' : 's'}, often build output such as ` +

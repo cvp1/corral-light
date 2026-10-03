@@ -1199,13 +1199,19 @@ def fit_review(obj, limit=REVIEW_JSON_MAX, at="diff"):
         d["truncated"] = True
         if over <= 0:
             return obj
-    omitted = 0
     while files and len(json.dumps(obj)) > limit:
         cut = max(1, len(files) // 8)
         del files[-cut:]
-        omitted += cut
         d["files_omitted"] = (d.get("files_omitted") or 0) + cut
         d["truncated"] = True
+    big = obj.get("too_big") if at is not None else None
+    while big and len(json.dumps(obj)) > limit:
+        cut = max(1, len(big) // 8)
+        del big[-cut:]
+        obj["too_big_omitted"] = (obj.get("too_big_omitted") or 0) + cut
+    ign = (obj.get("ignored") or {}).get("sample") if at is not None else None
+    while ign and len(json.dumps(obj)) > limit:
+        del ign[-max(1, len(ign) // 8):]
     return obj
 
 
@@ -1392,10 +1398,17 @@ def rewrite_rule(entry, url):
     too, so a chained rule would send the push (and its check) elsewhere."""
     r = git(["config", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"],
             cwd=entry["path"], check=False)
+    if r.rc not in (0, 1):                  # 1 is "no such keys"; anything else is unknown
+        return f"git config could not be read ({r.err_text.strip()[:120]})"
     for line in r.text.splitlines():
         key, _, prefix = line.partition(" ")
-        if prefix and url.startswith(prefix):
-            return f"{key} {prefix}"
+        if url.startswith(prefix):          # an empty prefix matches every URL
+            return f"{key} {prefix!r}"
+    # What git itself makes of the argument: insteadOf applied, and a word that
+    # names a configured remote becomes that remote's URL.
+    got = git(["ls-remote", "--get-url", "--", url], cwd=entry["path"], check=False)
+    if got.rc != 0 or got.text.strip() != url:
+        return f"git reads it as {got.text.strip() or 'something else'}"
     return None
 
 
@@ -1468,6 +1481,12 @@ def _gh(args, cwd, input=None):
         return None
 
 
+def _pr_head_owner(head, repo):
+    """The GitHub owner a PR's head lives under: the fork's for `owner:branch`,
+    else the base repo's. Lower case; "" when unknown."""
+    return (head.split(":", 1)[0] if ":" in head else (repo or "").split("/")[0]).lower()
+
+
 def open_pr(entry, title, body, repo, registry=None, remote="origin"):
     """Open (or find) the pull request for this branch on the confirmed `repo`.
 
@@ -1497,14 +1516,14 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
                                        "then publish again")
     found = _gh(["pr", "list", "--repo", repo, "--head", branch, "--state", "open",
                  "--json", "url,headRepositoryOwner"], p)
-    owner = (head.split(":", 1)[0] if ":" in head else repo.split("/")[0]).lower()
+    owner = _pr_head_owner(head, repo)
     url = None
     if found is not None and found.rc == 0:
         try:
             # --head matches the branch name in any fork: keep the one from our head.
             for pr in json.loads(found.text or "[]"):
                 login = ((pr.get("headRepositoryOwner") or {}).get("login") or "").lower()
-                if not login or login == owner:
+                if login and login == owner:    # no owner (a deleted fork) is not ours
                     url = pr["url"]
                     break
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -1952,12 +1971,18 @@ def resolve_op(entry, op, registry):
         return "push interrupted by a restart; the remote does not have it, so it did not happen"
     if kind == "pr":
         found = _gh(["pr", "list", "--repo", op.get("repo", ""), "--head",
-                     entry["branch"][len("refs/heads/"):], "--state", "open", "--json", "url"],
-                    entry["common_dir"])
+                     entry["branch"][len("refs/heads/"):], "--state", "open",
+                     "--json", "url,headRepositoryOwner"], entry["common_dir"])
         try:
             listed = json.loads(found.text) if found and found.rc == 0 else None
         except ValueError:
             listed = None
+        if listed is not None:
+            # --head matches the branch name in any fork: only the PR from the
+            # head this op journalled is ours (the same rule as open_pr).
+            owner = _pr_head_owner(op.get("head") or "", op.get("repo") or "")
+            listed = [x for x in listed if isinstance(x, dict) and owner and
+                      ((x.get("headRepositoryOwner") or {}).get("login") or "").lower() == owner]
         if listed:
             done(stage="done", url=listed[0].get("url"))
             prev = registry.read(wid).get("published") or {}
