@@ -3178,7 +3178,7 @@ class BugBash4Restart(PubCase):
         real = wt.git
 
         def git(args, *a, **k):
-            if args[:2] == ["config", "--get-regexp"]:
+            if args[:1] == ["config"] and "--get-regexp" in args:
                 return wt.GitResult(128, b"", b"fatal: bad config line 3", False)
             return real(args, *a, **k)
         with mock.patch.object(wt, "git", git):
@@ -3389,6 +3389,22 @@ class BugBash6Publish(PubCase):
                 finally:
                     wt.git(["config", "--unset", key], cwd=self.repo)
         self.assertEqual(self.push()["pushed"], self.oid)     # nothing set: it pushes
+
+    # Gemini r7: a rewrite rule whose base holds a space was misparsed and missed.
+    def test_BB6_13_a_rewrite_rule_with_a_space_in_its_base_is_refused(self):
+        other = self.tmp / "repo path.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "--push", "origin", self.url], cwd=self.repo)
+        wt.git(["config", f"url.{other}.pushInsteadOf", self.url], cwd=self.repo)
+        self.assertEqual(wt.push_urls(self.e, "origin"), [self.url])
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertIn(cm.exception.reason, ("rewrite", "transport"))
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    def test_BB6_14_rewrite_rule_parses_keys_with_spaces(self):
+        wt.git(["config", "url.https://x.invalid/a b/.insteadOf", self.url], cwd=self.repo)
+        self.assertTrue(wt.rewrite_rule(self.e, self.url))
 
     def test_BB6_12_a_worktree_scoped_override_counts_too(self):
         wt.git(["config", "extensions.worktreeConfig", "true"], cwd=self.repo)
