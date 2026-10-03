@@ -47,7 +47,10 @@ def _safe_static_path(rel):
 
 
 # Loopback by default; set CORRAL_LIGHT_BIND=0.0.0.0 to expose on the network.
-BIND = os.environ.get("CORRAL_LIGHT_BIND", "127.0.0.1")
+# In the container the default is 0.0.0.0 (the published port arrives on the
+# bridge, not loopback); the compose file publishes on host loopback only.
+CONTAINER = os.environ.get("CORRAL_CONTAINER") == "1"
+BIND = os.environ.get("CORRAL_LIGHT_BIND", "0.0.0.0" if CONTAINER else "127.0.0.1")
 PORT = int(os.environ.get("CORRAL_LIGHT_PORT", "8098"))
 COOKIE = "corral_light"          # distinct from full Corral's cookie on the same host
 SSE_PING = 20                    # keepalive for proxies and sleeping clients

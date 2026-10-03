@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "platform": "linux/amd64",
+  "base": {
+    "ref": "docker.io/library/python:3.12-slim-bookworm",
+    "digest": "sha256:1aaa65a85fda306ffb8b910824d4e93bdce61e212c7e87168123ea3073b41a1a"
+  },
+  "apt_snapshot": "20260930T000000Z",
+  "node": {
+    "version": "22.23.3",
+    "url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.xz",
+    "sha256": "df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de",
+    "major": 22
+  },
+  "npm_lock": "spike/package-lock.json",
+  "lanes": {
+    "claude": {
+      "via": "npm ci: @anthropic-ai/claude-agent-sdk-linux-x64 (lockfile sha512)",
+      "default_model": null,
+      "default_effort": null
+    },
+    "codex": {
+      "via": "npm ci: @openai/codex-linux-x64 (lockfile sha512)",
+      "default_model": null,
+      "default_effort": null
+    },
+    "grok": {
+      "artifact": {
+        "version": "1.0.46",
+        "url": "https://x.ai/cli/grok-1.0.46-linux-x86_64",
+        "sha256": "41626a53292324140b92556b9d42ff5542e3dcd04aff85eafb8689dd4adb44fc",
+        "bytes": 171207616
+      },
+      "default_model": null,
+      "default_effort": null
+    },
+    "antigravity": {
+      "artifact": {
+        "release": "agy_acp_server_20260818_01_RC01-linux-x86_64",
+        "url": "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_20260818_01_RC01-linux-x86_64.zip",
+        "sha256": "ce3f09628575b25497cf5a3c19d073b49acb80f1dab1ff8592919e9c9b8799e1"
+      },
+      "default_model": null,
+      "default_effort": null
+    }
+  },
+  "seed": {
+    "tag": "v0.4.9-alpha",
+    "repo": "https://github.com/cvp1/ai-os-seed",
+    "commit": "c006e90df7a05e53c08f4fbf6ab775a8feb3412a"
+  },
+  "notes": "null default_model/default_effort = the vendor's own default, which is what the native hub uses today (parity, C4). Fill pins with: python3 container/pin.py --write"
+}
