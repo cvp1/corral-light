@@ -1214,7 +1214,10 @@ env | grep -q '^GH_PROMPT_DISABLED=1$' || {{ echo noenv >> {state}/argv; }}
 case "$1 $2" in
   "auth status") {'exit 0' if signed_in else 'echo "not logged in" >&2; exit 1'} ;;
   "pr list") cat {state}/pr 2>/dev/null || echo "[]" ;;
-  "pr create") cat > {state}/body; echo '[{{"url":"https://github.com/o/r/pull/7"}}]' > {state}/pr;
+  "pr create") cat > {state}/body; h=""; r=""; prev="";
+               for a in "$@"; do [ "$prev" = "--head" ] && h="$a"; [ "$prev" = "--repo" ] && r="$a"; prev="$a"; done;
+               case "$h" in *:*) o="${{h%%:*}}";; *) o="${{r%%/*}}";; esac;
+               echo '[{{"url":"https://github.com/o/r/pull/7","headRepositoryOwner":{{"login":"'"$o"'"}}}}]' > {state}/pr;
                echo https://github.com/o/r/pull/7 ;;
 esac
 """
@@ -2995,6 +2998,192 @@ class BugBash3Hub(LifecycleCase):
         self.assertTrue(pops)
         for i in pops:
             self.assertTrue(lines[i - 1].strip().startswith("with self._lock:"), lines[i])
+
+
+# ── round 3 panel (reviews/2026-10-02-own-branch-bugbash/r3-*.md) ─────────────
+
+class BugBash4Hub(LifecycleCase):
+
+    # Astra r3-1: the first agent start did not hold the action lock.
+    def test_BB4_1_review_refuses_while_the_first_agent_starts(self):
+        import sessions
+        entered, release, done, errs = (threading.Event(), threading.Event(),
+                                         threading.Event(), [])
+        start = sessions.Pane.start
+
+        def slow(pane):
+            entered.set()
+            release.wait(10)
+            return start(pane)
+
+        def create():
+            try:
+                self.pane()
+            except Exception as err:                 # noqa: BLE001
+                errs.append(repr(err))
+            finally:
+                done.set()
+        with mock.patch.object(sessions.Pane, "start", slow):
+            t = threading.Thread(target=create)
+            t.start()
+            self.assertTrue(entered.wait(5))
+            p = next(iter(self.mgr.panes.values()))
+            try:
+                with self.assertRaises(wt.Refused) as cm:
+                    self.mgr.worktree_snapshot(p.id)
+                self.assertEqual(cm.exception.reason, "busy")
+            finally:
+                release.set()
+                t.join(15)
+        self.assertEqual(errs, [])
+        self.assertEqual(self.entry(p)["phase"], "active")
+        self.assertTrue(p.client and p.client.alive)
+
+    # Astra r3-2: a busy refusal released a hold it never took and retired the agent.
+    def test_BB4_2_a_busy_refusal_leaves_the_running_turn_alone(self):
+        p = self.pane()
+        p.send("sleep 0.7")
+        self.assertTrue(wait_for(lambda: p._turn_running))
+        p.send("write queued.txt q")
+        gen = p._generation
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_snapshot(p.id)
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertEqual(p._generation, gen, "the refusal retired the live attachment")
+        self.assertTrue(wait_for(lambda: (Path(self.entry(p)["path"]) / "queued.txt").exists(),
+                                 timeout=15), "the queued message was dropped")
+        self.assertTrue(wait_for(lambda: p.state == "ready", timeout=15), p.state)
+        p.send("perm")
+        self.assertTrue(wait_for(lambda: bool(p.pending), timeout=10),
+                        "a permission card never reached the pane")
+
+    # The same for an action that held the pane and then failed: the type-ahead
+    # is parked, but the live agent keeps its attachment.
+    def test_BB4_3_a_failed_action_parks_type_ahead_but_keeps_the_agent(self):
+        p = self.pane()
+        gen = p._generation
+
+        def boom(e, tmp_dir=None):
+            p.send("write never.txt n")                # queued behind the hold
+            raise wt.Refused("busy", "simulated failure")
+        with mock.patch.object(wt, "snapshot", boom):
+            with self.assertRaises(wt.Refused):
+                self.mgr.worktree_snapshot(p.id)
+        self.assertEqual(p._generation, gen)
+        self.assertEqual(p._queue, [])
+        self.assertFalse((Path(self.entry(p)["path"]) / "never.txt").exists())
+        self.say(p, "write after.txt a")
+        self.assertTrue((Path(self.entry(p)["path"]) / "after.txt").exists())
+
+    # Astra r3-4: resume and send after the worktree was switched to another branch.
+    def test_BB4_4_a_worktree_on_another_branch_blocks_resume_and_send(self):
+        p = self.pane()
+        p.pause()
+        wt.git(["switch", "-qc", "foreign-branch"], cwd=self.entry(p)["path"])
+        wt.reconcile(self.reg)
+        with self.assertRaises(ValueError) as cm:
+            p.resume()
+        self.assertIn("foreign-branch", str(cm.exception))
+        with self.assertRaises(ValueError):
+            p.send("write branch-bypass.txt x")
+        self.assertFalse((Path(self.entry(p)["path"]) / "branch-bypass.txt").exists())
+
+
+class BugBash4Publish(PubCase):
+    stub_gh = ThePullRequest.stub_gh
+    pr = ThePullRequest.pr
+
+    # Astra r3-3a: git accepts an empty insteadOf prefix; it matches every URL.
+    def test_BB4_10_an_empty_rewrite_prefix_is_refused(self):
+        wt.git(["config", "url.dst/.insteadOf", ""], cwd=self.repo)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=wt.push_urls(self.e, "origin")[0])
+        self.assertIn(cm.exception.reason, ("rewrite", "remote_changed"))
+
+    # Astra r3-3b: a URL that git reads as another remote's name.
+    def test_BB4_11_a_url_that_names_another_remote_is_refused(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "destination"], cwd=self.repo)
+        wt.git(["remote", "add", "destination", str(other)], cwd=self.repo)
+        url = wt.push_urls(self.e, "origin")[0]
+        self.assertEqual(url, "destination")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=url)
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    # Gemini r3-1: a listed PR with no head owner (a deleted fork) is not ours.
+    def test_BB4_12_a_pr_with_no_head_owner_is_not_reused(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/o/r.git"], cwd=self.repo)
+        gh, state = self.stub_gh()
+        (state / "pr").write_text('[{"url":"https://github.com/o/r/pull/3",'
+                                  '"headRepositoryOwner":null}]')
+        r = self.pr(gh)
+        self.assertEqual(r["pr_url"], "https://github.com/o/r/pull/7")
+
+
+class BugBash4Library(CreateCase):
+
+    # Astra r3 non-blocking: a huge too_big inventory overflowed the cap.
+    def test_BB4_20_fit_review_trims_inventories_too(self):
+        import json
+        obj = {"tree": "a" * 40,
+               "too_big": [{"path": "一" * 60 + str(i), "size": 600000} for i in range(6000)],
+               "diff": {"files": [], "truncated": False}}
+        out = wt.fit_review(obj)
+        self.assertLessEqual(len(json.dumps(out)), wt.REVIEW_JSON_MAX)
+        self.assertTrue(out.get("too_big_omitted"))
+
+
+
+class BugBash4Restart(PubCase):
+    stub_gh = ThePullRequest.stub_gh
+
+    # Grok r3-1: restart settled an interrupted PR op on any open PR with that branch name.
+    def _interrupted_pr(self, listed, head="me:corral/fix-login", repo="o/r"):
+        gh, state = self.stub_gh()
+        (state / "pr").write_text(listed)
+        op = self.reg.begin_op(self.e["id"], "pr", repo=repo, head=head)
+        with mock.patch.object(wt, "GH_BIN", gh):
+            note = wt.resolve_op(self.reg.read(self.e["id"]),
+                                 [o for o in self.reg.read(self.e["id"])["ops"]
+                                  if o["op_id"] == op][0], self.reg)
+        got = [o for o in self.reg.read(self.e["id"])["ops"] if o["op_id"] == op][0]
+        return note, got, (state / "argv").read_text()
+
+    def test_BB4_30_a_strangers_pr_does_not_settle_ours(self):
+        note, got, argv = self._interrupted_pr(
+            '[{"url":"https://github.com/o/r/pull/1","headRepositoryOwner":{"login":"stranger"}}]')
+        self.assertEqual((got["state"], got.get("stage")), ("done", "not_done"), note)
+        self.assertIsNone((self.reg.read(self.e["id"]).get("published") or {}).get("pr_url"))
+        self.assertIn("headRepositoryOwner", argv)
+
+    def test_BB4_31_our_pr_settles_it(self):
+        note, got, _ = self._interrupted_pr(
+            '[{"url":"https://github.com/o/r/pull/1","headRepositoryOwner":{"login":"stranger"}},'
+            '{"url":"https://github.com/o/r/pull/9","headRepositoryOwner":{"login":"me"}}]')
+        self.assertEqual((got["state"], got.get("url")), ("done", "https://github.com/o/r/pull/9"))
+        self.assertEqual(self.reg.read(self.e["id"])["published"]["pr_url"],
+                         "https://github.com/o/r/pull/9")
+
+    def test_BB4_32_a_same_repo_head_uses_the_repo_owner(self):
+        note, got, _ = self._interrupted_pr(
+            '[{"url":"https://github.com/o/r/pull/4","headRepositoryOwner":{"login":"o"}}]',
+            head="corral/fix-login")
+        self.assertEqual(got.get("url"), "https://github.com/o/r/pull/4")
+
+    # Grok r3 non-blocking: an unreadable git config must not skip the rewrite check.
+    def test_BB4_33_an_unreadable_config_refuses_the_push(self):
+        real = wt.git
+
+        def git(args, *a, **k):
+            if args[:2] == ["config", "--get-regexp"]:
+                return wt.GitResult(128, b"", b"fatal: bad config line 3", False)
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", git):
+            self.assertTrue(wt.rewrite_rule(self.e, self.url))
+
 
 if __name__ == "__main__":
     unittest.main()

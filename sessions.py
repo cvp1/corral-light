@@ -800,6 +800,27 @@ class Pane(_core.PaneBase):
                                "parked": parked})
         return parked
 
+    def _park_held_queue(self):
+        """Drop what queued behind a failed review action, naming each message.
+
+        Unlike _park_stale_queue, the agent is alive and idle: its attachment
+        (generation) and turn state are left exactly as they are, so its events
+        and permission cards keep arriving."""
+        with self._turn_lock:
+            parked, self._queue = list(self._queue), []
+        for t in parked:
+            self._turns().mark(getattr(t, "turn", None), "interrupted",
+                               why="a review action failed while it waited",
+                               was="accepted")
+        if parked:
+            names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
+                                   ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                              for t in parked)
+            self.emit("note", {"text": f"{len(parked)} message(s) typed during the review "
+                                       f"action were not sent because it failed: {names}",
+                               "parked": parked})
+        return parked
+
     def _no_review_action(self):
         """Hold this pane's action lock while an agent is attached (resume, /clear),
         so a review action and a new agent never interleave: Discard cannot
@@ -1613,7 +1634,10 @@ class Pane(_core.PaneBase):
                 threading.Thread(target=self._drain, daemon=True).start()
                 return
         if not drain:
-            self._park_stale_queue()
+            if self.client is not None and self.client.alive:
+                self._park_held_queue()     # the agent stays: keep its attachment
+            else:
+                self._park_stale_queue()
 
     def _on_permission(self, req):
         """Worktree panes never offer "allow always": Phase 0 showed Claude saves
@@ -2142,8 +2166,13 @@ class Manager(_core.ManagerBase):
                 pane.emit("note", {"text": f"own branch: {e['warning']}"}, activity=False)
         try:
             if pane.worktree_id:
-                _wt.check_agent_cwd(e)       # never start an agent outside its branch
-            pane.start()
+                # The first attachment holds the action lock like resume and
+                # /clear do, so no review action runs while the agent starts.
+                with pane._action_lock:
+                    _wt.check_agent_cwd(e)   # never start an agent outside its branch
+                    pane.start()
+            else:
+                pane.start()
         except Exception as e:
             if pane.worktree_id:
                 # D14: the pane stays, dead, owning its worktree; Resume retries
@@ -2392,9 +2421,12 @@ class Manager(_core.ManagerBase):
                     "or resolve it with `corral-light worktrees`")
         if phase == "active":
             try:
+                _wt.verify(entry)            # still our branch, our admin dir, under the root
                 _wt.check_agent_cwd(entry)
             except _wt.Refused as e:
                 return e.detail
+            except (OSError, _wt.GitError) as e:
+                return f"this pane's own branch could not be checked: {e}"
         return None
 
     def _worktree_restore(self):
@@ -2476,18 +2508,20 @@ class Manager(_core.ManagerBase):
             raise _wt.Refused("blocked", why)
         if not p._action_lock.acquire(blocking=False):
             raise _wt.Refused("busy", "another action is already running on this pane")
-        ok = False
+        ok = held = False
         try:
             with p._turn_lock:
-                if p._turn_running or p.state in ("busy", "needs-you", "uncertain") or p.pending:
+                if (p._turn_running or p.pending or
+                        p.state in ("busy", "needs-you", "uncertain", "starting")):
                     raise _wt.Refused("busy", "the agent is still working; wait for its turn to end")
-                p.held = True
+                p.held = held = True
             result = fn(p, e)
             ok = True
             return result
         finally:
             try:
-                p.release_hold(drain=ok and drain_after)
+                if held:                    # never release a hold this call did not take
+                    p.release_hold(drain=ok and drain_after)
             finally:
                 p._action_lock.release()
 
