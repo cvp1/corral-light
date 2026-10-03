@@ -13,9 +13,10 @@ Collected by test_corral_light.py. Run alone: python3 -m unittest test_worktrees
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
+
+from testkit.scratch import tmpdir
 
 ROOT = Path(__file__).resolve().parent
 SUITES = ("test_worktrees", "test_worktree_routes", "test_worktrees_cli")
@@ -45,7 +46,7 @@ class Isolation(unittest.TestCase):
             / "corral-light"
         watched = (real_state / "worktrees", real_state / "worktree-registry")
         before = {str(d): listing(d) for d in watched}
-        box = Path(tempfile.mkdtemp(prefix="corral-iso-"))
+        box = Path(tmpdir(self, "corral-iso-"))
         (box / "home").mkdir()
         (box / "tmp").mkdir()
         log = box / "git-cwds.log"

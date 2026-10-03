@@ -12,12 +12,12 @@
 import json
 import os
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="peer-consumers-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("peer-consumers-")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import port                                                       # noqa: E402
@@ -63,7 +63,7 @@ class ThePortPack(unittest.TestCase):
 
 class TheIndex(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix="peer-index-"))
+        self.root = Path(tmpdir(self, "peer-index-"))
         d = self.root / "panes" / "p1"
         d.mkdir(parents=True)
         (d / "meta.json").write_text(json.dumps({
