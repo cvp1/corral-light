@@ -1403,6 +1403,21 @@ function diffNodes(f) {
 const R = { pane: null, snap: null, busy: false, loading: false, reason: '', done: null,
             painted: null };
 
+// Dismiss a dead pane. An own-branch pane asks first (F7): the hub answers
+// 409 own_branch, and the user picks review (to Discard) or keep-and-dismiss.
+async function forgetPane(p) {
+  try { await api('/api/session/forget', { pane: p.id }); await refresh(); return; }
+  catch (err) {
+    if (!(err.status === 409 && err.body && err.body.reason === 'own_branch')) {
+      toast(err.message, true); return;
+    }
+    if (confirm(err.message + '\n\nOpen review to discard the branch?')) { openReview(p); return; }
+    if (!confirm('Dismiss the pane and keep the branch? Reopen it from the archive to get back to it.')) return;
+    try { await api('/api/session/forget', { pane: p.id, keep_branch: true }); await refresh(); }
+    catch (e2) { toast(e2.message, true); }
+  }
+}
+
 async function openReview(p) {
   const dlg = $('#revdlg');
   if (!dlg || !p || !p.worktree) return;
@@ -2206,8 +2221,7 @@ function render() {
       const f = el('button', 'a', '✕'); f.title = 'dismiss — remove from the list';
       f.onclick = async e => {
         e.stopPropagation();
-        try { await api('/api/session/forget', { pane: p.id }); await refresh(); }
-        catch (err) { toast(err.message, true); }
+        await forgetPane(p);
       };
       acts.appendChild(f);
     }
@@ -2481,8 +2495,7 @@ function render() {
     c.appendChild(el('div', 't', `${p.title || p.label} — agent stopped`));
     c.appendChild(el('div', 'm', p.error || 'click to dismiss'));
     c.onclick = async () => {
-      try { await api('/api/session/forget', { pane: p.id }); await refresh(); }
-      catch (e) { toast(e.message, true); }
+      await forgetPane(p);
     };
     if (p.resumable || p.deadCause === 'auth') {
       const acts = el('div', 'facts');

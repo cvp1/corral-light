@@ -456,6 +456,27 @@ class Registry:
             raise KeyError(f"{wt_id} has no op {op_id}")
         return self._mutate(wt_id, fn)
 
+    def finish_op(self, wt_id, op_id, op_fields, **fields):
+        """Close op `op_id` with `op_fields` AND update the entry in one write.
+
+        A crash between two writes could leave an op `done` while the entry
+        still described the old state (a discarded worktree still `active`,
+        so nothing could restore it). One mutation, one rename: both or neither.
+        """
+        def fn(e):
+            for k in ("id", "v", "ops"):
+                if k in fields:
+                    raise ValueError(f"{k} cannot be set through finish_op()")
+            for rec in e.get("ops") or []:
+                if rec.get("op_id") == op_id:
+                    rec.update(op_fields)
+                    rec["at"] = _now()
+                    break
+            else:
+                raise KeyError(f"{wt_id} has no op {op_id}")
+            e.update(fields)
+        return self._mutate(wt_id, fn)
+
     def all(self, include_unreadable=False):
         """Every entry, oldest first. Unreadable ones only with include_unreadable."""
         if not self.dir.is_dir():
@@ -754,6 +775,29 @@ def _refuse_symlink(p, what):
                          "CORRAL_LIGHT_WORKTREES at a real folder)")
 
 
+def refuse_open_ops(entry, registry):
+    """Refuse a mutating action while any op on this worktree is not settled.
+
+    `unknown`: a past action's outcome could not be checked; only the CLI
+    resolves it. `intent`: an action is running in another process, or one
+    was cut short and the restart has not checked it yet. Reads the entry
+    as it is now, not the caller's copy.
+    """
+    try:
+        cur = registry.read(entry["id"])
+    except (OSError, ValueError, RegistryVersionError) as e:
+        raise Refused("missing", f"this branch's record cannot be read: {e}") from None
+    for o in cur.get("ops") or []:
+        if o.get("state") == "unknown":
+            raise Refused("unknown", "an action on this branch has an unknown outcome; "
+                                     "resolve it with `corral-light worktrees`")
+        if o.get("state") == "intent":
+            raise Refused("unknown", f"an earlier {o.get('op') or 'action'} on this branch has "
+                                     "not finished; restart the hub to check it, or resolve "
+                                     "it with `corral-light worktrees`")
+    return cur
+
+
 def agent_cwd(entry):
     """The folder the agent starts in: the worktree plus the subdir the user chose."""
     return Path(entry["path"]) / (entry.get("subdir") or "")
@@ -796,9 +840,27 @@ def create(pr, title, owner_pane, registry=None):
             _crash_point("create:added")
             verify(entry)
         except BaseException as e:
+            if isinstance(e, GitError) and not isinstance(e, GitTimeout) and _added_anyway(entry):
+                # git exits non-zero when a post-checkout hook fails, AFTER the
+                # worktree and branch exist. Marking that `missing` orphaned a
+                # live worktree nothing could list or discard.
+                return registry.update(entry["id"], phase="active", warning=(
+                    "git reported an error after creating the worktree (a failing "
+                    f"post-checkout hook?): {str(e)[:ERR_SNIPPET]}"))
             registry.update(entry["id"], phase="missing", error=str(e)[:ERR_SNIPPET])
             raise
         return registry.update(entry["id"], phase="active")
+
+
+def _added_anyway(entry):
+    """Did `git worktree add` register the path and check out our branch despite failing?"""
+    try:
+        if os.path.realpath(entry["path"]) not in _registered_paths(entry):
+            return False
+        verify(entry)
+        return True
+    except Exception:                               # noqa: BLE001 — doubt means no
+        return False
 
 
 def _registered_paths(entry):
@@ -1113,31 +1175,58 @@ def _tree_of_index(p, content, tmp_dir):
         return git(["write-tree"], cwd=p, env_extra={"GIT_INDEX_FILE": tmp}).text.strip()
 
 
-def _replace_index(idx, content):
-    """Swap `content` in as the real index the way git does: O_EXCL index.lock, then rename."""
+def _index_id(idx):
+    """The identity snapshot() records: sha256 of the index bytes (none: of b"")."""
+    try:
+        return hashlib.sha256(Path(idx).read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return hashlib.sha256(b"").hexdigest()
+
+
+def _replace_index(idx, content, expect_id=None):
+    """Swap `content` in as the real index the way git does: O_EXCL index.lock, then rename.
+
+    With `expect_id`, the index must still be that one once the lock is held
+    (git writes the index only under index.lock, so it cannot change after):
+    otherwise someone staged work, and it is left exactly as it is.
+    """
     lock = idx + ".lock"
     try:
         fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError:
         raise Refused("busy", "another git process holds the worktree's index.lock") from None
     try:
-        os.write(fd, content)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(lock, idx)
+        try:
+            if expect_id is not None and _index_id(idx) != expect_id:
+                raise Refused("changed", "something was staged in the worktree since review; "
+                                         "the index was left as it is")
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(lock, idx)
+    except BaseException:
+        _unlink_own_temp(lock)          # our own lock, never another process's
+        raise
 
 
-def _reconcile_index(p, new, tmp_dir):
-    """Point the real index at commit `new` without touching the work tree (step 6)."""
+def _reconcile_index(p, new, tmp_dir, expect_id=None):
+    """Point the real index at commit `new` without touching the work tree (step 6).
+
+    `expect_id` (the identity journalled with the commit) must match both
+    before the rebuild and under index.lock; otherwise Refused("changed").
+    """
     idx = _index_path(p)
+    if expect_id is not None and _index_id(idx) != expect_id:
+        raise Refused("changed", "something was staged in the worktree since review; "
+                                 "the index was left as it is")
     with _temp_index(tmp_dir, Path(idx).read_bytes(), os.stat(idx).st_mtime_ns) as tmp:
         env = {"GIT_INDEX_FILE": tmp}
         git(["read-tree", new], cwd=p, env_extra=env, timeout=COMMIT_TIMEOUT_S)
         git(["update-index", "-q", "--refresh"], cwd=p, env_extra=env, check=False,
             timeout=COMMIT_TIMEOUT_S)
         content = Path(tmp).read_bytes()
-    _replace_index(idx, content)
+    _replace_index(idx, content, expect_id)
 
 
 def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_dir=None):
@@ -1166,6 +1255,7 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
                                  "cannot be signed, so commit in the worktree by hand")
     v = verify(entry)
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         idx = _index_path(p)
         if os.path.exists(idx + ".lock"):
             raise Refused("busy", "another git process holds the worktree's index.lock")
@@ -1192,7 +1282,7 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
         new = git(["commit-tree", tree, "-p", expect_head], cwd=p, input=msg.encode(),
                   timeout=COMMIT_TIMEOUT_S).text.strip()
         op = registry.begin_op(entry["id"], "commit", stage="prepared", new=new,
-                               expect_old=expect_head, tree=tree)
+                               expect_old=expect_head, tree=tree, index_id=index_id)
         _crash_point("commit:prepared")
         r = git(["update-ref", entry["branch"], new, expect_head], cwd=p, check=False)
         if r.rc != 0:
@@ -1200,15 +1290,21 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
             raise Refused("identity", "the branch moved while committing; nothing was committed")
         registry.set_op(entry["id"], op, stage="ref_moved")
         _crash_point("commit:ref_moved")
-        _reconcile_index(p, new, tmp_dir)
+        try:
+            _reconcile_index(p, new, tmp_dir, expect_id=index_id)
+        except Exception as err:            # noqa: BLE001 — the ref moved: never `intent`
+            registry.set_op(entry["id"], op, state="unknown", error=str(err)[:ERR_SNIPPET])
+            raise Refused("unknown", "the commit is on the branch but the index could not be "
+                                     f"updated ({err}); staged work was left as it is. Resolve "
+                                     "it with `corral-light worktrees`") from None
         _crash_point("commit:index")
         ok = (git(["rev-parse", entry["branch"]], cwd=p).text.strip() == new
               and _tree_of_index(p, Path(idx).read_bytes(), tmp_dir) == tree)
-        registry.set_op(entry["id"], op, state="done" if ok else "unknown", stage="done")
         if not ok:
+            registry.set_op(entry["id"], op, state="unknown", stage="done")
             raise Refused("unknown", "the commit landed but the index does not match; "
                                      "resolve it with `corral-light worktrees`")
-        registry.update(entry["id"], last_commit=new)
+        registry.finish_op(entry["id"], op, {"state": "done", "stage": "done"}, last_commit=new)
         return {"commit": new, "noop": False, "recovery_refs": recovery}
 
 
@@ -1244,6 +1340,7 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     """
     registry = registry or Registry()
     p = entry["path"]
+    refuse_open_ops(entry, registry)
     v = verify(entry)
     if v["oid"] != oid:
         raise Refused("identity", f"the branch is at {v['oid'][:12]}, not the reviewed {oid[:12]}")
@@ -1326,6 +1423,7 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
         except (ValueError, KeyError, IndexError, TypeError):
             url = None
     if not url:
+        refuse_open_ops(entry, registry)
         op = registry.begin_op(entry["id"], "pr", repo=repo, head=head)
         _crash_point("pr:before")
         made = _gh(["pr", "create", "--repo", repo, "--head", head, "--base", base,
@@ -1443,7 +1541,29 @@ def _procs_lsof(root):
     return sorted(found.items())
 
 
-def _wait_lock_gone(idx):
+def _set_aside_stale_lock(idx, record):
+    """Move index.lock aside if `record` proves our own stopped agent left it.
+
+    `record` is {"pid", "start", "lock", "stopped_at"} from the pane whose
+    agent the hub stopped. The lock must name the same file, its owner pid
+    must be gone (lock_is_ours_and_stale), and the lock must predate the stop,
+    so a git started since is never touched. Renamed, not deleted.
+    """
+    lock = idx + ".lock"
+    if not record or not lock_is_ours_and_stale(lock, record):
+        return False
+    try:
+        if os.stat(lock).st_mtime > float(record.get("stopped_at") or 0):
+            return False
+        os.replace(lock, f"{lock}.corral-stale-{_ts()}")
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _wait_lock_gone(idx, stale=None):
+    if stale and os.path.exists(idx + ".lock"):
+        _set_aside_stale_lock(idx, stale)
     deadline = time.monotonic() + LOCK_WAIT_S
     while os.path.exists(idx + ".lock"):
         if time.monotonic() > deadline:
@@ -1455,7 +1575,41 @@ def trash_dir():
     return worktree_root() / ".trash"
 
 
-def discard(entry, tree, registry=None, tmp_dir=None):
+def discard_preflight(entry, registry=None, agent_pgids=()):
+    """What can refuse a discard before the agent is stopped (converged finding 3).
+
+    Unsettled ops, a worktree that is not ours any more, an unusable trash
+    folder, and processes inside the worktree that are NOT in the agent's
+    process groups (`agent_pgids`): stopping the agent cannot clear those,
+    so killing it first would only lose its turn. Raises Refused or
+    ValueError; returns the processes the agent's stop will end.
+    """
+    registry = registry or Registry()
+    refuse_open_ops(entry, registry)
+    verify(entry)
+    tdir = trash_dir()
+    _refuse_symlink(tdir, "trash folder")
+    try:
+        busy = processes_in(entry["path"])
+    except ScanFailed as e:
+        raise Refused("busy", f"could not check for processes inside the worktree ({e}); "
+                              "nothing was moved") from None
+    ours = set(agent_pgids or ())
+
+    def pgid(pid):
+        try:
+            return os.getpgid(pid)
+        except OSError:
+            return None
+    foreign = [(pid, cmd) for pid, cmd in busy if pgid(pid) not in ours]
+    if foreign:
+        raise Refused("busy", "still running inside the worktree: " +
+                      ", ".join(f"pid {pid} ({cmd})" for pid, cmd in foreign) +
+                      "; the agent was left running")
+    return [pid for pid, _ in busy]
+
+
+def discard(entry, tree, registry=None, tmp_dir=None, stale_lock=None):
     """Recovery ref, then move the whole worktree into <root>/.trash/. Deletes nothing.
 
     The caller stops the pane's writers first (D11); this refuses, naming
@@ -1468,6 +1622,7 @@ def discard(entry, tree, registry=None, tmp_dir=None):
     """
     registry = registry or Registry()
     p = entry["path"]
+    refuse_open_ops(entry, registry)
     try:
         busy = processes_in(p)
     except ScanFailed as e:
@@ -1477,8 +1632,9 @@ def discard(entry, tree, registry=None, tmp_dir=None):
         raise Refused("busy", "still running inside the worktree: " +
                       ", ".join(f"pid {pid} ({cmd})" for pid, cmd in busy))
     verify(entry)
-    _wait_lock_gone(_index_path(p))
+    _wait_lock_gone(_index_path(p), stale_lock)
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         now = _snapshot_locked(entry, tmp_dir or registry_dir() / "tmp")
         if now["tree"] != tree:
             raise Refused("changed", "files changed since you opened review; refresh it")
@@ -1501,8 +1657,8 @@ def discard(entry, tree, registry=None, tmp_dir=None):
         _crash_point("discard:journalled")
         git(["worktree", "move", "--", p, str(dest)], cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
         _crash_point("discard:moved")
-        registry.set_op(entry["id"], op, state="done", stage="done")
-        registry.update(entry["id"], phase="trashed", trash_path=str(dest))
+        registry.finish_op(entry["id"], op, {"state": "done", "stage": "done"},
+                           phase="trashed", trash_path=str(dest))
     return {"recovery_ref": ref, "trash_path": str(dest)}
 
 
@@ -1517,8 +1673,8 @@ def restore(entry, registry=None):
         op = registry.begin_op(entry["id"], "restore", src=entry["trash_path"], dst=entry["path"])
         git(["worktree", "move", "--", entry["trash_path"], entry["path"]],
             cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
-        registry.set_op(entry["id"], op, state="done", stage="done")
-        e = registry.update(entry["id"], phase="active", trash_path=None)
+        e = registry.finish_op(entry["id"], op, {"state": "done", "stage": "done"},
+                               phase="active", trash_path=None)
     verify(e)
     return e
 
@@ -1544,14 +1700,22 @@ def purge(entry, confirm, registry=None):
     if os.path.islink(t) or not os.path.realpath(t).startswith(tdir + os.sep):
         raise ValueError(f"{t} is not inside {tdir}; refusing")
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         op = registry.begin_op(entry["id"], "purge", path=t)
         git(["worktree", "remove", "--force", "--", t], cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
-        want = entry.get("branch_oid_at_discard")
-        deleted = bool(want) and git(["update-ref", "-d", branch, want],
-                                     cwd=entry["common_dir"], check=False).rc == 0
-        registry.set_op(entry["id"], op, state="done", stage="done", branch_deleted=deleted)
-        registry.update(entry["id"], phase="purged", trash_path=None)
+        deleted = _delete_discarded_branch(entry)
+        registry.finish_op(entry["id"], op, {"state": "done", "stage": "done",
+                                             "branch_deleted": deleted},
+                           phase="purged", trash_path=None)
     return {"branch_deleted": deleted}
+
+
+def _delete_discarded_branch(entry):
+    """Delete the corral/* branch only if it is still at the OID recorded at discard."""
+    branch, want = entry.get("branch") or "", entry.get("branch_oid_at_discard")
+    if not branch.startswith(BRANCH_PREFIX) or not want:
+        return False
+    return git(["update-ref", "-d", branch, want], cwd=entry["common_dir"], check=False).rc == 0
 
 
 def is_integrated(entry):
@@ -1607,15 +1771,25 @@ def resolve_op(entry, op, registry):
             idx = _index_path(p)
             if _tree_of_index(p, Path(idx).read_bytes(), tmp) != op.get("tree"):
                 _wait_lock_gone(idx)
-                _reconcile_index(p, new, tmp)
+                try:
+                    # The identity journalled with the commit: anything staged
+                    # while the hub was down is left exactly as it is.
+                    _reconcile_index(p, new, tmp, expect_id=op.get("index_id"))
+                except Refused as err:
+                    return unknown(f"commit interrupted; the branch has it but the index "
+                                   f"was not updated ({err.detail}), outcome unknown")
             if _tree_of_index(p, Path(idx).read_bytes(), tmp) == op.get("tree"):
-                done(stage="done")
-                registry.update(wid, last_commit=new)
+                registry.finish_op(wid, op["op_id"], {"state": "done", "stage": "done"},
+                                   last_commit=new)
                 return "commit interrupted by a restart; finished it (outcome checked after restart)"
         return unknown("commit interrupted; branch and journal disagree, outcome unknown")
     if kind == "push":
-        there = git(["ls-remote", "--", op["url"], op["ref"]], cwd=entry["common_dir"],
-                    check=False, timeout=PUSH_TIMEOUT_S).text.split()
+        r = git(["ls-remote", "--", op["url"], op["ref"]], cwd=entry["common_dir"],
+                check=False, timeout=PUSH_TIMEOUT_S)
+        if r.rc != 0:
+            # Could not ask the remote: that is not "it did not happen".
+            return unknown("push interrupted; the remote could not be checked, outcome unknown")
+        there = r.text.split()
         if there and there[0] == op.get("oid"):
             done(stage="done")
             prev = registry.read(wid).get("published") or {}
@@ -1644,9 +1818,9 @@ def resolve_op(entry, op, registry):
         reg = _registered(entry["common_dir"]) or set()
         src, dst = os.path.realpath(op["src"]), os.path.realpath(op["dst"])
         if dst in reg and os.path.isdir(dst):
-            done(stage="done")
-            registry.update(wid, phase="trashed" if kind == "discard" else "active",
-                            trash_path=op["dst"] if kind == "discard" else None)
+            registry.finish_op(wid, op["op_id"], {"state": "done", "stage": "done"},
+                               phase="trashed" if kind == "discard" else "active",
+                               trash_path=op["dst"] if kind == "discard" else None)
             return f"{kind} interrupted by a restart; it completed (outcome checked after restart)"
         if src in reg and os.path.isdir(src):
             done(stage="not_done")
@@ -1654,8 +1828,10 @@ def resolve_op(entry, op, registry):
         return unknown(f"{kind} interrupted; the worktree is at neither place, outcome unknown")
     if kind == "purge":
         if not os.path.lexists(op.get("path", "")):
-            done(stage="done")
-            registry.update(wid, phase="purged", trash_path=None)
+            deleted = _delete_discarded_branch(entry)
+            registry.finish_op(wid, op["op_id"], {"state": "done", "stage": "done",
+                                                  "branch_deleted": deleted},
+                               phase="purged", trash_path=None)
             return "purge interrupted by a restart; the files are gone (outcome checked)"
         done(stage="not_done")
         return "purge interrupted by a restart; nothing was deleted"
@@ -1683,52 +1859,65 @@ def reconcile(registry=None):
     for common, group in by_repo.items():
         reg = _registered(common) if common else None
         for e in group:
-            for k in ("path", "trash_path"):
-                if e.get(k):
-                    known.add(os.path.realpath(e[k]))
-            phase = e.get("phase")
-            if phase in ("purged", "missing", "tampered"):
-                continue
-            if reg is None:
-                registry.update(e["id"], phase="missing", error="the repository is gone")
-                note(e, "missing", f"{e['repo_top']} is gone; {e['branch']} cannot be checked")
-                continue
-            for op in [o for o in e.get("ops") or [] if o.get("state") == "intent"]:
-                note(e, "op", resolve_op(e, op, registry))
-            e = registry.read(e["id"])
-            if e["phase"] == "intent":
-                if os.path.realpath(e["path"]) in reg:
-                    try:
-                        verify(e)
-                        registry.update(e["id"], phase="active")
-                        continue
-                    except IdentityError:
-                        pass
-                registry.update(e["id"], phase="missing", error="creation did not finish")
-                note(e, "missing", f"creating {e['branch']} did not finish before a restart")
-                continue
-            if e["phase"] == "active":
-                if not _ref(e, e["branch"]):
-                    note(e, "branch", f"the branch {e['branch'][len('refs/heads/'):]} was deleted outside Corral")
-                    continue
-                try:
-                    verify(e)
-                except IdentityError as err:
-                    phase = "tampered" if err.reason == "tampered" else "missing"
-                    if err.reason == "identity":
-                        note(e, "identity", str(err))
-                        continue
-                    registry.update(e["id"], phase=phase, error=str(err))
-                    note(e, phase, str(err))
-            elif e["phase"] == "trashed":
-                t = e.get("trash_path")
-                if not t or os.path.realpath(t) not in reg or not os.path.isdir(t):
-                    registry.update(e["id"], phase="missing", error="the trashed copy is gone")
-                    note(e, "missing", f"the trashed copy of {e['branch']} is gone")
+            try:
+                _reconcile_entry(e, reg, registry, note, known)
+            except Exception as err:        # noqa: BLE001 — one entry never stops the rest
+                note(e, "error", f"could not check {e.get('branch') or e['id']}: {err}")
     for child in orphans(known):
         note(None, "orphan", f"{child} is under the worktree root but in no registry entry",
              path=str(child))
     return notes
+
+
+def _reconcile_entry(e, reg, registry, note, known):
+    """reconcile() for one entry; `known` collects its paths for orphans()."""
+    for k in ("path", "trash_path"):
+        if e.get(k):
+            known.add(os.path.realpath(e[k]))
+    phase = e.get("phase")
+    if phase in ("purged", "missing", "tampered"):
+        return
+    if reg is None:
+        registry.update(e["id"], phase="missing", error="the repository is gone")
+        note(e, "missing", f"{e['repo_top']} is gone; {e['branch']} cannot be checked")
+        return
+    for op in [o for o in e.get("ops") or [] if o.get("state") == "intent"]:
+        try:
+            note(e, "op", resolve_op(e, op, registry))
+        except Exception as err:            # noqa: BLE001 — one op never stops the rest
+            registry.set_op(e["id"], op["op_id"], state="unknown", error=str(err)[:ERR_SNIPPET])
+            note(e, "op", f"{op.get('op')} interrupted; checking it failed ({err}), "
+                          "outcome unknown")
+    e = registry.read(e["id"])
+    if e["phase"] == "intent":
+        if os.path.realpath(e["path"]) in reg:
+            try:
+                verify(e)
+                registry.update(e["id"], phase="active")
+                return
+            except IdentityError:
+                pass
+        registry.update(e["id"], phase="missing", error="creation did not finish")
+        note(e, "missing", f"creating {e['branch']} did not finish before a restart")
+        return
+    if e["phase"] == "active":
+        if not _ref(e, e["branch"]):
+            note(e, "branch", f"the branch {e['branch'][len('refs/heads/'):]} was deleted outside Corral")
+            return
+        try:
+            verify(e)
+        except IdentityError as err:
+            phase = "tampered" if err.reason == "tampered" else "missing"
+            if err.reason == "identity":
+                note(e, "identity", str(err))
+                return
+            registry.update(e["id"], phase=phase, error=str(err))
+            note(e, phase, str(err))
+    elif e["phase"] == "trashed":
+        t = e.get("trash_path")
+        if not t or os.path.realpath(t) not in reg or not os.path.isdir(t):
+            registry.update(e["id"], phase="missing", error="the trashed copy is gone")
+            note(e, "missing", f"the trashed copy of {e['branch']} is gone")
 
 
 def orphans(known=None, registry=None):

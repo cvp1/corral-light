@@ -2236,3 +2236,305 @@ class TheMacClaudeHome(LifecycleCase):
         after = (_tree_snapshot(self.home / ".claude"),
                  (self.home / ".claude.json").read_bytes())
         self.assertEqual(after, before)
+
+
+# ── Bug bash 2026-10-02, round 1 (reviews/2026-10-02-own-branch-bugbash) ──────
+# Each test below was written from a reviewer's repro and failed at b6f7dfc.
+
+def _unknown_op(reg, wid, kind="commit"):
+    op = reg.begin_op(wid, kind, stage="ref_moved")
+    reg.set_op(wid, op, state="unknown")
+    return op
+
+
+def _staged_blob(p, rel):
+    return wt.git(["rev-parse", ":" + rel], cwd=p).text.strip()
+
+
+def _reachable(p, oid):
+    objs = wt.git(["rev-list", "--objects", "--all", "--reflog"], cwd=p,
+                  max_out=64 << 20).text
+    return oid in objs or wt.git(["rev-parse", ":a.txt"], cwd=p).text.strip() == oid
+
+
+# A discard killed right after its first registry write once the move is done.
+CRASH_AFTER_MOVE = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+import worktrees as wt
+reg = wt.Registry()
+e = reg.read(sys.argv[2])
+snap = wt.snapshot(e)
+dst_prefix = str(wt.trash_dir() / e["id"])
+real = wt.atomic_write_json
+
+def write_then_die(path, obj):
+    real(path, obj)
+    moved = any(str(c).startswith(dst_prefix) for c in wt.trash_dir().iterdir()) \
+        if wt.trash_dir().is_dir() else False
+    if moved and str(path).endswith(e["id"] + ".json"):
+        os.kill(os.getpid(), signal.SIGKILL)
+wt.atomic_write_json = write_then_die
+wt.discard(e, snap["tree"])
+"""
+
+
+class BugBashLibrary(CreateCase):
+    """worktrees.py findings: the gate, the index swap, discard, purge, create."""
+
+    # Converged 1: an `unknown` or `intent` op blocks every mutating action.
+    def test_BB_1_actions_refuse_while_an_op_is_unknown(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("despite unknown\n")
+        snap = wt.snapshot(e)
+        _unknown_op(self.reg, e["id"])
+        e = self.reg.read(e["id"])
+        with self.assertRaises(wt.Refused) as cm:
+            wt.commit_tree(e, snap["tree"], snap["index_id"], "m", expect_head=snap["head"],
+                           registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.discard(e, snap["tree"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        self.assertTrue(p.exists())
+        self.assertEqual(wt.git(["rev-parse", e["branch"]], cwd=p).text.strip(), e["base_sha"])
+
+    def test_BB_1b_an_intent_op_from_another_process_also_blocks(self):
+        e = self.make()
+        (Path(e["path"]) / "a.txt").write_text("x\n")
+        snap = wt.snapshot(e)
+        self.reg.begin_op(e["id"], "commit", stage="prepared")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.commit_tree(self.reg.read(e["id"]), snap["tree"], snap["index_id"], "m",
+                           expect_head=snap["head"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+
+    # Converged 2 (Astra): work staged while the hub was down is never replaced.
+    def test_BB_2_restart_never_replaces_an_index_staged_while_the_hub_was_down(self):
+        import subprocess
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed\n")
+        env = dict(os.environ, CORRAL_WT_TEST="1", CORRAL_WT_CRASH_AT="commit:ref_moved")
+        r = subprocess.run([sys.executable, "-c", CRASH_SCRIPT, str(ROOT), e["id"], "commit"],
+                           env=env, capture_output=True, timeout=120)
+        self.assertEqual(r.returncode, -signal.SIGKILL, r.stderr.decode()[-500:])
+        (p / "a.txt").write_text("unique staged content\n")
+        wt.git(["add", "a.txt"], cwd=p)
+        blob = _staged_blob(p, "a.txt")
+        (p / "a.txt").write_text("reviewed\n")
+        wt.reconcile(self.reg)
+        self.assertEqual(_staged_blob(p, "a.txt"), blob, "the staged work was replaced")
+        self.assertEqual(self.reg.read(e["id"])["ops"][-1]["state"], "unknown")
+
+    # Converged 2 (Astra, live): staging between the check and the swap.
+    def test_BB_3_staging_during_the_swap_is_never_lost(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed\n")
+        snap = wt.snapshot(e)
+        real = wt._reconcile_index
+        blobs = []
+
+        def stage_first(*a, **k):
+            (p / "a.txt").write_text("unique staged content\n")
+            wt.git(["add", "a.txt"], cwd=p)
+            blobs.append(_staged_blob(p, "a.txt"))
+            (p / "a.txt").write_text("reviewed\n")
+            return real(*a, **k)
+        with mock.patch.object(wt, "_reconcile_index", stage_first):
+            with self.assertRaises(wt.Refused) as cm:
+                wt.commit_tree(e, snap["tree"], snap["index_id"], "m",
+                               expect_head=snap["head"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        self.assertEqual(_staged_blob(p, "a.txt"), blobs[0], "the staged work was replaced")
+        self.assertEqual(self.reg.read(e["id"])["ops"][-1]["state"], "unknown")
+
+    # Converged 2 (Grok): a failed swap after update-ref is `unknown`, not a stuck intent.
+    def test_BB_4_a_failed_index_swap_after_the_ref_moved_is_unknown(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed line\n")
+        snap = wt.snapshot(e)
+
+        def boom(idx, content):
+            raise wt.Refused("busy", "index.lock appeared while swapping the index")
+        with mock.patch.object(wt, "_replace_index", boom):
+            with self.assertRaises(wt.Refused) as cm:
+                wt.commit_tree(e, snap["tree"], snap["index_id"], "feat",
+                               expect_head=snap["head"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        op = self.reg.read(e["id"])["ops"][-1]
+        self.assertEqual(op["state"], "unknown", op)
+
+    # Converged 2 (Grok): one entry that cannot be resolved does not stop the rest.
+    def test_BB_5_one_failing_entry_does_not_abort_reconcile(self):
+        a = self.make(title="first", owner="pane0001")
+        b = self.make(title="second", owner="pane0002")
+        self.reg.begin_op(a["id"], "push", url="https://example.invalid/x.git",
+                          ref=a["branch"], oid=a["base_sha"])
+        missing = Path(b["path"])
+        import shutil
+        shutil.rmtree(missing)                      # the test's own temp tree
+        real = wt.git
+
+        def timeout(args, *x, **k):
+            if args and args[0] == "ls-remote":
+                raise wt.GitTimeout(["git", "ls-remote"], 1)
+            return real(args, *x, **k)
+        with mock.patch.object(wt, "git", timeout):
+            notes = wt.reconcile(self.reg)
+        self.assertEqual(self.reg.read(b["id"])["phase"], "missing", notes)
+        self.assertEqual(self.reg.read(a["id"])["ops"][-1]["state"], "unknown")
+
+    # Single seat (Astra): op `done` and phase `trashed` land in one write.
+    def test_BB_6_discard_killed_after_its_first_post_move_write_stays_restorable(self):
+        import subprocess
+        e = self.make()
+        (Path(e["path"]) / "w.txt").write_text("work to keep\n")
+        r = subprocess.run([sys.executable, "-c", CRASH_AFTER_MOVE, str(ROOT), e["id"]],
+                           env=dict(os.environ), capture_output=True, timeout=120)
+        self.assertEqual(r.returncode, -signal.SIGKILL, r.stderr.decode()[-500:])
+        wt.reconcile(self.reg)
+        got = self.reg.read(e["id"])
+        self.assertEqual(got["phase"], "trashed", got)
+        back = wt.restore(got, registry=self.reg)
+        self.assertEqual(Path(back["path"], "w.txt").read_text(), "work to keep\n")
+
+    # Single seat (Gemini): an interrupted purge still deletes the branch.
+    def test_BB_7_purge_resolved_after_a_restart_deletes_the_branch(self):
+        e = self.make()
+        snap = wt.snapshot(e)
+        wt.discard(e, snap["tree"], registry=self.reg)
+        e = self.reg.read(e["id"])
+        wt.git(["worktree", "remove", "--force", "--", e["trash_path"]], cwd=self.repo)
+        self.reg.begin_op(e["id"], "purge", path=e["trash_path"])   # as a SIGKILL left it
+        wt.reconcile(self.reg)
+        self.assertEqual(self.reg.read(e["id"])["phase"], "purged")
+        self.assertIsNone(wt._ref(e, e["branch"]), "the corral branch was left behind")
+
+    # Single seat (Grok): a failing post-checkout hook does not orphan a live worktree.
+    def test_BB_8_a_failing_post_checkout_hook_leaves_a_usable_worktree(self):
+        hook = self.repo / ".git" / "hooks" / "post-checkout"
+        hook.write_text("#!/bin/sh\necho hook says no >&2\nexit 1\n")
+        hook.chmod(0o755)
+        e = self.make()
+        self.assertEqual(e["phase"], "active")
+        self.assertIn("hook says no", e.get("warning") or "")
+        wt.verify(e)
+
+    # Single seat (Gemini): a lock our own stopped agent left is cleared, not waited out.
+    def test_BB_9_a_stale_lock_from_our_stopped_agent_does_not_block_discard(self):
+        import subprocess
+        e = self.make()
+        snap = wt.snapshot(e)
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        lock = wt._index_path(e["path"]) + ".lock"
+        Path(lock).write_bytes(b"partial")
+        rec = {"pid": gone.pid, "start": "x", "lock": lock, "stopped_at": time.time()}
+        with mock.patch.object(wt, "LOCK_WAIT_S", 0.3):
+            r = wt.discard(e, snap["tree"], registry=self.reg, stale_lock=rec)
+        self.assertTrue(Path(r["trash_path"]).exists())
+        self.assertFalse(os.path.exists(lock))
+
+    def test_BB_9b_a_lock_whose_owner_is_alive_is_never_cleared(self):
+        e = self.make()
+        snap = wt.snapshot(e)
+        lock = wt._index_path(e["path"]) + ".lock"
+        Path(lock).write_bytes(b"partial")
+        rec = {"pid": os.getpid(), "start": "x", "lock": lock, "stopped_at": time.time()}
+        with mock.patch.object(wt, "LOCK_WAIT_S", 0.3):
+            with self.assertRaises(wt.Refused) as cm:
+                wt.discard(e, snap["tree"], registry=self.reg, stale_lock=rec)
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertEqual(Path(lock).read_bytes(), b"partial")
+
+
+class BugBashHub(LifecycleCase):
+    """sessions.py findings: the gate on sends, Discard's order, Forget."""
+
+    # Converged 1 (Astra, Grok): no review action runs on an `unknown` op.
+    def test_BB_10_every_review_action_refuses_while_an_op_is_unknown(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        _unknown_op(self.reg, p.worktree_id)
+        acts = {
+            "snapshot": lambda: self.mgr.worktree_snapshot(p.id),
+            "commit": lambda: self.mgr.worktree_commit(p.id, snap["tree"], snap["head"],
+                                                       snap["index_id"], "m"),
+            "publish": lambda: self.mgr.worktree_publish(p.id, snap["head"], snap["tree"],
+                                                         "origin", "x"),
+            "discard": lambda: self.mgr.worktree_discard(p.id, snap["tree"]),
+        }
+        for name, act in acts.items():
+            with self.subTest(action=name):
+                with self.assertRaises(wt.Refused) as cm:
+                    act()
+                self.assertEqual(cm.exception.reason, "unknown")
+        self.assertEqual(p.state, "ready", "a refused action stopped the agent")
+        self.assertTrue(p.client and p.client.alive)
+
+    # Converged 1 (Astra): nothing is dispatched into a pane whose op is unknown.
+    def test_BB_11_a_send_to_a_pane_with_an_unknown_op_never_runs(self):
+        p = self.pane()
+        _unknown_op(self.reg, p.worktree_id)
+        with self.assertRaises(ValueError):
+            p.send("write unknown.txt writing while blocked")
+        time.sleep(0.3)
+        self.assertFalse(Path(self.entry(p)["path"], "unknown.txt").exists())
+
+    # Converged 4 (Astra, PROVEN): a real send during discard never reaches the trash.
+    def test_BB_12_a_real_send_during_discard_never_writes_into_trash(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        real = wt.processes_in
+
+        def scan_then_send(path):
+            found = real(path)
+            try:
+                p.send("write AFTER_DISCARD.txt this should be impossible")
+            except Exception:                    # noqa: BLE001 — refusing is fine
+                pass
+            return found
+        with mock.patch.object(wt, "processes_in", scan_then_send):
+            r = self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertFalse(p.client and p.client.alive, "an agent survived the discard")
+        with self.assertRaises(Exception):
+            p.send("write AFTER_DISCARD.txt this should be impossible")
+        time.sleep(0.5)
+        self.assertFalse(Path(r["trash_path"], "AFTER_DISCARD.txt").exists())
+
+    # Converged 3 (Grok, Gemini): a refused discard leaves the agent running.
+    def test_BB_13_a_discard_refused_by_an_outside_process_leaves_the_agent_alone(self):
+        import subprocess
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        outsider = subprocess.Popen(["sleep", "30"], cwd=self.entry(p)["path"],
+                                    start_new_session=True)
+        self.addCleanup(outsider.wait)
+        self.addCleanup(outsider.kill)
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertIn(str(outsider.pid), str(cm.exception.detail))
+        self.assertEqual(p.state, "ready")
+        self.assertTrue(p.client and p.client.alive, "the refused discard killed the agent")
+        self.say(p, "write b.txt still working")
+
+    # Single seat (Gemini): Forget on an own-branch pane offers Discard first.
+    def test_BB_14_forget_on_an_own_branch_pane_asks_first(self):
+        p = self.pane()
+        p.client.close()
+        p.state = "dead"
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.forget(p.id)
+        self.assertEqual(cm.exception.reason, "own_branch")
+        self.assertIn(p.id, self.mgr.panes)
+        self.mgr.forget(p.id, keep_branch=True)
+        self.assertNotIn(p.id, self.mgr.panes)
+        self.assertEqual(self.reg.read(p.worktree_id)["phase"], "active")
