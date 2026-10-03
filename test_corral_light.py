@@ -16,8 +16,8 @@ from pathlib import Path
 
 # Default the state dir before anything imports sessions (STATE binds at
 # import time), so the suite never writes into the live store.
-os.environ.setdefault("CORRAL_LIGHT_STATE",
-                      tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("corral-light-test-")
 
 ROOT = Path(__file__).resolve().parent
 
@@ -1163,7 +1163,7 @@ class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
     def test_stripped_vars_do_not_reach_the_child_process(self):
         """Measured at the process boundary, not asserted about a dict."""
         import acp, sessions, tempfile, sys as _sys, time
-        spy = Path(tempfile.mkdtemp()) / "spy.py"
+        spy = Path(tmpdir(self)) / "spy.py"
         spy.write_text(
             "import json,os,sys\n"
             "sys.stderr.write(json.dumps(sorted(k for k in os.environ "
@@ -1185,7 +1185,7 @@ class AmbientVendorKeysCannotHijackALane(unittest.TestCase):
         boundary for every lane.
         """
         import sessions, tempfile, sys as _sys, time, json as _json
-        work = Path(tempfile.mkdtemp())
+        work = Path(tmpdir(self))
         spy = work / "spy.py"
         spy.write_text(
             "import json,os,sys\n"
@@ -1383,7 +1383,7 @@ class DiagnoseIsSafeToPaste(unittest.TestCase):
     def test_the_credential_shape_reports_lengths_not_values(self):
         """Token lengths are reported; values never are."""
         import diagnose, tempfile, io, contextlib
-        d = Path(tempfile.mkdtemp()) / "c.json"
+        d = Path(tmpdir(self)) / "c.json"
         d.write_text(json.dumps({"claudeAiOauth": {
             "accessToken": "SUPERSECRETVALUE" * 4, "expiresAt": 123}}))
         buf = io.StringIO()
@@ -1395,7 +1395,7 @@ class DiagnoseIsSafeToPaste(unittest.TestCase):
 
     def test_a_missing_token_field_is_called_out(self):
         import diagnose, tempfile, io, contextlib
-        d = Path(tempfile.mkdtemp()) / "c.json"
+        d = Path(tmpdir(self)) / "c.json"
         d.write_text(json.dumps({"claudeAiOauth": {"expiresAt": 1}}))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1417,7 +1417,7 @@ class AnEmptyTokenIsNotACredential(unittest.TestCase):
     """A credential file with empty tokens is not a usable credential."""
 
     def _cred(self, payload):
-        d = Path(tempfile.mkdtemp()) / ".credentials.json"
+        d = Path(tmpdir(self)) / ".credentials.json"
         d.write_text(json.dumps(payload))
         return d
 
@@ -1446,7 +1446,7 @@ class AnEmptyTokenIsNotACredential(unittest.TestCase):
     def test_missing_or_unparseable_is_not_usable(self):
         import sessions
         self.assertFalse(sessions.usable_credential(Path("/nope/none.json")))
-        bad = Path(tempfile.mkdtemp()) / "c.json"
+        bad = Path(tmpdir(self)) / "c.json"
         bad.write_text("{ not json")
         self.assertFalse(sessions.usable_credential(bad))
 
@@ -1460,7 +1460,7 @@ class AnEmptyTokenIsNotACredential(unittest.TestCase):
         """The whole point: refuse the directory rather than build one that
         only looks credentialed."""
         import sessions
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text(
             json.dumps({"claudeAiOauth": {"accessToken": ""}}))
@@ -1480,7 +1480,7 @@ class TheCopiedCredentialResyncs(unittest.TestCase):
     """
 
     def _home_with_cred(self, token="a"):
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / ".claude").mkdir()
         cred = home / ".claude" / ".credentials.json"
         cred.write_text(json.dumps(
@@ -1579,7 +1579,7 @@ class TheStaleCopyTheoryWasWrong(unittest.TestCase):
         """
         import sessions
         _pin_sessions_platform(self, "linux")
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text(json.dumps(
             {"claudeAiOauth": {"accessToken": "a" * 108}}))
@@ -1597,7 +1597,7 @@ class TheStaleCopyTheoryWasWrong(unittest.TestCase):
         pane over a permission bit nobody can set anyway."""
         import sessions
         _pin_sessions_platform(self, "linux")
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text(json.dumps(
             {"claudeAiOauth": {"accessToken": "a" * 108}}))
@@ -1625,8 +1625,8 @@ class DiagnoseAuditsPermissionsAndContent(unittest.TestCase):
 
     def test_content_equality_never_prints_the_hash_or_the_bytes(self):
         import diagnose, tempfile as tf, io, contextlib
-        a = Path(tf.mkdtemp()) / "a.json"; a.write_text("secret-value-a")
-        b = Path(tf.mkdtemp()) / "b.json"; b.write_text("secret-value-a")
+        a = Path(tmpdir(self)) / "a.json"; a.write_text("secret-value-a")
+        b = Path(tmpdir(self)) / "b.json"; b.write_text("secret-value-a")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             diagnose._content_equality(a, b)
@@ -1636,8 +1636,8 @@ class DiagnoseAuditsPermissionsAndContent(unittest.TestCase):
 
     def test_content_equality_detects_a_real_difference(self):
         import diagnose, tempfile as tf, io, contextlib
-        a = Path(tf.mkdtemp()) / "a.json"; a.write_text("one")
-        b = Path(tf.mkdtemp()) / "b.json"; b.write_text("two")
+        a = Path(tmpdir(self)) / "a.json"; a.write_text("one")
+        b = Path(tmpdir(self)) / "b.json"; b.write_text("two")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             diagnose._content_equality(a, b)
@@ -1657,7 +1657,7 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
         self.addCleanup(lambda: setattr(sessions.sys, "platform", real))
 
     def _fake_home_with_real_credential(self):
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text(json.dumps(
             {"claudeAiOauth": {"accessToken": "a" * 108,
@@ -1675,7 +1675,7 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
         self._patch_darwin()
         self._fake_home_with_real_credential()
         self.assertIsNone(sessions.seed_config_dir(
-            Path(tempfile.mkdtemp()) / "cfg", "auto"))
+            Path(tmpdir(self)) / "cfg", "auto"))
         self.assertFalse(sessions.posture_enforceable(
             _config_dir_only(sessions.AGENTS["claude"])))
         # ...yet the lane still has a posture here, imposed over ACP.
@@ -1689,7 +1689,7 @@ class DarwinKeychainMakesIsolationImpossible(unittest.TestCase):
         _pin_sessions_platform(self, "linux")
         self._fake_home_with_real_credential()
         self.assertIsNotNone(sessions.seed_config_dir(
-            Path(tempfile.mkdtemp()) / "cfg", "auto"))
+            Path(tmpdir(self)) / "cfg", "auto"))
         self.assertTrue(
             sessions.posture_enforceable(sessions.AGENTS["claude"]))
 
@@ -2022,7 +2022,7 @@ class TheServiceRunsThisTree(unittest.TestCase):
             d["ProgramArguments"] = ["/opt/homebrew/bin/python3", str(program)]
         if workdir:
             d["WorkingDirectory"] = str(workdir)
-        path = Path(tempfile.mkdtemp()) / "com.cvp1.corral-light.plist"
+        path = Path(tmpdir(self)) / "com.cvp1.corral-light.plist"
         with open(path, "wb") as fh:
             plistlib.dump(d, fh)
         return path
@@ -2030,15 +2030,15 @@ class TheServiceRunsThisTree(unittest.TestCase):
     def test_the_matching_tree_is_silent(self):
         """A correct host says nothing (the control for the failing cases below)."""
         import diagnose
-        tree = Path(tempfile.mkdtemp()).resolve()
+        tree = Path(tmpdir(self)).resolve()
         plist = self._plist(tree / "hub.py", tree)
         self.assertIsNone(diagnose.service_tree_problem(
             root=tree, path=plist, label="nope.not.loaded"))
 
     def test_a_worktree_in_program_arguments_is_caught(self):
         import diagnose
-        root = Path(tempfile.mkdtemp()).resolve()
-        other = Path(tempfile.mkdtemp()).resolve()
+        root = Path(tmpdir(self)).resolve()
+        other = Path(tmpdir(self)).resolve()
         plist = self._plist(other / "hub.py", other)
         problem = diagnose.service_tree_problem(
             root=root, path=plist, label="nope.not.loaded")
@@ -2051,8 +2051,8 @@ class TheServiceRunsThisTree(unittest.TestCase):
         lanes vanish.
         """
         import diagnose
-        root = Path(tempfile.mkdtemp()).resolve()
-        plist = self._plist(Path(tempfile.mkdtemp()).resolve() / "hub.py")
+        root = Path(tmpdir(self)).resolve()
+        plist = self._plist(Path(tmpdir(self)).resolve() / "hub.py")
         problem = diagnose.service_tree_problem(
             root=root, path=plist, label="nope.not.loaded")
         self.assertIn("spike/node_modules/", problem)
@@ -2063,7 +2063,7 @@ class TheServiceRunsThisTree(unittest.TestCase):
         not a fault.
         """
         import diagnose
-        root = Path(tempfile.mkdtemp()).resolve()
+        root = Path(tmpdir(self)).resolve()
         self.assertEqual(diagnose.installed_service_trees(root / "absent.plist"), [])
         self.assertIsNone(diagnose.service_tree_problem(
             root=root, path=root / "absent.plist", label="nope.not.loaded"))
@@ -2072,7 +2072,7 @@ class TheServiceRunsThisTree(unittest.TestCase):
         """argv[0] is /opt/homebrew/bin/python3. Reading the tree off it would
         report /opt/homebrew/bin on every correctly configured host."""
         import diagnose
-        tree = Path(tempfile.mkdtemp()).resolve()
+        tree = Path(tmpdir(self)).resolve()
         trees = diagnose.installed_service_trees(self._plist(tree / "hub.py"))
         self.assertEqual(trees, [tree])
 
@@ -2098,7 +2098,7 @@ class UnavailableReasonsNameWhatWasChecked(unittest.TestCase):
     def test_codex_names_the_path_it_probed(self):
         import codex_launcher
         real_adapter, real_here = codex_launcher.DEFAULT_ADAPTER, codex_launcher.HERE
-        stray = Path(tempfile.mkdtemp()).resolve()
+        stray = Path(tmpdir(self)).resolve()
         codex_launcher.DEFAULT_ADAPTER = stray / "spike/node_modules/.bin/codex-acp"
         codex_launcher.HERE = stray
         self.addCleanup(setattr, codex_launcher, "DEFAULT_ADAPTER", real_adapter)
@@ -2140,7 +2140,7 @@ class PairCodeIsNotPython(unittest.TestCase):
 
     def test_a_quote_in_the_pair_code_is_not_executed(self):
         import subprocess
-        marker = Path(tempfile.mkdtemp()) / "pwned"
+        marker = Path(tmpdir(self)) / "pwned"
         code = f"x'; open(r'{marker}','w').write('pwned')#"
         r = subprocess.run(
             [str(ROOT / "corral-light"), "pair", code],
@@ -2223,7 +2223,7 @@ class LiveCapIsNotJustCreate(unittest.TestCase):
         """Restart must not drop conversations 13–60. They come back detached;
         MAX_PANES only applies when one of them wants a process."""
         import sessions, json
-        state = Path(tempfile.mkdtemp())
+        state = Path(tmpdir(self))
         n = sessions.MAX_PANES + 3
         for i in range(n):
             d = state / "panes" / f"p{i:02d}"
@@ -2260,7 +2260,7 @@ class StrictDoesNotInheritHostAllow(unittest.TestCase):
     def test_strict_drops_host_allow_and_keeps_deny(self):
         import sessions
         _pin_sessions_platform(self, "linux")
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text(json.dumps(
             {"claudeAiOauth": {"accessToken": "a" * 108}}))
@@ -2285,7 +2285,7 @@ class EmptyAuthJsonIsNotALogin(unittest.TestCase):
 
     def test_grok_empty_auth_json_is_not_present(self):
         import grok_launcher
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / "auth.json").write_text("{}")
         real = grok_launcher.GROK_HOME
         grok_launcher.GROK_HOME = home
@@ -2296,7 +2296,7 @@ class EmptyAuthJsonIsNotALogin(unittest.TestCase):
 
     def test_codex_empty_auth_json_is_not_present(self):
         import codex_launcher
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / "auth.json").write_text("{}")
         real = codex_launcher.CODEX_HOME
         codex_launcher.CODEX_HOME = home
@@ -2307,7 +2307,7 @@ class EmptyAuthJsonIsNotALogin(unittest.TestCase):
 
     def test_a_token_bearing_file_still_counts(self):
         import grok_launcher
-        home = Path(tempfile.mkdtemp())
+        home = Path(tmpdir(self))
         (home / "auth.json").write_text(json.dumps(
             {"accessToken": "g" * 40}))
         real = grok_launcher.GROK_HOME
@@ -2337,7 +2337,7 @@ class ModelExtrasSurviveARealSession(unittest.TestCase):
         m = sessions.Manager.__new__(sessions.Manager)
         m.catalog = {}
         real = sessions.CATALOG
-        d = Path(tempfile.mkdtemp())
+        d = Path(tmpdir(self))
         sessions.CATALOG = d / "catalog.json"
         self.addCleanup(lambda: setattr(sessions, "CATALOG", real))
         return m, sessions
@@ -2536,7 +2536,7 @@ class SshHostsComeFromAFileNotTheFleet(unittest.TestCase):
 
     def _with_hosts(self, payload):
         import sessions
-        d = Path(tempfile.mkdtemp())
+        d = Path(tmpdir(self))
         f = d / "ssh-hosts.json"
         f.write_text(payload if isinstance(payload, str) else json.dumps(payload))
         real = sessions.EXTRA_SSH_HOSTS
@@ -3025,7 +3025,7 @@ class AgentsSurviveTheirSpawningThread(unittest.TestCase):
         # The child does what Grok Build does: prctl(PR_SET_PDEATHSIG=1, SIGTERM=15).
         # AcpClient's own reader owns the child's stdout, so readiness is a
         # marker file, not a line: the child writes it AFTER prctl has run.
-        mark = Path(tempfile.mkdtemp()) / "armed"
+        mark = Path(tmpdir(self)) / "armed"
         argv = [sys.executable, "-c",
                 "import ctypes, time, sys, pathlib; ctypes.CDLL(None).prctl(1, 15); "
                 f"pathlib.Path({str(mark)!r}).write_text('1'); time.sleep(20)"]

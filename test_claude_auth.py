@@ -16,9 +16,8 @@ import time
 import unittest
 from pathlib import Path
 
-import tempfile
-os.environ.setdefault("CORRAL_LIGHT_STATE",
-                      tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state  # noqa: E402
+default_state("corral-light-test-")
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 

@@ -9,11 +9,11 @@ Collected by test_corral_light.py. Run alone: python3 -m unittest test_worktrees
 import io
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state  # noqa: E402
+default_state("corral-light-test-")
 ROOT = Path(__file__).resolve().parent
 
 import worktrees as wt                                    # noqa: E402

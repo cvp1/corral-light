@@ -5,14 +5,13 @@
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("CORRAL_LIGHT_STATE",
-                      tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("corral-light-test-")
 ROOT = Path(__file__).resolve().parent
 
 
@@ -20,7 +19,7 @@ class Roles(unittest.TestCase):
     def setUp(self):
         import roles
         self.roles = roles
-        self.dir = Path(tempfile.mkdtemp(prefix="corral-light-roles-"))
+        self.dir = Path(tmpdir(self, "corral-light-roles-"))
         self.fields = {"id": "reviewer", "description": "a strict code reviewer",
                        "personality": "blunt", "does": "reviews diffs",
                        "expects": "findings with file:line", "data_class": "internal",
@@ -151,7 +150,7 @@ class Later(unittest.TestCase):
         self.addCleanup(self.case.doCleanups)
         self.mgr = self.case.mgr
         self.dir = self.case.agent_dir
-        self.s = schedule.Scheduler(self.mgr, Path(tempfile.mkdtemp()) / "schedule.json")
+        self.s = schedule.Scheduler(self.mgr, Path(tmpdir(self)) / "schedule.json")
 
     def iso(self, **delta):
         from datetime import datetime, timedelta, timezone
@@ -212,7 +211,7 @@ class Later(unittest.TestCase):
 
     def test_a_role_is_inlined_when_armed(self):
         import roles
-        rdir = Path(tempfile.mkdtemp())
+        rdir = Path(tmpdir(self))
         os.environ["CORRAL_LIGHT_ROLES_DIR"] = str(rdir)
         self.addCleanup(os.environ.pop, "CORRAL_LIGHT_ROLES_DIR", None)
         roles.create({"id": "nightly", "description": "a nightly summariser",
@@ -233,7 +232,7 @@ class TranscriptSearch(unittest.TestCase):
         import transcripts
         from datetime import datetime, timezone
         self.t = transcripts
-        self.state = Path(tempfile.mkdtemp(prefix="corral-light-fts-"))
+        self.state = Path(tmpdir(self, "corral-light-fts-"))
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         def pane(pid, events, meta=True, closed=False):
@@ -358,7 +357,7 @@ class PortAConversation(unittest.TestCase):
         src = self._src()
         b = self.port.export(src.id, state_dir=src.dir.parent.parent)
         self.assertNotIn("acp_session", b["meta"])
-        state = Path(tempfile.mkdtemp())
+        state = Path(tmpdir(self))
         new_id = self.port.import_bundle(json.loads(json.dumps(b)), state_dir=state)
         meta = json.loads((state / "panes" / new_id / "meta.json").read_text())
         self.assertTrue(meta["closed"])

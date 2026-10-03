@@ -10,7 +10,6 @@ import os
 import stat
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -18,7 +17,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="light-login-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("light-login-")
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import claude_login                                               # noqa: E402
@@ -52,7 +52,7 @@ def fake_login(tmp, **kw):
 
 class Launcher(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="login-")
+        self.tmp = tmpdir(self, "login-")
         self.r = fake_login(self.tmp)
         self.L = self.r.login
 
@@ -172,7 +172,7 @@ class RealLauncherPath(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="login-real-"))
+        self.tmp = Path(tmpdir(self, "login-real-"))
         self.cred = self.tmp / "cred.json"
         self.cred.write_text(json.dumps({"refresh": 100}), encoding="utf-8")
         self.saved = (claude_login.LOGIN_POLL_S, claude_login.STARTUP_GRACE_S)
@@ -257,7 +257,7 @@ class Route(unittest.TestCase):
         cls.srv.shutdown()
 
     def setUp(self):
-        self.r = fake_login(tempfile.mkdtemp(prefix="login-route-"))
+        self.r = fake_login(tmpdir(self, "login-route-"))
         self.patches = [
             mock.patch.object(self.hub, "LOGIN", self.r.login),
             mock.patch.object(self.hub, "MGR", types.SimpleNamespace(
@@ -321,7 +321,7 @@ class Route(unittest.TestCase):
 class Tick(unittest.TestCase):
     def test_T4_8_a_slow_status_never_slows_the_tick(self):
         import hub
-        tmp = Path(tempfile.mkdtemp(prefix="login-tick-"))
+        tmp = Path(tmpdir(self, "login-tick-"))
         calls = []
 
         def slow_status(c):
@@ -354,7 +354,7 @@ class FindsTheCli(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="login-bin-"))
+        self.tmp = Path(tmpdir(self, "login-bin-"))
         self.home = self.tmp / "home"
         (self.home / ".local/bin").mkdir(parents=True)
         self.onpath = self.tmp / "path"

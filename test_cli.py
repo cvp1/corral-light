@@ -10,10 +10,11 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
+
+from testkit.scratch import tmpdir
 
 ROOT = Path(__file__).resolve().parent
 FAKE = ROOT / "testkit" / "fake_acp_agent.py"
@@ -37,7 +38,7 @@ class HubCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from test_resilience import start_hub
-        cls.tmp = Path(tempfile.mkdtemp(prefix="corral-light-cli-"))
+        cls.tmp = Path(tmpdir(cls, "corral-light-cli-"))
         (cls.tmp / "agent").mkdir()
         cls.env = {**os.environ, "CORRAL_LIGHT_STATE": str(cls.tmp / "state"),
                    "CORRAL_LIGHT_ROLES_DIR": str(cls.tmp / "roles"),

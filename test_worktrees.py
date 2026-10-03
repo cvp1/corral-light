@@ -13,7 +13,6 @@ import signal
 import socketserver
 import stat
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -22,7 +21,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 # Before anything imports sessions (STATE binds at import time): never the live store.
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("corral-light-test-")
 FIXTURES = ROOT / "testkit" / "fixtures" / "merge-tree"
 
 # Isolate every git call in this suite from the user's config.
@@ -46,7 +46,7 @@ class GitCase(unittest.TestCase):
         self._env.start()
         self.addCleanup(self._env.stop)
         # realpath: on macOS mkdtemp answers /var/folders/..., a symlink into /private.
-        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="corral-wt-test-")))
+        self.tmp = Path(os.path.realpath(tmpdir(self, "corral-wt-test-")))
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         wt.git(["init", "-q", "-b", "main"], cwd=self.repo)

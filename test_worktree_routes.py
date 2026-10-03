@@ -11,13 +11,13 @@ import http.client
 import json
 import os
 import sys
-import tempfile
 import threading
 import unittest
 from pathlib import Path
 
 # Before anything imports sessions or hub (STATE binds at import): never the live store.
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="corral-light-wt-routes-"))
+from testkit.scratch import default_state  # noqa: E402
+default_state("corral-light-wt-routes-")
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 

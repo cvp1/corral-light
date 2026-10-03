@@ -11,13 +11,13 @@ import http.client
 import json
 import os
 import sys
-import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="light-seat-routes-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("light-seat-routes-")
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import sessions                                                   # noqa: E402
@@ -43,7 +43,7 @@ class Routes(unittest.TestCase):
         import hub
         from http.server import ThreadingHTTPServer
         cls.hub = hub
-        cls.root = Path(tempfile.mkdtemp(prefix="seat-routes-"))
+        cls.root = Path(tmpdir(cls, "seat-routes-"))
         (cls.root / "panes").mkdir()
         cls.patches = [mock.patch.object(m, "STATE", cls.root)
                        for m in (sessions, sessions._core)]

@@ -11,13 +11,13 @@ import http.client
 import json
 import os
 import sys
-import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="corral-light-seats-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("corral-light-seats-")
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -41,7 +41,7 @@ def disk_meta(root, pid):
 
 class SeatCase(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix="seat-state-"))
+        self.root = Path(tmpdir(self, "seat-state-"))
         (self.root / "panes").mkdir()
         # Both globals: the skin builds pane dirs from its own STATE, the core
         # scans open metas from the core's.
@@ -271,7 +271,7 @@ class TheRouteIsHumanOnly(unittest.TestCase):
         import hub
         from http.server import ThreadingHTTPServer
         cls.hub = hub
-        cls.root = Path(tempfile.mkdtemp(prefix="seat-route-"))
+        cls.root = Path(tmpdir(cls, "seat-route-"))
         (cls.root / "panes").mkdir()
         cls.patches = [mock.patch.object(m, "STATE", cls.root)
                        for m in (sessions, sessions._core)]

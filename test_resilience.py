@@ -8,14 +8,13 @@ import json
 import os
 import signal
 import sys
-import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("CORRAL_LIGHT_STATE",
-                      tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("corral-light-test-")
 
 ROOT = Path(__file__).resolve().parent
 FAKE = ROOT / "testkit" / "fake_acp_agent.py"
@@ -37,7 +36,7 @@ class FakeLaneCase(unittest.TestCase):
     def setUp(self):
         import sessions
         self.sessions = sessions
-        self.agent_dir = tempfile.mkdtemp(prefix="fake-acp-")
+        self.agent_dir = tmpdir(self, "fake-acp-")
         sessions.AGENTS["fake"] = {
             "label": "Fake", "argv": [sys.executable, str(FAKE)],
             "requires": (str(FAKE),), "posture_via_config_dir": False,
@@ -140,7 +139,7 @@ class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
         super().setUp()
         import subprocess
         self.subprocess = subprocess
-        self.state = Path(tempfile.mkdtemp(prefix="corral-light-restore-"))
+        self.state = Path(tmpdir(self, "corral-light-restore-"))
         self._real_state = self.sessions.STATE
         self.sessions.STATE = self.state
         self.addCleanup(setattr, self.sessions, "STATE", self._real_state)
@@ -290,7 +289,7 @@ class ShutdownWritesNotesNotPauses(FakeLaneCase):
 
     def test_a_real_hub_process_writes_the_note_on_sigterm_and_exits(self):
         import subprocess
-        state = tempfile.mkdtemp(prefix="corral-light-sigterm-")
+        state = tmpdir(self, "corral-light-sigterm-")
         env = {**os.environ, "CORRAL_LIGHT_STATE": state, "LIGHT_ROOT": str(ROOT),
                "FAKE": str(FAKE), "FAKE_ACP_DIR": self.agent_dir}
         pr = subprocess.Popen([sys.executable, "-c", HUB_SCRIPT], env=env,
@@ -436,7 +435,7 @@ class TheTurnLedger(FakeLaneCase):
         super().setUp()
         from corral_core import sessions as core
         self.core = core
-        self.state = Path(tempfile.mkdtemp(prefix="corral-light-ledger-"))
+        self.state = Path(tmpdir(self, "corral-light-ledger-"))
         for mod in (self.sessions, core):
             real = mod.STATE
             mod.STATE = self.state
@@ -581,7 +580,7 @@ class TheWatcherPagesAndNeverRestarts(unittest.TestCase):
     def setUp(self):
         import watch
         self.watch = watch
-        self.state = Path(tempfile.mkdtemp(prefix="corral-light-watch-"))
+        self.state = Path(tmpdir(self, "corral-light-watch-"))
         real = watch.STATE
         watch.STATE = self.state
         self.addCleanup(setattr, watch, "STATE", real)
