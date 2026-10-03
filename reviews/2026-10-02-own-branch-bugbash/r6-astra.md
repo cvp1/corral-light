@@ -1,0 +1,3 @@
+I’ll check the prior blockers and round 6 fixes, then run the isolated tests and targeted repros. I’ll keep all writes inside this seat and won’t contact the running hub or any remote.
+The new code addresses the three round 5 counterexamples, and the isolated suite is running. I’m checking nearby edge cases now: a drain waiting to dispatch when a hold starts, and repository config that changes Git’s destination without changing the displayed URL.
+You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 12:23 PM.

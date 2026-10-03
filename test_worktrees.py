@@ -3372,14 +3372,20 @@ class BugBash6Publish(PubCase):
         for key, value in (("core.sshCommand", "sh -c 'exit 1'"),
                            ("core.gitProxy", "evil-proxy"),
                            ("http.proxy", "http://127.0.0.1:9"),
-                           ("http.https://github.com/.sslVerify", "false")):
+                           ("http.https://github.com/.sslVerify", "false"),
+                           # Grok r6: maps the confirmed host to another address.
+                           ("http.curloptResolve", "confirmed.invalid:80:127.0.0.2"),
+                           ("http.http://confirmed.invalid/repo.git.curloptResolve",
+                            "confirmed.invalid:80:127.0.0.2"),
+                           ("http.followRedirects", "true"),
+                           ("ssh.variant", "simple")):
             with self.subTest(key=key):
                 wt.git(["config", key, value], cwd=self.repo)
                 try:
                     with self.assertRaises(wt.Refused) as cm:
                         self.push()
                     self.assertEqual(cm.exception.reason, "transport")
-                    self.assertIn(key.split(".")[-1].lower(), cm.exception.detail.lower())
+                    self.assertIn(key.rsplit(".", 1)[-1].lower(), cm.exception.detail.lower())
                 finally:
                     wt.git(["config", "--unset", key], cwd=self.repo)
         self.assertEqual(self.push()["pushed"], self.oid)     # nothing set: it pushes

@@ -2613,7 +2613,7 @@ class Manager(_core.ManagerBase):
         e = self.worktree_entry(p)
         if not e:
             raise ValueError("this pane is not on its own branch")
-        names = _wt.git(["remote"], cwd=e["path"]).text.split()
+        names = [n for n in _wt.git(["remote"], cwd=e["path"]).text.split("\n") if n]
         out = []
         for n in names:
             urls = _wt.push_urls(e, n)

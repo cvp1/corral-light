@@ -1409,7 +1409,7 @@ def rewrite_rule(entry, url):
     rr = git(["remote"], cwd=entry["path"], check=False)
     if rr.rc != 0 or rr.truncated:
         return "the configured remotes could not be listed"
-    names = rr.text.split("\n")            # names may hold any whitespace but newline
+    names = [n for n in rr.text.split("\n") if n]   # any whitespace but newline is a name
     if url in names:
         return f"it is the name of the remote {url!r}"
     if url and "/" not in url and os.sep not in url and any(
@@ -1423,10 +1423,10 @@ def rewrite_rule(entry, url):
     return None
 
 
-# Keys that change where or how a push travels without changing its URL.
-_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..*proxy|"
-                             r"http\..*sslverify|http\..*sslcainfo|http\..*sslcapath|"
-                             r"http\..*sslbackend|ssh\.variant)$", re.I)
+# Keys that can change where or how a push travels without changing its URL.
+# Whole sections, not a list of known keys: http.* alone has curloptResolve,
+# proxies, TLS and redirect settings, and a denylist of names kept missing one.
+_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..+|ssh\..+)$", re.I)
 
 
 def transport_override(entry):
