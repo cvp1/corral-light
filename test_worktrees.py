@@ -3663,5 +3663,131 @@ class BugBash9Publish(PubCase):
         self.assertIn(("ls-remote", self.e["common_dir"]), seen)
 
 
+
+# ── round 11 panel ────────────────────────────────────────────────────────────
+
+class BugBash10Library(CreateCase):
+
+    # Astra r11-1: a worktree-scoped core.worktree routed the pane's git to the
+    # main checkout while verify() still passed.
+    def test_BB10_1_a_redirected_work_tree_fails_verify(self):
+        e = self.make()
+        wt.git(["config", "extensions.worktreeConfig", "true"], cwd=self.repo)
+        wt.git(["config", "--worktree", "core.worktree", str(self.repo)], cwd=e["path"])
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        self.assertIsNotNone(m._worktree_blocked_reason(e))
+
+    # Astra r11-2: an index symlinked to the main checkout's index.
+    def test_BB10_2_an_index_outside_the_admin_dir_fails_verify(self):
+        e = self.make()
+        idx = Path(wt._index_path(e["path"]))
+        real = idx.with_name("index.saved")
+        os.replace(idx, real)
+        os.symlink(self.repo / ".git" / "index", idx)
+        self.addCleanup(lambda: (idx.unlink(), os.replace(real, idx)))
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+
+    def test_BB10_3_an_index_symlinked_inside_the_admin_dir_still_passes(self):
+        e = self.make()
+        idx = Path(wt._index_path(e["path"]))
+        real = idx.with_name("index.real")
+        os.replace(idx, real)
+        os.symlink(real, idx)
+        self.addCleanup(lambda: (idx.unlink(), os.replace(real, idx)))
+        wt.verify(e)
+
+
+class BugBash10Hub(CreateCase):
+
+    # Astra r11-3: a review action checked the gates before taking the pane's
+    # action lock, so an overlapping Commit could leave an op unknown first.
+    def test_BB10_10_review_rechecks_the_gates_after_taking_the_lock(self):
+        import sessions
+        import types
+        e = self.make()
+        p = types.SimpleNamespace(id="review", worktree_id=e["id"],
+                                  _action_lock=threading.Lock(), _turn_lock=threading.Lock(),
+                                  _turn_running=False, pending={}, state="ready", held=False,
+                                  dir=self.tmp / "pane")
+        p.dir.mkdir()
+        p.emit = lambda *a, **k: None
+        p.release_hold = lambda **k: setattr(p, "held", False)
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes, m._wt_registry, m._lock = {p.id: p}, self.reg, threading.Lock()
+        (Path(e["path"]) / "a.txt").write_text("reviewed change\n")
+        snap = wt.snapshot(e)
+        passed, go, results, errors = threading.Event(), threading.Event(), [], []
+        real_gate = m._worktree_blocked_reason
+
+        def delayed_gate(entry, *a, **k):
+            r = real_gate(entry, *a, **k)
+            if threading.current_thread().name == "delayed-review" and not passed.is_set():
+                passed.set()
+                go.wait(10)
+            return r
+        m._worktree_blocked_reason = delayed_gate
+
+        def review():
+            try:
+                results.append(m.worktree_snapshot(p.id))
+            except BaseException as err:              # noqa: BLE001
+                errors.append(err)
+        th = threading.Thread(target=review, name="delayed-review")
+        th.start()
+        try:
+            self.assertTrue(passed.wait(10))
+            with mock.patch.object(wt, "_replace_index",
+                                   side_effect=wt.Refused("busy", "injected")):
+                with self.assertRaises(wt.Refused):
+                    m.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "c")
+            self.assertEqual(self.reg.read(e["id"])["ops"][-1]["state"], "unknown")
+        finally:
+            go.set()
+            th.join(10)
+        self.assertEqual(results, [], "review ran while an op was unknown")
+        self.assertTrue(errors and isinstance(errors[0], wt.Refused), errors)
+
+
+
+class BugBash10Publish(PubCase):
+
+    # Grok r11: restart settled an interrupted push by ls-remote, which a
+    # url.*.insteadOf added since then sends to a decoy holding the oid.
+    def test_BB10_20_restart_does_not_settle_a_push_through_a_rewrite(self):
+        decoy = self.tmp / "decoy.git"
+        wt.git(["clone", "-q", "--bare", str(self.repo), str(decoy)], cwd=self.tmp)
+        wt.git(["push", "-q", str(decoy), f"{self.oid}:{self.e['branch']}"], cwd=self.e["path"])
+        op = self.reg.begin_op(self.e["id"], "push", url=self.url, ref=self.e["branch"],
+                               oid=self.oid)
+        wt.git(["config", f"url.{decoy}.insteadOf", self.url], cwd=self.repo)
+        note = wt.resolve_op(self.reg.read(self.e["id"]),
+                             [o for o in self.reg.read(self.e["id"])["ops"]
+                              if o["op_id"] == op][0], self.reg)
+        got = [o for o in self.reg.read(self.e["id"])["ops"] if o["op_id"] == op][0]
+        self.assertEqual(got["state"], "unknown", note)
+        self.assertNotIn("url", self.reg.read(self.e["id"]).get("published") or {})
+
+    # Grok r11: a push that timed out stayed `intent` until a restart.
+    def test_BB10_21_a_push_that_times_out_is_unknown(self):
+        real = wt.git
+
+        def git(args, *a, **k):
+            if args[:1] == ["push"]:
+                raise wt.GitTimeout(["git", "push"], 120)
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", git):
+            with self.assertRaises(wt.Refused) as cm:
+                self.push()
+        self.assertEqual(cm.exception.reason, "unknown")
+        op = [o for o in self.reg.read(self.e["id"])["ops"] if o["op"] == "push"][-1]
+        self.assertEqual(op["state"], "unknown")
+
+
 if __name__ == "__main__":
     unittest.main()

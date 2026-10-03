@@ -922,6 +922,23 @@ def verify(entry):
         raise IdentityError("tampered", f"{p} now belongs to the repository at "
                                         f"{actual or 'an unreadable location'}, not "
                                         f"{entry['common_dir']}")
+    # What git will actually use from here: the work tree (core.worktree in a
+    # worktree config can move it), the git dir, and the index (a symlink can
+    # move it). Each must be this worktree's own, or the agent's ordinary git
+    # commands would write somewhere else, such as the main checkout.
+    lay = git(["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-path", "index"],
+              cwd=p, check=False)
+    parts = lay.text.splitlines() if lay.rc == 0 else []
+    if len(parts) < 3:
+        raise IdentityError("tampered", f"git cannot describe {p}'s layout")
+    top, gdir, index = (os.path.realpath(os.path.join(p, x)) for x in parts[:3])
+    if top != os.path.realpath(p):
+        raise IdentityError("tampered", f"git's work tree for {p} is now {top}")
+    if gdir != want_admin:
+        raise IdentityError("tampered", f"git's directory for {p} is now {gdir}")
+    if not index.startswith(want_admin + os.sep):
+        raise IdentityError("tampered", f"{p}'s index now resolves to {index}, outside "
+                                        f"its own admin dir")
     if os.path.realpath(p) not in _registered_paths(entry):
         raise IdentityError("missing", f"git no longer lists {p} as a worktree")
     sym = git(["symbolic-ref", "-q", "HEAD"], cwd=p, check=False)
@@ -1613,8 +1630,14 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     ref = entry["branch"]
     op = registry.begin_op(entry["id"], "push", url=push_url, ref=ref, oid=oid)
     _crash_point("push:before")
-    r = _repo_git(entry, ["push", "--porcelain", "--", push_url, f"{oid}:{ref}"], check=False,
-            timeout=PUSH_TIMEOUT_S)
+    try:
+        r = _repo_git(entry, ["push", "--porcelain", "--", push_url, f"{oid}:{ref}"],
+                      check=False, timeout=PUSH_TIMEOUT_S)
+    except GitError as err:                 # timed out (a hook, a slow remote): may have pushed
+        registry.set_op(entry["id"], op, state="unknown", stage="push_failed",
+                        error=str(err)[:ERR_SNIPPET])
+        raise Refused("unknown", f"the push did not finish ({err}), so whether the remote has "
+                                 "it is not known; resolve it with `corral-light worktrees`") from None
     _crash_point("push:after")
     if r.rc != 0:
         registry.set_op(entry["id"], op, state="done", stage="refused")
@@ -1623,8 +1646,14 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
             raise Refused("non_ff", "the remote branch has commits this one does not; "
                                     "it was not overwritten")
         raise GitError(["git", "push"], r.rc, r.err_text)
-    there = _repo_git(entry, ["ls-remote", "--", push_url, ref],
-                      timeout=PUSH_TIMEOUT_S).text.split()
+    try:
+        there = _repo_git(entry, ["ls-remote", "--", push_url, ref],
+                          timeout=PUSH_TIMEOUT_S).text.split()
+    except GitError as err:                 # the push ran: never leave it `intent`
+        registry.set_op(entry["id"], op, state="unknown", stage="check_failed",
+                        error=str(err)[:ERR_SNIPPET])
+        raise Refused("unknown", f"the push ran but the remote could not be checked ({err}); "
+                                 "resolve it with `corral-light worktrees`") from None
     try:
         same_cfg = config_fingerprint(entry) == cfg_before
     except Refused:
@@ -2130,6 +2159,16 @@ def resolve_op(entry, op, registry):
         if is_relative_local_url(op.get("url") or ""):
             return unknown("push interrupted; its URL is a relative path, so the remote "
                            "cannot be checked unambiguously, outcome unknown")
+        # The same destination checks Publish ran: a rewrite or transport rule
+        # (added since, perhaps) would point this check at another repository.
+        try:
+            why = rewrite_rule(entry, op["url"]) or transport_override(entry)
+        except (Refused, GitError, OSError) as err:
+            why = str(err)
+        if why:
+            return unknown(f"push interrupted; the repository's git config now changes where "
+                           f"{op['url']} goes ({why}), so the remote cannot be checked, "
+                           "outcome unknown")
         r = _repo_git(entry, ["ls-remote", "--", op["url"], op["ref"]],
                       check=False, timeout=PUSH_TIMEOUT_S)
         if r.rc != 0:
