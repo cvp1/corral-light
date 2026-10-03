@@ -804,7 +804,13 @@ class Pane(_core.PaneBase):
         """Name, in the ledger and a note, what a review action's hold parked.
 
         `live`: the agent is alive and idle, so its attachment was left as it
-        is (its events and permission cards keep arriving)."""
+        is (its events and permission cards keep arriving). A parked message
+        from another pane tells its sender at once, not at its wait's timeout."""
+        for t in parked:
+            if getattr(t, "peer", False):
+                self.emit("peer_result", {"turn": getattr(t, "turn", None), "delivered": False,
+                                          "reason": "parked: a review action held the pane"},
+                          activity=False)
         if not live:
             for t in parked:
                 self._turns().mark(getattr(t, "turn", None), "interrupted",
@@ -1473,16 +1479,24 @@ class Pane(_core.PaneBase):
             return tid
 
     def _drain(self):
-        """Run queued prompts strictly in order until the pane is empty."""
+        """Run queued prompts strictly in order until the pane is empty.
+
+        Bound to the attachment it started on: once /clear, resume or pause
+        retires it (a new generation), it touches nothing and sends nothing,
+        and it never sends while a review action holds the pane."""
+        with self._turn_lock:
+            born = self._generation
         while True:
             with self._turn_lock:
+                if self._generation != born:
+                    return              # retired: a newer attachment owns the pane
                 # Read the client inside the lock: pause() can set it to None concurrently.
                 client = self.client
-                gen = self._generation
+                gen = born
                 # Re-admit replies held behind the turn that just ended.
                 self._release_held_peers_locked()
-                if not self._queue or self.state == "dead" or client is None:
-                    self._turn_running = False
+                if self.held or not self._queue or self.state == "dead" or client is None:
+                    self._turn_running = False   # a hold's release restarts the drain
                     return
                 text = self._queue.pop(0)
                 # Re-check for a pending card: a peer turn never runs while one is open.
@@ -1495,6 +1509,15 @@ class Pane(_core.PaneBase):
             tid = getattr(text, "turn", None)
             if self.worktree_id and self._refuse_queued_into_blocked_branch(text, gen, lg):
                 return
+            with self._turn_lock:
+                # The gate ran git outside the lock: check nothing moved meanwhile.
+                if self._generation != gen:
+                    return              # /clear or pause already accounted for it
+                if self.held:
+                    self._queue.insert(0, text)
+                    self._in_flight = None
+                    self._turn_running = False
+                    return
             lg.mark(tid, "dispatched")
             try:
                 r = client.prompt(self.acp_session, text)

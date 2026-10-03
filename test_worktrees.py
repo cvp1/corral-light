@@ -3284,5 +3284,113 @@ class BugBash5Publish(PubCase):
         self.assertEqual(cm.exception.reason, "rewrite")
 
 
+
+# ── round 5 panel ─────────────────────────────────────────────────────────────
+
+class BugBash6Hub(LifecycleCase):
+
+    # Astra r5-1: a drain retired by /clear picked up the new generation and
+    # dispatched type-ahead while a review action held the pane.
+    def test_BB6_1_a_retired_drain_never_dispatches_during_a_hold(self):
+        p = self.pane()
+        at_tail, release_tail = threading.Event(), threading.Event()
+        in_review, release_review = threading.Event(), threading.Event()
+        tail, snap_real, calls, errs = self.mgr.worktree_turn_ended, wt.snapshot, [], []
+
+        def slow_tail(pane):
+            calls.append(1)
+            if len(calls) == 1:
+                at_tail.set()
+                release_tail.wait(10)
+            return tail(pane)
+
+        def slow_snapshot(*a, **k):
+            in_review.set()
+            release_review.wait(10)
+            return snap_real(*a, **k)
+
+        def review():
+            try:
+                self.mgr.worktree_snapshot(p.id)
+            except BaseException as err:              # noqa: BLE001
+                errs.append(err)
+        target = Path(self.entry(p)["path"]) / "during-review.txt"
+        with mock.patch.object(self.mgr, "worktree_turn_ended", slow_tail):
+            p.send("pwd")
+            self.assertTrue(at_tail.wait(10))
+            p.send("/clear")
+            with mock.patch.object(wt, "snapshot", slow_snapshot):
+                th = threading.Thread(target=review)
+                th.start()
+                try:
+                    self.assertTrue(in_review.wait(10))
+                    self.assertTrue(p.held)
+                    p.send("write during-review.txt queued behind the hold")
+                    release_tail.set()
+                    time.sleep(1.5)
+                    self.assertFalse(target.exists(), "a retired drain dispatched during the hold")
+                finally:
+                    release_tail.set()
+                    release_review.set()
+                    th.join(10)
+        self.assertEqual(errs, [])
+        self.assertTrue(wait_for(target.exists, timeout=10),
+                        "the queued message never ran after the hold ended")
+
+    # Gemini r5: a parked peer message never told its sender.
+    def test_BB6_2_a_parked_peer_message_reports_not_delivered(self):
+        import sessions
+        p = self.pane()
+        item = sessions._core.QueuedText("from another pane", "t-peer-1")
+        item.peer = True
+        p._report_parked([item], live=True)
+        res = [e["data"] for e in p.events if e["kind"] == "peer_result"]
+        self.assertTrue(any(r.get("turn") == "t-peer-1" and r.get("delivered") is False
+                            for r in res), res)
+
+
+class BugBash6Publish(PubCase):
+
+    # Astra r5-2: a remote name with a non-breaking space escaped str.split().
+    def test_BB6_10_a_remote_name_with_unicode_space_is_refused(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        name = "release mirror"
+        wt.git(["remote", "set-url", "origin", name], cwd=self.repo)
+        wt.git(["remote", "add", name, name], cwd=self.repo)
+        wt.git(["remote", "set-url", "--push", name, str(other)], cwd=self.repo)
+        url = wt.push_urls(self.e, "origin")[0]
+        self.assertEqual(url, name)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=url)
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    # Grok r5-1: a repo-local core.sshCommand (or proxy, or TLS override) sends
+    # the push, and its check, somewhere the user did not confirm.
+    def test_BB6_11_repo_local_transport_overrides_are_refused(self):
+        for key, value in (("core.sshCommand", "sh -c 'exit 1'"),
+                           ("core.gitProxy", "evil-proxy"),
+                           ("http.proxy", "http://127.0.0.1:9"),
+                           ("http.https://github.com/.sslVerify", "false")):
+            with self.subTest(key=key):
+                wt.git(["config", key, value], cwd=self.repo)
+                try:
+                    with self.assertRaises(wt.Refused) as cm:
+                        self.push()
+                    self.assertEqual(cm.exception.reason, "transport")
+                    self.assertIn(key.split(".")[-1].lower(), cm.exception.detail.lower())
+                finally:
+                    wt.git(["config", "--unset", key], cwd=self.repo)
+        self.assertEqual(self.push()["pushed"], self.oid)     # nothing set: it pushes
+
+    def test_BB6_12_a_worktree_scoped_override_counts_too(self):
+        wt.git(["config", "extensions.worktreeConfig", "true"], cwd=self.repo)
+        wt.git(["config", "--worktree", "core.sshCommand", "evil"], cwd=self.e["path"])
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "transport")
+
+
 if __name__ == "__main__":
     unittest.main()
