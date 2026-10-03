@@ -3547,5 +3547,121 @@ class BugBash8Publish(PubCase):
             self.push()
 
 
+
+# ── round 10 panel ────────────────────────────────────────────────────────────
+
+def _bounded(test, fn, seconds=10):
+    """Run fn in a thread; fail (not hang) if it does not return in time."""
+    box = {}
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as err:                  # noqa: BLE001
+            box["error"] = err
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(seconds)
+    test.assertFalse(th.is_alive(), "blocked reading a file the agent controls")
+    return box
+
+
+class BugBash9Library(CreateCase):
+
+    # Astra r10: verify() read the worktree's .git with a plain Python read; a
+    # fifo there blocked it forever (and with it a resume holding the lock).
+    def _fifo(self, path):
+        path = Path(path)
+        old = path.read_bytes() if path.exists() else None
+        path.unlink(missing_ok=True)
+        os.mkfifo(path)
+
+        def restore():
+            path.unlink(missing_ok=True)
+            if old is not None:
+                path.write_bytes(old)
+        self.addCleanup(restore)
+
+    def test_BB9_1_a_fifo_dotgit_fails_verify_without_blocking(self):
+        e = self.make()
+        self._fifo(Path(e["path"]) / ".git")
+        box = _bounded(self, lambda: wt.verify(e))
+        self.assertIsInstance(box.get("error"), wt.IdentityError)
+
+    def test_BB9_2_a_fifo_index_refuses_snapshot_without_blocking(self):
+        e = self.make()
+        self._fifo(wt._index_path(e["path"]))
+        box = _bounded(self, lambda: wt.snapshot(e))
+        self.assertIsInstance(box.get("error"), wt.Refused)
+
+    def test_BB9_3_an_index_symlinked_to_a_fifo_is_refused_without_blocking(self):
+        # git resolves a symlinked index itself, so a link to a regular file
+        # is read the same by git and by the hub; a link to a fifo is the hazard.
+        e = self.make()
+        idx = Path(wt._index_path(e["path"]))
+        real = idx.with_name("index.real")
+        fifo = self.tmp / "index.fifo"
+        os.replace(idx, real)
+        os.mkfifo(fifo)
+        os.symlink(fifo, idx)
+        self.addCleanup(lambda: (idx.unlink(), os.replace(real, idx)))
+        box = _bounded(self, lambda: wt.snapshot(e))
+        self.assertIsInstance(box.get("error"), (wt.Refused, wt.GitError))
+
+class BugBash9Hub(LifecycleCase):
+
+    def test_BB9_10_resume_with_a_fifo_dotgit_refuses_and_releases_the_lock(self):
+        p = self.pane()
+        p.pause()
+        dotgit = Path(self.entry(p)["path"]) / ".git"
+        old = dotgit.read_bytes()
+        dotgit.unlink()
+        os.mkfifo(dotgit)
+        self.addCleanup(lambda: (dotgit.unlink(), dotgit.write_bytes(old)))
+        box = _bounded(self, p.resume)
+        self.assertIsInstance(box.get("error"), ValueError)
+        self.assertFalse(p._action_lock.locked(), "resume left the action lock held")
+
+
+
+class BugBash9Publish(PubCase):
+
+    # Grok r10: a relative push URL resolves against git's cwd, which is not
+    # the folder the user meant; a decoy there received the push.
+    def test_BB9_20_a_relative_local_push_url_is_refused(self):
+        decoy = Path(self.e["common_dir"]) / "proj.git"
+        wt.git(["init", "-q", "--bare", str(decoy)], cwd=self.tmp)
+        for rel in ("../proj.git", "proj.git", "./x/../proj.git"):
+            with self.subTest(url=rel):
+                wt.git(["remote", "set-url", "origin", rel], cwd=self.repo)
+                with self.assertRaises(wt.Refused) as cm:
+                    self.push(push_url=rel)
+                self.assertEqual(cm.exception.reason, "relative")
+        self.assertEqual(wt.git(["ls-remote", str(decoy)], cwd=self.tmp).text.strip(), "")
+
+    def test_BB9_21_absolute_paths_and_urls_are_not_relative(self):
+        for url in ("/srv/git/r.git", "file:///srv/git/r.git", "https://github.com/o/r.git",
+                    "ssh://git@host/r.git", "git@github.com:o/r.git", "host:path/r.git"):
+            with self.subTest(url=url):
+                self.assertFalse(wt.is_relative_local_url(url))
+        for url in ("../r.git", "r.git", "./r", "sub/dir/r.git", "./a:b"):
+            with self.subTest(url=url):
+                self.assertTrue(wt.is_relative_local_url(url))
+
+    def test_BB9_22_restart_checks_an_interrupted_push_from_the_repository(self):
+        real, seen = wt.git, []
+
+        def spy(args, *a, **k):
+            seen.append((args[0], (k.get("env_extra") or {}).get("GIT_DIR")))
+            return real(args, *a, **k)
+        op = self.reg.begin_op(self.e["id"], "push", url=self.url, ref=self.e["branch"],
+                               oid=self.oid)
+        with mock.patch.object(wt, "git", spy):
+            wt.resolve_op(self.reg.read(self.e["id"]),
+                          [o for o in self.reg.read(self.e["id"])["ops"] if o["op_id"] == op][0],
+                          self.reg)
+        self.assertIn(("ls-remote", self.e["common_dir"]), seen)
+
+
 if __name__ == "__main__":
     unittest.main()

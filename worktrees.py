@@ -745,7 +745,7 @@ class Refused(Exception):
     """An action refused for a machine-readable `reason` (a route answers 409 with it).
 
     Reasons: busy, changed, identity, missing, tampered, signing, uncommitted,
-    remote_changed, non_ff, unknown.
+    remote_changed, rewrite, transport, relative, non_ff, unknown.
     """
 
     def __init__(self, reason, detail):
@@ -908,7 +908,7 @@ def verify(entry):
         raise IdentityError("tampered", f"{p} resolves outside {root}")
     want_admin = os.path.realpath(Path(entry["common_dir"]) / "worktrees" / entry["admin_name"])
     try:
-        dotgit = Path(p, ".git").read_text(encoding="utf-8").strip()
+        dotgit = read_regular(os.path.join(p, ".git")).decode("utf-8", "replace").strip()
     except OSError:
         raise IdentityError("tampered", f"{p}/.git is not a worktree link") from None
     if not dotgit.startswith("gitdir: ") or os.path.realpath(
@@ -1064,7 +1064,7 @@ def _snapshot_locked(entry, tmp_dir=None, pin=True):
     p = entry["path"]
     idx = _index_path(p)
     try:
-        real = Path(idx).read_bytes()
+        real = _read_index(idx)
         idx_mtime = os.stat(idx).st_mtime_ns
     except FileNotFoundError:
         real, idx_mtime = b"", None
@@ -1247,10 +1247,41 @@ def _tree_of_index(p, content, tmp_dir):
         return git(["write-tree"], cwd=p, env_extra={"GIT_INDEX_FILE": tmp}).text.strip()
 
 
+def read_regular(path):
+    """Bytes of `path`, which must be a regular file reached without a symlink.
+
+    For every file an agent can replace (the worktree's .git file, its index,
+    the repository's config): a fifo would block a plain read forever (and a
+    review action or resume holding the pane's lock with it), and a symlink
+    could point anywhere. Opened non-blocking and without following links,
+    then checked on the open descriptor. FileNotFoundError passes through."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise IdentityError("tampered", f"{path} is not a regular file")
+        os.set_blocking(fd, True)
+        with os.fdopen(fd, "rb") as f:
+            fd = None
+            return f.read()
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _read_index(idx):
+    """read_regular() for the index, mapping a symlink (ELOOP) to IdentityError."""
+    try:
+        return read_regular(idx)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise IdentityError("tampered", f"{idx} cannot be read as a plain file: {e}") from None
+
+
 def _index_id(idx):
     """The identity snapshot() records: sha256 of the index bytes (none: of b"")."""
     try:
-        return hashlib.sha256(Path(idx).read_bytes()).hexdigest()
+        return hashlib.sha256(_read_index(idx)).hexdigest()
     except FileNotFoundError:
         return hashlib.sha256(b"").hexdigest()
 
@@ -1292,7 +1323,7 @@ def _reconcile_index(p, new, tmp_dir, expect_id=None):
     if expect_id is not None and _index_id(idx) != expect_id:
         raise Refused("changed", "something was staged in the worktree since review; "
                                  "the index was left as it is")
-    with _temp_index(tmp_dir, Path(idx).read_bytes(), os.stat(idx).st_mtime_ns) as tmp:
+    with _temp_index(tmp_dir, _read_index(idx), os.stat(idx).st_mtime_ns) as tmp:
         env = {"GIT_INDEX_FILE": tmp}
         git(["read-tree", new], cwd=p, env_extra=env, timeout=COMMIT_TIMEOUT_S)
         git(["update-index", "-q", "--refresh"], cwd=p, env_extra=env, check=False,
@@ -1342,7 +1373,7 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
             return {"commit": None, "noop": True, "recovery_refs": []}
         recovery = []
         if now["staged_differs"]:
-            staged_tree = _tree_of_index(p, Path(idx).read_bytes(), tmp_dir)
+            staged_tree = _tree_of_index(p, _read_index(idx), tmp_dir)
             keep = git(["commit-tree", staged_tree, "-p", expect_head], cwd=p,
                        input=b"corral: staged content kept before hub commit\n").text.strip()
             ref = f"{RECOVERY_REF}{entry['id']}/{_ts()}-index"
@@ -1372,7 +1403,7 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
         _crash_point("commit:index")
         try:
             ok = (git(["rev-parse", entry["branch"]], cwd=p).text.strip() == new
-                  and _tree_of_index(p, Path(idx).read_bytes(), tmp_dir) == tree)
+                  and _tree_of_index(p, _read_index(idx), tmp_dir) == tree)
         except Exception as err:            # noqa: BLE001 — the ref moved: never `intent`
             registry.set_op(entry["id"], op, state="unknown", error=str(err)[:ERR_SNIPPET])
             raise Refused("unknown", f"the commit is on the branch but checking it failed "
@@ -1407,6 +1438,20 @@ def push_urls(entry, remote):
     """Where `git push <remote>` would really go: pushurl and pushInsteadOf applied."""
     r = _repo_git(entry, ["remote", "get-url", "--push", "--all", "--", remote])
     return [u for u in r.text.splitlines() if u]
+
+
+def is_relative_local_url(url):
+    """True for a push URL git would read as a local path relative to its cwd.
+
+    git's rules: "scheme://" is a URL; "host:path" with no "/" before the
+    first ":" is scp-style ssh; anything else is a local path. A relative
+    one names a different repository depending on where git runs."""
+    if "://" in url:
+        return False
+    head, colon, _ = url.partition(":")
+    if colon and "/" not in head:
+        return False                        # scp-like: [user@]host:path
+    return not os.path.isabs(url)
 
 
 def rewrite_rule(entry, url):
@@ -1467,17 +1512,17 @@ def config_fingerprint(entry):
     for f in (Path(entry["common_dir"]) / "config", Path(entry["common_dir"]) / "config.worktree",
               Path(_admin_dir(entry)) / "config.worktree", *sorted(must)):
         try:
-            st = os.lstat(f)
+            data = read_regular(f)
         except FileNotFoundError:
             if f in must:
                 raise Refused("transport", f"{f} is missing, so which repository this "
                                            "worktree belongs to cannot be checked") from None
             out.append((str(f), None))
             continue
-        if not stat.S_ISREG(st.st_mode):
+        except (IdentityError, OSError):
             raise Refused("transport", f"{f} is not a regular file, so git may read "
-                                       "something different each time; nothing was pushed")
-        out.append((str(f), hashlib.sha256(Path(f).read_bytes()).hexdigest()))
+                                       "something different each time; nothing was pushed") from None
+        out.append((str(f), hashlib.sha256(data).hexdigest()))
     return tuple(out)
 
 
@@ -1555,6 +1600,10 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     if rule:
         raise Refused("rewrite", f"git would rewrite {push_url} again ({rule}), so the push "
                                  "would not go where you confirmed; nothing was pushed")
+    if is_relative_local_url(push_url):
+        raise Refused("relative", f"{push_url} is a relative path, which names a different "
+                                  "repository depending on where git runs; set the remote "
+                                  "to an absolute path or a URL, then publish again")
     over = transport_override(entry)
     if over:
         raise Refused("transport", f"this repository's own git config changes how pushes "
@@ -2057,7 +2106,7 @@ def resolve_op(entry, op, registry):
             tip = new
         if tip == new and new:
             idx = _index_path(p)
-            if _tree_of_index(p, Path(idx).read_bytes(), tmp) != op.get("tree"):
+            if _tree_of_index(p, _read_index(idx), tmp) != op.get("tree"):
                 if not op.get("index_id"):
                     # Journalled before the index identity existed: nothing can
                     # tell staged work apart from the review, so touch nothing.
@@ -2072,14 +2121,17 @@ def resolve_op(entry, op, registry):
                 except Refused as err:
                     return unknown(f"commit interrupted; the branch has it but the index "
                                    f"was not updated ({err.detail}), outcome unknown")
-            if _tree_of_index(p, Path(idx).read_bytes(), tmp) == op.get("tree"):
+            if _tree_of_index(p, _read_index(idx), tmp) == op.get("tree"):
                 registry.finish_op(wid, op["op_id"], {"state": "done", "stage": "done"},
                                    last_commit=new)
                 return "commit interrupted by a restart; finished it (outcome checked after restart)"
         return unknown("commit interrupted; branch and journal disagree, outcome unknown")
     if kind == "push":
-        r = git(["ls-remote", "--", op["url"], op["ref"]], cwd=entry["common_dir"],
-                check=False, timeout=PUSH_TIMEOUT_S)
+        if is_relative_local_url(op.get("url") or ""):
+            return unknown("push interrupted; its URL is a relative path, so the remote "
+                           "cannot be checked unambiguously, outcome unknown")
+        r = _repo_git(entry, ["ls-remote", "--", op["url"], op["ref"]],
+                      check=False, timeout=PUSH_TIMEOUT_S)
         if r.rc != 0:
             # Could not ask the remote: that is not "it did not happen".
             return unknown("push interrupted; the remote could not be checked, outcome unknown")
