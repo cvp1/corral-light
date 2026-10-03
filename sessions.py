@@ -1731,6 +1731,107 @@ MODEL_EXTRAS = {}
 
 
 
+# ── one hub per state dir ─────────────────────────────────────────────────
+# restore() reaps every adapter whose pgid is on disk. Run by a second process
+# on a state dir a live hub owns, that kills the live hub's agents, so restore()
+# first claims the dir: an exclusive lock held for the process's lifetime, plus
+# hub.pid, which also covers a running hub that predates the lock.
+HUB_LOCK_WAIT_S = 10       # a restarting hub may briefly overlap its predecessor
+
+
+class StateInUse(RuntimeError):
+    """Another live hub owns this state dir; nothing was signalled."""
+
+
+_CLAIMED = {}              # resolved state dir -> the open, locked hub.lock
+_CLAIM_GUARD = threading.Lock()
+
+
+def _forget_claims_in_child():
+    """A forked child is a different process: it must claim for itself, and
+    its own flock on hub.lock then conflicts with the parent's."""
+    global _CLAIM_GUARD
+    _CLAIM_GUARD = threading.Lock()         # another thread may have held it
+    _CLAIMED.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_claims_in_child)
+
+
+def _other_live_hub(state):
+    """The pid hub.pid names when it is alive and not this process, else None."""
+    try:
+        rec = json.loads((state / "hub.pid").read_text(encoding="utf-8"))
+        pid = int(rec["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if pid == os.getpid() or pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass                                    # exists, not ours to signal
+    except OSError:
+        return None
+    now = acp.process_start_token(pid)
+    if now is None:
+        return None                             # gone between the two checks
+    want = rec.get("start")
+    if want and now != want:
+        return None                             # the pid was reused
+    return pid
+
+
+def claim_state(state=None, wait=None):
+    """Make this process the only hub on `state`, or raise StateInUse.
+
+    Idempotent within a process. The lock is released when the process exits,
+    however it exits, so a crashed hub never blocks its successor.
+    """
+    state = Path(state if state is not None else STATE)
+    wait = HUB_LOCK_WAIT_S if wait is None else wait
+    try:
+        import fcntl
+    except ImportError:                         # no flock: hub.pid alone
+        fcntl = None
+    with _CLAIM_GUARD:
+        state.mkdir(parents=True, exist_ok=True)
+        key = str(state.resolve())
+        if _CLAIMED.get(key, (None,))[0] == os.getpid():
+            return
+        f = open(state / "hub.lock", "a+", encoding="utf-8")
+        deadline = time.monotonic() + max(0.0, wait)
+        try:
+            while True:
+                held = True
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        held = False
+                other = _other_live_hub(state) if held else None
+                if held and other is None:
+                    _CLAIMED[key] = (os.getpid(), f)
+                    return
+                if held and fcntl is not None:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+                if time.monotonic() >= deadline:
+                    who = (f"a running hub (pid {other})" if other is not None
+                           else f"another process (it holds {state / 'hub.lock'})")
+                    raise StateInUse(
+                        f"corral-light: {state} belongs to {who}; starting a "
+                        f"second Manager there would stop that hub's agents, so "
+                        f"nothing was touched. Point CORRAL_LIGHT_STATE (and "
+                        f"CORRAL_LIGHT_WORKTREES) at a private dir.")
+                time.sleep(0.1)
+        except BaseException:
+            f.close()
+            raise
+
+
 def _clear_pid_record(pane_dir):
     """Null the pid fields in a meta.json, touching nothing else (atomic).
 
@@ -2024,6 +2125,7 @@ class Manager(_core.ManagerBase):
         Restored panes are `detached` (no process until wanted); MAX_PANES caps
         live processes on resume.
         """
+        claim_state()              # before anything is read, written or signalled
         root = STATE / "panes"
         if not root.is_dir():
             return
