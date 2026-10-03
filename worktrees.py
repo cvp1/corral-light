@@ -188,6 +188,16 @@ def _iso_log(cwd):
             f.write(os.path.realpath(str(cwd)) + "\n")
 
 
+def _feed(stdin, data):
+    try:
+        stdin.write(data)
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+    finally:
+        with contextlib.suppress(BrokenPipeError, ValueError, OSError):
+            stdin.close()
+
+
 def _run(cmd, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OUT,
          env_extra=None, input=None, optional_locks_off=False):
     """The process runner behind git() (and gh): see git()."""
@@ -199,27 +209,25 @@ def _run(cmd, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OU
     out, err = [], []
     readers = [threading.Thread(target=_drain, args=(proc.stdout, max_out, out), daemon=True),
                threading.Thread(target=_drain, args=(proc.stderr, max_out, err), daemon=True)]
+    if input is not None:
+        # In a thread: a child that never reads must not stall us past the deadline.
+        readers.append(threading.Thread(target=_feed, args=(proc.stdin, input), daemon=True))
     for t in readers:
         t.start()
-    if input is not None:
-        try:
-            proc.stdin.write(input)
-        except BrokenPipeError:
-            pass
-        finally:
-            try:
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
+    # One deadline for everything: a child that exits while a grandchild
+    # (a hook's helper) keeps the pipes open must not outlive the timeout.
+    deadline = time.monotonic() + timeout
     try:
-        rc = proc.wait(timeout=timeout)
+        rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        for t in readers:
+            t.join(max(0.0, deadline - time.monotonic()))
+        if any(t.is_alive() for t in readers):
+            raise subprocess.TimeoutExpired(cmd, timeout)
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         for t in readers:
             t.join(KILL_GRACE_S)
         raise GitTimeout(cmd, timeout) from None
-    for t in readers:
-        t.join()
     res = GitResult(rc, out[0], err[0], out[1] or err[1])
     if check and rc != 0:
         raise GitError(cmd, rc, res.err_text)
@@ -803,6 +811,20 @@ def agent_cwd(entry):
     return Path(entry["path"]) / (entry.get("subdir") or "")
 
 
+def check_agent_cwd(entry):
+    """Refuse if the agent's folder resolves outside its worktree.
+
+    A subdir that is a committed symlink (replaced by a real folder only in
+    the main checkout) passes probe, and the new checkout restores the link.
+    Checked before every start, resume and dispatch, on the live disk."""
+    root = os.path.realpath(entry["path"])
+    real = os.path.realpath(agent_cwd(entry))
+    if real != root and not real.startswith(root + os.sep):
+        raise Refused("identity", f"this pane's folder {agent_cwd(entry)} resolves to {real}, "
+                                  "outside its own branch; the agent was not started")
+    return real
+
+
 def create(pr, title, owner_pane, registry=None):
     """Register intent, then `git worktree add -b corral/<slug>` under the root.
 
@@ -965,7 +987,9 @@ SNAPSHOT_TIMEOUT_S = 60
 SNAP_UNTRACKED_MAX = 512 << 10     # untracked files larger than this are named, not added
 BLOB_MAX = 512 << 10               # files larger than this are listed without hunks
 DIFF_FILE_MAX = 256 << 10          # patch bytes per file
-DIFF_TOTAL_MAX = 1536 << 10        # patch bytes per response (JSON stays under 2 MiB)
+DIFF_TOTAL_MAX = 1536 << 10        # JSON-encoded patch bytes per response
+DIFF_JSON_MAX = 2 << 20            # what diff() may encode to, metadata included
+REVIEW_JSON_MAX = 2 << 20          # the whole review response (hub.py caps bodies by this)
 DIFF_MAX_PATCHED_FILES = 400
 IGNORED_SAMPLE = 20
 REVIEW_REF = "refs/corral/review/"
@@ -1143,15 +1167,46 @@ def diff(entry, tree):
                 args = [a for a in _diff_tree_args("-p", "--no-color", "--src-prefix=a/",
                                                     "--dst-prefix=b/", base, tree, "--",
                                                     *sorted(spec)) if a != "-z"]
-                pr = git(args, cwd=p, max_out=min(DIFF_FILE_MAX, budget))
+                pr = git(args, cwd=p, max_out=min(DIFF_FILE_MAX, max(budget, 1)))
                 patched += 1
-                if pr.truncated:
-                    truncated = True
+                text = None if pr.truncated else pr.out.decode("utf-8", "replace")
+                cost = len(json.dumps(text)) if text is not None else 0
+                if text is None or cost > budget:
+                    truncated = True        # escaping can triple Unicode; charge what is sent
                 else:
-                    f["patch"] = pr.out.decode("utf-8", "replace")
-                    budget -= len(pr.out)
+                    f["patch"] = text
+                    budget -= cost
         files.append(f)
-    return {"base": base, "tree": tree, "files": files, "truncated": truncated}
+    return fit_review({"base": base, "tree": tree, "files": files, "truncated": truncated},
+                      limit=DIFF_JSON_MAX, at=None)
+
+
+def fit_review(obj, limit=REVIEW_JSON_MAX, at="diff"):
+    """Shrink a review until json.dumps() of it fits `limit`, and say so.
+
+    `obj[at]` (or `obj` itself when `at` is None) is a diff: patches go
+    first, largest first, then file rows from the end (`files_omitted`
+    counts them). Never touches the tree or anything an action depends on."""
+    d = obj if at is None else obj.get(at)
+    if not isinstance(d, dict) or len(json.dumps(obj)) <= limit:
+        return obj
+    files = d.get("files") or []
+    over = len(json.dumps(obj)) - limit
+    for f in sorted((f for f in files if f.get("patch")),
+                    key=lambda f: len(json.dumps(f["patch"])), reverse=True):
+        over -= len(json.dumps(f["patch"])) - len("null")
+        f["patch"] = None
+        d["truncated"] = True
+        if over <= 0:
+            return obj
+    omitted = 0
+    while files and len(json.dumps(obj)) > limit:
+        cut = max(1, len(files) // 8)
+        del files[-cut:]
+        omitted += cut
+        d["files_omitted"] = (d.get("files_omitted") or 0) + cut
+        d["truncated"] = True
+    return obj
 
 
 # ── crash points (tests only) ─────────────────────────────────────────────────
@@ -1330,6 +1385,20 @@ def push_urls(entry, remote):
     return [u for u in r.text.splitlines() if u]
 
 
+def rewrite_rule(entry, url):
+    """The url.<base>.insteadOf / pushInsteadOf rule git would apply to `url`, or None.
+
+    push() passes the confirmed URL to git, and git rewrites a URL argument
+    too, so a chained rule would send the push (and its check) elsewhere."""
+    r = git(["config", "--get-regexp", r"^url\..*\.(insteadof|pushinsteadof)$"],
+            cwd=entry["path"], check=False)
+    for line in r.text.splitlines():
+        key, _, prefix = line.partition(" ")
+        if prefix and url.startswith(prefix):
+            return f"{key} {prefix}"
+    return None
+
+
 def github_repo(url):
     """"owner/name" for a GitHub remote URL, else None."""
     m = _GITHUB_RE.match(url or "")
@@ -1365,6 +1434,10 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     if urls[0] != push_url:
         raise Refused("remote_changed", f"{remote} now pushes to {urls[0]}, not the "
                                         f"{push_url} you confirmed")
+    rule = rewrite_rule(entry, push_url)
+    if rule:
+        raise Refused("rewrite", f"git would rewrite {push_url} again ({rule}), so the push "
+                                 "would not go where you confirmed; nothing was pushed")
     ref = entry["branch"]
     op = registry.begin_op(entry["id"], "push", url=push_url, ref=ref, oid=oid)
     _crash_point("push:before")
@@ -1423,13 +1496,18 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
         raise Refused("gh_signed_out", "gh is signed out; run `gh auth login` in a terminal, "
                                        "then publish again")
     found = _gh(["pr", "list", "--repo", repo, "--head", branch, "--state", "open",
-                 "--json", "url"], p)
+                 "--json", "url,headRepositoryOwner"], p)
+    owner = (head.split(":", 1)[0] if ":" in head else repo.split("/")[0]).lower()
     url = None
     if found is not None and found.rc == 0:
         try:
-            listed = json.loads(found.text or "[]")
-            url = listed[0]["url"] if listed else None
-        except (ValueError, KeyError, IndexError, TypeError):
+            # --head matches the branch name in any fork: keep the one from our head.
+            for pr in json.loads(found.text or "[]"):
+                login = ((pr.get("headRepositoryOwner") or {}).get("login") or "").lower()
+                if not login or login == owner:
+                    url = pr["url"]
+                    break
+        except (ValueError, KeyError, TypeError, AttributeError):
             url = None
     if not url:
         refuse_open_ops(entry, registry)
@@ -1500,9 +1578,19 @@ def _procs_proc(root):
         try:
             if os.stat(base).st_uid != uid:
                 continue
-            hits = [os.readlink(f"{base}/cwd")]
         except OSError:
-            continue
+            continue                        # gone
+        # An unreadable cwd still has its open files read. A process whose cwd
+        # and fds are both unreadable (non-dumpable: keyring agents and the
+        # like) cannot be inspected by anyone without privilege; it is left
+        # out, as before, rather than blocking every Discard on the machine.
+        hits = []
+        try:
+            hits.append(os.readlink(f"{base}/cwd"))
+        except FileNotFoundError:
+            continue                        # gone
+        except OSError:
+            pass
         try:
             for fd in os.listdir(f"{base}/fd"):
                 with contextlib.suppress(OSError):
@@ -1547,7 +1635,10 @@ def _procs_lsof(root):
                 found.setdefault(pid, "?")
         elif line.startswith("c") and pid in found:
             found[pid] = line[1:120]
-    if not found and (r.err.strip() or r.rc not in (0, 1)):
+    # lsof's own warnings (e.g. a devfs it cannot stat on macOS) are not a
+    # failed scan; any other stderr line is.
+    errs = [l for l in r.err_text.splitlines() if l.strip() and not l.startswith("lsof: WARNING")]
+    if not found and (r.rc not in (0, 1) or errs):
         raise ScanFailed(f"lsof failed: {r.err_text.strip()[:200] or f'exit {r.rc}'}")
     return sorted(found.items())
 
@@ -1720,6 +1811,10 @@ def restore(entry, registry=None):
         raise ValueError("this worktree is not in trash")
     if os.path.lexists(entry["path"]):
         raise ValueError(f"{entry['path']} exists; refusing to overwrite it")
+    parent = Path(entry["path"]).parent
+    root = os.path.realpath(worktree_root())
+    if not os.path.lexists(parent) and os.path.realpath(parent.parent) == root:
+        parent.mkdir(mode=0o700)            # the repo's folder under the root, emptied by Discard
     with repo_lock(entry):
         refuse_open_ops(entry, registry)
         op = registry.begin_op(entry["id"], "restore", src=entry["trash_path"], dst=entry["path"])

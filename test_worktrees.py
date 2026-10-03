@@ -2802,5 +2802,199 @@ class BugBash2Hub(LifecycleCase):
         self.assertIn("p.worktree.phase === 'active'", body)
 
 
+
+# ── round 1 leftovers (synthesis.md: deferred, then medium and low) ──────────
+
+class BugBash3Library(CreateCase):
+
+    # Astra r1-4: a committed symlink makes the chosen subdir land outside the worktree.
+    def test_BB3_1_an_agent_folder_outside_the_worktree_is_refused(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        os.symlink(outside, self.repo / "pkg")
+        wt.git(["add", "pkg"], cwd=self.repo)
+        wt.git(["commit", "-qm", "pkg link"], cwd=self.repo)
+        os.unlink(self.repo / "pkg")
+        (self.repo / "pkg").mkdir()                   # uncommitted: a real dir now
+        e = self.make(cwd=self.repo / "pkg")
+        self.assertEqual(e["subdir"], "pkg")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.check_agent_cwd(e)
+        self.assertEqual(cm.exception.reason, "identity")
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        self.assertIn("outside", m._worktree_blocked_reason(e))
+
+    def test_BB3_1b_a_normal_subdir_passes(self):
+        (self.repo / "sub").mkdir()
+        (self.repo / "sub" / "f.txt").write_text("f\n")
+        wt.git(["add", "-A"], cwd=self.repo)
+        wt.git(["commit", "-qm", "sub"], cwd=self.repo)
+        e = self.make(cwd=self.repo / "sub")
+        wt.check_agent_cwd(e)
+
+    # Astra r1-7: one deadline covers a child that keeps git's pipes open.
+    def test_BB3_2_the_timeout_covers_inherited_pipes(self):
+        stub = self.stub_git("sleep 30 &\nexit 0")
+        t0 = time.monotonic()
+        with self.assertRaises(wt.GitTimeout):
+            wt._run([str(stub)], self.tmp, timeout=0.5)
+        self.assertLess(time.monotonic() - t0, 8, "the reader join outlived the timeout")
+
+    # Astra r1-8: Unicode patches expand under JSON escaping past the 2 MiB cap.
+    def test_BB3_3_the_encoded_review_stays_under_its_cap(self):
+        import json
+        e = self.make()
+        p = Path(e["path"])
+        for i in range(10):
+            (p / f"u{i}.txt").write_text(("é" * 99 + "\n") * 1200, encoding="utf-8")
+        snap = wt.snapshot(e)
+        d = wt.diff(e, snap["tree"])
+        self.assertTrue(d["truncated"])
+        self.assertLessEqual(len(json.dumps(d)), wt.DIFF_JSON_MAX)
+        full = wt.fit_review(dict(snap, diff=d,
+                                  summary={"files": 10}))
+        self.assertLessEqual(len(json.dumps(full)), wt.REVIEW_JSON_MAX)
+
+    def test_BB3_3b_fit_review_drops_patches_then_files_and_says_so(self):
+        import json
+        files = [{"path": f"f{i}", "patch": "一" * 40000} for i in range(30)]
+        files += [{"path": "x" * 900 + str(i), "patch": None} for i in range(4000)]
+        out = wt.fit_review({"tree": "t", "diff": {"files": files, "truncated": False}})
+        self.assertLessEqual(len(json.dumps(out)), wt.REVIEW_JSON_MAX)
+        self.assertTrue(out["diff"]["truncated"])
+        self.assertTrue(out["diff"].get("files_omitted"))
+
+    # Grok r1-9: a pid whose cwd cannot be read was skipped before its fds were read.
+    def test_BB3_4_an_unreadable_cwd_still_scans_the_fds(self):
+        import subprocess
+        e = self.make()
+        held = Path(e["path"]) / "held.txt"
+        held.write_text("x\n")
+        c = subprocess.Popen([sys.executable, "-c",
+                              "import sys,time; f=open(sys.argv[1]); print('open', flush=True); "
+                              "time.sleep(30)", str(held)], cwd=self.tmp,
+                             stdout=subprocess.PIPE, start_new_session=True)
+        self.addCleanup(lambda: (c.kill(), c.wait(), c.stdout.close()))
+        c.stdout.readline()
+        real = os.readlink
+
+        def rl(path, *a, **k):
+            if str(path) == f"/proc/{c.pid}/cwd":
+                raise PermissionError(13, "denied")
+            return real(path, *a, **k)
+        if not wt._have_proc():
+            self.skipTest("no /proc: the Linux scan did not run here")
+        with mock.patch.object(wt.os, "readlink", rl):
+            found = [pid for pid, _ in wt.processes_in(e["path"])]
+        self.assertIn(c.pid, found)
+
+    # Gemini r1: restore failed when the repo's folder under the root was gone.
+    def test_BB3_5_restore_recreates_the_repo_folder_under_the_root(self):
+        e = self.make()
+        wt.discard(e, wt.snapshot(e)["tree"], registry=self.reg)
+        parent = Path(e["path"]).parent
+        os.rmdir(parent)                              # empty once the worktree moved
+        got = wt.restore(self.reg.read(e["id"]), registry=self.reg)
+        self.assertEqual(got["phase"], "active")
+        self.assertTrue(Path(e["path"]).is_dir())
+
+    # Gemini r1: a harmless lsof warning on stderr failed the macOS scan.
+    def test_BB3_6_an_lsof_warning_with_no_records_is_none(self):
+        stub = self.stub_git('echo "lsof: WARNING: can\'t stat() devfs file system /dev" >&2\nexit 1')
+        e = self.make()
+        with mock.patch.object(wt, "_lsof_bin", lambda: str(stub)):
+            self.assertEqual(wt._procs_lsof(os.path.realpath(e["path"])), [])
+
+    def test_BB3_6b_an_lsof_error_about_the_path_still_fails(self):
+        e = self.make()
+        root = os.path.realpath(e["path"])
+        stub = self.stub_git(f'echo "lsof: status error on {root}: No such file" >&2\nexit 1')
+        with mock.patch.object(wt, "_lsof_bin", lambda: str(stub)):
+            with self.assertRaises(wt.ScanFailed):
+                wt._procs_lsof(root)
+
+
+class BugBash3Publish(PubCase):
+    stub_gh = ThePullRequest.stub_gh
+    pr = ThePullRequest.pr
+
+    # Astra r1-3: a confirmed URL that another rewrite rule would redirect.
+    def test_BB3_10_a_url_git_would_rewrite_again_is_refused(self):
+        # alias:r -> the confirmed URL (one rewrite, what the dialog shows);
+        # the confirmed URL -> another repo (the second rewrite git applies).
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "alias:r"], cwd=self.repo)
+        wt.git(["config", f"url.{self.url}.insteadOf", "alias:r"], cwd=self.repo)
+        wt.git(["config", f"url.{other}.insteadOf", self.url], cwd=self.repo)
+        self.assertEqual(wt.push_urls(self.e, "origin"), [self.url], "the dialog's URL")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertIsNone(wt.git(["ls-remote", str(other), self.e["branch"]],
+                                 cwd=self.tmp).text.strip() or None)
+
+    def test_BB3_10b_a_push_rewrite_counts_too(self):
+        wt.git(["config", "url.ssh://elsewhere/.pushInsteadOf", self.url], cwd=self.repo)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertIn(cm.exception.reason, ("rewrite", "remote_changed"))
+
+    # Grok r1-8: an open PR from another owner's fork is not this branch's PR.
+    def test_BB3_11_a_pr_from_another_head_owner_is_not_ours(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/me/r.git"], cwd=self.repo)
+        gh, state = self.stub_gh()
+        (state / "pr").write_text('[{"url":"https://github.com/o/r/pull/3",'
+                                  '"headRepositoryOwner":{"login":"stranger"}}]')
+        r = self.pr(gh, repo="o/r")
+        self.assertEqual(r["pr_url"], "https://github.com/o/r/pull/7", "a stranger's PR was reused")
+        argv = (state / "argv").read_text()
+        self.assertIn("pr create", argv)
+        self.assertIn("--head me:", argv)
+
+    def test_BB3_11b_our_own_open_pr_is_reused(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/me/r.git"], cwd=self.repo)
+        gh, state = self.stub_gh()
+        (state / "pr").write_text('[{"url":"https://github.com/o/r/pull/3",'
+                                  '"headRepositoryOwner":{"login":"me"}}]')
+        r = self.pr(gh, repo="o/r")
+        self.assertEqual(r["pr_url"], "https://github.com/o/r/pull/3")
+        self.assertNotIn("pr create", (state / "argv").read_text())
+
+
+class BugBash3Hub(LifecycleCase):
+
+    def test_BB3_20_an_agent_folder_outside_the_worktree_never_starts(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        os.symlink(outside, self.repo / "pkg")
+        wt.git(["add", "pkg"], cwd=self.repo)
+        wt.git(["commit", "-qm", "pkg link"], cwd=self.repo)
+        os.unlink(self.repo / "pkg")
+        (self.repo / "pkg").mkdir()
+        with self.assertRaises(Exception):
+            self.mgr.create("fake", str(self.repo / "pkg"), worktree=True)
+        live = [p for p in self.mgr.panes.values() if p.client and p.client.alive]
+        self.assertEqual(live, [], "an agent started outside its worktree")
+
+    # Gemini r1-8 / Grok r1-6: the browser's review text.
+    def test_BB3_21_review_text_for_noop_commits_and_staged_differs(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("r.noop", js)
+        body = js[js.index("function reviewBanners(snap)"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("staged_differs", body)
+
+    # Gemini r1-5: create's failure paths mutate the roster under its lock.
+    def test_BB3_22_create_failure_paths_pop_under_the_lock(self):
+        import inspect
+        import sessions
+        lines = inspect.getsource(sessions.Manager.create).splitlines()
+        pops = [i for i, l in enumerate(lines) if "self.panes.pop(" in l]
+        self.assertTrue(pops)
+        for i in pops:
+            self.assertTrue(lines[i - 1].strip().startswith("with self._lock:"), lines[i])
+
 if __name__ == "__main__":
     unittest.main()
