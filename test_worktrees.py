@@ -7,6 +7,7 @@ are the plan's §5.2 catalogue.
 Collected by test_corral_light.py, so `python3 test_corral_light.py` runs it.
 Run alone: python3 -m unittest test_worktrees -v
 """
+import errno
 import http.server
 import os
 import signal
@@ -930,13 +931,23 @@ class TheDiff(CreateCase):
         for n in names:
             (p / n).write_text("x\n")
         raw = b"latin1-\xe9.txt"
-        with open(os.path.join(os.fsencode(p), raw), "wb") as fh:
-            fh.write(b"y\n")
+        try:
+            with open(os.path.join(os.fsencode(p), raw), "wb") as fh:
+                fh.write(b"y\n")
+        except OSError as err:
+            # APFS refuses a name that is not UTF-8 (EILSEQ), so on macOS such a
+            # file cannot exist in a worktree; the other odd names still run.
+            if err.errno != errno.EILSEQ:
+                raise
+            raw = None
         d = self.snapdiff(e)
         got = {f["path"] for f in d["files"]}
         for n in names:
             self.assertIn(n, got)
         odd = [f for f in d["files"] if f.get("path_b64")]
+        if raw is None:
+            self.assertEqual(odd, [])
+            return
         self.assertEqual(len(odd), 1)
         self.assertEqual(wt.base64.b64decode(odd[0]["path_b64"]), raw)
 
@@ -1820,8 +1831,13 @@ class LifecycleBasics(LifecycleCase):
             self.assertIsNotNone(self.sessions.worktree_refusal(lane), lane)
         self.assertIsNone(self.sessions.worktree_refusal("fake"))
         with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": ""}):
-            self.assertIsNone(self.sessions.worktree_refusal("claude"))
-            self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
+            # The platform default decides; pin the platform so the test does too.
+            with mock.patch.object(self.sessions.sys, "platform", "linux"):
+                self.assertIsNone(self.sessions.worktree_refusal("claude"))
+                self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
+            with mock.patch.object(self.sessions.sys, "platform", "darwin"):
+                why = self.sessions.worktree_refusal("claude")
+                self.assertIn("lane matrix has not run", why or "")
         with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREES_ENABLED": "0"}):
             with self.assertRaises(ValueError):
                 self.mgr.create("fake", str(self.repo), worktree=True)
@@ -2175,8 +2191,10 @@ class TheMacDiscardScan(CreateCase):
         self.assertIn("lsof", cm.exception.detail)
 
     def test_M1_on_linux_an_unreadable_proc_fails_closed_too(self):
+        # Take the /proc path whatever this host is, so the test runs on macOS too.
         self._noproc.stop()
-        with mock.patch.object(wt.os, "listdir", side_effect=PermissionError("no")):
+        with mock.patch.object(wt, "_have_proc", lambda: True), \
+                mock.patch.object(wt.os, "listdir", side_effect=PermissionError("no")):
             with self.assertRaises(wt.ScanFailed):
                 wt.processes_in(self.p)
         self._noproc.start()
@@ -2197,9 +2215,16 @@ class TheMacPaths(CreateCase):
 
     def test_M3_true_case_prefers_an_exact_match_and_leaves_the_unknown_alone(self):
         (self.tmp / "ab").mkdir()
-        (self.tmp / "AB").mkdir()
+        try:
+            (self.tmp / "AB").mkdir()
+            both = True
+        except FileExistsError:
+            # A case-insensitive volume (default APFS) holds one of the two;
+            # there the exact spelling is absent and the on-disk case wins.
+            both = False
         with mock.patch.object(wt.sys, "platform", "darwin"):
-            self.assertEqual(wt._true_case(str(self.tmp / "AB")), str(self.tmp / "AB"))
+            want = self.tmp / ("AB" if both else "ab")
+            self.assertEqual(wt._true_case(str(self.tmp / "AB")), str(want))
             self.assertEqual(wt._true_case(str(self.tmp / "nope" / "x")), str(self.tmp / "nope" / "x"))
 
     def test_M3_the_suite_realpaths_its_temp_roots(self):

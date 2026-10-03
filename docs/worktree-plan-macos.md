@@ -24,6 +24,13 @@ forcing the darwin path. What only mac-host can prove is still Phase 0.7.
 | M5 | Nothing to build yet. | Record memory behaviour for an `~/ai-os` worktree. |
 | Facts | git is resolved once and `doctor` prints its path; `doctor` reads the filesystem from `mount` without `/proc`. | None. |
 
+**2026-10-03, run on mac-host** (`docs/worktree-phase0-macos.md`). M1 is done:
+darwin T-RMV-13 passes against the real lsof. M3 is done: the full suite passes
+there after four Linux-only tests were fixed. M4 holds with real Claude Code. M2
+is partly done: the unattended matrix slice passed for Claude, Codex and Grok,
+but the rail, push and PR, agent commit and three-at-once steps still need a
+human. No lane is enabled yet. M5 is not run.
+
 ## Changes design or tests
 
 ### M1. Discard's `/proc` scan does not exist on macOS
