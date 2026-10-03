@@ -41,7 +41,7 @@ class PairedUrl(_TempState):
         code = m.group(1)
         tok, status = auth.claim(code)
         self.assertEqual(status, "ok")
-        self.assertEqual(auth.verify(tok), "operator")
+        self.assertEqual(auth.verify(tok), "owner")
         # Single use: the same code claims as expired the second time.
         self.assertEqual(auth.claim(code), (None, "expired"))
 

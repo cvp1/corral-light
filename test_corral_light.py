@@ -2003,7 +2003,7 @@ class MacosPlistIsThisHost(unittest.TestCase):
                          "mac account only on the host that runs the agent")
     def test_the_plist_does_not_point_at_the_ranch_user(self):
         text = (ROOT / "com.cvp1.corral-light.plist").read_text(encoding="utf-8")
-        self.assertNotIn("/Users/USER/", text)
+        self.assertNotIn("/Users/<user>/", text)
         home = str(Path.home())
         self.assertIn(f"{home}/corral-light", text)
         self.assertIn(f"{home}/Library/Logs/corral-light.log", text)

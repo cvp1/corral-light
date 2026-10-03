@@ -43,7 +43,7 @@ from pathlib import Path
 
 # Overridable for tests (a stub binary) and for the git 2.38 release check.
 # Resolved once, at start, on the hub's own PATH: a host can have two gits
-# (mac-host: Homebrew 2.55 ahead of Apple's 2.54), and doctor says which ran.
+# (the Mac host: Homebrew 2.55 ahead of Apple's 2.54), and doctor says which ran.
 GIT_BIN = os.environ.get("CORRAL_TEST_GIT") or shutil.which("git") or "git"
 
 DEFAULT_TIMEOUT_S = 20

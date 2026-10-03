@@ -193,9 +193,10 @@ def claim(code, now=None):
     return mint(now=now), "ok"
 
 
-def mint(now=None, ttl=SESSION_TTL, user="operator"):
-    # `user` is the token's audience: the default, or edge.SERVE_USER for a
-    # cookie minted through Tailscale Serve.
+def mint(now=None, ttl=SESSION_TTL, user="owner"):
+    # `user` is the token's audience: edge.LAN_USER ("owner"), or
+    # edge.SERVE_USER for a cookie minted through Tailscale Serve.
+    # The literal must match corral_core/edge.py.
     if "." in user:
         raise ValueError("a token user may not contain '.'")
     now = int(now or time.time())

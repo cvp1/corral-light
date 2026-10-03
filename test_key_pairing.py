@@ -419,7 +419,7 @@ class T77_KeyOnly(Base):
         ok, _ = auth.approve(code, break_glass=True)
         self.assertTrue(ok)
         tok, status = auth.claim(code)
-        self.assertEqual((auth.verify(tok), status), ("operator", "ok"))
+        self.assertEqual((auth.verify(tok), status), ("owner", "ok"))
         self.assertEqual(len(self.events("break-glass")), 1)
 
     def test_key_only_needs_a_key(self):
@@ -563,7 +563,7 @@ class T715_Recover(Base):
         with contextlib.redirect_stdout(out):
             self.assertEqual(key_cli.main(["key", "recover", code, lost]), 0)
         tok, status = auth.claim(code)
-        self.assertEqual((auth.verify(tok), status), ("operator", "ok"))
+        self.assertEqual((auth.verify(tok), status), ("owner", "ok"))
         self.assertEqual(self.keys(), [])
         self.assertEqual(auth.policy()[0], "code")
         self.assertEqual([e["event"] for e in auth.ledger_lines()][-5:],
@@ -810,7 +810,7 @@ class Routes(Base):
         st, body, cookie, _ = self.pair_over_http(self.origin, "localhost")
         self.assertEqual((st, body), (200, {"status": "ok"}))
         tok = cookie.split(";")[0].split("=", 1)[1]
-        self.assertEqual(auth.verify(tok), "operator")
+        self.assertEqual(auth.verify(tok), "owner")
         self.assertNotIn("Secure", cookie)
         st, _, cookie2, _ = self.call("POST", "/api/pair/key/finish",
                                       self.a.get("x" * 43, origin=self.origin))

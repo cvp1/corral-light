@@ -93,8 +93,21 @@ class PeerRules(unittest.TestCase):
         self.assertTrue(edge.audience_ok(edge.SERVE_USER, h, "127.0.0.1"))
         self.assertFalse(edge.audience_ok(edge.SERVE_USER, {}, "127.0.0.1"))
         self.assertFalse(edge.audience_ok(edge.SERVE_USER, h, "198.51.100.7"))
-        self.assertTrue(edge.audience_ok("user", {}, "198.51.100.7"))
+        self.assertTrue(edge.audience_ok(edge.LAN_USER, {}, "198.51.100.7"))
         self.assertFalse(edge.audience_ok(None, h, "127.0.0.1"))
+
+    def test_any_serve_suffixed_audience_is_serve_only(self):
+        """Audiences were renamed 2026-10-01. A still-valid cookie with the
+        OLD Serve-only audience must stay Serve-only, not become a LAN cookie;
+        and full Corral, which shares this file, still mints the old names."""
+        h = {"Tailscale-User-Login": self.ME}
+        for aud in (edge.SERVE_USER, "operator-ts"):
+            with self.subTest(audience=aud):
+                self.assertFalse(edge.audience_ok(aud, {}, "198.51.100.7"))
+                self.assertFalse(edge.audience_ok(aud, {}, "127.0.0.1"))
+                self.assertTrue(edge.audience_ok(aud, h, "127.0.0.1"))
+        self.assertTrue(edge.audience_ok("operator", {}, "198.51.100.7"))
+        self.assertFalse(edge.audience_ok("", {}, "127.0.0.1"))
 
 
 if __name__ == "__main__":

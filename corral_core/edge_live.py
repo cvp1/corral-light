@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer
 
 from corral_core import edge
 
-ME = "user@example.com"
+ME = "owner@example.com"
 
 
 def _raw(port, data, read_s=3.0):

@@ -406,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/pair/key/finish":
                 auth.key_finish(b, origin, rp_id)
                 serve = edge.via_serve(self.headers, self._peer())
-                tok = auth.mint(user=edge.SERVE_USER if serve else "operator")
+                tok = auth.mint(user=edge.SERVE_USER if serve else edge.LAN_USER)
                 return self._json({"status": "ok"}, 200, {
                     "Set-Cookie": edge.cookie_header(
                         COOKIE, tok, auth.SESSION_TTL, secure=serve)})

@@ -24,7 +24,28 @@ SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
 # A LaunchAgent pointed at a worktree lacks the gitignored spike/node_modules/,
 # so the Claude and ChatGPT lanes vanish. Report what launchd will run and
 # what it is running now.
-LAUNCHD_LABEL = "com.cvp1.corral-light"
+DEFAULT_LAUNCHD_LABEL = "com.cvp1.corral-light"   # what install_service writes
+
+
+def installed_label(agents=None, env=None):
+    """The label of the corral-light LaunchAgent actually installed here.
+
+    CORRAL_LAUNCHD_LABEL wins. Else the default label if its plist exists,
+    else any `*.corral-light.plist` in ~/Library/LaunchAgents (a host
+    installed before the 2026-10-01 rename keeps its old label until it is
+    reinstalled -- diagnosing it must not depend on the name it was given).
+    """
+    env = os.environ if env is None else env
+    if env.get("CORRAL_LAUNCHD_LABEL"):
+        return env["CORRAL_LAUNCHD_LABEL"]
+    agents = Path(agents or Path.home() / "Library" / "LaunchAgents")
+    if (agents / f"{DEFAULT_LAUNCHD_LABEL}.plist").exists():
+        return DEFAULT_LAUNCHD_LABEL
+    found = sorted(p.stem for p in agents.glob("*.corral-light.plist"))
+    return found[0] if found else DEFAULT_LAUNCHD_LABEL
+
+
+LAUNCHD_LABEL = installed_label()
 INSTALLED_PLIST = (Path.home() / "Library" / "LaunchAgents"
                    / f"{LAUNCHD_LABEL}.plist")
 

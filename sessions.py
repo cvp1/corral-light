@@ -68,7 +68,7 @@ MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 
 # ── own-branch worktrees (docs/worktree-review-plan.md) ──────────────────────
 # Lanes that passed the Phase 0 matrix ON THIS PLATFORM: Linux in
-# docs/worktree-phase0.md; macOS none until its own matrix runs on mac-host
+# docs/worktree-phase0.md; macOS none until its own matrix runs on the Mac host
 # (docs/worktree-plan-macos.md M2: Codex's sandbox there is Seatbelt, a
 # different mechanism). Gemini is held: its lane runs `yolo` whatever the
 # posture. Never host:* (cwd ignored) or ollama (no tools). Override with
