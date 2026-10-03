@@ -2742,13 +2742,73 @@ class PostureRidesTheAcpMode(unittest.TestCase):
             sessions.posture_enforceable(sessions.AGENTS["claude"]))
 
     def test_a_lane_that_manages_its_own_permissions_still_says_false(self):
-        """The fix must not turn every lane green: grok/codex/ollama run under
+        """The fix must not turn every lane green: codex/ollama run under
         their own policy and must keep reporting that honestly."""
         import sessions
-        for lane in ("grok", "ollama"):
+        for lane in ("codex", "ollama"):
             with self.subTest(lane=lane):
                 self.assertFalse(
                     sessions.posture_enforceable(sessions.AGENTS[lane]))
+
+
+class GrokPostureRidesArgv(unittest.TestCase):
+    """`grok agent stdio` advertises no ACP permission mode and raises a card
+    for every shell command its own policy does not auto-allow (measured
+    2026-10-02: 11 cards in 314 tool calls, all `Execute`), so a pane under
+    `auto` blocked on a card per command. The launcher realizes the posture with the
+    agent's only knob, --always-approve, and the pane says so honestly.
+    """
+
+    def test_auto_adds_always_approve_before_stdio(self):
+        import grok_launcher
+        argv = grok_launcher.build_argv("/g", None, "auto")
+        self.assertEqual(argv, ["/g", "agent", "--always-approve", "stdio"])
+        argv = grok_launcher.build_argv("/g", "grok-4.7", "auto")
+        self.assertEqual(argv, ["/g", "agent", "--model", "grok-4.7",
+                                "--always-approve", "stdio"])
+
+    def test_strict_and_edits_add_no_flag(self):
+        import grok_launcher
+        for posture in ("strict", "edits", None):
+            with self.subTest(posture=posture):
+                self.assertEqual(grok_launcher.build_argv("/g", None, posture),
+                                 ["/g", "agent", "stdio"])
+
+    def test_main_reads_the_posture_from_the_spawn_env(self):
+        import grok_launcher, inspect
+        self.assertIn("CORRAL_POSTURE", inspect.getsource(grok_launcher.main))
+
+    def test_spawn_env_hands_the_posture_only_to_argv_lanes(self):
+        import sessions
+        env = sessions.spawn_env(sessions.AGENTS["grok"], None, "auto")
+        self.assertEqual(env.get("CORRAL_POSTURE"), "auto")
+        for lane in ("claude", "codex", "ollama"):
+            with self.subTest(lane=lane):
+                env = sessions.spawn_env(sessions.AGENTS[lane], None, "auto")
+                self.assertNotIn("CORRAL_POSTURE", env)
+
+    def test_enforceable_per_posture(self):
+        """auto and strict are realized; edits has no Grok mode and stays
+        honest (pill reads `Grok policy`)."""
+        import sessions
+        spec = sessions.AGENTS["grok"]
+        self.assertTrue(sessions.posture_enforceable(spec))
+        self.assertTrue(sessions.posture_enforceable(spec, "auto"))
+        self.assertTrue(sessions.posture_enforceable(spec, "strict"))
+        self.assertFalse(sessions.posture_enforceable(spec, "edits"))
+
+    def test_the_pane_reports_what_the_flag_does(self):
+        import sessions
+        p = sessions.Pane.__new__(sessions.Pane)
+        p.agent = "grok"
+        notes = []
+        p.emit = lambda kind, d: notes.append((kind, d["text"]))
+        p.posture = "auto"
+        self.assertTrue(p._apply_posture())
+        self.assertIn("--always-approve", notes[-1][1])
+        p.posture = "edits"
+        self.assertFalse(p._apply_posture())
+        self.assertIn("no mode for posture 'edits'", notes[-1][1])
 
 
 class OpusPlanWasNeverARealAlias(unittest.TestCase):
