@@ -3472,5 +3472,80 @@ class BugBash7Publish(PubCase):
         self.assertNotIn("url", self.reg.read(self.e["id"]).get("published") or {})
 
 
+
+# ── round 9 panel ─────────────────────────────────────────────────────────────
+
+class BugBash8Hub(LifecycleCase):
+
+    # Astra r9: the admin dir's `commondir` file was trusted, so an agent could
+    # point its worktree at another clone and commit there.
+    def _retarget(self, e):
+        other = self.tmp / "other.git"
+        wt.git(["clone", "-q", "--bare", str(self.repo), str(other)], cwd=self.tmp)
+        link = Path(wt._admin_dir(e)) / "commondir"
+        old = link.read_bytes()
+        self.addCleanup(link.write_bytes, old)
+        link.write_text(str(other) + "\n")
+        return other
+
+    def test_BB8_1_a_retargeted_commondir_fails_verify_and_blocks_dispatch(self):
+        p = self.pane()
+        e = self.entry(p)
+        tip = wt.git(["rev-parse", e["branch"]], cwd=self.repo).text.strip()
+        other = self._retarget(e)
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+        self.assertIsNotNone(self.mgr._worktree_blocked_reason(e))
+        with self.assertRaises(ValueError):
+            p.send("commit agent commit after commondir change")
+        self.assertEqual(wt.git(["rev-parse", e["branch"]], cwd=other).text.strip(), tip)
+
+    def test_BB8_3_the_commondir_link_is_fingerprinted(self):
+        p = self.pane()
+        e = self.entry(p)
+        link = Path(wt._admin_dir(e)) / "commondir"
+        old = link.read_bytes()
+        self.addCleanup(link.write_bytes, old)
+        before = wt.config_fingerprint(e)
+        link.write_bytes(old + b"\n")
+        self.assertNotEqual(wt.config_fingerprint(e), before, "commondir is not fingerprinted")
+
+    def test_BB8_2_publish_refuses_a_retargeted_commondir(self):
+        p = self.pane()
+        e = self.entry(p)
+        self._retarget(e)
+        tree = wt.git(["rev-parse", "HEAD^{tree}"], cwd=e["path"]).text.strip()
+        with self.assertRaises(wt.Refused):
+            wt.push(e, "origin", str(self.tmp / "x.git"), e["base_sha"], tree, registry=self.reg)
+
+
+
+class BugBash8Publish(PubCase):
+
+    # Grok r9: every git call that decides or performs the push runs against
+    # the repository's git dir, so worktree links cannot redirect any of them.
+    def test_BB8_10_publish_decides_and_pushes_from_the_repositorys_git_dir(self):
+        real, seen = wt.git, []
+
+        def spy(args, *a, **k):
+            seen.append((args[0], (k.get("env_extra") or {}).get("GIT_DIR"), k.get("cwd")))
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", spy):
+            self.push()
+        decide = [x for x in seen if x[0] in ("push", "ls-remote", "remote", "config")]
+        self.assertTrue(decide)
+        for verb, gd, cwd in decide:
+            self.assertEqual((gd, str(cwd)), (self.e["common_dir"], self.e["common_dir"]), verb)
+
+    def test_BB8_11_a_missing_commondir_refuses(self):
+        link = Path(wt._admin_dir(self.e)) / "commondir"
+        old = link.read_bytes()
+        link.unlink()
+        self.addCleanup(link.write_bytes, old)
+        with self.assertRaises(wt.Refused):
+            self.push()
+
+
 if __name__ == "__main__":
     unittest.main()
