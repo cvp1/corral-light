@@ -1,0 +1,140 @@
+FIX FIRST — Discard still kills the agent and wipes the prompt queue when files changed before Discard was clicked (`Refused("changed")`), and the op gate fails to block dispatches (`Pane.send`, `Pane._dispatch`, peer messages) or `Pane.resume` on `intent` ops because `_worktree_blocked_reason` only inspects `unknown`.
+
+### PER-FIX VERDICT
+
+- **1. Gate (`unknown` and `intent` ops)**: `PARTLY` — `_worktree_action` and git plumbing actions refuse `intent` ops, but `_worktree_blocked_reason` in [`sessions.py`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L2330) completely omits `intent`; consequently, `Pane.send`, `Pane._dispatch` (peer messages), and `Pane.resume` allow execution during `intent` ops. Additionally, [`open_pr`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/worktrees.py#L1426) and [`restore`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/worktrees.py#L1668) bypass `refuse_open_ops`.
+- **2a. Index snapshot identity & atomic swap**: `CLOSED` — `_index_id` hashes whole-file bytes and `_replace_index` verifies identity under `index.lock` before renaming.
+- **2b. Crash-safe commit op journalling & resolution**: `CLOSED` — `commit_tree` journals `prepared` before advancing refs, and `resolve_op` safely recovers or marks `unknown`.
+- **2c. Reconcile per-entry isolation**: `CLOSED` — `_reconcile_entry` wraps per-entry work in try/except; corrupt worktrees do not block others.
+- **3a. Discard preflight before agent termination**: `PARTLY` — `discard_preflight` checks external processes, identity, and trash paths, but omits verifying that the snapshot tree matches; a tree mismatch kills the agent and wipes the queue anyway.
+- **3b. Stale index.lock recovery**: `PARTLY` — `_set_aside_stale_lock` works when the agent is alive at discard time, but if the agent was already dead or detached, `stale` is passed as `None`, causing Discard to hang for 60 seconds and fail.
+- **3c. Atomic finish_op registry updates**: `CLOSED` — Op completion and entry state update atomically under registry flock.
+- **3d. Purge conditional branch deletion**: `CLOSED` — `_delete_discarded_branch` requires `branch_oid_at_discard` match via CAS `update-ref -d`.
+- **3e. Post-checkout hook failure handling**: `CLOSED` — `_added_anyway` detects successful creation despite git exit codes, transitioning to `active` with a warning note.
+- **3f. Pane forget confirmation & retention**: `CLOSED` — `Manager.forget` refuses active own-branch panes with 409 `own_branch` unless `keep_branch` is passed.
+- **4. Second Manager state lock (HEAD~1)**: `CLOSED` — Non-blocking exclusive flock on `hub.lock` plus PID start-time check in `claim_state` reliably prevents second hubs or test runners from reaping running agents.
+
+---
+
+### FINDINGS
+
+#### 1. Discard kills agent process and drops queue when tree changed
+- **Severity:** High
+- **Status:** PROVEN
+- **file:line:** [`sessions.py:2415-2432`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L2415-L2432), [`worktrees.py:1641`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/worktrees.py#L1641)
+- **Trigger:** User opens Review dialog, a file is modified in the worktree (or git status changed), and user clicks "Discard".
+- **What goes wrong:** `discard_preflight()` verifies processes and paths but does not accept or verify `tree`. `Manager.worktree_discard` invokes `p.client.close()`, clears `p.client`, and sets `p.state = "detached"` *before* calling `_wt.discard()`. Inside `_wt.discard()`, `now["tree"] != tree` raises `Refused("changed")`. `_worktree_action` catches the refusal and runs `release_hold(drain=False)`, triggering `p._park_stale_queue()`. The live agent process is terminated and all queued messages are permanently dropped, yet the worktree was not discarded.
+- **Minimal fix:** Check `_snapshot_locked(e, p.dir)["tree"] == tree` inside `discard_preflight` or at the start of `worktree_discard` before stopping the client.
+- **Repro:**
+```bash
+CORRAL_LIGHT_STATE=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/state CORRAL_LIGHT_WORKTREES=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/state/worktrees HOME=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/home TMPDIR=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/tmp python3 -c '
+import test_worktrees
+from pathlib import Path
+import worktrees as wt
+class T(test_worktrees.LifecycleCase):
+    def runTest(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        (Path(self.entry(p)["path"]) / "a.txt").write_text("mod\n")
+        try: self.mgr.worktree_discard(p.id, snap["tree"])
+        except wt.Refused: pass
+        assert p.state == "detached" and not (p.client and p.client.alive)
+        print("REPRO CONFIRMED: agent killed despite discard refusal")
+T().runTest()
+'
+```
+
+#### 2. Gate omits `intent` ops in dispatch, user sends, and resume
+- **Severity:** High
+- **Status:** PROVEN
+- **file:line:** [`sessions.py:2330-2336`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L2330-L2336), [`sessions.py:1350-1355`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L1350-L1355), [`sessions.py:1500-1506`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L1500-L1506), [`sessions.py:808-815`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L808-L815)
+- **Trigger:** A mutating op (commit, discard, push, pr) was left in `intent` state by an interrupted action or another process, or hub restarted and background reconcile has not yet completed; user types into the pane, a peer agent sends a message, or pane is resumed.
+- **What goes wrong:** Claim 1 specifies that an op in `unknown` or `intent` must refuse every dispatch (`Pane.send`, `Pane._dispatch`, peer messages). However, `Pane._refuse_blocked_worktree()` and `Pane.resume()` only consult `Manager._worktree_blocked_reason()`, which checks `if any(o.get("state") == "unknown" for o in entry.get("ops") or [])` and ignores `intent`. `_worktree_blocked_reason()` returns `None`. Messages are dispatched directly to the agent or the agent is resumed while the worktree has an unsettled intent op.
+- **Minimal fix:** In `sessions.py:_worktree_blocked_reason`:
+```python
+if any(o.get("state") in ("unknown", "intent") for o in entry.get("ops") or []):
+    return "an action on this branch is in progress or has an unknown outcome; resolve it with `corral-light worktrees`"
+```
+- **Repro:**
+```bash
+CORRAL_LIGHT_STATE=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/state CORRAL_LIGHT_WORKTREES=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/state/worktrees HOME=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/home TMPDIR=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/tmp python3 -c '
+import sessions
+mgr = sessions.Manager.__new__(sessions.Manager)
+entry = {"id": "w1", "phase": "active", "ops": [{"op": "commit", "state": "intent"}]}
+assert mgr._worktree_blocked_reason(entry) is None
+print("REPRO CONFIRMED: _worktree_blocked_reason returns None for intent op")
+'
+```
+
+#### 3. `open_pr` mutates registry entry and bypasses gate when PR already exists
+- **Severity:** Medium
+- **Status:** PROVEN
+- **file:line:** [`worktrees.py:1425-1435`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/worktrees.py#L1425-L1435)
+- **Trigger:** `worktrees.open_pr()` is called for a branch that already has an open GitHub PR while an op is in `unknown` or `intent` state.
+- **What goes wrong:** In `open_pr()`, `refuse_open_ops(entry, registry)` is placed inside `if not url:`. If `_gh(["pr", "list", ...])` returns an existing PR URL, `refuse_open_ops` is bypassed entirely, and `registry.update(entry["id"], published=...)` proceeds to mutate the registry entry despite open/unsettled ops.
+- **Minimal fix:** Move `refuse_open_ops(entry, registry)` to the very top of `open_pr()`, before checking `_gh`.
+- **Repro:** Inspect `worktrees.py:1425-1435`: `if not url: refuse_open_ops(entry, registry)` is guarded by the falsity of `url`, followed immediately by `registry.update(entry["id"], published=...)`.
+
+#### 4. Discard of a crashed/dead agent hangs for 60s if `index.lock` was left behind
+- **Severity:** Medium
+- **Status:** PROVEN
+- **file:line:** [`sessions.py:2415-2425`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L2415-L2425), [`worktrees.py:1550-1560`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/worktrees.py#L1550-L1560)
+- **Trigger:** An agent process crashes or is killed (OOM, SIGKILL) while writing git index, leaving `.git/worktrees/.../index.lock`. User clicks "Discard".
+- **What goes wrong:** In `Manager.worktree_discard`, `stale` lock metadata is only constructed `if alive:`. Because the crashed agent has `alive = False`, `stale` is left as `None`. In `_wt.discard`, `_wait_lock_gone` receives `stale=None`, never calls `_set_aside_stale_lock()`, and sleeps the full 60 seconds (`LOCK_WAIT_S`) before raising `Refused("busy", "a git process still holds the worktree's index.lock")`.
+- **Minimal fix:** If `not alive`, construct `stale` from `p.pid` and `p.pid_start` (or from `meta.json`) if available, allowing `_set_aside_stale_lock` to verify that the creator is no longer running.
+- **Repro:**
+```bash
+CORRAL_LIGHT_STATE=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/state CORRAL_LIGHT_WORKTREES=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/state/worktrees HOME=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/home TMPDIR=/home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/tmp python3 -c '
+import test_worktrees, time
+from pathlib import Path
+import worktrees as wt
+from unittest.mock import patch
+class T(test_worktrees.LifecycleCase):
+    def runTest(self):
+        p = self.pane(); self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        lock = wt._index_path(self.entry(p)["path"]) + ".lock"
+        Path(lock).write_bytes(b"stale")
+        p.client.close(); p.client = None; p.state = "dead"
+        with patch.object(wt, "LOCK_WAIT_S", 0.5):
+            t0 = time.time()
+            try: self.mgr.worktree_discard(p.id, snap["tree"])
+            except wt.Refused as e:
+                assert e.reason == "busy" and (time.time() - t0) >= 0.5
+                print("REPRO CONFIRMED: dead agent with lock timed out without clearing stale lock")
+T().runTest()
+'
+```
+
+#### 5. `restore()` moves worktrees without checking for open ops
+- **Severity:** Medium
+- **Status:** PROVEN
+- **file:line:** [`worktrees.py:1668-1680`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/worktrees.py#L1668-L1680)
+- **Trigger:** User runs `corral-light worktrees restore <id>` on a trashed worktree that has an unsettled op in `unknown` or `intent` state (e.g. from an interrupted purge or previous restore attempt).
+- **What goes wrong:** `restore()` acquires `repo_lock(entry)` and immediately calls `registry.begin_op(..., "restore", ...)`. Unlike `commit_tree`, `discard`, and `purge`, `restore()` never calls `refuse_open_ops(entry, registry)`. An op left in `unknown` or `intent` is ignored, violating the op gate invariant.
+- **Minimal fix:** Add `refuse_open_ops(entry, registry)` inside `restore()` before starting the restore op.
+
+#### 6. UI `forgetPane` gets stuck when worktree creation failed in `phase == "intent"`
+- **Severity:** Low
+- **Status:** SUSPECTED
+- **file:line:** [`static/app.js:1406-1418`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/static/app.js#L1406-L1418), [`sessions.py:2308`](file:///home/cvande/.cache/corral-bugbash-2026-10-03-r2/gemini38/corral-light/sessions.py#L2308)
+- **Trigger:** A pane's worktree creation crashes before finishing, leaving `phase: "intent"`. User clicks dismiss (`✕`) in the UI.
+- **What goes wrong:** `Manager.forget` checks `if e and e.get("phase") in ("active", "intent"):` and returns 409 `own_branch`. `app.js:forgetPane` catches this and asks `Open review to discard the branch?`. When the user clicks OK, `openReview(p)` checks `if (p.worktree.phase !== 'active') return toast(...)`. The review dialog refuses to open because the phase is `intent`, preventing the user from discarding from the UI.
+- **Minimal fix:** In `app.js:openReview`, allow opening review if `phase === 'intent'`, or in `forgetPane` offer direct discard API call rather than opening the review dialog.
+
+---
+
+### TEST GAPS
+
+1. **`test_discard_tree_mismatch_preserves_live_agent_and_queue`**: Verify that when `_wt.discard()` raises `Refused("changed")`, the pane's client remains alive, `pane.state` remains `ready`, and user prompts in `_queue` are not parked. (Current `test_BB_13` only tests foreign process preflight refusal, completely missing `tree` mismatch).
+2. **`test_intent_op_refuses_pane_send_and_dispatch`**: Verify that an op in state `intent` causes `pane.send()`, peer message `_dispatch()`, and `pane.resume()` to raise/refuse rather than dispatching into the worktree. (Current `test_BB_1b` only exercises `wt.commit_tree`, not pane dispatch).
+3. **`test_discard_stale_index_lock_with_dead_agent`**: Verify that an `index.lock` left behind when an agent process is in `dead` state is recognized as stale and set aside rather than waiting `LOCK_WAIT_S`.
+4. **`test_open_pr_refuses_when_unknown_op_exists_and_pr_already_present`**: Verify that `open_pr` raises `Refused("unknown")` when a GitHub PR already exists but an uncommitted op is in `unknown` state.
+5. **`test_restore_refuses_on_unknown_or_intent_op`**: Verify that calling `wt.restore()` on a trashed worktree containing an unsettled op raises `Refused("unknown")`.
+
+---
+
+### ONE SENTENCE
+
+The remaining bug most likely to bite Craig in the first week is clicking Discard in the review dialog after files have changed in the worktree: the hub terminates the agent and wipes the prompt queue before realizing the snapshot tree mismatched, leaving the worktree untouched while killing the agent.
