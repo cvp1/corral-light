@@ -805,6 +805,11 @@ class Pane(_core.PaneBase):
         if self.state not in self.RESUMABLE:
             raise ValueError(f"pane is {self.state}, not detached or dead")
         if self.worktree_id:
+            # A review action holds the pane: Discard may be moving its folder,
+            # and a resumed agent would keep writing into the trash.
+            if self.held:
+                raise ValueError("a review action is running on this pane; "
+                                 "try again when it finishes")
             # Read the entry as it is now: the CLI restores or resolves it from
             # another process, so a reason cached at discard may be stale.
             self.worktree_blocked = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self))
@@ -1340,6 +1345,11 @@ class Pane(_core.PaneBase):
         # loading the old conversation only to throw it away is wasted work.
         if (text or "").strip() == "/clear":
             return self.clear_context(via)
+        if self.worktree_id:
+            self._refuse_blocked_worktree()
+            if self.held and self.state in self.RESUMABLE:
+                raise ValueError("a review action is running on this pane; "
+                                 "send again when it finishes")
         # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
         # stopped means "bring it back", exactly as it does for a paused one.
         # resume() parks — never sends — whatever was queued when it died.
@@ -1483,9 +1493,20 @@ class Pane(_core.PaneBase):
 
     # ── own-branch worktrees: the held queue (D11) ──────────────────────────
 
+    def _refuse_blocked_worktree(self):
+        """Raise ValueError if this pane's own branch must not get new work: an
+        op with an unknown outcome, or a worktree that is trashed or gone."""
+        why = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self))
+        self.worktree_blocked = why
+        if why:
+            raise ValueError(why)
+
     def _dispatch(self, item, at=None):
         """As the core's, except that while a review action holds the pane the
-        prompt is queued and no drain starts."""
+        prompt is queued and no drain starts, and nothing (a peer message
+        included) is dispatched into a blocked own branch."""
+        if self.worktree_id:
+            self._refuse_blocked_worktree()
         if self.held:
             if at is None:
                 self._queue.append(item)
@@ -1982,6 +2003,8 @@ class Manager(_core.ManagerBase):
             pane.title = Pane._default_title(agent, cwd)   # the repo's name, not the slug
             pane._preamble_due = True
             pane.save_meta()
+            if e.get("warning"):
+                pane.emit("note", {"text": f"own branch: {e['warning']}"}, activity=False)
         try:
             pane.start()
         except Exception as e:
@@ -2186,6 +2209,20 @@ class Manager(_core.ManagerBase):
 
     # ── own-branch worktrees ─────────────────────────────────────────────────
 
+    def forget(self, pane_id, keep_branch=False):
+        """As the core's, except that an own-branch pane asks first (F7):
+        Forget offers Discard, and dismisses only with `keep_branch`. The
+        branch and its folder are never touched here."""
+        p = self.get(pane_id)
+        if p.worktree_id and not keep_branch:
+            e = self.worktree_entry(p)
+            if e and e.get("phase") in ("active", "intent"):
+                branch = (e.get("branch") or "")[len("refs/heads/"):]
+                raise _wt.Refused("own_branch", f"this pane owns the branch {branch}; open "
+                                  "review to Discard it, or dismiss the pane and keep the "
+                                  "branch (reopen it from the archive later)")
+        return super().forget(pane_id)
+
     def worktree_registry(self):
         reg = getattr(self, "_wt_registry", None)
         if reg is None:
@@ -2284,6 +2321,12 @@ class Manager(_core.ManagerBase):
         e = self.worktree_entry(p)
         if e is None:
             raise _wt.Refused("missing", "this pane's own-branch record is missing")
+        # Unsettled ops first (`unknown`, or an `intent` from another process),
+        # then a phase that leaves nothing to act on.
+        _wt.refuse_open_ops(e, self.worktree_registry())
+        why = self._worktree_blocked_reason(e)
+        if why:
+            raise _wt.Refused("blocked", why)
         if not p._action_lock.acquire(blocking=False):
             raise _wt.Refused("busy", "another action is already running on this pane")
         ok = False
@@ -2358,17 +2401,34 @@ class Manager(_core.ManagerBase):
         return self._worktree_action(pane_id, go, drain_after=True)
 
     def worktree_discard(self, pane_id, tree):
-        """Stop the agent (cancel, then end its process group), then discard (D9)."""
+        """Preflight, then stop the agent (cancel, then end its process group),
+        then discard (D9).
+
+        The preflight refuses what stopping the agent cannot fix (an unsettled
+        op, a foreign process inside the worktree, a worktree that is not ours)
+        while the agent still runs, so a refusal never costs its turn.
+        """
         def go(p, e):
-            if p.client and p.client.alive:
+            reg = self.worktree_registry()
+            alive = bool(p.client and p.client.alive)
+            # The client's own group id (it starts the agent in a new session).
+            pg = getattr(p.client, "pgid", None) if alive else None
+            _wt.discard_preflight(e, reg, agent_pgids={pg} if pg else ())
+            stale = None
+            if alive:
+                # What _wt needs to recognise an index.lock this agent's git left.
+                stale = {"pid": getattr(getattr(p.client, "p", None), "pid", None) or p.pid,
+                         "start": p.pid_start,
+                         "lock": _wt._index_path(e["path"]) + ".lock"}
                 p._expect_exit = True
                 with contextlib.suppress(Exception):
                     p.client.cancel(p.acp_session)
                 p.client.close()           # TERM then KILL of the adapter's group
                 p.client = None
+                stale["stopped_at"] = time.time()
             p.pid = p.pgid = p.pid_start = None
             p.state = "detached"
-            r = _wt.discard(e, tree, registry=self.worktree_registry(), tmp_dir=p.dir)
+            r = _wt.discard(e, tree, registry=reg, tmp_dir=p.dir, stale_lock=stale)
             p.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(p))
             p.save_meta()
             p.emit("worktree", {"discarded": r}, activity=False)

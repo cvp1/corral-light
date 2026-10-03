@@ -748,8 +748,11 @@ class Handler(BaseHTTPRequestHandler):
                 MGR.close(b.get("pane", ""))
                 return self._json({"ok": True})
             if p == "/api/session/forget":
-                return self._json({"ok": True,
-                                   "forgot": MGR.forget(b.get("pane", ""))})
+                try:
+                    forgot = MGR.forget(b.get("pane", ""), keep_branch=b.get("keep_branch") is True)
+                except worktrees.Refused as e:
+                    return self._json({"error": str(e.detail)[:400], "reason": e.reason}, 409)
+                return self._json({"ok": True, "forgot": forgot})
             return self._json({"error": "not found"}, 404)
         except ValueError as e:
             return self._json({"error": str(e)}, 400)
