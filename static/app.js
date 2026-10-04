@@ -1216,26 +1216,63 @@ function posturePill(p) {
   return q;
 }
 
+/* The pane header: one line of identity and controls, one quiet line of
+ * facts. The eye needs the title and the state word at a glance; everything
+ * else is plain text that reads only when looked for, not a row of badges.
+ * Four controls stay visible (find, the ⋯ menu, minimize, close); every other
+ * pane action lives in openPaneMenu, which the roster row opens too. */
 function paneHead(p) {
   const h = el('div', 'ph');
-  h.appendChild(el('span', 'nm', p.title || p.label));
-  // Display state, with the raw enum on the tooltip.
+  const row = el('div', 'ph1');
   const dsp = displayState(p);
-  const st = el('span', 'pill st d-' + dsp, DISPLAY_LABEL[dsp] || dsp);
+  row.appendChild(el('span', 'dot d-' + dsp));
+  const nm = el('span', 'nm', p.title || p.label);
+  nm.title = p.title || p.label;
+  row.appendChild(nm);
+  // Display state, with the raw enum on the tooltip.
+  const st = el('span', 'st d-' + dsp, DISPLAY_LABEL[dsp] || dsp);
   st.title = `${p.state}${p.idleS >= 30 ? ` · quiet ${fmtAge(p.idleS)}` : ''}`;
-  h.appendChild(st);
-  h.appendChild(seatPill(p));
-  // Only claim a posture Corral actually imposed.
-  if (p.postureEnforced === false) {
-    const q = posturePill(p);
-    h.appendChild(q);
-  } else {
-    h.appendChild(el('span', 'pill ' + p.posture, p.posture));
+  row.appendChild(st);
+  const ctl = el('span', 'ctl');
+  // Literal smart-case find, every match highlighted; Enter/Shift+Enter walk them.
+  const fnd = el('button', 'x find' + (FIND.pane === p.id ? ' fon' : ''), '⌕');
+  fnd.type = 'button'; fnd.title = 'find in this conversation';
+  fnd.onclick = () => toggleFind(p);
+  const more = el('button', 'x more', '⋯');
+  more.type = 'button'; more.title = 'more — every step, rename, pin, seat, pause…';
+  more.setAttribute('aria-haspopup', 'menu');
+  more.onclick = e => openPaneMenu(p, e.currentTarget);
+  const min = el('button', 'x', '–'); min.type = 'button';
+  min.title = 'minimize (keeps running)';
+  min.onclick = () => setMin(p, true);
+  const x = el('button', 'x close', '✕'); x.type = 'button'; x.title = 'close';
+  x.onclick = async () => { try { await api('/api/session/close', { pane: p.id }); await refresh(); }
+                            catch (e) { toast(e.message, true); } };
+  ctl.append(fnd, more, min, x);
+  row.appendChild(ctl);
+  h.appendChild(row);
+
+  // The facts, in the order they are asked for: who, where, on what, how.
+  const facts = el('div', 'ph2');
+  const fact = node => { node.classList.add('f'); facts.appendChild(node); return node; };
+  const sp = seatPill(p);                     // the unseated ＠ lives in the menu instead
+  if (p.seat || p.seatWithheld) fact(sp);
+  const pm = paneMeta(p);
+  const meta = el('span', 'meta', pm.text);
+  if (pm.title) meta.title = pm.title;
+  fact(meta);
+  const wp = wtPillModel(p.worktree);        // own branch: opens review
+  if (wp) {
+    const b = el('button', wp.cls, wp.text);
+    b.type = 'button'; b.title = wp.title;
+    b.onclick = () => openReview(p);
+    fact(b);
   }
   for (const cid of ['model', 'effort']) {
     const cfg = (p.config || {})[cid];
     if (!cfg || !cfg.value) continue;
-    const b = el('button', 'pill cfg', (cid === 'effort' ? '⚡ ' : '') + cfg.value);
+    const b = el('button', 'cfg', (cid === 'effort' ? '⚡ ' : '') + cfg.value);
+    b.type = 'button';
     b.title = `${cfg.name || cid} — click to change`;
     b.onclick = async () => {
       const opts = cfg.options || [];
@@ -1245,64 +1282,129 @@ function paneHead(p) {
       try { await api('/api/session/config', { pane: p.id, configId: cid, value: next.value }); }
       catch (e) { toast(e.message, true); }
     };
-    h.appendChild(b);
+    fact(b);
   }
-  // ACP usage_update is unstable and may be missing or zero: show no pill rather
+  // Only claim a posture Corral actually imposed.
+  if (p.postureEnforced === false) {
+    fact(posturePill(p));
+  } else {
+    const q = el('span', p.posture, p.posture);
+    q.title = { auto: 'auto — a classifier handles routine prompts',
+                edits: 'edits — file edits auto-accepted, the rest asks',
+                strict: 'strict — prompts on dangerous operations' }[p.posture] || p.posture;
+    fact(q);
+  }
+  // ACP usage_update is unstable and may be missing or zero: show nothing rather
   // than a misleading "0% ctx".
   const u = p.usage || {};
   if (u.size > 0 && Number.isFinite(u.used)) {
     const pct = Math.round(100 * u.used / u.size);
     const warn = pct >= 75;                    // matches CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
-    const pill = el('span', 'pill ctx' + (warn ? ' warn' : ''), `${pct}% ctx`);
-    pill.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
-    h.appendChild(pill);
+    const c = el('span', 'ctx' + (warn ? ' warn' : ''), `${pct}% ctx`);
+    c.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
+    fact(c);
   }
-  const pm = paneMeta(p);
-  const meta = el('span', 'meta', pm.text);
-  if (pm.title) meta.title = pm.title;
-  h.appendChild(meta);
-  const wp = wtPillModel(p.worktree);        // own branch: opens review
-  if (wp) {
-    const b = el('button', wp.cls, wp.text);
-    b.type = 'button'; b.title = wp.title;
-    b.onclick = () => openReview(p);
-    h.appendChild(b);
-  }
-  // Detail mode persists per pane, so the button says when it is on.
-  const on = S.detail.has(p.id);
-  const eye = el('button', 'eye' + (on ? ' on' : ''), on ? '☰ every step' : '☰');
-  eye.title = on ? 'showing every step — click to collapse tool calls'
-                 : 'show every step';
-  eye.onclick = () => {
-    S.detail.has(p.id) ? S.detail.delete(p.id) : S.detail.add(p.id);
-    saveDetail(); render();
-  };
-  h.appendChild(eye);
-  // Literal smart-case find, every match highlighted; Enter/Shift+Enter walk them.
-  const fnd = el('button', 'x' + (FIND.pane === p.id ? ' fon' : ''), '⌕');
-  fnd.title = 'find in this conversation';
-  fnd.onclick = () => toggleFind(p);
-  h.appendChild(fnd);
   if (p.portedFrom) {
     const pf = p.portedFrom;
-    const tag = el('span', 'pill unknown', `⇄ from ${pf.agent}`);
+    const tag = el('span', 'unknown', `⇄ from ${pf.agent}`);
     tag.title = `transcript carried from pane ${pf.pane} on ${pf.host} — the model ` +
                 `read it, it does not remember it` + (pf.delivered === false ? ' (NOT delivered)' : '');
-    h.appendChild(tag);
+    fact(tag);
   }
-  if (!isTerm(p)) {
-    const pt = el('button', 'x', '⇄'); pt.title = 'carry this conversation to another lane';
-    pt.onclick = () => openPort(p);
-    h.appendChild(pt);
-  }
-  const min = el('button', 'x', '–'); min.title = 'minimize (keeps running)';
-  min.onclick = () => setMin(p, true);
-  h.appendChild(min);
-  const x = el('button', 'x', '✕'); x.title = 'close';
-  x.onclick = async () => { try { await api('/api/session/close', { pane: p.id }); await refresh(); }
-                            catch (e) { toast(e.message, true); } };
-  h.appendChild(x);
+  h.appendChild(facts);
   return h;
+}
+
+/* ── the pane menu ───────────────────────────────────────────────────────
+ * Every pane action that is not find, minimize or close, in one place. The
+ * header's ⋯ drops it; a roster row opens the same menu on right-click or
+ * its hover button. Built from fresh state when opened, so nothing in it
+ * needs a slot in headSignature. `at` is the button it hangs from, or a
+ * {x, y} point for a right-click. */
+function closePaneMenu() {
+  for (const n of document.querySelectorAll('.pmenu, .pmenu-veil')) n.remove();
+}
+
+function openPaneMenu(p, at) {
+  closePaneMenu();
+  p = S.panes.get(p.id) || p;
+  const veil = el('div', 'pmenu-veil');
+  const m = el('div', 'pmenu');
+  m.setAttribute('role', 'menu');
+  const head = el('div', 'mh', p.title || p.label);
+  head.title = p.title || p.label;
+  m.appendChild(head);
+  const item = (label, run, o = {}) => {
+    const b = el('button', 'mi' + (o.danger ? ' danger' : ''));
+    b.type = 'button'; b.setAttribute('role', 'menuitem');
+    b.appendChild(el('span', 'chk', o.on ? '✓' : ''));
+    b.appendChild(el('span', 'ml', label));
+    if (o.key) b.appendChild(el('kbd', 'mk', o.key));
+    if (o.title) b.title = o.title;
+    b.onclick = async () => {
+      closePaneMenu();
+      try { await run(); } catch (e) { toast(e.message, true); }
+    };
+    m.appendChild(b);
+    return b;
+  };
+  const sep = () => m.appendChild(el('div', 'msep'));
+
+  const dead = p.state === 'dead', detached = p.state === 'detached';
+  const on = S.detail.has(p.id);
+  item(on ? 'Showing every step' : 'Show every step', () => {
+    on ? S.detail.delete(p.id) : S.detail.add(p.id);
+    saveDetail(); render();
+  }, { on, title: on ? 'click to collapse tool calls' : 'expand every tool call and thought' });
+  if (p.worktree && p.worktree.phase === 'active') {
+    item('Review changes…', () => openReview(p), { key: 'r' });
+  }
+  if (!isTerm(p)) item('Carry to another lane…', () => openPort(p));
+  sep();
+  item('Rename…', () => { S.renaming = p.id; render(); });
+  item(p.pinned ? 'Unpin' : 'Pin to the top', async () => {
+    await api('/api/session/pin', { pane: p.id, pinned: !p.pinned }); await refresh();
+  });
+  item(p.seat ? `Seat · @${p.seat}…` : p.seatWithheld ? `Seat · @${p.seatWithheld} withheld…`
+                                                      : 'Give it a seat…',
+       () => openSeat(p),
+       { title: 'a name other panes can address this one by' });
+  sep();
+  if (!dead && !detached) {
+    item('Pause', async () => { await api('/api/session/pause', { pane: p.id }); await refresh(); },
+         { title: 'stop the agent, keep the conversation' });
+  }
+  if ((dead && p.resumable) || detached) {
+    item('Resume', () => resumePane(p), { title: 'restart the agent on this conversation' });
+  }
+  item(p.minimized ? 'Restore' : 'Minimize', () => setMin(p, !p.minimized));
+  if (dead) item('Dismiss', () => forgetPane(p), { danger: true, title: 'remove it from the list' });
+  item('Close', async () => { await api('/api/session/close', { pane: p.id }); await refresh(); },
+       { danger: true, title: 'end the agent and file the conversation' });
+
+  veil.onclick = closePaneMenu;
+  veil.oncontextmenu = e => { e.preventDefault(); closePaneMenu(); };
+  m.onkeydown = e => {
+    const items = [...m.querySelectorAll('.mi')];
+    const i = items.indexOf(document.activeElement);
+    if (e.key === 'Escape') { e.preventDefault(); closePaneMenu(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
+  };
+  document.body.append(veil, m);
+  // Place it, then keep it on screen.
+  const pad = 8, vw = window.innerWidth, vh = window.innerHeight;
+  let x, y;
+  if (at && at.getBoundingClientRect) {
+    const r = at.getBoundingClientRect();
+    x = r.right - m.offsetWidth; y = r.bottom + 4;
+  } else {
+    x = at.x; y = at.y;
+  }
+  x = Math.max(pad, Math.min(x, vw - m.offsetWidth - pad));
+  y = Math.max(pad, Math.min(y, vh - m.offsetHeight - pad));
+  m.style.left = x + 'px'; m.style.top = y + 'px';
+  m.querySelector('.mi')?.focus();
 }
 
 /* ── own branches ────────────────────────────────────────────────────────
@@ -2444,45 +2546,19 @@ function render() {
     // A minimized pane blocked on a permission still shows its count.
     if (p.pending.length) it.appendChild(el('span', 'badge', String(p.pending.length)));
 
-    const acts = el('div', 'acts');
-    if (p.state === 'dead' && p.resumable) {
-      // ↻ resumes a self-stopped pane on the same conversation.
-      const r = el('button', 'a', '↻'); r.title = 'resume — restart the agent on this conversation';
-      r.onclick = async e => { e.stopPropagation(); await resumePane(p); };
-      acts.appendChild(r);
+    if (p.pinned) {
+      const pm = el('span', 'pinmark', '★'); pm.title = 'pinned';
+      it.appendChild(pm);
     }
-    if (p.state === 'dead') {
-      const f = el('button', 'a', '✕'); f.title = 'dismiss — remove from the list';
-      f.onclick = async e => {
-        e.stopPropagation();
-        await forgetPane(p);
-      };
-      acts.appendChild(f);
-    }
-    const pin = el('button', 'a' + (p.pinned ? ' on' : ''), p.pinned ? '★' : '☆');
-    pin.title = p.pinned ? 'unpin' : 'pin to the top';
-    pin.onclick = async e => {
-      e.stopPropagation();
-      try { await api('/api/session/pin', { pane: p.id, pinned: !p.pinned }); await refresh(); }
-      catch (err) { toast(err.message, true); }
+    // One hover button, and the right-click, open the pane's menu: every
+    // action the row used to carry lives there, beside the header's.
+    const more = el('button', 'more', '⋯');
+    more.type = 'button'; more.title = 'more — rename, pin, pause, resume…';
+    more.onclick = e => { e.stopPropagation(); openPaneMenu(p, e.currentTarget); };
+    it.appendChild(more);
+    it.oncontextmenu = e => {
+      e.preventDefault(); openPaneMenu(p, { x: e.clientX, y: e.clientY });
     };
-    const ren = el('button', 'a', '✎'); ren.title = 'rename';
-    ren.onclick = e => { e.stopPropagation(); S.renaming = p.id; render(); };
-    // Pause stops the process and keeps the conversation; close ends and files it.
-    if (p.state !== 'detached' && p.state !== 'dead') {
-      const ps = el('button', 'a', '⏸'); ps.title = 'pause — stop the agent, keep the conversation';
-      ps.onclick = async e => {
-        e.stopPropagation();
-        try { await api('/api/session/pause', { pane: p.id }); await refresh(); }
-        catch (err) { toast(err.message, true); }
-      };
-      acts.appendChild(ps);
-    }
-    const mm = el('button', 'a', p.minimized ? '▣' : '–');
-    mm.title = p.minimized ? 'restore' : 'minimize (keeps running)';
-    mm.onclick = e => { e.stopPropagation(); setMin(p, !p.minimized); };
-    acts.append(pin, ren, mm);
-    it.appendChild(acts);
 
     // Drag to reorder.
     it.draggable = true;
@@ -2510,16 +2586,21 @@ function render() {
     return it;
   };
 
-  const pinned = panes.filter(p => p.pinned || S.focus === p.id);
-  const others = panes.filter(p => !p.pinned && S.focus !== p.id);
-  for (const p of pinned) r.appendChild(paneRow(p));
-  if (others.length) {
-    // "Other", not "Recent": the roster already has a "Recent" group.
-    const lab = el('div', 'lab clicky',
-                   `Other · ${others.length} ${S.hideOther ? '▸' : '▾'}`);
-    lab.onclick = () => { S.hideOther = !S.hideOther; render(); };
-    r.appendChild(lab);
-    if (!S.hideOther) for (const p of others) r.appendChild(paneRow(p));
+  // With nothing pinned the list is flat: a group header over every row says nothing.
+  if (!panes.some(p => p.pinned)) {
+    for (const p of panes) r.appendChild(paneRow(p));
+  } else {
+    const pinned = panes.filter(p => p.pinned || S.focus === p.id);
+    const others = panes.filter(p => !p.pinned && S.focus !== p.id);
+    for (const p of pinned) r.appendChild(paneRow(p));
+    if (others.length) {
+      // "Other", not "Recent": the roster already has a "Recent" group.
+      const lab = el('div', 'lab clicky',
+                     `Other · ${others.length} ${S.hideOther ? '▸' : '▾'}`);
+      lab.onclick = () => { S.hideOther = !S.hideOther; render(); };
+      r.appendChild(lab);
+      if (!S.hideOther) for (const p of others) r.appendChild(paneRow(p));
+    }
   }
   if (!panes.length) r.appendChild(el('div', 'calm', 'None yet.'));
   // Say what the restore cap left off the roster.
@@ -2605,7 +2686,9 @@ function render() {
       // Full title and state in the name: the label ellipsizes and colour alone
       // is not enough. Display state first, raw state in parentheses.
       const full = `${p.title || p.label} — ${DISPLAY_LABEL[cdisp] || cdisp}`
-                 + ` (${p.state}), click to restore`;
+                 + ` (${p.state})`
+                 + (p.background ? ', in the background until it needs you' : '')
+                 + ', click to restore';
       c.title = full;
       c.setAttribute('aria-label', full);
       c.onclick = () => setMin(p, false);
@@ -2805,7 +2888,7 @@ function render() {
 async function setMin(p, flag) {
   try {
     await api('/api/session/minimize', { pane: p.id, minimized: flag });
-    p.minimized = flag; render();
+    p.minimized = flag; p.background = false; render();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -3168,7 +3251,8 @@ async function renderRigList() {
 async function rigUp(name, btn) {
   const out = $('#rig-out');
   if (btn) btn.disabled = true;
-  out.replaceChildren(el('div', 'hint', `Bringing up ${name}… each seat may take a handshake.`));
+  out.replaceChildren(el('div', 'hint', `Bringing up ${name}… each seat may take a handshake. ` +
+    'Seats start minimized; one that needs you comes back on its own.'));
   try {
     const r = await api('/api/session/rigs/up', { name });
     out.replaceChildren(el('div', 'hint', `rig ${name}:`), ...rigOutcomeRows(r));

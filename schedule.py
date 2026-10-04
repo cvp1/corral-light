@@ -224,7 +224,8 @@ class Scheduler:
         pane = self.mgr.create(job["agent"], job["cwd"],
                                job.get("posture") or sessions.DEFAULT_POSTURE,
                                job.get("model"), job.get("effort"),
-                               role=job.get("role"), role_sha=job.get("role_sha"))
+                               role=job.get("role"), role_sha=job.get("role_sha"),
+                               background=True)   # unattended: minimized until it needs you
         if pane.state == "dead":
             raise RuntimeError(f"the agent did not start: {pane.error}")
         pane.rename(job["title"] or job["prompt"][:60])

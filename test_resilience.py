@@ -127,8 +127,11 @@ class ResumeFromDead(FakeLaneCase):
         self.assertFalse(p.snapshot()["resumable"])
 
     def test_the_ui_offers_resume_on_a_dead_row(self):
+        # The pane menu (header ⋯ and the roster row's right-click) offers
+        # Resume on a dead-but-resumable pane; the composer takes a message too.
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("'↻'", js)
+        self.assertIn("if ((dead && p.resumable) || detached) {", js)
+        self.assertIn("item('Resume', () => resumePane(p)", js)
         self.assertIn("p.state === 'dead') return p.resumable ? 'live' : 'none'", js)
 
 

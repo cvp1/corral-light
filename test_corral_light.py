@@ -11,6 +11,7 @@ import threading
 import sys
 import time
 import types
+import uuid
 import unittest
 from pathlib import Path
 
@@ -3599,6 +3600,112 @@ class LightRigs(RigCases, _FakeLaneCase):
         import sessions
         self.assertIs(sessions._core.ROLE_RESOLVER, sessions._rig_role)
         self.assertEqual(sessions._core.ROSTER_CAP, sessions.MAX_ROSTER)
+
+
+class BackgroundPanes(_FakeLaneCase):
+    """Bulk spawners (rigs, panels, evals, schedules) start panes minimized;
+    a background pane restores itself when it needs the operator."""
+
+    def setUp(self):
+        super().setUp()
+        import queue
+        self.q = queue.Queue()
+        self.mgr.subscribe(self.q)
+        rigs_dir = rigs_mod().rigs_dir()
+        import shutil
+        shutil.rmtree(rigs_dir, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, rigs_dir, True)
+
+    def layouts(self, pane):
+        out = []
+        while not self.q.empty():
+            ev = self.q.get_nowait()
+            if ev.get("kind") == "layout" and ev.get("pane") == pane.id:
+                out.append(ev["data"])
+        return out
+
+    def test_a_background_pane_starts_minimized_and_says_so(self):
+        p = self.mgr.create("fake", self.agent_dir, background=True)
+        self.assertEqual(p.state, "ready", p.error)
+        self.assertTrue(p.minimized and p.background)
+        snap = p.snapshot()
+        self.assertTrue(snap["minimized"] and snap["background"])
+        meta = json.loads((p.dir / "meta.json").read_text(encoding="utf-8"))
+        self.assertTrue(meta["minimized"] and meta["background"])
+        plain = self.mgr.create("fake", self.agent_dir)
+        self.assertFalse(plain.minimized or plain.background)
+
+    def test_a_permission_restores_a_background_pane(self):
+        p = self.mgr.create("fake", self.agent_dir, background=True)
+        self.layouts(p)
+        p.send("perm")
+        self.assertTrue(_wait_for(lambda: p.pending), "no permission arrived")
+        self.assertTrue(_wait_for(lambda: not p.minimized))
+        self.assertFalse(p.background)
+        self.assertIn({"minimized": False, "background": False, "pinned": False,
+                       "order": None}, self.layouts(p))
+        notes = [e["data"]["text"] for e in p.events if e["kind"] == "note"]
+        self.assertTrue(any("restored from the background" in n for n in notes),
+                        notes)
+
+    def test_a_pane_the_operator_minimized_stays_minimized(self):
+        p = self.mgr.create("fake", self.agent_dir, background=True)
+        p.set_minimized(True)           # the operator's own choice now
+        self.assertFalse(p.background)
+        p.send("perm")
+        self.assertTrue(_wait_for(lambda: p.pending), "no permission arrived")
+        self.assertTrue(p.minimized, "an operator-minimized pane was restored")
+
+    def test_a_question_restores_a_background_pane(self):
+        p = self.mgr.create("fake", self.agent_dir, background=True)
+        p.ask("which branch?")
+        self.assertFalse(p.minimized or p.background)
+
+    def test_a_pane_that_already_needs_the_operator_is_not_hidden(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        p.ask("which branch?")
+        self.assertFalse(p.to_background())
+        self.assertFalse(p.minimized)
+
+    def test_the_flag_survives_a_restart_only_while_minimized(self):
+        import sessions
+        p = self.mgr.create("fake", self.agent_dir, background=True)
+        meta = json.loads((p.dir / "meta.json").read_text(encoding="utf-8"))
+        q = sessions.Pane.from_meta(meta, self.mgr)
+        self.assertTrue(q.minimized and q.background)
+        meta["minimized"] = False
+        q = sessions.Pane.from_meta(meta, self.mgr)
+        self.assertFalse(q.background)
+
+    def test_rig_up_minimizes_its_seats_unless_told_otherwise(self):
+        rigs = rigs_mod()
+        a, b = f"bg-{uuid.uuid4().hex[:6]}", f"fg-{uuid.uuid4().hex[:6]}"
+        d = rigs.rigs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        for name, seat in (("bgrig", a), ("fgrig", b)):
+            (d / f"{name}.toml").write_text(rigs.compose(
+                [{"id": seat, "agent": "fake", "cwd": self.agent_dir}]),
+                encoding="utf-8")
+        pa = self.mgr.panes[rigs.up(self.mgr, "bgrig")["outcomes"][0]["pane"]]
+        self.assertTrue(pa.minimized and pa.background)
+        out = rigs.route(self.mgr, "POST", "/api/session/rigs/up",
+                         {"name": "fgrig", "background": False})
+        pb = self.mgr.panes[out[1]["outcomes"][0]["pane"]]
+        self.assertFalse(pb.minimized or pb.background)
+
+    def test_the_spawners_ask_for_the_background(self):
+        root = ROOT
+        hub = (root / "hub.py").read_text(encoding="utf-8")
+        self.assertIn('background=b.get("background") is True', hub)
+        self.assertIn('"background": True', (root / "lane_matrix.py")
+                      .read_text(encoding="utf-8"))
+        self.assertIn("background=True", (root / "schedule.py")
+                      .read_text(encoding="utf-8"))
+
+
+def rigs_mod():
+    from corral_core import rigs
+    return rigs
 
 
 # ask_human cases through Light's own send(), drain and ledger.

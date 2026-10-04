@@ -16,6 +16,9 @@ VERBS
                                the hub's QUOTE_CHARS)
     close     --pane ID ...    close panes this script opened
 
+Panes it opens start minimized and restore themselves when one needs the
+operator (a permission or a question); --foreground shows them on the wall.
+
 The prompt comes from --prompt, --prompt-file, or stdin. Output is one JSON
 document on stdout; progress and warnings go to stderr.
 """
@@ -267,8 +270,9 @@ def read_prompt(args):
 
 
 def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
-              config=None):
-    """Open a pane on `lane`; `posture=None` posts no key so the hub default applies."""
+              config=None, background=True):
+    """Open a pane on `lane`; `posture=None` posts no key so the hub default applies.
+    `background`: minimized on the wall until it needs the operator."""
     key = lane_key(lane)
     live = {a["key"]: a for a in lanes(hub)}
     a = live.get(key)
@@ -285,6 +289,8 @@ def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
         body["model"] = model
     if effort:
         body["effort"] = effort
+    if background:
+        body["background"] = True
     pane = hub.post("/api/session/new", body, timeout=HANDSHAKE_S)["pane"]
     # Extra lane config (e.g. codex `mode=read-only`); a refusal is fatal.
     applied = []
@@ -526,7 +532,7 @@ def cmd_ask(args):
     hub = connect(args.url)
     text = read_prompt(args)
     pane = open_pane(hub, args.lane, args.cwd, args.title, args.model, args.effort,
-                     args.posture, args.config)
+                     args.posture, args.config, background=not args.foreground)
     try:
         rec = send_and_wait(hub, pane["id"], text, args.timeout, args.title or args.lane)
     except BaseException:
@@ -568,7 +574,8 @@ def cmd_fanout(args):
     for i, lane in enumerate(lanes_):
         title = (args.title + f" · {lane}") if args.title else None
         try:
-            pane = open_pane(hub, lane, args.cwd, title, None, None, args.posture)
+            pane = open_pane(hub, lane, args.cwd, title, None, None, args.posture,
+                             background=not args.foreground)
             opened[pane["id"]] = lane
         except ConsultError as e:
             # One lane refusing does not stop the others; report it by name.
@@ -647,6 +654,12 @@ def _prompt_args(p):
                    help=f"wall budget per arm, seconds (default {DEFAULT_TIMEOUT_S})")
 
 
+def _foreground_arg(p):
+    p.add_argument("--foreground", action="store_true",
+                   help="show new panes on the wall (default: minimized until "
+                        "one needs you)")
+
+
 def build_parser():
     """The CLI parser, separate from main() so tests can inspect defaults."""
     ap = argparse.ArgumentParser(prog="corral-light consult",
@@ -670,6 +683,7 @@ def build_parser():
     p.add_argument("--config", action="append", metavar="ID=VALUE",
                    help="extra lane config, e.g. mode=read-only (repeatable)")
     p.add_argument("--close", action="store_true", help="close the pane afterwards")
+    _foreground_arg(p)
     _prompt_args(p)
     p.set_defaults(fn=cmd_ask)
 
@@ -685,6 +699,7 @@ def build_parser():
     p.add_argument("--title")
     # No default: an unset posture lets the hub apply its DEFAULT_POSTURE.
     p.add_argument("--posture", default=None)
+    _foreground_arg(p)
     _prompt_args(p)
     p.set_defaults(fn=cmd_fanout)
 

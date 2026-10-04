@@ -54,7 +54,7 @@ check(b.textContent === '＠' && /seatadd/.test(b.className),
       'an unseated pane offers no way to name it');
 
 /* The header actually carries it. */
-check(/h\.appendChild\(seatPill\(p\)\);/.test(fn('paneHead')),
+check(/seatPill\(p\)/.test(fn('paneHead')),
       'paneHead no longer renders the seat pill');
 
 /* ── ⌘K ──────────────────────────────────────────────────────────────────── */

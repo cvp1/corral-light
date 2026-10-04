@@ -3,6 +3,7 @@
 
     corral-light panes                         list panes: state, lane, model, pending
     corral-light open --lane L [--cwd D] [--model M] [--effort E] [--posture P] [--title T]
+                      [--background]   minimized until it needs you (for scripts)
     corral-light say <pane> [text…]            send, stream the reply, answer permissions here
     corral-light watch <pane>                  follow a pane live (Ctrl-C stops watching)
     corral-light pending <pane>                the full payload + digest of every waiting card
@@ -14,6 +15,7 @@
     corral-light attach <pane> <note-id>       composer text for a note (printed, not sent)
     corral-light quote <from> [<to>]           composer text quoting a pane's last answer
     corral-light rig save|up|list|rm [name]    saved seats, brought back per seat
+                                               (up: minimized unless --foreground)
 
 A client of the running hub, using the same routes as the browser, so
 nothing bypasses the permission rail. Pairing comes from consult.py.
@@ -404,6 +406,8 @@ def v_open(c, a):
     for k in ("model", "effort", "posture", "role"):
         if getattr(a, k, None):
             body[k] = getattr(a, k)
+    if a.background:
+        body["background"] = True
     r = c.post("/api/session/new", body, timeout=consult.HANDSHAKE_S)
     p = r["pane"]
     if p.get("state") == "dead":
@@ -657,7 +661,9 @@ def v_rig(c, a):
         r = c.post("/api/session/rigs/save", {"name": a.name, "replace": a.replace})
         c.say(f"saved {r['name']}: " + " ".join("@" + s for s in r["seats"]))
         return 0
-    r = c.post("/api/session/rigs/up", {"name": a.name}, timeout=RIG_UP_TIMEOUT_S)
+    r = c.post("/api/session/rigs/up", {"name": a.name,
+                                        "background": not a.foreground},
+               timeout=RIG_UP_TIMEOUT_S)
     for line in r["lines"]:
         c.say(line)
     return 1 if any(o["outcome"] in RIG_PROBLEMS for o in r["outcomes"]) else 0
@@ -686,6 +692,8 @@ def main(argv=None):
     s.add_argument("--role", help="a role preset (roles.py list)")
     s.add_argument("--ask", help="with --role: send the role's instructions plus "
                                  "this ask as the first turn, and follow it")
+    s.add_argument("--background", action="store_true",
+                   help="start minimized; it restores itself when it needs you")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=v_open)
 
@@ -793,6 +801,9 @@ def main(argv=None):
     x = rsub.add_parser("up", help="check the whole rig, then resume or start "
                                    "each seat; one line per seat")
     x.add_argument("name")
+    x.add_argument("--foreground", action="store_true",
+                   help="show the seats on the wall (default: minimized until "
+                        "one needs you)")
     x = rsub.add_parser("rm")
     x.add_argument("name")
     s.set_defaults(fn=v_rig)

@@ -247,7 +247,7 @@ with a shell can still write anywhere you can.
 
 ### 5. Put two agents to work together
 
-Click **＠** in a pane's header to give it a seat name, such as `@author`,
+Open a pane's **⋯** menu and choose **Give it a seat…** to name it, such as `@author`,
 and do the same for a second pane, `@reviewer`. Now tell the author: *"when
 you are done, send your change to @reviewer and wait for the review."* The
 agents use built-in tools to message each other; you watch both panes and

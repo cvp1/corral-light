@@ -708,7 +708,9 @@ class Handler(BaseHTTPRequestHandler):
                                   posture, (b.get("model") or "").strip() or None,
                                   effort, role=role, role_sha=role_sha,
                                   worktree=b.get("worktree") is True,
-                                  title=(b.get("title") or "").strip()[:80] or None)
+                                  title=(b.get("title") or "").strip()[:80] or None,
+                                  # Bulk spawners: minimized until it needs you.
+                                  background=b.get("background") is True)
                 # The preamble is returned to the composer, not sent from here.
                 return self._json({"ok": True, "pane": pane.snapshot(),
                                    "preamble": preamble, "notes": notes})
