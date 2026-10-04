@@ -38,7 +38,7 @@ Platform knowledge is marked. Claims the plan says it measured in code are unver
 
 9. **All lanes — TCC and file sharing.** Desktop, Documents, Downloads, external disks, and `/opt/homebrew` stay empty until Docker has the share and Full Disk Access. **Fix:** `install.sh` reads a sentinel in each configured mount and stops with the setting that failed. Leave `~` off the default list.
 
-10. **Any lane with no Linux build for that arch.** If Grok has no linux/arm64 binary, that pane cannot start on mac-host. qemu-user can run a linux/amd64 build only as a doctor-labeled degraded fallback. A Mach-O binary cannot be emulated. **Fix:** the manifest refuses the tag when any lane lacks a Linux build for the arch.
+10. **Any lane with no Linux build for that arch.** If Grok has no linux/arm64 binary, that pane cannot start on the Mac host. qemu-user can run a linux/amd64 build only as a doctor-labeled degraded fallback. A Mach-O binary cannot be emulated. **Fix:** the manifest refuses the tag when any lane lacks a Linux build for the arch.
 
 ## Open questions
 

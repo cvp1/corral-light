@@ -20,11 +20,11 @@ proven**. It does not restate the design's reasoning; read v3 for that.
 | Design rule | Parity with native, per lane (C4) |
 | Image architecture | **linux/amd64 only** for now. No linux/arm64 build. |
 | Image visibility | **Public** on GHCR (`ghcr.io/cvp1/corral-light`). Source repos `cvp1/corral-light` and `cvp1/ai-os-seed` are already public (checked 2026-10-01). |
-| Test hosts | **mac-host**, an **Intel Mac laptop running Omarchy**, and **thinkpad-host** (IBM ThinkPad running Omarchy) |
+| Test hosts | **The Mac host**, an **Intel Mac laptop running Omarchy**, and **The ThinkPad** (IBM ThinkPad running Omarchy) |
 
-### Consequence of amd64-only on mac-host — must be tested, not assumed
+### Consequence of amd64-only on the Mac host — must be tested, not assumed
 
-mac-host is Apple Silicon (`uname -m` = arm64; Docker Desktop reports
+The Mac host is Apple Silicon (`uname -m` = arm64; Docker Desktop reports
 `aarch64 linux`). An amd64-only image runs there **under emulation** — Docker
 Desktop's "Use Rosetta for x86_64/amd64 emulation" setting, or QEMU if Rosetta
 is off. That is a supported mode, but:
@@ -36,7 +36,7 @@ is off. That is a supported mode, but:
   measures it.
 - If a lane fails under emulation, the fix is adding linux/arm64 to the build
   matrix — a CI flag, not a redesign. Until then that lane is reported as
-  degraded on mac-host by `doctor`.
+  degraded on the Mac host by `doctor`.
 - The release gate in v3 ("tag fails if a lane lacks a Linux build for a
   supported arch") now means **amd64 only**.
 
@@ -44,7 +44,7 @@ is off. That is a supported mode, but:
 
 ## 1. Target matrix
 
-| | mac-host | Intel Mac laptop (Omarchy) | thinkpad-host (ThinkPad, Omarchy) |
+| | The Mac host | Intel Mac laptop (Omarchy) | The ThinkPad (ThinkPad, Omarchy) |
 |---|---|---|---|
 | Hostname | `mac-host` | **to confirm** | `thinkpad-host` [to confirm exact] |
 | OS | macOS 27 | Omarchy (Arch Linux, Hyprland, Wayland) | Omarchy |
@@ -61,7 +61,7 @@ is off. That is a supported mode, but:
 | Existing AI-OS | yes (`~/ai-os`, launchd jobs) | unknown — fresh install path | unknown — fresh install path |
 | Role in testing | daily seat; full parity incl. Keychain, rig, launchd jobs | clean Linux install; Intel hardware | second clean Linux install; proves it isn't one machine's luck |
 
-The two Omarchy hosts are the **clean-install** proof. mac-host is the
+The two Omarchy hosts are the **clean-install** proof. The Mac host is the
 **migration** proof (existing workspace, existing scheduled jobs, existing
 native hub to retire).
 
@@ -226,7 +226,7 @@ Order of work is in section 4.
 5. `corral init` installs Seed into an empty workspace; `corral update`
    stages and atomically swaps, keeps the previous image tag and workspace
    snapshot for rollback.
-6. mac-host migration: export the current launchd jobs from
+6. The Mac host migration: export the current launchd jobs from
    `scheduler/manifest.yml`, classify each as container-runnable or
    host-needing (via `corral-host-run`/hostd), dry-run both backends side by
    side, then unload the launchd units **only at cutover**.
@@ -271,19 +271,19 @@ JSON report per run to `reviews/parity-runs/<host>-<date>.json`.
 
 | Phase | Hosts | Work | Entry | Exit |
 |---|---|---|---|---|
-| **P0a — image boots** | mac-host, thinkpad-host | WS1, WS2, WS3 (bind, workspace, doctor basics) | This plan approved | T-IMG, T-ARCH, T-ID pass on both; hub reachable and pairs on :8099 (mac-host) / :8098 (thinkpad-host) |
-| **P0b — parity on mac-host** | mac-host | WS4, WS5, WS6, WS7, rest of WS3 | P0a exit | The eight v3 Phase 0 checks (section 5.3) pass on **all four lanes**, against a **copy** of `~/ai-os`, beside the live native hub |
-| **P0c — parity on Linux** | thinkpad-host, Intel Mac laptop (Omarchy) | Linux variants of WS4/WS5 | P0a exit on thinkpad-host | Same eight checks pass on all four lanes on both Omarchy hosts |
-| **P1 — Seed and scheduler** | all three | WS8 | P0b and P0c exit | mac-host's scheduled jobs run from the container for **7 days** at native freshness (`observability/freshness.py`), including at least one sleep/wake and one Docker restart, with no duplicate or missed runs; on the Omarchy hosts `corral init` produces a working Seed workspace |
-| **P2 — installer and release** | Intel Mac laptop (Omarchy) first, then thinkpad-host | WS9, WS10 | P1 exit | From a clean user account: the four install lines → `/status` answers; public image tag published with signature and SBOM |
-| **P3 — cutover mac-host** | mac-host | Stop native hub, unload launchd plist and native scheduler units, switch container to :8098 and the real workspace | P2 exit + the operator's go | 48 hours of daily use with no fallback to native; rollback rehearsed (below) |
+| **P0a — image boots** | The Mac host, the ThinkPad | WS1, WS2, WS3 (bind, workspace, doctor basics) | This plan approved | T-IMG, T-ARCH, T-ID pass on both; hub reachable and pairs on :8099 (the Mac host) / :8098 (the ThinkPad) |
+| **P0b — parity on the Mac host** | The Mac host | WS4, WS5, WS6, WS7, rest of WS3 | P0a exit | The eight v3 Phase 0 checks (section 5.3) pass on **all four lanes**, against a **copy** of `~/ai-os`, beside the live native hub |
+| **P0c — parity on Linux** | The ThinkPad, Intel Mac laptop (Omarchy) | Linux variants of WS4/WS5 | P0a exit on the ThinkPad | Same eight checks pass on all four lanes on both Omarchy hosts |
+| **P1 — Seed and scheduler** | all three | WS8 | P0b and P0c exit | The Mac host's scheduled jobs run from the container for **7 days** at native freshness (`observability/freshness.py`), including at least one sleep/wake and one Docker restart, with no duplicate or missed runs; on the Omarchy hosts `corral init` produces a working Seed workspace |
+| **P2 — installer and release** | Intel Mac laptop (Omarchy) first, then the ThinkPad | WS9, WS10 | P1 exit | From a clean user account: the four install lines → `/status` answers; public image tag published with signature and SBOM |
+| **P3 — cutover the Mac host** | The Mac host | Stop native hub, unload launchd plist and native scheduler units, switch container to :8098 and the real workspace | P2 exit + the operator's go | 48 hours of daily use with no fallback to native; rollback rehearsed (below) |
 
 **Rollback (every phase).** Native install stays untouched until P3. P3
 rollback: `corral down`, reload the saved launchd plists
 (`com.cvp1.corral-light`, watch, Seed jobs), start the native hub. Rehearse
 once before cutover.
 
-**Never during P0–P2 on mac-host:** bind the container to :8098, point it at
+**Never during P0–P2 on the Mac host:** bind the container to :8098, point it at
 the real `~/ai-os`, or unload any launchd unit.
 
 ---
@@ -298,9 +298,9 @@ the real `~/ai-os`, or unload any launchd unit.
 | Image | built image | every CI build | `docker run` scripts |
 | Parity (mechanics) | each test host | each phase gate | `tests/parity/run.py --direct` via `docker exec` |
 | Parity (per lane) | each test host | each phase gate | `tests/parity/run.py --lanes` drives each lane through `corral-light consult` |
-| Lifecycle | mac-host primarily | P1 | scripted sleep/wake + Docker restart |
+| Lifecycle | The Mac host primarily | P1 | scripted sleep/wake + Docker restart |
 | Security | each host | each phase gate | `tests/parity/security.py` |
-| Native regression | mac-host native checkout | every change to hub code | existing `test_*.py` and `selftest_*.mjs` suites |
+| Native regression | The Mac host native checkout | every change to hub code | existing `test_*.py` and `selftest_*.mjs` suites |
 
 **Why two parity modes.** `--direct` proves the plumbing deterministically.
 `--lanes` proves each lane's own tool runner actually has that reach: the
@@ -316,8 +316,8 @@ it passes on **all four lanes**.
 - T-IMG-3 Every lane binary present, Linux x64, runs `--version`.
 - T-IMG-4 Layer scan finds no host paths, usernames, hostnames, tokens.
 - T-IMG-5 Image size recorded; regression > 15% flags the PR.
-- T-ARCH On mac-host under Rosetta: each lane CLI starts, completes one real
-  prompt, and runs one tool call; record wall time vs thinkpad-host. A failure marks
+- T-ARCH On the Mac host under Rosetta: each lane CLI starts, completes one real
+  prompt, and runs one tool call; record wall time vs the ThinkPad. A failure marks
   that lane degraded on Apple Silicon and opens the arm64 build task.
 
 **Identity, paths, overlays, git**
@@ -338,12 +338,12 @@ it passes on **all four lanes**.
   uses one.
 
 **Host reach**
-- T-HOST-1 `corral-host-run brew --prefix` (mac-host) / `pacman -V`
+- T-HOST-1 `corral-host-run brew --prefix` (the Mac host) / `pacman -V`
   (Omarchy) exits 0 with login PATH.
 - T-HOST-2 cwd and an argument with a space arrive intact.
 - T-HOST-3 Non-zero exit status propagates.
 - T-HOST-4 Ctrl-C cancels the host process (no orphan left).
-- T-HOST-5 `launchctl print gui/$(id -u)` succeeds (mac-host).
+- T-HOST-5 `launchctl print gui/$(id -u)` succeeds (the Mac host).
 - T-HOSTD-1 `secret` returns the broker's native outcome for a fixture handle;
   no value appears in the pane transcript, hostd log, or container log.
 - T-HOSTD-2 `notify` appears (Notification Center / mako).
@@ -370,7 +370,7 @@ it passes on **all four lanes**.
 - T-PORT-2 Unpublished port reachable only after `expose`.
 - T-PORT-3 Ollama `/api/tags` answers from a pane via `host.docker.internal`.
 - T-PORT-4 `rigctl -m 2 -r host.docker.internal:4532 f` returns the IC-7300
-  frequency (mac-host, radio on).
+  frequency (the Mac host, radio on).
 - T-NET-1 Hub reachable only from host loopback; not from the LAN IP.
 - T-NET-2 Pairing still requires pair code and cookie.
 - T-NET-3 Request from the bridge gateway with a forged Tailscale Serve header
@@ -430,14 +430,14 @@ it passes on **all four lanes**.
 | 5 Session reach | T-HOSTD-1..4 |
 | 6 Ports | T-PORT-1..4, T-HOSTD-5 |
 | 7 Git and watching | T-GIT-1..2, T-WATCH-1 |
-| 8 Lifecycle and trust | T-SCHED-2..3 (P1 on mac-host), T-NET-2..3 |
+| 8 Lifecycle and trust | T-SCHED-2..3 (P1 on the Mac host), T-NET-2..3 |
 
 Each row must pass on **all four lanes** on the host under test. One lane
 failing fails the row.
 
 ### 5.4 Host × phase matrix
 
-| Test group | mac-host | Intel Mac laptop (Omarchy) | thinkpad-host |
+| Test group | The Mac host | Intel Mac laptop (Omarchy) | The ThinkPad |
 |---|---|---|---|
 | T-IMG, T-REL | CI | CI | CI |
 | T-ARCH | **P0a** (Rosetta) | n/a (native) | n/a (native) |
@@ -465,27 +465,27 @@ failing fails the row.
 
 | Risk | Where | Mitigation | Test |
 |---|---|---|---|
-| A lane binary misbehaves under Rosetta | mac-host | Detect in P0a; add linux/arm64 to the matrix for that build | T-ARCH |
-| Demos pass, real Mac work fails (panel's top risk) | mac-host | Gate on real workflows per lane, not prompts | 5.3 |
-| virtiofs watch drops and slow trees | mac-host | Poll-reconcile in hub/Seed; heavy watchers via host shell | T-WATCH, T-PERF |
+| A lane binary misbehaves under Rosetta | The Mac host | Detect in P0a; add linux/arm64 to the matrix for that build | T-ARCH |
+| Demos pass, real Mac work fails (panel's top risk) | The Mac host | Gate on real workflows per lane, not prompts | 5.3 |
+| virtiofs watch drops and slow trees | The Mac host | Poll-reconcile in hub/Seed; heavy watchers via host shell | T-WATCH, T-PERF |
 | OAuth flow can't complete in container | all | Out-of-band first, `expose` lease second | T-LOGIN |
-| Docker Desktop not running at login | mac-host | Doorbell starts it; hub shows "starting" | T-SCHED-3 |
+| Docker Desktop not running at login | The Mac host | Doorbell starts it; hub shows "starting" | T-SCHED-3 |
 | Secret Service absent on Omarchy | Omarchy hosts | hostd `secret` reports unavailable cleanly; document provider install | T-HOSTD-1, T-HOSTD-7 |
 | sshd off on a host | all | Installer checks and stops with the fix | T-INST-2 |
 | Public image leaks personal data | CI | Runtime-only config; layer scan; re-scan published tag | T-IMG-4, T-SEC-4 |
-| Scheduler double-runs or misses after recreate | mac-host | Durable last-run state; overlap guard | T-SCHED-4..5 |
-| Cutover breaks the daily seat | mac-host | Native untouched until P3; rehearsed rollback | P3 |
+| Scheduler double-runs or misses after recreate | The Mac host | Durable last-run state; overlap guard | T-SCHED-4..5 |
+| Cutover breaks the daily seat | The Mac host | Native untouched until P3; rehearsed rollback | P3 |
 
 ---
 
 ## 7. Open items to resolve during implementation
 
-1. Hostname of the Intel Mac laptop running Omarchy; exact hostname of thinkpad-host.
+1. Hostname of the Intel Mac laptop running Omarchy; exact hostname of the ThinkPad.
 2. Docker Engine, sshd and a Secret Service provider on stock Omarchy.
 3. Grok CLI Linux x86_64 artifact name and its login flow.
 4. Antigravity's Google login flow inside a container.
-5. Docker Desktop settings on mac-host (file sharing, VirtioFS, SSH agent,
+5. Docker Desktop settings on the Mac host (file sharing, VirtioFS, SSH agent,
    Rosetta) — macOS privacy protection blocked reading them from a session;
    read them in the Docker Desktop UI.
-6. Which of mac-host's scheduled jobs need host reach (WS8 step 6).
+6. Which of the Mac host's scheduled jobs need host reach (WS8 step 6).
 7. Where the secret broker lives on hosts without `~/ai-os` (Seed path).

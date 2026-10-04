@@ -30,7 +30,7 @@
 ### 3. The Fork: Architectural Recommendation
 
 **Recommendation: A Hybrid Split.**
-* **For the operator (Primary Mac Workstation / mac-host): Non-Container.** Deploy a host-native, `uv`-pinned Python 3.12 runtime with prebuilt adapter bundles and platform binaries. The operator requires low-latency macOS Keychain integration, IC-7300 USB serial, desktop notifications, and zero VM overhead.
+* **For the operator (Primary Mac Workstation / the Mac host): Non-Container.** Deploy a host-native, `uv`-pinned Python 3.12 runtime with prebuilt adapter bundles and platform binaries. The operator requires low-latency macOS Keychain integration, IC-7300 USB serial, desktop notifications, and zero VM overhead.
 * **For Novices & Remote Fleet (Linux iMac, Linux laptop): Container.** Ship the hardened container image (with read-only `~/notes`, unprivileged credentials, and fixed gateway handling) where a sandboxed "appliances-style" zero-dependency install protects novice hosts from arbitrary local file compromise.
 
 ---

@@ -25,14 +25,14 @@ FORMAT: Markdown, under 1,300 words. Start with the eight verdict lines. No prea
 # Proposal — Corral Light runs in a container, on every host
 
 Status: **v2 FOR PANEL REVIEW**, 2026-10-01. Nothing built.
-Author: Claude (mac-host session) for the operator, who owns the system and decides.
+Author: Claude (the Mac host session) for the operator, who owns the system and decides.
 
 ## What changed from v1, and why
 
 v1 was reviewed by a three-model panel (see `reviews/2026-10-01-container-install-panel/`).
-The panel converged on keeping mac-host native. The operator rejected that framing:
+The panel converged on keeping the Mac host native. The operator rejected that framing:
 
-1. **Containers are the goal, on every host including mac-host.** The job is to
+1. **Containers are the goal, on every host including the Mac host.** The job is to
    solve host reach, not route around it.
 2. **No lane-specific constraints.** Corral drives four agent CLIs. A design
    rule that only binds Claude Code (its PreToolUse hooks) cannot gate the
@@ -69,12 +69,12 @@ not a promise.
 
 | Pain | Evidence |
 |---|---|
-| Python drift | No pin. Hub floor 3.9; mac-host runs brew 3.14; Seed scripts need 3.10+. |
+| Python drift | No pin. Hub floor 3.9; the Mac host runs brew 3.14; Seed scripts need 3.10+. |
 | Two service formats | launchd plist + systemd unit + watch service/timer. |
 | Hidden setup step | `spike/node_modules` gitignored; `doctor.py` exists to explain the missing `npm install`. |
 | Per-platform binaries | Adapters ship `darwin-arm64` builds; Grok is `grok-1.0.46-macos-aarch64`; Antigravity is a per-platform build. |
 | Two repos, two clones | Seed and Corral Light installed separately, not pinned to each other. |
-| Workspace path mismatch | Code assumes `~/aios`; mac-host's workspace is `~/ai-os`. |
+| Workspace path mismatch | Code assumes `~/aios`; the Mac host's workspace is `~/ai-os`. |
 | Lane defaults lag | Grok defaults to 4.6 (4.7 exists), Codex to effort `low`, Gemini to 3.7 (3.8 exists). |
 
 ## The shape
@@ -218,10 +218,10 @@ checks for it and stops with the link if missing.
 
 | Phase | Work | Done when |
 |---|---|---|
-| 0 | Image + compose + identity/PATH/parity map; run beside native on :8099 on mac-host | Every lane logs in and answers one real prompt in the container; `doctor` lists the same lanes ok as native |
+| 0 | Image + compose + identity/PATH/parity map; run beside native on :8099 on the Mac host | Every lane logs in and answers one real prompt in the container; `doctor` lists the same lanes ok as native |
 | 1 | corral-hostd + SSH reach + rigctld | From a pane on each lane: `corral-host secret` succeeds, a notification appears, `ssh host.docker.internal launchctl list` works, `rigctl` reads the rig frequency |
-| 2 | Seed bundled, container scheduler backend, `install.sh`, multi-arch CI | mac-host's twelve scheduled jobs run from the container for a week with the same freshness as launchd |
-| 3 | Cut over | mac-host retires the native launchd plist; linux-host and a fresh Linux host install with the four lines |
+| 2 | Seed bundled, container scheduler backend, `install.sh`, multi-arch CI | The Mac host's twelve scheduled jobs run from the container for a week with the same freshness as launchd |
+| 3 | Cut over | The Mac host retires the native launchd plist; the Linux host and a fresh Linux host install with the four lines |
 
 ## Open questions for the panel
 
@@ -239,5 +239,5 @@ checks for it and stops with the link if missing.
 ## Unverified
 
 - Grok CLI Linux arm64 build [NEEDS VERIFICATION].
-- Docker on linux-host [NEEDS VERIFICATION]; laptop-host unreachable 2026-10-01.
+- Docker on the Linux host [NEEDS VERIFICATION]; the laptop unreachable 2026-10-01.
 - Each lane's login flow inside a container.

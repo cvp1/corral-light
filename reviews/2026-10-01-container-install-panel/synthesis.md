@@ -11,7 +11,7 @@ each reviewing the pasted text only from an empty scratch directory.
 
 ## Bottom line
 
-**Unanimous: hybrid.** Keep mac-host on a pinned native install; ship the
+**Unanimous: hybrid.** Keep the Mac host on a pinned native install; ship the
 container as an opt-in restricted sandbox for novices and Linux hosts, and
 only after the must-fixes below. Sol's framing is the sharpest: build one
 **shared release bundle first** (pinned Python, adapters, CLIs, Seed, model
@@ -97,7 +97,7 @@ check against each lane's config before relying on the memory-mesh guard.**
 1. **Release bundle first, for every host.** One versioned manifest pins
    Python (uv 3.12), adapter and CLI builds per OS/arch, Seed, and model
    defaults. One installer; launchd/systemd stay. Fixes every measured pain in
-   the v1 table without a VM, and keeps mac-host's host reach.
+   the v1 table without a VM, and keeps the Mac host's host reach.
 2. **Container second, as the sandbox install.** Same manifest inside the
    image. Must-fixes 1–8 are entry criteria for Phase 0, not later polish.
 3. **Guard independent of vendor hooks.** Read-only mounts plus a write broker

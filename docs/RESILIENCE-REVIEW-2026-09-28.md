@@ -12,7 +12,7 @@
 > (spike/node_modules/@agentclientprotocol/codex-acp/dist/index.js:30533),
 > full Corral's dead-pane resume (corral/sessions.py:1372). What was NOT
 > reproduced here: a Light hub crash with live panes — Light's daily driver is
-> mac-host, and linux-host runs the full hub. The kill paths below are read
+> The Mac host, and the Linux host runs the full hub. The kill paths below are read
 > from the code, with line numbers, so each can be checked in ten minutes.
 
 ## TL;DR
@@ -210,7 +210,7 @@ the code before being accepted.
 
 | Finding | Verified | Consequence |
 |---|---|---|
-| A hub exit does not guarantee the adapters exit. `start_new_session=True` (corral_core/acp.py:227) puts each adapter in its own session; the plist has no `AbandonProcessGroup`, so on mac-host launchd's group kill misses them. **`meta.json` stores no pid**, so `restore()` cannot reap the orphan and the next `session/load` runs a second adapter on the same `acp_session`. | yes | **New P0: write `pid`+`pgid` into meta at spawn; `restore()` SIGTERMs a still-running group before any load.** Both P0-c and the pane host double-attach until this exists. |
+| A hub exit does not guarantee the adapters exit. `start_new_session=True` (corral_core/acp.py:227) puts each adapter in its own session; the plist has no `AbandonProcessGroup`, so on the Mac host launchd's group kill misses them. **`meta.json` stores no pid**, so `restore()` cannot reap the orphan and the next `session/load` runs a second adapter on the same `acp_session`. | yes | **New P0: write `pid`+`pgid` into meta at spawn; `restore()` SIGTERMs a still-running group before any load.** Both P0-c and the pane host double-attach until this exists. |
 | `pause()` is the wrong shutdown primitive: it clears the queue (corral_core/sessions.py:659) and the in-flight prompt is already popped (sessions.py:1455), so "persist the queue then pause" loses the one message that matters and duplicates `user` events already on disk. | yes | P0-b becomes: on SIGTERM write ONE `note` per busy pane naming the interrupted prompt and the still-queued ones, from the main thread; no pause. `KillMode=mixed` so the handler runs before the children are signalled. |
 | K4 must measure remembered context, not the `loadSession` flag. And Light's own replay suppression (`_replaying=True` around load, sessions.py:1063) swallows Ollama's "context lost" chunk (ollama_acp.py:148), so the pane looks continuous while the model forgot everything. | yes | Bug: emit the Ollama notice as a `note` after replay ends, or have ollama_acp send it as a separate notification the hub does not suppress. Lane matrix asserts continuity with a "what did I say first?" turn. |
 | `_spawn()` waits on `Future.result()` with no timeout (acp.py:158). | yes | A bounded wait plus a loud error; not a note. |

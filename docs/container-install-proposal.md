@@ -3,8 +3,8 @@
 Status: **v3 — panel-converged design, ready to build Phase 0**, 2026-10-01.
 Implementation and test plan: `docs/container-implementation-plan.md`.
 
-**Decisions (the operator, 2026-10-01):** image is **linux/amd64 only** for now (mac-host runs it under Docker Desktop's Rosetta emulation); image is **public** on GHCR; test hosts are **mac-host**, an **Intel Mac laptop running Omarchy**, and **thinkpad-host** (ThinkPad, Omarchy).
-Author: Claude (mac-host session) for the operator, who owns the system and decides.
+**Decisions (the operator, 2026-10-01):** image is **linux/amd64 only** for now (the Mac host runs it under Docker Desktop's Rosetta emulation); image is **public** on GHCR; test hosts are **The Mac host**, an **Intel Mac laptop running Omarchy**, and **The ThinkPad** (ThinkPad, Omarchy).
+Author: Claude (the Mac host session) for the operator, who owns the system and decides.
 
 ## History
 
@@ -50,7 +50,7 @@ host:                                        │
   `~/notes`, read-write, at the **same absolute paths**. No mount is special;
   the product does not know whether a folder is synced or versioned.
 - `CORRAL_WORKSPACE` defaults to the workspace Seed reports, not a hardcoded
-  `~/aios` (mac-host's is `~/ai-os`).
+  `~/aios` (the Mac host's is `~/ai-os`).
 - `install.sh` creates missing default paths as the user, then writes a
   sentinel into each mount and reads it from the container. A failure names
   the Docker Desktop file-sharing or Full Disk Access setting to fix (macOS
@@ -198,7 +198,7 @@ corral login <lane>        # once per lane
 corral doctor
 ```
 
-## Phase 0 exit criteria — every check from a pane on every lane, on mac-host
+## Phase 0 exit criteria — every check from a pane on every lane, on the Mac host
 
 A chat reply and a green `doctor` are not sufficient. All eight must pass.
 
@@ -231,9 +231,9 @@ A chat reply and a green `doctor` are not sufficient. All eight must pass.
 
 | Phase | Work | Done when |
 |---|---|---|
-| 0 | Image, compose, identity/overlays, hostd, `corral-host-shell`, login flows; on mac-host beside native on :8099 against a **copy** of the workspace | The eight checks pass on all four lanes |
-| 1 | Seed container backend + doorbell; `install.sh`; multi-arch CI with the parity suite | mac-host's scheduled jobs run from the container for a week, including a sleep and a Docker restart, at native freshness |
-| 2 | Cut over mac-host; install linux-host and a fresh Linux host | Native launchd plist retired; the four install lines work on Linux |
+| 0 | Image, compose, identity/overlays, hostd, `corral-host-shell`, login flows; on the Mac host beside native on :8099 against a **copy** of the workspace | The eight checks pass on all four lanes |
+| 1 | Seed container backend + doorbell; `install.sh`; multi-arch CI with the parity suite | The Mac host's scheduled jobs run from the container for a week, including a sleep and a Docker restart, at native freshness |
+| 2 | Cut over the Mac host; install the Linux host and a fresh Linux host | Native launchd plist retired; the four install lines work on Linux |
 
 ## Biggest risk (all three reviewers)
 
@@ -244,9 +244,9 @@ workflows on every lane, not a prompt round-trip.
 ## Unverified
 
 - Grok CLI Linux x86_64 artifact, and Grok's login flow.
-- Every lane binary working under Rosetta on mac-host.
+- Every lane binary working under Rosetta on the Mac host.
 - Antigravity's exact Google login flow in a container.
-- Docker on linux-host (its ssh accepts only mesh commands); laptop-host was
+- Docker on the Linux host (its ssh accepts only mesh commands); the laptop was
   unreachable 2026-10-01.
-- Docker Desktop's current settings on mac-host (macOS privacy protection
+- Docker Desktop's current settings on the Mac host (macOS privacy protection
   blocked reading them).

@@ -4,7 +4,7 @@ pane 5018c4e4929f · model grok-4.7 · complete True
 
 I'll read the hub, session, and adapter code the plan cites before judging any item.The plan's line citations need checking against the live spawn, resume, and shutdown paths.TL;DR 1–4 are K1, K2, K3, and the sequence. Verdicts below.
 
-**K1 — RESHAPE.** A hub exit closes every adapter pipe (`corral_core/acp.py:224`). `Restart=always` is set and `KillMode` is not (`corral-light.service:37`), so Linux does kill the cgroup. mac-host is launchd (`KeepAlive`, `com.cvp1.corral-light.plist:81`) and `start_new_session=True` puts the adapter in its own session (`acp.py:227`). Launchd's process-group kill misses it. Grok dies because the spawner thread dies (`acp.py:214`). Any adapter blocked in a model call keeps running until its next stdin read.
+**K1 — RESHAPE.** A hub exit closes every adapter pipe (`corral_core/acp.py:224`). `Restart=always` is set and `KillMode` is not (`corral-light.service:37`), so Linux does kill the cgroup. The Mac host is launchd (`KeepAlive`, `com.cvp1.corral-light.plist:81`) and `start_new_session=True` puts the adapter in its own session (`acp.py:227`). Launchd's process-group kill misses it. Grok dies because the spawner thread dies (`acp.py:214`). Any adapter blocked in a model call keeps running until its next stdin read.
 
 **K2 — KEEP.** `resume()` accepts only `detached` (`sessions.py:1043`), `send()` raises on `dead` (`sessions.py:1375`), and a dead row offers only dismiss (`static/app.js:1449`). This repairs a local adapter crash whose `acp_session` is still valid. A vendor-side session kill stays dead after the same call.
 
@@ -28,7 +28,7 @@ I'll read the hub, session, and adapter code the plan cites before judging any i
 
 **P0-b — RESHAPE.** A transcript note is worth writing. Persisting `_queue` into the composer duplicates a `user` event already on disk and misses the popped prompt. `pause()` is the wrong primitive. Write the popped text and the queue from the main thread. Set `KillMode=mixed` if that handler is supposed to run before the adapters are signaled.
 
-**P0-c — DROP.** Boot re-attach opens a new adapter onto `acp_session` while a mac-host orphan may still hold it. Twelve panes at 2s is 24s plus handshakes; the verify step expects 10s. It is also a rate-limit stampede, which is K2. Ollama resumes into an empty context and says so.
+**P0-c — DROP.** Boot re-attach opens a new adapter onto `acp_session` while a the Mac host orphan may still hold it. Twelve panes at 2s is 24s plus handshakes; the verify step expects 10s. It is also a rate-limit stampede, which is K2. Ollama resumes into an empty context and says so.
 
 **P0-d — DROP.** A timer that restarts the unit is another K1. `tick_age_s` is `-1` until the first tick (`hub.py:241`) and freezes when any `snapshot` throws, because `_TICK` updates only after the whole loop (`hub.py:137`). Page when the main process is gone.
 
@@ -46,7 +46,7 @@ I'll read the hub, session, and adapter code the plan cites before judging any i
 
 ### Missed kill
 
-`meta.json` stores `acp_session` and no pid (`corral_core/sessions.py:246`). `from_meta` forces `detached` (`sessions.py:1024`). On mac-host the old adapter is still alive after the hub exits, still holding the vendor session. The next `resume` starts a second adapter on that same id. Linux cgroup stop hides this. The daily driver does not. Separately, from the `pop` at `sessions.py:1455` until `turn_end`, the prompt text exists only inside `client.prompt`. SIGKILL of the hub skips both `agent_exit` and `_drain`'s drop note (`sessions.py:1474`).
+`meta.json` stores `acp_session` and no pid (`corral_core/sessions.py:246`). `from_meta` forces `detached` (`sessions.py:1024`). On the Mac host the old adapter is still alive after the hub exits, still holding the vendor session. The next `resume` starts a second adapter on that same id. Linux cgroup stop hides this. The daily driver does not. Separately, from the `pop` at `sessions.py:1455` until `turn_end`, the prompt text exists only inside `client.prompt`. SIGKILL of the hub skips both `agent_exit` and `_drain`'s drop note (`sessions.py:1474`).
 
 ### Sequencing
 
@@ -66,4 +66,4 @@ Two writers on one `acp_session`. Seq is assigned in the hub (`corral_core/sessi
 
 ### Build this
 
-Write `pid` and `pgid` into `meta.json` at spawn, and have `restore()` SIGTERM that group when it is still the adapter, before any `session/load`. mac-host's `setsid` children outlive launchd. Both P0-c and the pane host double-attach until this exists. It is smaller than the host, and it is the kill path the inventory missed.
+Write `pid` and `pgid` into `meta.json` at spawn, and have `restore()` SIGTERM that group when it is still the adapter, before any `session/load`. The Mac host's `setsid` children outlive launchd. Both P0-c and the pane host double-attach until this exists. It is smaller than the host, and it is the kill path the inventory missed.

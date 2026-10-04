@@ -41,7 +41,7 @@ so Phase 0 must run real workflows on every lane.
   as a doorbell. v3 takes the latter (2–1): one manifest, one state store.
 - **General host commands.** Grok (R2): a hostd `spawn` verb, since SSH lands
   outside the Aqua session. Sol and Gemini: SSH with a login-PATH wrapper,
-  hostd for session-only capabilities. Author measured on mac-host: SSH *can*
+  hostd for session-only capabilities. Author measured on the Mac host: SSH *can*
   reach `launchctl print gui/<uid>`, and its PATH lacks Homebrew. v3 takes SSH
   + `corral-host-shell` (2–1, backed by the measurement).
 - **hostd transport.** Sol: tunnel through SSH. Grok and Gemini: direct to

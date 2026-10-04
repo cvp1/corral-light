@@ -21,7 +21,7 @@ Must-fix in the Phase 0 spec before anything is built:
 
 ## The fork
 
-Hybrid. mac-host, the operator's daily Mac, stays a uv-pinned native install with prebuilt host-arch bundles, so Keychain, USB serial, notifications, and the Seed scheduler keep working. The container is the install for a novice and for a Linux host used as a restricted sandbox, and only after the list above is in the spec. Phase 0 beside native on `:8099` is a falsification spike for mounts, pairing, and the deny gate.
+Hybrid. The Mac host, the operator's daily Mac, stays a uv-pinned native install with prebuilt host-arch bundles, so Keychain, USB serial, notifications, and the Seed scheduler keep working. The container is the install for a novice and for a Linux host used as a restricted sandbox, and only after the list above is in the spec. Phase 0 beside native on `:8099` is a falsification spike for mounts, pairing, and the deny gate.
 
 ## The hook guard
 
@@ -34,4 +34,4 @@ Hybrid. mac-host, the operator's daily Mac, stays a uv-pinned native install wit
 
 ## Bottom line
 
-Keep mac-host native; build the container only as a novice or Linux sandbox whose hub cannot start unless notes are read-only, Claude's token is out of the shared environment, and a real prohibited write is denied for every lane.
+Keep the Mac host native; build the container only as a novice or Linux sandbox whose hub cannot start unless notes are read-only, Claude's token is out of the shared environment, and a real prohibited write is denied for every lane.

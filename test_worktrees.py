@@ -2080,7 +2080,7 @@ def _alive(pid):
 class TheMacAddendum(unittest.TestCase):
     """docs/worktree-plan-macos.md M1-M4, checked here by forcing the darwin paths.
 
-    The real proof is Phase 0.7 on mac-host; these keep the code honest until then.
+    The real proof is Phase 0.7 on the Mac host; these keep the code honest until then.
     """
 
     def setUp(self):

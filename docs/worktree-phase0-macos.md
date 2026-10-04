@@ -1,6 +1,6 @@
 # Worktree Phase 0 on macOS (item 0.7) — results
 
-Run 2026-10-03 on mac-host (Mac mini M4, macOS, APFS, `/opt/homebrew/bin/git`
+Run 2026-10-03 on the Mac host (Mac mini M4, macOS, APFS, `/opt/homebrew/bin/git`
 2.55.0, hub on Homebrew Python 3.14). Code at `0847d05` plus the macOS test
 fixes in `9052d20`. Plan: `docs/worktree-plan-macos.md`.
 
@@ -24,7 +24,7 @@ PR, an agent's own `git commit`, three lanes at once, and M5. So
 
 ## Automated suites
 
-The full suite (`python3 test_corral_light.py`) passes on mac-host: 647 tests OK,
+The full suite (`python3 test_corral_light.py`) passes on the Mac host: 647 tests OK,
 3 skipped. The skips are the Claude login spike tests. Four worktree tests had
 assumed Linux and are fixed in `9052d20`: T-DIF-6, M3 true case, T-LIF-13 and
 M1 unreadable /proc. T-ISO-1 failed only because it reruns them. **T-RMV-13

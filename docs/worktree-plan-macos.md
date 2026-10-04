@@ -1,30 +1,30 @@
-# Worktree plan — macOS (mac-host) addendum
+# Worktree plan — macOS (the Mac host) addendum
 
-Status: 2026-10-02, written on mac-host. An addendum to `docs/worktree-review-plan.md`,
+Status: 2026-10-02, written on the Mac host. An addendum to `docs/worktree-review-plan.md`,
 kept as its own file so it never collides with the plan's own edits. Fold it into the
 plan (as a "macOS" section, Phase 0 item 0.7 and a ship-gate line) when the plan is next
 amended, then delete this file.
 
 The plan and Phase 0 (`docs/worktree-phase0.md`) were run on omarchy-laptop (Linux).
-mac-host is a Mac mini M4 on macOS 27 with APFS. The facts below were checked there against
+The Mac host is a Mac mini M4 on macOS 27 with APFS. The facts below were checked there against
 the running hub's code and config. Phase 0's v3.2 results are taken as given for Linux.
 Each item says whether they carry over to macOS.
 
 ## Status (2026-10-02, built and tested on omarchy-laptop)
 
 Code for M1 to M4 is on `master` once merged; each was tested on Linux by
-forcing the darwin path. What only mac-host can prove is still Phase 0.7.
+forcing the darwin path. What only the Mac host can prove is still Phase 0.7.
 
-| Item | Built | Still for 0.7 on mac-host |
+| Item | Built | Still for 0.7 on the Mac host |
 |---|---|---|
 | M1 | Off Linux, discard scans with `lsof +D` under a 20 s timeout; any failure (missing, error, timeout) refuses. lsof's exit code is ignored: it is 1 both on a find and on a bad path. Darwin T-RMV-13 runs here against the real lsof. | Run it under macOS lsof. |
 | M2 | Lanes are keyed by platform. macOS has none, so own branches are refused there with the reason. `CORRAL_LIGHT_WORKTREE_LANES` opts lanes in for the matrix run. | The §5.3 matrix for Claude, Codex, Grok; then list the passing lanes. |
-| M3 | On darwin the repo dir hash uses the common dir in its on-disk letter case (T-CRT-8). The suite realpaths its temp roots. | Run the suite on mac-host. |
+| M3 | On darwin the repo dir hash uses the common dir in its on-disk letter case (T-CRT-8). The suite realpaths its temp roots. | Run the suite on the Mac host. |
 | M4 | A darwin T-LIF-14 shows the hub leaves `~/.claude` and `~/.claude.json` byte-identical. `doctor` lists `~/.claude/projects` folders of gone worktrees. | Assert the same with real Claude Code. The `session_git_guard.py` hook must skip the worktree root before it is ever re-wired. |
 | M5 | Nothing to build yet. | Record memory behaviour for an `~/ai-os` worktree. |
 | Facts | git is resolved once and `doctor` prints its path; `doctor` reads the filesystem from `mount` without `/proc`. | None. |
 
-**2026-10-03, run on mac-host** (`docs/worktree-phase0-macos.md`). M1 is done:
+**2026-10-03, run on the Mac host** (`docs/worktree-phase0-macos.md`). M1 is done:
 darwin T-RMV-13 passes against the real lsof. M3 is done: the full suite passes
 there after four Linux-only tests were fixed. M4 holds with real Claude Code. M2
 is partly done: the unattended matrix slice passed for Claude, Codex and Grok,
@@ -55,8 +55,8 @@ Codex events carry no `locations`, so Codex relies entirely on its sandbox. That
 macOS sandbox run more important, not less.
 
 - Key lane enabling by `(lane, sys.platform)`.
-- Run the §5.3 matrix on mac-host for Claude, Codex and Grok.
-- Gemini's lane shows `unknown` in `lanes-check.json` on mac-host. It is held anyway under D8.
+- Run the §5.3 matrix on the Mac host for Claude, Codex and Grok.
+- Gemini's lane shows `unknown` in `lanes-check.json` on the Mac host. It is held anyway under D8.
 
 ### M3. Case-insensitive APFS and `/private` temp paths
 
@@ -94,20 +94,20 @@ into the real file. Three effects remain:
 ### M5. ai-os memory in a worktree pane (unproven on macOS)
 
 Phase 0 found that Claude's auto-memory for a worktree resolves to the main repo. That
-test ran on Linux with Claude Code 2.1.287. One older mac-host data point points the other
+test ran on Linux with Claude Code 2.1.287. One older the Mac host data point points the other
 way. A 2026-09 Claude Code `--worktree` session of `~/ai-os`, on v2.1.219 and inside the
 repo, loaded no memory-mesh index.
 
 `~/ai-os` matters here because its store is fold-generated and write-guarded. The guard
 derives the store from its own install path. Phase 0.7 should start a Claude pane in an
-`~/ai-os` worktree on mac-host and record two things: whether it loads the
-`-Users-craigvandeputte-ai-os` memory index, and where a memory write lands. If the write
+`~/ai-os` worktree on the Mac host and record two things: whether it loads the
+`-Users-USER-ai-os` memory index, and where a memory write lands. If the write
 doesn't land in that store, the dialog should warn for repos whose store carries
 `.mesh-generated`.
 
 ## Facts for this host (no design change)
 
-| Plan / Phase 0 says (laptop) | mac-host |
+| Plan / Phase 0 says (laptop) | The Mac host |
 |---|---|
 | `~/tools/corral-light` | `~/corral-light`. launchd runs the hub from here, and it must never be a worktree. |
 | `~/aios` | `~/ai-os` |
@@ -120,12 +120,12 @@ doesn't land in that store, the dialog should warn for repos whose store carries
 | Chromium for T-VIS | None installed, so T-VIS skips loudly here and the visual gate runs on the laptop |
 | git 2.38 via container | Docker 29.6.2 is running, so this route works here too |
 
-## Proposed Phase 0 item 0.7 (macOS, on mac-host)
+## Proposed Phase 0 item 0.7 (macOS, on the Mac host)
 
-Run the §5.3 matrix for Claude, Codex and Grok on mac-host. Prove M1's `lsof` scan finds a
+Run the §5.3 matrix for Claude, Codex and Grok on the Mac host. Prove M1's `lsof` scan finds a
 shell whose cwd is inside the worktree and refuses when the scan fails. Assert that
 `~/.claude.json` is unchanged across a Claude worktree pane (M4). Record M5's memory
 behaviour for an `~/ai-os` worktree. Write the results to `docs/worktree-phase0-macos.md`.
 
 Proposed ship-gate line: on macOS, M1 to M3 are resolved, T-RMV-13 is green on darwin, and
-lanes are enabled only from the mac-host matrix.
+lanes are enabled only from the the Mac host matrix.

@@ -15,7 +15,7 @@
 # $CORRAL_BUILD_DIR/cache/corral-light, and afterwards Docker's own build
 # cache is trimmed to CORRAL_KEEP_CACHE (default 2GB). Docker Desktop's VM
 # disk grows but only shrinks lazily, so an untrimmed cache is what fills a
-# small system disk (measured on mac-host, 2026-10-01: 21 GB of cache).
+# small system disk (measured on the Mac host, 2026-10-01: 21 GB of cache).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
