@@ -1,0 +1,23 @@
+# Local guardrails. Install once per clone: pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-yaml
+      - id: check-json
+        exclude: ^spike/package-lock\.json$
+      - id: detect-private-key
+  - repo: local
+    hooks:
+      - id: no-private-names
+        name: no private host, account or person names
+        entry: python3 -m unittest test_corral_light.TheCoreNeverImportsFullCorral.test_the_whole_repo_names_no_private_host_account_or_person
+        language: system
+        pass_filenames: false

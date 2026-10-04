@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 spike/node_modules
+.DS_Store
+.venv/
+*.log
+.env

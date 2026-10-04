@@ -59,7 +59,7 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
     def test_the_core_names_no_host(self):
         """The public core names no machine, LAN address or account."""
         import re
-        bad = re.compile(r"linux-host|mac-host|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
+        bad = re.compile(r"\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
         # *.toml too: the rig template ships in the core and is copied by users.
         files = sorted((ROOT / "corral_core").glob("*.py")) + \
             sorted((ROOT / "corral_core").glob("*.toml"))
@@ -70,6 +70,59 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
                 self.assertIsNone(
                     m, f"{f.name}:{i} names a host or account in a public "
                        f"repository: {line.strip()[:90]}")
+
+    # Private machine, account and person names, stored as SHA-256 digests so
+    # this public file does not publish the very names it guards. Compare by
+    # hashing each lowercased [a-z0-9-] token. Add a name with:
+    #   printf '%s' name | shasum -a 256
+    _BANNED_TOKEN_SHA256 = frozenset({
+        "d9999399b7c4d4fe56538604ed39fbe591786e74f9016017ec64b1fd75bf8b64",
+        "6957dc07e908dacf131a71fae3d014ea03320ef1d10100d2e7c294dcec7838a8",
+        "cabdfa67f88f656fd39b2728d3802380bf10cc1122482a949490bed40f3fe533",
+        "0ff87b356f0c980ceecb306a5864a20cfbad72760550d09470fe6e205585bf18",
+        "fc1d4d30fc51ae5fd0c907657255c43847fe086f1a1604135fe95f7bc1adbd47",
+        "87ca5ee7de4c7947b0162a295bb7d0d6c909d13472e38ba6bd5236ca9cfc116d",
+        "ef9a42a96b9e9a928200c25097b8a72cda08d8d32e4e8ce9ad035f32376d2ea7",
+        "3f8dc034c5f3e9d87b702d63594eb3b5d0dc2dd90c58d2effcb966f0fc613817",
+        "c157a0b0d40f9d9506c72fae584069d1692b816da16cd76c648d5761c588057a",
+    })
+    _BANNED_NET24_SHA256 = frozenset({
+        "6c6d2c9533c0ecb6e557384314d063cb75cce7d5b8a5b52ac706f33526c4dac7",
+    })
+
+    def test_the_whole_repo_names_no_private_host_account_or_person(self):
+        """Every shipped text file, docs and reviews included: no private
+        machine, account or person name, and no address on the private LAN.
+        Hyphenated tokens are checked whole and by part. LICENSE keeps the
+        copyright holder's name."""
+        import hashlib
+        import re
+        token = re.compile(r"[a-z0-9][a-z0-9-]*")
+        net24 = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d")
+        banned = self._BANNED_TOKEN_SHA256 | self._BANNED_NET24_SHA256
+        sha = lambda t: hashlib.sha256(t.encode()).hexdigest()
+        skip_dirs = {".git", "node_modules", "__pycache__"}
+        hits = []
+        for dirpath, dirnames, filenames in os.walk(ROOT):
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            for name in filenames:
+                if name == "LICENSE":
+                    continue
+                f = Path(dirpath) / name
+                try:
+                    text = f.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for i, line in enumerate(text.splitlines(), 1):
+                    words = set()
+                    for t in token.findall(line.lower()):
+                        words.add(t)
+                        words.update(t.split("-"))
+                    words.update(net24.findall(line))
+                    if any(sha(w) in banned for w in words):
+                        hits.append(f"{f.relative_to(ROOT)}:{i}")
+        self.assertEqual(hits[:20], [], f"{len(hits)} lines name a private "
+                                         f"host, account, person or LAN")
 
     def test_the_core_imports_with_nothing_but_this_tree_on_the_path(self):
         """Import the core in a clean interpreter whose path holds only this directory."""
@@ -1999,18 +2052,18 @@ class StaticPathContainment(unittest.TestCase):
 
 
 class MacosPlistIsThisHost(unittest.TestCase):
-    """The launchd plist, the one file allowed a home path, names this account."""
+    """The launchd plist template names no account; rendered for an account,
+    it points at that account's tree."""
 
-    @unittest.skipUnless(sys.platform == "darwin",
-                         "launchd plist is a macOS artifact; Path.home() is the "
-                         "mac account only on the host that runs the agent")
     def test_the_plist_does_not_point_at_the_ranch_user(self):
         text = (ROOT / "com.cvp1.corral-light.plist").read_text(encoding="utf-8")
         self.assertNotIn("/Users/<user>/", text)
-        home = str(Path.home())
-        self.assertIn(f"{home}/corral-light", text)
-        self.assertIn(f"{home}/Library/Logs/corral-light.log", text)
+        self.assertIn("/Users/USER/corral-light", text)
         self.assertIn("/opt/homebrew/bin/python3", text)
+        rendered = text.replace("/Users/USER", "/Users/alice")
+        self.assertNotIn("/Users/USER", rendered)
+        self.assertIn("/Users/alice/corral-light/hub.py", rendered)
+        self.assertIn("/Users/alice/Library/Logs/corral-light.log", rendered)
 
 
 class TheServiceRunsThisTree(unittest.TestCase):
@@ -2090,9 +2143,12 @@ class TheServiceRunsThisTree(unittest.TestCase):
         """The file we ship must be the file that satisfies this. Otherwise
         the documented fix (`cp` it into LaunchAgents) reinstalls a fault."""
         import diagnose
+        template = (ROOT / "com.cvp1.corral-light.plist").read_text(encoding="utf-8")
+        rendered = Path(tmpdir(self)) / "com.cvp1.corral-light.plist"
+        rendered.write_text(template.replace("/Users/USER", str(Path.home())),
+                            encoding="utf-8")
         self.assertIsNone(diagnose.service_tree_problem(
-            root=ROOT, path=ROOT / "com.cvp1.corral-light.plist",
-            label="nope.not.loaded"))
+            root=ROOT, path=rendered, label="nope.not.loaded"))
 
 
 class UnavailableReasonsNameWhatWasChecked(unittest.TestCase):
@@ -3297,7 +3353,7 @@ class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
         """
         import re
         import install_service
-        bad = re.compile(r"linux-host|mac-host|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
+        bad = re.compile(r"\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
         src = Path(install_service.__file__).read_text(encoding="utf-8")
         for i, line in enumerate(src.splitlines(), 1):
             m = bad.search(line)
@@ -3439,7 +3495,7 @@ class PairingByKeyInTheBrowser(unittest.TestCase):
         rule as the core's guard. `user@example.com`-style placeholders are
         fine; a real host, LAN address or home path is not."""
         import re
-        bad = re.compile(r"linux-host|mac-host|\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
+        bad = re.compile(r"\b192\.168\.\d|/home/[a-z]|/Users/[a-z]")
         files = (sorted((ROOT / "static").glob("*.js")) + sorted((ROOT / "static").glob("*.html"))
                  + sorted((ROOT / "static").glob("*.css")) + sorted(ROOT.glob("selftest_*.mjs"))
                  + [ROOT / "README.md"])

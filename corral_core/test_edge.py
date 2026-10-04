@@ -101,12 +101,12 @@ class PeerRules(unittest.TestCase):
         OLD Serve-only audience must stay Serve-only, not become a LAN cookie;
         and full Corral, which shares this file, still mints the old names."""
         h = {"Tailscale-User-Login": self.ME}
-        for aud in (edge.SERVE_USER, "operator-ts"):
+        for aud in (edge.SERVE_USER, "alice-ts"):
             with self.subTest(audience=aud):
                 self.assertFalse(edge.audience_ok(aud, {}, "198.51.100.7"))
                 self.assertFalse(edge.audience_ok(aud, {}, "127.0.0.1"))
                 self.assertTrue(edge.audience_ok(aud, h, "127.0.0.1"))
-        self.assertTrue(edge.audience_ok("operator", {}, "198.51.100.7"))
+        self.assertTrue(edge.audience_ok("alice", {}, "198.51.100.7"))
         self.assertFalse(edge.audience_ok("", {}, "127.0.0.1"))
 
 

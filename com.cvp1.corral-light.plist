@@ -16,6 +16,8 @@
   hub.py in the foreground from that checkout with CORRAL_LIGHT_PORT=8099.
 
   Paths are absolute because launchd inherits almost no environment.
+  Replace /Users/USER with your home directory before installing, or let
+  `corral-light install-service` write a rendered copy for you.
 -->
 <plist version="1.0">
 <dict>

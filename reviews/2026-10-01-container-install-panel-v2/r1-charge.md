@@ -111,7 +111,7 @@ host reach:                                │
 ## 2. Identity and paths inside the container
 
 - **Same UID/GID as the host user**, and an entrypoint-generated `passwd`
-  entry whose home is the host's `$HOME` (e.g. `/Users/operator`), so `getpwuid`,
+  entry whose home is the host's `$HOME` (e.g. `/Users/alice`), so `getpwuid`,
   `Path.home()` and `~` agree for every lane.
 - **Container-owned `PATH`**: container binaries first; host binary
   directories are never on `PATH`, so no lane can exec a Mach-O by accident.
