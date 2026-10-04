@@ -4,38 +4,92 @@
 
 <h1 align="center">Corral Light</h1>
 
-<p align="center"><strong>The window for AIOS.</strong><br>
-One fence. Four assistants. You hold the gate.</p>
+<p align="center"><strong>Every AI assistant you pay for, on one wall, behind one gate you hold.</strong></p>
 
 <p align="center">
-  <a href="#saddle-up--the-one-line-install-linux"><img alt="Linux" src="https://img.shields.io/badge/Linux-x86--64%20%7C%20arm64-d5813f?style=flat-square&logo=linux&logoColor=white"></a>
+  <a href="#install-in-one-line-linux"><img alt="Linux" src="https://img.shields.io/badge/Linux-x86--64%20%7C%20arm64-d5813f?style=flat-square&logo=linux&logoColor=white"></a>
   <img alt="Python 3.9+" src="https://img.shields.io/badge/Python-3.9%2B-8fae6d?style=flat-square&logo=python&logoColor=white">
   <img alt="stdlib only" src="https://img.shields.io/badge/dependencies-stdlib%20only-1d1a16?style=flat-square">
   <img alt="runs on your machine" src="https://img.shields.io/badge/runs%20on-your%20machine-d5813f?style=flat-square">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-8fae6d?style=flat-square"></a>
 </p>
 
----
-
-You already pay for Claude, ChatGPT, Grok, Gemini. Each one lives in its own
-app, its own tab, its own terminal, and none of them can see the others.
-Corral Light puts them **side by side in one browser tab, on your machine,
-on the logins you already have** — and runs every one of them behind the
-same fence: before an assistant writes a file or runs a command, the pane
-stops and shows you exactly what, down to the byte. You open the gate, or
-you don't.
-
-Underneath is the floor: [AI-OS Seed](https://github.com/cvp1/ai-os-seed) —
-scheduled jobs, a run log, a secrets vault, and a memory that remembers *why*.
-Two repos, one folder. This README covers the window; the floor has its own.
-
-**What you will not find here:** API keys, a cloud relay, a vendor in the
-middle. Each assistant talks to its own maker, as you, and nothing else
-leaves the ranch.
+<p align="center">
+  <img src="docs/img/corral-wall.svg" width="100%" alt="The Corral Light wall: Claude working on its own git branch, ChatGPT reviewing it, Grok stopped at the gate asking to run a test command with Approve and Refuse buttons, and Gemini answering a question, all inside one browser tab with a ranch fence along the bottom">
+</p>
 
 ---
 
-## Saddle up — the one-line install (Linux)
+## The problem you already have
+
+You pay for more than one AI assistant. Claude for code, ChatGPT for a
+second opinion, maybe Grok or Gemini because each is good at something the
+others are not. They live in four apps, four tabs, four terminals, and none
+of them can see the others. You copy an answer out of one and paste it into
+the next. You are the message bus.
+
+And the coding agents among them do things now. They edit files, run
+commands, commit. Each vendor has its own idea of what "ask first" means,
+and two agents in the same repository will cheerfully overwrite each other.
+
+## What Corral Light does about it
+
+Corral Light is a small server that runs on your own computer and puts all
+of your assistants **side by side in one browser tab**, the wall, signed in
+with the accounts you already have. No API keys. No cloud relay. No vendor
+in the middle. Each assistant talks only to its own maker, as you.
+
+Every assistant on the wall runs **behind the same fence**. Before any of
+them writes a file or runs a command, its pane stops and shows you exactly
+what it wants to do, down to the byte, with a digest of the request. You
+approve it or you refuse it. The server enforces this, so no browser trick
+and no chatty model can skip it.
+
+Then the assistants can finally work *together*:
+
+- **Ask all of them at once.** One prompt to every pane (⌘↵ / Ctrl+Enter),
+  then **⇄ Cross-feed** hands each one the others' answers for a second
+  round. Disagreements surface in seconds, not after three copy-pastes.
+- **Let them talk to each other.** Name a pane `@author` and another
+  `@reviewer`. The author can send its work to the reviewer and wait for an
+  answer, with hard limits so two agents can never loop forever. When an
+  agent needs *you*, the pane says **needs you** instead of burying a
+  question at the end of a reply.
+- **Give each agent its own branch.** Tick **Own branch** and the agent works
+  in its own git worktree on `corral/<name>`. Your checkout is never
+  touched. When it is done you review the diff, then Commit, Push, open a
+  pull request, or Discard, and Discard keeps a recovery copy.
+- **Second opinions without a second bill.** Any assistant, or any script,
+  can run `corral-light consult ask --lane grok --prompt "…"` and get an
+  answer through your Grok subscription, in a pane you can watch.
+- **Bring the whole team back.** Save your named panes as a **rig** and
+  restore them all with one command tomorrow.
+
+Underneath sits [AI-OS Seed](https://github.com/cvp1/ai-os-seed), the floor:
+scheduled jobs, a run log, a secrets vault, and a memory that remembers
+*why* you decided things. The installer sets up both. This README covers the
+wall; Seed has its own.
+
+### Who it is for
+
+You will like Corral Light if you use AI assistants for real work, pay for
+at least one of them, and want them to cooperate without handing your
+repository, your keys or your judgment to someone else. You do not need to
+be a terminal expert: the installer is one pasted line, and it was built
+for someone who has never opened a terminal. You do need a Linux desktop
+today; macOS works by hand (see below).
+
+| Works with | You need |
+|---|---|
+| **Claude** (Claude Code) | Claude Pro or Max |
+| **ChatGPT** (Codex) | ChatGPT Plus, Pro or Team |
+| **Grok** | SuperGrok or X Premium |
+| **Gemini** (Antigravity) | A Google account |
+| **Local models** (Ollama) | Ollama and one model; chat only |
+
+---
+
+## Install in one line (Linux)
 
 Open a terminal (Ctrl+Alt+T on most desktops) and paste:
 
@@ -45,32 +99,41 @@ curl -fsSL https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh
 
 <sub>No `curl`? `wget -qO- https://raw.githubusercontent.com/cvp1/corral-light/master/install.sh | bash` does the same.</sub>
 
-That is the whole ride. It asks you two things first — **which assistants
-you have an account for** (just press Enter for Claude), and **whether Claude
-may remember your past conversations** — then goes to work on its own for
-about five minutes (twenty if you picked Gemini, which is a 1.5 GB download).
-At the end it walks you through each assistant's own sign-in, one at a time,
-and opens your browser on the wall, already paired. Start typing.
+Here is what happens, start to finish:
 
-> **The honest part.** On Linux there is no safe way to make a web link run an
-> installer, so this is one line to paste. Everything after the paste is the
-> installer's job, and it was built to be run by someone who has never opened
-> a terminal before.
+1. **Two questions, before anything is installed.** Which assistants you
+   have an account for (press Enter for Claude only), and whether Claude may
+   remember your past conversations.
+2. **About five minutes on its own.** Twenty if you picked Gemini, which is a
+   1.5 GB download. It installs everything into your home folder; it asks for
+   your password only if a basic tool such as `git` is missing, and shows
+   you the command first. Nothing shows while you type a password; that is
+   normal.
+3. **One sign-in per assistant.** Each opens its own login in your browser
+   (or prints a device code with no display). Skip any of them and come
+   back later.
+4. **The wall opens.** Your browser lands on Corral Light, already paired.
+   Start typing.
+
+Running the same line again is always safe: it updates what moved, repairs
+what is missing, and never installs anything twice. That is also how you
+**update**.
 
 ### What you need
 
 | | |
 |---|---|
-| **A Linux computer** | x86-64 or arm64 — Ubuntu, Debian, Fedora, Arch, openSUSE. A desktop, so a browser can open. |
-| **An account** | At least one of: Claude (Pro or Max), ChatGPT (Plus, Pro or Team), Grok (SuperGrok or X Premium), or a Google account for Gemini. You pick which; you can skip any sign-in and come back later. |
-| **Disk** | About 600 MB. 2.1 GB with Gemini. |
-| **Your password** | Only if a basic tool is missing (`git`, `python3`, `curl`, `cron`). The installer names what it will install and runs your distro's own package manager, nothing else. Nothing shows while you type the password; that is normal. |
+| **A Linux computer** | x86-64 or arm64: Ubuntu, Debian, Fedora, Arch, openSUSE. A desktop, so a browser can open. |
+| **An account** | At least one of the assistants above. You can skip any sign-in and add it later. |
+| **Disk** | About 600 MB; 2.1 GB with Gemini. |
+| **Your password** | Only if `git`, `python3`, `curl` or `cron` is missing. The installer uses your distribution's own package manager and nothing else. |
 
-### What happens, fence post by fence post
+<details>
+<summary><strong>Exactly what the installer does, step by step</strong></summary>
 
-| | Post | What it checks, then does |
+| | Step | What it checks, then does |
 |---|---|---|
-| 1 | **The ground** | Confirms Linux, your CPU, glibc and a desktop. Refuses to run as root. Then asks its two questions — before anything is installed or downloaded. |
+| 1 | **The ground** | Confirms Linux, your CPU, glibc and a desktop. Refuses to run as root. Then asks its two questions, before anything is installed or downloaded. |
 | 2 | **Tools** | Installs any missing base tools with your package manager, after showing you the command. Checks the internet and free disk space. |
 | 3 | **Posts** | Clones this repo to `~/tools/corral-light` and AI-OS Seed to `~/tools/ai-os-seed`, each at a pinned version. Puts the `corral-light` command on your PATH. |
 | 4 | **Node** | A private copy of Node.js (checksum verified) in `~/.local/share/corral-light/node`. Your system's Node, if any, is not touched. |
@@ -82,18 +145,13 @@ and opens your browser on the wall, already paired. Start typing.
 | 10 | **The gate** | Opens the wall in your browser, already paired (`corral-light launch`). |
 | 11 | **The brand** | Writes a receipt with every version actually installed, and prints what is done and what is still to do, per assistant, with the exact command for each. |
 
-Every post checks before it changes anything, so **running the same line
-again is safe**: it updates what moved, repairs what is missing, and never
-installs twice. Everything it prints also goes to
-`~/.local/share/corral-light/install.log`, and the versions it actually
-installed — down to the git commit — go to `install-receipt.json` beside it.
+Everything it prints also goes to `~/.local/share/corral-light/install.log`,
+and the versions it installed, down to the git commit, go to
+`install-receipt.json` beside it.
 
-<details>
-<summary><strong>What is pinned, and what is not</strong></summary>
-
-Seed's tag, Node, the two adapters (lock file), the Grok CLI and the
-Antigravity runtime are pinned, and checksum-verified where a checksum
-exists. Corral Light itself installs from `master` unless you set
+**What is pinned.** Seed's tag, Node, the two adapters (lock file), the Grok
+CLI and the Antigravity runtime are pinned, and checksum-verified where a
+checksum exists. Corral Light itself installs from `master` unless you set
 `CORRAL_LIGHT_REF` to a commit; the commit used is in the receipt. Claude
 Code is installed at a pinned version through Anthropic's installer and then
 updates itself, which is Anthropic's policy, not ours.
@@ -118,7 +176,7 @@ bash install.sh --help                       # every option, and every version i
 <details>
 <summary><strong>If something goes wrong</strong></summary>
 
-The installer stops at the post that failed, says which one, and points at
+The installer stops at the step that failed, says which one, and points at
 the log. Fix what it names and run the same line again. After that:
 
 ```
@@ -128,33 +186,98 @@ journalctl --user -u corral-light -n 50   # the hub's own log
 ```
 </details>
 
-**Updating** — run the install line again. **Leaving** —
-`bash ~/tools/corral-light/install.sh --uninstall` (the installer keeps a copy
-of itself in the clone) asks before each thing it removes; your sign-ins and
-your files are never part of it.
+**Uninstall:** `bash ~/tools/corral-light/install.sh --uninstall` asks
+before each thing it removes. Your sign-ins and your files are never part of
+it.
 
 ---
 
-## The first ride
+## Your first twenty minutes
 
-1. The browser tab that opened is **the wall**. Click **New**, pick an
-   assistant, choose a folder (the default is `~/aios`), and type.
-2. When an assistant wants to write a file or run a command, the pane
-   stops at the gate and shows you exactly what — bytes and a digest.
-   **Approve** or **Refuse**. Nothing moves until you do.
-3. Open a new terminal (the one the installer ran in still has the old
-   PATH), run `cd ~/aios && claude`, and type `/status`. That is the floor
-   answering: every scheduled job, its last run, and anything that has gone
-   quiet.
-4. Closed the tab? `corral-light launch` opens it again, paired. The hub
-   keeps running in the background; `systemctl --user status corral-light`
-   shows it.
+### 1. Open a conversation
 
-From there, the wall has more tricks than a one-pane chat: give two panes
-**seats** and let them message each other, fan one question out to every
-assistant with ⌘↵, make them argue with ⇄, save your seated panes as a
-**rig** and bring the whole posse back with one verb. All of that is in the
-[reference](#reference) below.
+The browser tab the installer opened is **the wall**. Closed it?
+`corral-light launch` opens it again, already paired.
+
+Click **＋ New conversation**, pick an assistant, choose a folder (the
+default is `~/aios`), and type. The **⚡** button beside it starts your
+default assistant in one click; right-click it to change the default.
+
+### 2. Meet the gate
+
+Ask a coding assistant to do something real, such as *"add a test for the
+login helper and run it."* When it wants to write the file or run the
+command, the pane turns **needs you** and shows the exact request: the
+command or the file contents, its size in bytes, and a SHA-256 digest.
+Choose one of the options the assistant offers. Nothing happens until you
+do, and a request too large to show in full cannot be approved at all.
+
+### 3. Ask everyone
+
+Open a second assistant beside the first. Type a question in one pane and
+press **⌘↵** (Ctrl+Enter on Linux): every pane that can take a prompt gets
+it. When the answers are in, press **⇄ Cross-feed** in the sidebar and each
+assistant reads the others' answers for round two.
+
+Press **⌘K** (Ctrl+K) to search every open and archived conversation, plus
+your notes, and attach a result to the message you are writing. Press **?**
+for every keyboard shortcut.
+
+### 4. Give an agent its own branch
+
+Open a new conversation in a folder inside a git repository and tick **Own
+branch**. The agent gets a fresh worktree on a new `corral/<name>` branch,
+cut from the branch you are on; your checkout and its uncommitted changes
+stay exactly as they are. (On Linux, Claude, Codex and Grok can take an own
+branch. If the repository cannot, the row says why.)
+
+The pane header shows what changed, such as `fix-login · 4 files +120 −8`.
+Click it, or press **r** on the focused pane, to review. Review freezes a
+snapshot, and every action applies to exactly what you saw:
+
+- **Commit** records the files shown on the branch.
+- **Push** sends it to the remote you pick, showing the exact URL first. It
+  never force-pushes, and it can open a GitHub pull request with `gh`.
+- **Discard** stops the agent, saves everything as a recovery ref, and moves
+  the folder to trash. Nothing is deleted for good until you type the branch
+  name with `corral-light worktrees purge`.
+
+An own branch keeps agents from colliding; it is not a sandbox. An agent
+with a shell can still write anywhere you can.
+
+### 5. Put two agents to work together
+
+Click **＠** in a pane's header to give it a seat name, such as `@author`,
+and do the same for a second pane, `@reviewer`. Now tell the author: *"when
+you are done, send your change to @reviewer and wait for the review."* The
+agents use built-in tools to message each other; you watch both panes and
+still approve every write. Save the pair with `corral-light rig save
+pairing` and bring both back tomorrow with `corral-light rig up pairing`.
+
+### 6. Drive it from a terminal
+
+Everything the wall does, a terminal can do, and panes opened there appear
+on the wall:
+
+```
+corral-light panes                               # what is open and what it is doing
+corral-light open --lane grok --cwd ~/src/app    # new pane, prints its id
+corral-light say <pane> "review the diff"        # send, and stream the reply
+corral-light consult ask --lane codex --prompt "Is this migration safe?"
+corral-light doctor                              # which assistants are ready
+```
+
+Point your own assistant at `corral-light consult` in its instructions file,
+and every second opinion it asks for goes through a subscription you already
+pay for.
+
+### 7. Take it with you
+
+The hub listens only on your own computer. To reach the wall from your phone
+or a laptop, put [Tailscale](https://tailscale.com) Serve or an SSH tunnel in
+front of it; both are covered under [Security](#security).
+
+---
 
 ## Signing in later
 
@@ -170,14 +293,27 @@ credential. Corral Light never sees a password or a token.
 
 `corral-light doctor` tells you which ones are done.
 
+## Honest limits
+
+- **Linux first.** The one-line installer is for Linux. macOS works by hand
+  (below); own branches are not yet approved for any macOS lane.
+- **Not a sandbox.** The gate covers every request an assistant makes
+  through its tools. An agent with shell access runs as you, and Codex's
+  own sandbox auto-approves commands inside its working folder.
+- **Gemini runs without asking** in its current runtime, whatever posture
+  you choose, so it is held back from own branches.
+- **Ollama is chat only.** It cannot edit files or run commands.
+- **Your machine, your uptime.** The hub runs as a user service; if the
+  machine sleeps, so does the wall.
+
 <details>
 <summary><strong>Install by hand (any Linux, or macOS)</strong></summary>
 
-You already have Claude Code. Python 3.9+. Node.js 20+.
+You already have Claude Code, Python 3.9+ and Node.js 20+.
 
 One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is a second brain.
 
-1. Install Seed into `~/aios` (or `--into` a workspace you already have — that folder then *is* `~/aios` for this purpose). See the Seed README. Do not install Seed into this repo.
+1. Install Seed into `~/aios` (or `--into` a workspace you already have; that folder then *is* `~/aios` for this purpose). See the Seed README. Do not install Seed into this repo.
 2. Clone this repo, then:
    ```
    cd spike && npm install && cd ..    # the Claude and ChatGPT adapters
@@ -185,19 +321,17 @@ One folder: `~/aios`. Seed lives in it. This app looks at it. A second folder is
    ./corral-light serve
    ```
    The adapters for Claude Code and ChatGPT (Codex) are an npm package, and
-   `spike/node_modules/` is gitignored — so no clone arrives with them. Skip
-   this step and those two lanes report `not installed: …/spike/node_modules/.bin/claude-agent-acp`,
-   which reads like a broken install rather than a step you have not run yet.
-   `doctor` names the step if the directory is missing.
-   The other three lanes (Grok, Antigravity, Ollama) resolve their programs
-   outside this tree and are unaffected.
+   `spike/node_modules/` is gitignored, so no clone arrives with them. Skip
+   this step and those two lanes report `not installed: …/spike/node_modules/.bin/claude-agent-acp`.
+   `doctor` names the step if the directory is missing. The other three lanes
+   (Grok, Antigravity, Ollama) resolve their programs outside this tree.
    Then either `./corral-light launch` (opens the browser, paired), or open
    http://127.0.0.1:8098 and in another terminal run `./corral-light pair <code>`
    with the code on screen.
 3. New Claude conversation. Working directory = `~/aios`.
 4. Done when `/status` answers.
 
-The server runs in the foreground. Data lives at `~/.local/share/corral-light` — not in `~/aios`, and not in this clone. `doctor` lists the assistants that are ready and explains what is missing for the others.
+The server runs in the foreground. Data lives at `~/.local/share/corral-light`, not in `~/aios`, and not in this clone. `doctor` lists the assistants that are ready and explains what is missing for the others.
 </details>
 
 ---
