@@ -155,6 +155,8 @@ class StructuralIndependence(unittest.TestCase):
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
                          "/manifest.json", "/api/state", "/api/stream",
                          "/api/search",
+                         # The lane list alone, for consult (PERF-REVIEW-2026-10-04 item 2).
+                         "/api/lanes",
                          # Starts the vendor's login for the Live tab's Claude lane; exact path only.
                          "/api/claude/login"}
         for r in routes:

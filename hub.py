@@ -90,10 +90,50 @@ ATTACH_EXCERPT_CHARS = 6000
 
 MGR = sessions.Manager()
 
+# What code this process is running, for /health (docs/PERF-REVIEW-2026-10-04.md
+# item 1): on 2026-10-04 the hub ran code 6.5 h older than its tree and nothing
+# said so. The fingerprint hashes the served source at start; `code_stale`
+# compares the files' current stat with the one taken at start.
+STARTED_AT = time.time()
+
+
+def _code_files():
+    files = [ROOT / "hub.py", ROOT / "static" / "app.js"]
+    files += sorted(ROOT.glob("*.py")) + sorted((ROOT / "corral_core").glob("*.py"))
+    return sorted({f for f in files if not f.name.startswith("test_")})
+
+
+def _code_stat():
+    out = {}
+    for f in _code_files():
+        try:
+            st = f.stat()
+            out[f.name if f.parent == ROOT else f"{f.parent.name}/{f.name}"] = \
+                (st.st_mtime_ns, st.st_size)
+        except OSError:
+            pass
+    return out
+
+
+def _code_fingerprint():
+    import hashlib
+    h = hashlib.sha256()
+    for f in _code_files():
+        try:
+            h.update(f.name.encode() + b"\0" + f.read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:12]
+
+
+CODE_STAT = _code_stat()
+CODE_FINGERPRINT = _code_fingerprint()
+
 
 def _login_signed_in():
     """On a confirmed sign-in, re-read the credential now and revive affected panes."""
     claude_auth.status(force=True)
+    sessions.AVAIL.invalidate()        # the picker's Claude row, without waiting a period
     MGR.auth_sweep()
 
 
@@ -438,12 +478,19 @@ class Handler(BaseHTTPRequestHandler):
             # orphans_reaped: adapters a previous hub left running, stopped at boot.
             reaped = sum(1 for v in getattr(MGR, "orphans", {}).values()
                          if v in ("reaped", "killed"))
-            return self._json({"ok": 1, "service": "corral-light",
+            extra = {}
+            emit_perf = sessions._core.emit_perf_snapshot()
+            if emit_perf is not None:               # CORRAL_PERF=1 only
+                extra["emit_perf"] = emit_perf
+            return self._json({**extra, "ok": 1, "service": "corral-light",
                                "tick_age_s": age, "panes_live": live,
                                "permissions_waiting": blocked,
                                "orphans_reaped": reaped,
                                "tick_errors": _TICK.get("errors", 0),
-                               "not_restored": getattr(MGR, "not_restored", 0)})
+                               "not_restored": getattr(MGR, "not_restored", 0),
+                               "started_at": int(STARTED_AT),
+                               "code": CODE_FINGERPRINT,
+                               "code_stale": _code_stat() != CODE_STAT})
 
         if self._edge_refused():
             return
@@ -577,17 +624,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"events": pane.history(before, n)})
             except (ValueError, KeyError) as e:
                 return self._json({"error": str(e)[:200]}, 400)
+        if p == "/api/lanes":
+            # The lane list alone, for clients that only need to know what can
+            # start (consult open_pane). Served from the availability worker.
+            agents, _auth, checked_at = sessions.AVAIL.read()
+            return self._json({"agents": agents, "checkedAt": int(checked_at)})
         if p == "/api/state":
             # ?since={"paneId":seq,...} -> only events after what the client
             # already has.
-            since = {}
+            # No `since`, or `full=1`, is the whole document; a cursor without
+            # `full` is a poller's light delta (Manager.state). A cursor that
+            # does not parse is treated as no cursor: the safe, full answer.
+            since = None
             raw = (q.get("since") or [None])[0]
             if raw:
                 try:
                     since = {str(k): int(v) for k, v in json.loads(raw).items()}
                 except (ValueError, AttributeError, TypeError):
-                    since = {}
-            out = MGR.state(since)
+                    since = None
+            full = (q.get("full") or ["0"])[0] in ("1", "true")
+            out = MGR.state(since, full=full)
             out["claudeLogin"] = LOGIN.snapshot()
             return self._json(out)
         if p == "/api/stream":
@@ -704,13 +760,19 @@ class Handler(BaseHTTPRequestHandler):
                     agent, effort = r.agent, r.effort
                     posture = r.posture or sessions.DEFAULT_POSTURE
                     role_sha, preamble, notes = r.sha256, r.preamble, r.notes
-                pane = MGR.create(agent, b.get("cwd") or str(sessions.default_cwd()),
-                                  posture, (b.get("model") or "").strip() or None,
-                                  effort, role=role, role_sha=role_sha,
-                                  worktree=b.get("worktree") is True,
-                                  title=(b.get("title") or "").strip()[:80] or None,
-                                  # Bulk spawners: minimized until it needs you.
-                                  background=b.get("background") is True)
+                try:
+                    pane = MGR.create(agent, b.get("cwd") or str(sessions.default_cwd()),
+                                      posture, (b.get("model") or "").strip() or None,
+                                      effort, role=role, role_sha=role_sha,
+                                      worktree=b.get("worktree") is True,
+                                      title=(b.get("title") or "").strip()[:80] or None,
+                                      # Bulk spawners: minimized until it needs you.
+                                      background=b.get("background") is True)
+                except Exception:
+                    # The cached lane list may have said "available" for a lane
+                    # that just failed: recheck now rather than in a period.
+                    sessions.AVAIL.invalidate()
+                    raise
                 # The preamble is returned to the composer, not sent from here.
                 return self._json({"ok": True, "pane": pane.snapshot(),
                                    "preamble": preamble, "notes": notes})
@@ -824,7 +886,19 @@ class Handler(BaseHTTPRequestHandler):
                                    "removed": MGR.schedule.remove(b.get("id", ""))})
             if p == "/api/session/seen":
                 # A human surface showed this pane up to `seq` (sent only while
-                # the page is visible and focused).
+                # the page is visible and focused). `seen: {pane: seq, ...}`
+                # marks several in one request (the browser's batch, one POST
+                # per tick instead of one per pane); a pane no longer here is
+                # skipped, not an error for the rest. Bounded by MAX_PANES.
+                many = b.get("seen")
+                if isinstance(many, dict):
+                    out = {}
+                    for pid, s in list(many.items())[:sessions.MAX_PANES]:
+                        try:
+                            out[pid] = mark_seen(str(pid), s or 0)
+                        except (ValueError, TypeError):
+                            continue
+                    return self._json({"ok": True, "seen": out})
                 return self._json({"ok": True, "seen": mark_seen(
                     b.get("pane", ""), b.get("seq") or 0)})
             if p in WORKTREE_POSTS:
@@ -923,6 +997,7 @@ def serve(bind=BIND, port=PORT):
         os.environ.pop(_k, None)
     threading.Thread(target=_observe_loop, daemon=True).start()
     threading.Thread(target=_notify_loop, daemon=True).start()
+    sessions.AVAIL.start()             # lane availability, off the request path
     MGR.schedule.start()
     # Where a pane's seat-tools child dials this hub: loopback when bound to
     # all interfaces, else the bound address.

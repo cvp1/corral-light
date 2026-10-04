@@ -43,12 +43,32 @@ class TooMany(Exception):
     """Refused for rate, not for identity — the caller should just wait."""
 
 
+_SECRET_CACHE = {}       # (path, inode, mtime_ns, size) -> key bytes; one entry
+
+
 def _secret():
+    """The cookie HMAC key. Read on every request before 2026-10-04; now kept
+    in memory and re-read whenever the file's identity or stat changes, so a
+    replaced or deleted key (revoking every session) still takes effect on the
+    next request."""
+    try:
+        st = KEYFILE.stat()
+    except OSError:
+        st = None
+    if st is not None:
+        ident = (str(KEYFILE), st.st_ino, st.st_mtime_ns, st.st_size)
+        hit = _SECRET_CACHE.get(ident)
+        if hit is not None:
+            return hit
     STATE.mkdir(parents=True, exist_ok=True)
     if not KEYFILE.is_file():
         KEYFILE.write_bytes(secrets.token_bytes(32))
         KEYFILE.chmod(0o600)
-    return KEYFILE.read_bytes()
+    key = KEYFILE.read_bytes()
+    st = KEYFILE.stat()
+    _SECRET_CACHE.clear()
+    _SECRET_CACHE[(str(KEYFILE), st.st_ino, st.st_mtime_ns, st.st_size)] = key
+    return key
 
 
 @contextlib.contextmanager

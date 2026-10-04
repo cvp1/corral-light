@@ -11,6 +11,8 @@ VERBS
     send      --pane ID        send to an existing pane, wait, print JSON
     fanout    --lane a --lane b ...   one prompt, N new panes, wait for all
               --pane x --pane y ...   ...or N existing panes
+              --stream                each arm as a JSON line when it completes
+              --min-arms N            return after N ok arms; the rest keep running
     crossfeed --pane a --pane b ...   every pane gets every other pane's last
                                answer under one preamble (quotes clipped at
                                the hub's QUOTE_CHARS)
@@ -28,6 +30,7 @@ import argparse
 import http.client
 import json
 import os
+import queue
 import sys
 import threading
 import time
@@ -239,8 +242,124 @@ def lane_key(name):
 
 
 def lanes(hub):
-    st = hub.get("/api/state")
-    return st.get("agents") or []
+    """The lane list. GET /api/lanes (served from the hub's availability
+    worker); a hub older than that route answers 404, so fall back to the
+    full /api/state it has always served."""
+    try:
+        return hub.get("/api/lanes").get("agents") or []
+    except ConsultError as e:
+        if "-> 404" not in str(e):
+            raise
+    return hub.get("/api/state").get("agents") or []
+
+
+# ── the doorbell: wake on the hub's push stream instead of sleeping POLL_S ──
+# (docs/PERF-REVIEW-2026-10-04.md item 4). One /api/stream per consult
+# process. Its events are used only to WAKE a waiter whose pane changed; the
+# waiter then reads that pane's events with the same light /api/state delta
+# as before, so answer attribution is unchanged. A stream that is down, or a
+# hub without one, leaves every waiter on the old POLL_S cadence.
+WAKE_MIN_GAP_S = 0.25           # coalesce a streaming turn's text chunks
+STREAM_READ_S = 60              # the hub pings every 20 s; silence past this is a dead socket
+STREAM_RETRY_S = 2.0
+
+
+class Waker:
+    def __init__(self, hub):
+        self.hub = hub
+        self._lock = threading.Lock()
+        self._bells = {}                 # pane id -> threading.Event
+        self._stop = threading.Event()
+        self._thread = None
+        self.dead = None                 # why the stream gave up for good, if it did
+
+    def start(self):
+        with self._lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="consult-doorbell",
+                                                daemon=True)
+                self._thread.start()
+
+    def _bell(self, pid):
+        with self._lock:
+            b = self._bells.get(pid)
+            if b is None:
+                b = self._bells[pid] = threading.Event()
+            return b
+
+    def _ring_all(self):
+        with self._lock:
+            for b in self._bells.values():
+                b.set()
+
+    def wait(self, pid, timeout):
+        """Sleep up to `timeout`, or until an event for `pid` arrives."""
+        b = self._bell(pid)
+        b.wait(timeout)
+        b.clear()
+
+    def _run(self):
+        while not self._stop.is_set():
+            conn = self.hub._conn(timeout=STREAM_READ_S)
+            try:
+                conn.request("GET", "/api/stream", headers=self.hub._headers())
+                r = conn.getresponse()
+                if r.status != 200:
+                    # Not paired any more, or a hub with no stream: polling it is.
+                    self.dead = f"/api/stream -> {r.status}"
+                    self._ring_all()
+                    return
+                self._ring_all()         # anything missed while (re)connecting
+                while not self._stop.is_set():
+                    line = r.fp.readline()
+                    if not line:
+                        break
+                    if not line.startswith(b"data: "):
+                        continue
+                    try:
+                        ev = json.loads(line[6:])
+                    except ValueError:
+                        continue
+                    pid = ev.get("pane") if isinstance(ev, dict) else None
+                    if pid:
+                        self._bell(pid).set()
+                    else:
+                        self._ring_all()     # resync and other host-wide events
+            except (OSError, http.client.HTTPException):
+                pass
+            finally:
+                conn.close()
+            self._ring_all()
+            self._stop.wait(STREAM_RETRY_S)
+
+
+def _waker(hub):
+    """The process's doorbell for `hub`, or None for a client without sockets
+    (the offline tests' stub hub)."""
+    if not hasattr(hub, "_conn"):
+        return None
+    with _WAKER_LOCK:                    # fan-out arms arrive here in parallel
+        w = getattr(hub, "waker", None)
+        if w is None:
+            w = hub.waker = Waker(hub)
+            w.start()
+    return w
+
+
+_WAKER_LOCK = threading.Lock()
+
+
+def _nap(hub, pid, last_poll):
+    """Between two reads of `pid`: return as soon as its pane has news (at
+    least WAKE_MIN_GAP_S after the last read), or after POLL_S regardless."""
+    w = _waker(hub)
+    if w is None or w.dead:
+        time.sleep(POLL_S)
+        return
+    w.wait(pid, POLL_S)
+    gap = WAKE_MIN_GAP_S - (time.time() - last_poll)
+    if gap > 0:
+        time.sleep(gap)
 
 
 def _state(hub, since, timeout=HTTP_TIMEOUT_S):
@@ -270,11 +389,12 @@ def read_prompt(args):
 
 
 def open_pane(hub, lane, cwd, title=None, model=None, effort=None, posture=None,
-              config=None, background=True):
+              config=None, background=True, live=None):
     """Open a pane on `lane`; `posture=None` posts no key so the hub default applies.
-    `background`: minimized on the wall until it needs the operator."""
+    `background`: minimized on the wall until it needs the operator.
+    `live`: a lane list the caller already read (fan-out reads it once)."""
     key = lane_key(lane)
-    live = {a["key"]: a for a in lanes(hub)}
+    live = {a["key"]: a for a in (lanes(hub) if live is None else live)}
     a = live.get(key)
     if a is None:
         raise ConsultError(f"no lane {key!r} — live lanes: {', '.join(sorted(live))}")
@@ -347,6 +467,7 @@ def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
         try:
             left = timeout_s - (time.time() - t0)
             st = _state(hub, since, timeout=min(HTTP_TIMEOUT_S, max(2.0, left)))
+            last_poll = time.time()
         except ConsultError as e:
             # Fall through to the cancel path rather than raising past it.
             transport_err = str(e)
@@ -415,7 +536,7 @@ def wait_turn(hub, pid, seq0, timeout_s, label="", own=None, prefix=False):
             break
         if time.time() - t0 > timeout_s:
             break
-        time.sleep(POLL_S)
+        _nap(hub, pid, last_poll)
     if needs_you_since is not None:
         needs_you_s += time.time() - needs_you_since
     timed_out = (not complete and dead_why is None and transport_err is None
@@ -454,6 +575,7 @@ def _await_ready(hub, pid, timeout_s, label=""):
     t0, warned = time.time(), False
     while True:
         p = _pane_in(_state(hub, {pid: 1 << 40}), pid)
+        last_poll = time.time()
         if p is None:
             raise ConsultError(f"no pane {pid}")
         state = p.get("state") or ""
@@ -468,7 +590,7 @@ def _await_ready(hub, pid, timeout_s, label=""):
         if time.time() - t0 > timeout_s:
             raise ConsultError(f"pane {pid} stayed {state} for {int(timeout_s)}s; "
                                f"not sending onto a busy pane")
-        time.sleep(POLL_S)
+        _nap(hub, pid, last_poll)
 
 
 def send_and_wait(hub, pid, text, timeout_s, label=""):
@@ -570,35 +692,82 @@ def cmd_fanout(args):
         raise ConsultError("fanout takes --lane ... (new panes) OR --pane ... (existing), not both")
     if len(lanes_) + len(pids) > MAX_LANES:
         raise ConsultError(f"at most {MAX_LANES} arms per fan-out")
-    opened = {}
-    for i, lane in enumerate(lanes_):
-        title = (args.title + f" · {lane}") if args.title else None
+    min_arms = args.min_arms
+    if min_arms is not None and not 1 <= min_arms <= len(lanes_) + len(pids):
+        raise ConsultError(f"--min-arms must be between 1 and the number of arms "
+                           f"({len(lanes_) + len(pids)})")
+    # One lane read for every arm; then each arm opens, sends and waits on its
+    # own thread, so a slow spawn or a hung adapter delays only its own arm
+    # (docs/PERF-REVIEW-2026-10-04.md item 2).
+    live = lanes(hub) if lanes_ else None
+    arms = [("lane", x) for x in lanes_] + [("pane", x) for x in pids]
+    done = queue.Queue()
+    where = {}                           # arm index -> pane id, once known
+    where_lock = threading.Lock()
+
+    def arm(i, kind, name):
         try:
-            pane = open_pane(hub, lane, args.cwd, title, None, None, args.posture,
-                             background=not args.foreground)
-            opened[pane["id"]] = lane
-        except ConsultError as e:
-            # One lane refusing does not stop the others; report it by name.
-            opened[f"refused:{lane}"] = str(e)
-    pids += [k for k in opened if not k.startswith("refused:")]
+            if kind == "lane":
+                title = (args.title + f" · {name}") if args.title else None
+                try:
+                    pane = open_pane(hub, name, args.cwd, title, None, None, args.posture,
+                                     background=not args.foreground, live=live)
+                except ConsultError as e:
+                    # One lane refusing does not stop the others; report it by name.
+                    done.put((i, {"pane": None, "lane": name, "ok": False, "why": str(e),
+                                  "complete": False, "text": ""}))
+                    return
+                pid = pane["id"]
+            else:
+                pid = name
+            with where_lock:
+                where[i] = pid
+            rec = send_and_wait(hub, pid, text, args.timeout,
+                                name if kind == "lane" else pid)
+            rec.setdefault("ok", bool(rec.get("complete") and rec.get("text")))
+            done.put((i, rec))
+        except Exception as e:                          # noqa: BLE001
+            done.put((i, {"pane": where.get(i), "ok": False, "complete": False,
+                          "text": "", "why": f"{type(e).__name__}: {e}"}))
+
+    for i, (kind, name) in enumerate(arms):
+        threading.Thread(target=arm, args=(i, kind, name), daemon=True).start()
+    results, ok_n = {}, 0
     try:
-        results = _parallel([(pid, hub, pid, text, args.timeout, opened.get(pid, pid))
-                             for pid in pids], send_and_wait)
+        while len(results) < len(arms):
+            try:
+                i, rec = done.get(timeout=0.5)        # interruptible: Ctrl+C reaches us
+            except queue.Empty:
+                continue
+            results[i] = rec
+            ok_n += bool(rec.get("ok"))
+            if args.stream:
+                print(json.dumps({"arm": rec}), flush=True)
+            if min_arms is not None and ok_n >= min_arms:
+                break
     except KeyboardInterrupt:
-        for pid in pids:
+        with where_lock:
+            known = list(where.values())
+        for pid in known:
             try:
                 hub.post("/api/session/cancel", {"pane": pid})
             except ConsultError:
                 pass
         raise
-    for k, v in opened.items():
-        if k.startswith("refused:"):
-            results[k] = {"pane": None, "lane": k.split(":", 1)[1], "ok": False,
-                          "why": v, "complete": False, "text": ""}
-    for r in results.values():
-        r.setdefault("ok", bool(r.get("complete") and r.get("text")))
-    print(json.dumps({"arms": list(results.values())}, indent=2), flush=True)
-    return 0 if sum(1 for r in results.values() if r["ok"]) >= 1 else 1
+    # Arms still out when --min-arms returned: left running, never cancelled.
+    with where_lock:
+        running = [{"pane": where.get(i), "lane": name if kind == "lane" else None,
+                    "phase": "answering" if i in where else "opening"}
+                   for i, (kind, name) in enumerate(arms) if i not in results]
+    ordered = [results[i] for i in sorted(results)]
+    if args.stream:
+        print(json.dumps({"done": True, "ok": ok_n, "running": running}), flush=True)
+    else:
+        out = {"arms": ordered}
+        if running:
+            out["running"] = running
+        print(json.dumps(out, indent=2), flush=True)
+    return 0 if ok_n >= 1 else 1
 
 
 def cmd_crossfeed(args):
@@ -699,6 +868,12 @@ def build_parser():
     p.add_argument("--title")
     # No default: an unset posture lets the hub apply its DEFAULT_POSTURE.
     p.add_argument("--posture", default=None)
+    p.add_argument("--stream", action="store_true",
+                   help="print each arm as one JSON line the moment it completes, "
+                        "then a {done, ok, running} line")
+    p.add_argument("--min-arms", type=int, default=None, metavar="N",
+                   help="return once N arms have answered ok; the rest keep running "
+                        "on the wall and are listed by pane id, never cancelled")
     _foreground_arg(p)
     _prompt_args(p)
     p.set_defaults(fn=cmd_fanout)

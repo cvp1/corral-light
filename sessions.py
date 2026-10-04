@@ -614,7 +614,7 @@ def available_agents():
             reason = f"not installed: {missing[0]}" if missing else None
             if reason is None:
                 import ollama_acp
-                reason = ollama_acp.unavailable_reason()
+                reason = ollama_acp.unavailable_reason(timeout=AVAIL_OLLAMA_TIMEOUT_S)
             out.append({"key": key, "label": spec["label"],
                         "available": reason is None,
                         "why": reason or spec.get("needs", ""),
@@ -679,6 +679,85 @@ def available_agents():
             item["memberLabel"] = (item["key"].split(":", 1)[1]
                                    if ":" in item["key"] else item["label"])
     return out
+
+
+# ── lane availability, off the request path (docs/PERF-REVIEW-2026-10-04.md) ──
+# available_agents() costs 30 to 70 ms (the Ollama HTTP probe, launcher checks)
+# and on a cold cache a full lane_probe handshake or a `security` call. Run on
+# every /api/state, that was most of a state request's latency. One bounded
+# worker computes it every AVAIL_PERIOD_S; requests serve its last result.
+# Not the observer tick: that tick runs auth_sweep resumes and is the wedge
+# detector, so a slow probe there would delay both.
+AVAIL_PERIOD_S = 5
+AVAIL_OLLAMA_TIMEOUT_S = 1      # the probe's own default is 5 s; the worker waits less
+
+
+class Availability:
+    """Last known lanes + Claude login status, refreshed by one daemon thread.
+
+    Without start() (tests, one-shot tools) every read computes fresh, which
+    is exactly the old behaviour. A probe that hangs stalls only the worker:
+    readers keep getting the previous result, stamped with when it was taken."""
+
+    def __init__(self, period=AVAIL_PERIOD_S):
+        self.period = period
+        self._lock = threading.Lock()          # guards the published result
+        self._compute = threading.Lock()       # one computation at a time
+        self._wake = threading.Event()
+        self._thread = None
+        self.agents = None
+        self.auth = None
+        self.checked_at = 0.0
+        self.errors = 0
+
+    def start(self):
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._loop, name="lane-availability",
+                                            daemon=True)
+            self._thread.start()
+
+    def _loop(self):
+        while True:
+            self.refresh()
+            self._wake.wait(self.period)
+            self._wake.clear()
+
+    def refresh(self, only_if_empty=False):
+        with self._compute:
+            if only_if_empty and self.agents is not None:
+                return                 # the worker's pass finished while we waited
+            try:
+                agents = available_agents()
+            except Exception:                        # noqa: BLE001
+                self.errors += 1
+                return
+            try:
+                auth = claude_auth.status()
+            except Exception:                        # noqa: BLE001
+                self.errors += 1
+                auth = None
+            with self._lock:
+                self.agents, self.auth, self.checked_at = agents, auth, time.time()
+
+    def invalidate(self):
+        """Recheck now (a spawn failed, a login changed); readers are not blocked."""
+        self._wake.set()
+
+    def read(self):
+        """(agents, claude_auth, checked_at)."""
+        if self._thread is None:
+            return available_agents(), claude_auth.status(), time.time()
+        with self._lock:
+            if self.agents is not None:
+                return self.agents, self.auth, self.checked_at
+        self.refresh(only_if_empty=True)           # first read after boot only
+        with self._lock:
+            if self.agents is None:                # the first computation failed
+                return [], None, 0.0
+            return self.agents, self.auth, self.checked_at
+
+
+AVAIL = Availability()
 
 
 class Pane(_core.PaneBase):
@@ -2747,13 +2826,40 @@ class Manager(_core.ManagerBase):
             return r
         return self._worktree_action(pane_id, go, drain_after=False)
 
-    def state(self, since=None):
+    # Delta contract (docs/PERF-REVIEW-2026-10-04.md, plan item 3). A request
+    # with a `since` cursor and no `full` is a poller asking what changed: it
+    # gets each pane's events past its cursor, but a pane's `commands` and
+    # `config` only when that pane's cursor is 0 (new to the client), and none
+    # of the host-wide fields in LIGHT_OMITS. No `since`, or `full`, is the
+    # whole document, as before. The browser always asks `full`.
+    LIGHT_OMITS = ("agents", "claudeAuth", "catalog", "archived",
+                   "cwdSuggestions", "schedule")
+    PANE_LIGHT_OMITS = ("commands", "config")
+
+    def state(self, since=None, full=None):
+        light = since is not None and not full
         since = since or {}
+        panes = []
         # Copy with list(): another thread may add or remove panes mid-iteration.
-        return {"panes": [p.snapshot(since.get(p.id, 0)) for p in list(self.panes.values())],
-                "agents": available_agents(),
+        for p in list(self.panes.values()):
+            cur = since.get(p.id, 0)
+            snap = p.snapshot(cur)
+            if light and cur:
+                for k in self.PANE_LIGHT_OMITS:
+                    snap.pop(k, None)
+            panes.append(snap)
+        if light:
+            return {"panes": panes, "agentGroups": agent_groups(),
+                    "postures": sorted(POSTURES), "defaultCwd": str(default_cwd()),
+                    "dataDir": str(STATE), "notRestored": self.not_restored,
+                    "light": True, "at": int(time.time())}
+        agents, claude_auth_status, checked_at = AVAIL.read()
+        return {"panes": panes,
+                "agents": agents,
+                # When `agents` was measured (the availability worker's last pass).
+                "agentsCheckedAt": int(checked_at),
                 # The Claude login's expiry, for the rail's early warning (cached).
-                "claudeAuth": claude_auth.status(),
+                "claudeAuth": claude_auth_status,
                 # Group definitions ship with `agents`, whose `group` tags reference them.
                 "agentGroups": agent_groups(),
                 "postures": sorted(POSTURES),

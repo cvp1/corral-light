@@ -37,10 +37,10 @@ def list_models():
     return sorted(names)[:MAX_MODELS]
 
 
-def unavailable_reason():
+def unavailable_reason(timeout=CONNECT_TIMEOUT):
     """None if this lane can serve, else the sentence to show in the picker."""
     try:
-        tags = _get("/api/tags").get("models") or []
+        tags = _get("/api/tags", timeout=timeout).get("models") or []
     except (urllib.error.URLError, OSError, TimeoutError):
         return f"Ollama is not answering at {URL} — start it, or set CORRAL_OLLAMA_URL"
     except ValueError:

@@ -274,7 +274,17 @@ class ADeadLoginIsSurvived(FakeLaneCase):
 
     def test_state_carries_the_login_and_the_ui_reads_it(self):
         src = (ROOT / "sessions.py").read_text(encoding="utf-8")
-        self.assertIn('"claudeAuth": claude_auth.status()', src)
+        # Since 2026-10-04 the availability worker reads the login status and
+        # state() serves its last result (docs/PERF-REVIEW-2026-10-04.md).
+        self.assertIn("auth = claude_auth.status()", src)
+        self.assertIn('"claudeAuth": claude_auth_status', src)
+        import sessions
+        from unittest import mock
+        with mock.patch.object(sessions, "available_agents", lambda: []), \
+                mock.patch.object(sessions.claude_auth, "status",
+                                  lambda *a, **k: {"ok": False, "why": "expired"}):
+            self.assertEqual(sessions.Availability().read()[1],
+                             {"ok": False, "why": "expired"})
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn("S.claudeAuth = d.claudeAuth", js)
         self.assertIn("'Claude login expired'", js)

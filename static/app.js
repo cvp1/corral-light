@@ -2463,10 +2463,38 @@ function displayTick() {
  * keeps the title's counts current. */
 const HIDDEN_RENDER_MS = 1000;
 let renderQueued = false;
+/* ?perf in the address: time every render and print a summary to the console
+ * every PERF_REPORT_MS (docs/PERF-REVIEW-2026-10-04.md item 5: measure frame
+ * cost before changing how the roster or a log is rebuilt). Bounded: the
+ * samples array is cleared at each report. Also readable as window.corralPerf. */
+const PERF = new URLSearchParams(location.search).has('perf');
+const PERF_REPORT_MS = 5000;
+const perfStat = { samples: [], over16: 0, frames: 0, worst: 0 };
+if (PERF) {
+  window.corralPerf = perfStat;
+  setInterval(() => {
+    const xs = perfStat.samples.sort((a, b) => a - b);
+    if (!xs.length) return;
+    const pct = q => xs[Math.min(xs.length - 1, Math.floor(xs.length * q))].toFixed(1);
+    console.log(`[corral perf] renders ${xs.length} in ${PERF_REPORT_MS / 1000}s · ` +
+                `p50 ${pct(0.5)} ms · p95 ${pct(0.95)} ms · max ${xs[xs.length - 1].toFixed(1)} ms · ` +
+                `over 16 ms: ${perfStat.over16} (all time) · panes ${S.panes.size}`);
+    perfStat.samples = [];
+  }, PERF_REPORT_MS);
+}
+function timedRender() {
+  const t = performance.now();
+  render();
+  const ms = performance.now() - t;
+  perfStat.frames++;
+  perfStat.worst = Math.max(perfStat.worst, ms);
+  if (ms > 16) perfStat.over16++;
+  if (perfStat.samples.length < 10000) perfStat.samples.push(ms);
+}
 function scheduleRender() {
   if (renderQueued) return;
   renderQueued = true;
-  const run = () => { renderQueued = false; render(); };
+  const run = () => { renderQueued = false; if (PERF) timedRender(); else render(); };
   if (document.visibilityState === 'hidden') setTimeout(run, HIDDEN_RENDER_MS);
   else requestAnimationFrame(run);
 }
@@ -2946,13 +2974,18 @@ function markSeen() {
   seenTimer = setTimeout(() => {
     seenTimer = null;
     if (!looking()) return;
+    // One POST for every pane that moved, not one per pane per tick.
+    const seen = {};
+    let any = false;
     for (const p of S.panes.values()) {
       const seq = p.seq || 0;
       if (seq > (SEEN.get(p.id) || 0)) {
         SEEN.set(p.id, seq);
-        api('/api/session/seen', { pane: p.id, seq }).catch(() => {});
+        seen[p.id] = seq;
+        any = true;
       }
     }
+    if (any) api('/api/session/seen', { seen }).catch(() => {});
   }, SEEN_MS);
 }
 
@@ -2966,20 +2999,23 @@ async function refresh() {
   const seq = ++refreshSeq;
   let d;
   try {
-    d = await api('/api/state?since=' + encodeURIComponent(JSON.stringify(since)));
+    // full=1: the browser reads the host-wide fields and every pane's commands
+    // and config; without it a cursor gets a poller's light delta (hub state()).
+    d = await api('/api/state?full=1&since=' + encodeURIComponent(JSON.stringify(since)));
   } catch (e) { if (e.status === 401) return relock(); throw e; }
   if (seq !== refreshSeq) return;      // a newer refresh() has since been issued
-  S.agents = d.agents || [];
-  S.claudeAuth = d.claudeAuth || null;
+  // A field the response leaves out keeps its previous value (never emptied).
+  if ('agents' in d) S.agents = d.agents || [];
+  if ('claudeAuth' in d) S.claudeAuth = d.claudeAuth || null;
   S.claudeLogin = d.claudeLogin || null;
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
   S.dataDir = d.dataDir || S.dataDir || '';
   S.cwdSuggestions = d.cwdSuggestions || S.cwdSuggestions || [];
-  S.archived = d.archived || [];
+  if ('archived' in d) S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
-  S.schedule = d.schedule || [];
+  if ('schedule' in d) S.schedule = d.schedule || [];
   const next = new Map();
   const rxAt = Date.now();
   for (const np of (d.panes || [])) {

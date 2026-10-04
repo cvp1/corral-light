@@ -136,6 +136,37 @@ TEXT_FLUSH_S = 0.15
 TEXT_FLUSH_CHARS = 4096
 MAX_EVENTS = 4000               # per-pane ring in memory; JSONL on disk is the record
 
+# How long emit() takes (ring append, transcript write and flush, broadcast).
+# It runs on the adapter's stdout reader thread, so a slow write delays the
+# next line read. Off unless CORRAL_PERF=1 (docs/PERF-REVIEW-2026-10-04.md
+# item 6); fixed-size counters, never a growing list. Served by /health.
+EMIT_PERF = os.environ.get("CORRAL_PERF") == "1"
+EMIT_PERF_BUCKETS_MS = (1, 10, 100)
+EMIT_STATS = {"n": 0, "total_ms": 0.0, "max_ms": 0.0,
+              "over_ms": {str(b): 0 for b in EMIT_PERF_BUCKETS_MS}}
+_EMIT_STATS_LOCK = threading.Lock()
+
+
+def _emit_perf_record(ms):
+    with _EMIT_STATS_LOCK:
+        EMIT_STATS["n"] += 1
+        EMIT_STATS["total_ms"] += ms
+        EMIT_STATS["max_ms"] = max(EMIT_STATS["max_ms"], ms)
+        for b in EMIT_PERF_BUCKETS_MS:
+            if ms > b:
+                EMIT_STATS["over_ms"][str(b)] += 1
+
+
+def emit_perf_snapshot():
+    """None when the switch is off; else counts, mean and max in ms."""
+    if not EMIT_PERF:
+        return None
+    with _EMIT_STATS_LOCK:
+        n = EMIT_STATS["n"]
+        return {"n": n, "mean_ms": round(EMIT_STATS["total_ms"] / n, 3) if n else 0.0,
+                "max_ms": round(EMIT_STATS["max_ms"], 3),
+                "over_ms": dict(EMIT_STATS["over_ms"])}
+
 MAX_LOG_BYTES = 64 * 1024 * 1024   # per-pane transcript on disk, then rotate
 
 MAX_PANES = 12
@@ -647,6 +678,15 @@ class PaneBase:
 
     # ── event plumbing ───────────────────────────────────────────────────
     def emit(self, kind, payload, activity=True):
+        if not EMIT_PERF:
+            return self._emit(kind, payload, activity)
+        t = time.perf_counter()
+        try:
+            return self._emit(kind, payload, activity)
+        finally:
+            _emit_perf_record((time.perf_counter() - t) * 1000)
+
+    def _emit(self, kind, payload, activity=True):
         if getattr(self, "_replaying", False):
             return None            # history we already hold; see resume()
         # activity=False for synthetic observations, which must not reset

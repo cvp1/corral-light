@@ -261,7 +261,7 @@ class Route(unittest.TestCase):
         self.patches = [
             mock.patch.object(self.hub, "LOGIN", self.r.login),
             mock.patch.object(self.hub, "MGR", types.SimpleNamespace(
-                panes={"p1": object()}, state=lambda since: {"panes": []}))]
+                panes={"p1": object()}, state=lambda since, full=None: {"panes": []}))]
         for p in self.patches:
             p.start()
 
