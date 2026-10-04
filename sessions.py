@@ -738,6 +738,7 @@ class Pane(_core.PaneBase):
         p.title = (None if stale_collision else stored_title) or \
             Pane._default_title(p.agent, p.cwd)
         p.minimized = bool(meta.get("minimized"))
+        p.background = bool(meta.get("background")) and p.minimized
         p.order = meta.get("order")
         p.pinned = bool(meta.get("pinned"))
         p.created = meta.get("created", _now())
@@ -1780,8 +1781,10 @@ class Pane(_core.PaneBase):
 
 
     def set_minimized(self, flag):
-        """Hide the pane; the roster still shows its live state and pending permissions."""
+        """Hide the pane; the roster still shows its live state and pending permissions.
+        The operator's choice: the pane stops being a background pane."""
         self.minimized = bool(flag)
+        self.background = False
         self.save_meta()
         self.mgr.broadcast_layout(self)
         return self.minimized
@@ -1818,7 +1821,8 @@ class Pane(_core.PaneBase):
                  ("dead", "detached", "uncertain") else "dead")
         return {
             "id": self.id, "agent": self.agent, "label": AGENTS[self.agent]["label"],
-            "minimized": self.minimized, "titleLocked": self.title_locked,
+            "minimized": self.minimized, "background": self.background,
+            "titleLocked": self.title_locked,
             "order": self.order, "pinned": self.pinned,
             "model": self.model, "effort": self.effort, "config": self.config,
             "commands": self.commands,
@@ -2182,7 +2186,10 @@ class Manager(_core.ManagerBase):
 
 
     def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None,
-               role=None, role_sha=None, worktree=False, title=None):
+               role=None, role_sha=None, worktree=False, title=None,
+               background=False):
+        """`background`: a bulk spawner's pane (rig, panel, eval, schedule)
+        starts minimized and restores itself when it needs the operator."""
         if agent.startswith("host:"):
             # The picker's list could be seconds stale; the spawn must not be.
             refresh_host_lanes()
@@ -2228,6 +2235,9 @@ class Manager(_core.ManagerBase):
             # Role annotation (roles.py), set before start() so the first save carries it.
             if role:
                 pane.role, pane.role_sha, pane.role_delivery = role, role_sha, "preamble"
+            if background:
+                # Before registration, so no browser ever sees it on the wall.
+                pane.minimized = pane.background = True
             self.panes[pane.id] = pane
         if worktree:
             try:
@@ -2443,6 +2453,7 @@ class Manager(_core.ManagerBase):
         self.broadcast({"seq": 0, "at": _now(), "pane": pane.id,
                         "kind": "layout", "data": {
                             "minimized": bool(pane.minimized),
+                            "background": bool(getattr(pane, "background", False)),
                             "pinned": bool(pane.pinned),
                             "order": pane.order,
                         }})

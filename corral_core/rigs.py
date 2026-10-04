@@ -6,7 +6,10 @@ prompt). `rig up` preflights the whole file and refuses it with every reason
 before starting anything, then brings each seat up in file order with one
 outcome from OUTCOMES; nothing rolls back. A hand-written opening prompt is
 sent via the pane's own `send()` only to panes the rig started fresh.
+Seats come up in the background (minimized) unless `background=False`; one
+that needs the operator restores itself.
 """
+import inspect
 import os
 import sys
 import threading
@@ -299,7 +302,15 @@ def _outcome(step, outcome, why="", pane=None, **extra):
     return o
 
 
-def _resume(mgr, step, p):
+def _creates_in_background(mgr):
+    """Does this product's `create` take `background`? (Both hubs share rigs.)"""
+    try:
+        return "background" in inspect.signature(mgr.create).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _resume(mgr, step, p, background=True):
     notes = []
     if p.agent != step["agent"]:
         notes.append(f"the pane runs {p.agent}, not {step['agent']} as the rig "
@@ -316,6 +327,8 @@ def _resume(mgr, step, p):
         return _outcome(step, "not-restored", cap + " — resume it by hand when "
                         "there is room", p)
     seq0 = p.events[-1]["seq"] if p.events else 0
+    if background and hasattr(p, "to_background"):
+        p.to_background()
     try:
         p.resume()
     except Exception as e:                                  # noqa: BLE001
@@ -333,15 +346,19 @@ def _resume(mgr, step, p):
     return _outcome(step, "resumed", "; ".join(notes), p)
 
 
-def _start(mgr, step):
+def _start(mgr, step, background=True):
     cap = _cap_refusal(mgr, new_pane=True)
     if cap:
         return _outcome(step, "not-restored", cap)
+    extra = {"background": True} if background and _creates_in_background(mgr) else {}
     try:
         p = mgr.create(step["agent"], step["cwd"], step["posture"], None,
-                       step["effort"], role=step["role"], role_sha=step["role_sha"])
+                       step["effort"], role=step["role"], role_sha=step["role_sha"],
+                       **extra)
     except Exception as e:                                  # noqa: BLE001
         return _outcome(step, "failed", f"could not start: {str(e)[:200]}")
+    if background and not extra and hasattr(p, "to_background"):
+        p.to_background()
     if p.state == "dead":
         return _outcome(step, "failed", f"the agent did not start: "
                         f"{(p.error or '')[:200]}", p)
@@ -363,24 +380,25 @@ def _start(mgr, step):
     return _outcome(step, "fresh-primed", "; ".join(notes), p, turn=turn)
 
 
-def _step(mgr, step):
+def _step(mgr, step, background=True):
     h = _holder(mgr, step["seat"])
     if h is not None:
         if _is_live(h):
             return _outcome(step, "withheld", f"pane {h.id} went live holding "
                             f"@{step['seat']} after the check; left as it is", h)
-        return _resume(mgr, step, h)
+        return _resume(mgr, step, h, background)
     on_disk = [m for m in _s.open_metas() if m.get("seat") == step["seat"]
                and m["id"] not in mgr.panes]
     if on_disk:
         return _outcome(step, "not-restored", f"pane {on_disk[0]['id']} holds "
                         f"@{step['seat']} on disk but is not on this roster "
                         f"(the restore cap); reopen it by hand")
-    return _start(mgr, step)
+    return _start(mgr, step, background)
 
 
-def up(mgr, name, by=None):
-    """Preflight the whole rig, then bring each seat up in file order.
+def up(mgr, name, by=None, background=True):
+    """Preflight the whole rig, then bring each seat up in file order,
+    minimized unless `background` is False.
     -> {"rig", "outcomes", "lines"}. RigRefused before anything is touched."""
     name = check_name(name)
     with _LOCK:
@@ -392,7 +410,7 @@ def up(mgr, name, by=None):
         outcomes = []
         for step in plan:
             try:
-                o = _step(mgr, step)
+                o = _step(mgr, step, background)
             except Exception as e:                          # noqa: BLE001
                 o = _outcome(step, "failed", f"{type(e).__name__}: {str(e)[:200]}")
             outcomes.append(o)
@@ -444,7 +462,8 @@ def route(mgr, method, path, body=None, by=None):
                                             replace=bool(body.get("replace")))}
         if path == "/api/session/rigs/rm":
             return 200, {"ok": True, "removed": rm(body.get("name", ""))}
-        return 200, {"ok": True, **up(mgr, body.get("name", ""), by=by)}
+        return 200, {"ok": True, **up(mgr, body.get("name", ""), by=by,
+                                      background=body.get("background") is not False)}
     except RigRefused as e:
         return 400, {"error": str(e)[:2000], "refused": e.reasons}
     except ValueError as e:

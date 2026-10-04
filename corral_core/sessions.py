@@ -459,8 +459,13 @@ class PaneBase:
                  # read it, or save_meta blanks it.
                  "seat",
                  # Open ask_human question {text, at, turn} or None.
-                 "question")
+                 "question",
+                 # Launched minimized by a bulk spawner (rig, panel, eval,
+                 # schedule); it un-minimizes itself when it needs you.
+                 # Absent = False.
+                 "background")
     ephemeral = False
+    background = False
     pid = pgid = pid_start = None
     seat = None
     question = None     # the agent's open ask_human question, or None
@@ -764,6 +769,7 @@ class PaneBase:
             "content": [] if oversize else body["content"],
             "locations": [] if oversize else body["locations"],
             "options": req.get("options") or []})
+        self.surface_for_operator("a permission is waiting on you")
 
     def _mcp_servers(self):
         registry = getattr(self.mgr, "mcp", None)
@@ -955,7 +961,40 @@ class PaneBase:
         self.emit("question", {"text": text, "turn": q["turn"], "at": q["at"],
                                "replaces": prev.get("at"), "source": source},
                   activity=False)
+        self.surface_for_operator("it asked you a question")
         return q
+
+    # ── background panes: minimized until they need the operator ───────
+    def _layout_changed(self):
+        self.save_meta()
+        tell = getattr(self.mgr, "broadcast_layout", None)
+        if tell is not None:
+            tell(self)
+
+    def to_background(self):
+        """Minimize a pane a bulk spawner (rig, panel, eval, schedule) brought
+        up, marked so it restores itself when it needs the operator. A pane
+        that already needs them stays on the wall. -> True if minimized."""
+        if display_state(self)["state"] == "needs-you":
+            return False
+        if self.minimized and self.background:
+            return True
+        if self.minimized:
+            return True         # the operator minimized it; leave it theirs
+        self.minimized = self.background = True
+        self._layout_changed()
+        return True
+
+    def surface_for_operator(self, why):
+        """Restore a background pane that now needs the operator. A pane the
+        operator minimized by hand is left minimized: its chip shows the count."""
+        if not (self.background and self.minimized):
+            return False
+        self.minimized = self.background = False
+        self._layout_changed()
+        self.emit("note", {"text": f"restored from the background: {why}"},
+                  activity=False)
+        return True
 
     def _clear_question(self, reason):
         """Close the open question, if any, and say why in the transcript."""
