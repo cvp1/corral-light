@@ -1003,6 +1003,7 @@ class Pane(_core.PaneBase):
                 self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
             spec = AGENTS[self.agent]
             env = spawn_env(spec, self._config_dir(), self.posture)
+            env["CORRAL_PANE_ID"] = self.id      # tools can tell which pane they run in
             self._expect_exit = False        # a NEW process; its exit is real news
             with self._turn_lock:
                 self._generation += 1        # a new attachment; retire any stale drain
@@ -1326,6 +1327,7 @@ class Pane(_core.PaneBase):
         try:
             spec = AGENTS[self.agent]
             env = spawn_env(spec, self._config_dir(), self.posture)
+            env["CORRAL_PANE_ID"] = self.id      # tools can tell which pane they run in
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         strip_env=strip_prefixes(),
                                         **self._bind(self._generation))

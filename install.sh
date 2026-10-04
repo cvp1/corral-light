@@ -763,6 +763,11 @@ EOF
       systemctl --user enable --now corral-light-watch.timer >/dev/null 2>&1 || true
       ok "watchdog timer enabled (pages you if the hub goes down; never restarts it)"
     fi
+    if [ -f "$CL/skills/corral-update/SKILL.md" ] && [ ! -e "$HOME/.claude/skills/corral-update" ]; then
+      if "$CL/corral-light" update --install-skill >/dev/null 2>&1; then
+        ok "corral-update skill linked (ask a Claude pane to update Corral)"
+      else warn "could not link the corral-update skill — later: corral-light update --install-skill"; fi
+    fi
   else
     if hub_alive; then
       skip "a Corral Light hub already answers on port $PORT"

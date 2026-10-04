@@ -117,7 +117,8 @@ Here is what happens, start to finish:
 
 Running the same line again is always safe: it updates what moved, repairs
 what is missing, and never installs anything twice. That is also how you
-**update**.
+**update**. For just Corral Light itself, `./corral-light update` is quicker (see
+[Keeping Corral Light current](#keeping-corral-light-current)).
 
 ### What you need
 
@@ -366,6 +367,17 @@ The availability check is intentionally honest: an assistant is marked unavailab
 ```
 ./corral-light diagnose [assistant]
 ```
+
+### Keeping Corral Light current
+
+```
+./corral-light update --check          # how far behind master, and whether the hub runs older code
+./corral-light update                  # fetch, fast-forward, restart the hub when it is safe
+./corral-light update --install-timer  # do that daily around 05:15, unattended
+./corral-light update --install-skill  # let Claude panes run it when you ask
+```
+
+The update fast-forwards the checkout the running hub serves. Then it restarts the hub, but only when no pane is mid-turn or waiting on a permission, because a restart ends those turns. Paused panes resume on their next message. When panes are busy, it changes nothing, names them, and exits 3. `--wait 600` waits for them, and `--now` interrupts them. It refuses, changing nothing, when the checkout has local changes, commits of its own, or is on another branch. The adapters are reinstalled only when their lockfile changed, and a failed install puts the old commit back. It also notices a hub still serving older code after a pull without a restart. The timer records each run in `update-status.json` in the state folder, and `--check` shows the last one.
 
 ### Keeping the assistants current
 

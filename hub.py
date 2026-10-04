@@ -38,6 +38,21 @@ ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 
 
+def _boot_commit():
+    """The commit this process loaded, read once at import, so `corral-light
+    update` can tell a hub still serving older code. None outside git."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+        return (r.stdout.strip() or None) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+BOOT_COMMIT = _boot_commit()
+
+
 def _safe_static_path(rel):
     """Resolve `rel` under STATIC; None if it escapes (path-wise, not by
     string prefix, so a sibling like `static-secret/` cannot match)."""
@@ -645,6 +660,8 @@ class Handler(BaseHTTPRequestHandler):
             full = (q.get("full") or ["0"])[0] in ("1", "true")
             out = MGR.state(since, full=full)
             out["claudeLogin"] = LOGIN.snapshot()
+            # Which checkout and commit this process serves (`corral-light update`).
+            out["hub"] = {"root": str(ROOT), "commit": BOOT_COMMIT}
             return self._json(out)
         if p == "/api/stream":
             return self._stream()

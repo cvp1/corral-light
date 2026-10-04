@@ -91,6 +91,14 @@ class Routes(unittest.TestCase):
         c.close()
         return r.status, out
 
+    def test_state_names_the_checkout_and_commit_the_hub_serves(self):
+        st, out = self.req("GET", "/api/state", cookie=True)
+        self.assertEqual(st, 200)
+        self.assertEqual(out["hub"]["root"], str(self.hub.ROOT))
+        self.assertEqual(out["hub"]["commit"], self.hub.BOOT_COMMIT)
+        st, out = self.req("GET", "/health")
+        self.assertNotIn("hub", out, "the unauthenticated probe stays counts-only")
+
     def test_rig_routes_are_behind_the_pairing_cookie(self):
         """401 before routing without the cookie; paired, a refused rig starts
         nothing and says why, and `save` writes the seated panes.

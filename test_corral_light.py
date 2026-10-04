@@ -3705,6 +3705,18 @@ class BackgroundPanes(_FakeLaneCase):
                       .read_text(encoding="utf-8"))
 
 
+class AgentsKnowTheirPane(_FakeLaneCase):
+    def test_the_agent_process_carries_its_pane_id(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        self.assertEqual(p.state, "ready", p.error)
+        environ = Path(f"/proc/{p.client.p.pid}/environ")
+        if not environ.exists():
+            self.skipTest("no /proc here")
+        env = dict(x.split("=", 1) for x in
+                   environ.read_bytes().decode().split("\0") if "=" in x)
+        self.assertEqual(env.get("CORRAL_PANE_ID"), p.id)
+
+
 def rigs_mod():
     from corral_core import rigs
     return rigs
@@ -3734,6 +3746,7 @@ from test_worktrees import *                     # noqa: F401,F403,E402
 # 2026-09-30: the Claude login foreseen (claude_auth) and survived (auth_sweep).
 from test_claude_auth import *                   # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
+from test_update import *                        # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402
 # Seats: the forked half (restore/reopen/from_meta/snapshot).
 from test_seats import *                         # noqa: F401,F403,E402

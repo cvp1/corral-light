@@ -30,6 +30,9 @@
 #                               list them (read only), restore a discarded one,
 #                               purge one for good (typed branch name), settle an
 #                               action with an unknown outcome (worktrees_cli.py)
+#   corral-light update [--check|--now|--wait S]   bring this install up to date
+#                               with its repository; restarts the hub only when no
+#                               pane is mid-turn or waiting (update.py --help)
 #   corral-light lanes check [--job]   installed against latest per lane (read only;
 #                               --job = edge-triggered notices for a scheduler)
 #   corral-light lanes update <lane>   stage a lane's newer adapter, prove it on a
@@ -57,6 +60,7 @@ case "${1:-}" in
   panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|seat|config|attach|quote|later|search|digest|port|rig)
     exec "$PY" "$D/cli.py" "$@" ;;
   lanes) shift; exec "$PY" "$D/lanes.py" "$@" ;;
+  update) shift; exec "$PY" "$D/update.py" "$@" ;;
   cli) shift; exec "$PY" "$D/cli.py" "$@" ;;
-  *)     echo "usage: corral-light {pair [--break-glass] <code>|key <list|enroll|rm|policy|recover>|serve|doctor|launch [--print]|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|rig <save|up|list|rm>|lanes check|lanes update <lane>}"; exit 2 ;;
+  *)     echo "usage: corral-light {pair [--break-glass] <code>|key <list|enroll|rm|policy|recover>|serve|doctor|launch [--print]|install-service [--print]|diagnose [lane]|consult <verb> ...|watch [pane]|panes|open|say|pending|ok|no|cancel|pause|resume|close|forget|reopen|rename|config|attach|quote|rig <save|up|list|rm>|lanes check|lanes update <lane>|update [--check]}"; exit 2 ;;
 esac
