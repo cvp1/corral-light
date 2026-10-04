@@ -294,6 +294,10 @@ check(bn.some(b => /big\.bin/.test(b)), 'files left out for size are named');
 check(bn.some(b => /2 binary files/.test(b)), 'binary files get a banner');
 check(bn.some(b => /size limit/.test(b)), 'a truncated diff says so');
 eq(reviewBanners({ ignored: { count: 0 }, too_big: [], diff: { files: [] } }), [], 'nothing to say, no banners');
+bn = reviewBanners({ ignored: { count: 0 }, too_big: [], diff: { files: [] },
+                     staged_differs: ['a.txt', 'b.txt'] });
+check(bn.length === 1 && bn[0].includes('a.txt') && bn[0].includes('recovery ref'),
+   'a path staged differently from its file is named, with the recovery ref');
 
 const diffNodes = load('diffNodes', ['parseUnified'], { el: mk });
 const big = { path: 'huge.txt', status: 'M', add: 9000, del: 0, binary: false, too_big: true, patch: null };

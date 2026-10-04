@@ -9,11 +9,11 @@ Collected by test_corral_light.py. Run alone: python3 -m unittest test_worktrees
 import io
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state  # noqa: E402
+default_state("corral-light-test-")
 ROOT = Path(__file__).resolve().parent
 
 import worktrees as wt                                    # noqa: E402
@@ -212,6 +212,27 @@ class TheResolve(CliCase):
         got = [o for o in self.reg.read(e["id"])["ops"] if o["op_id"] == op][0]
         self.assertEqual((got["state"], got["stage"]), ("done", "resolved_by_user"))
         self.assertIsNone(m._worktree_blocked_reason(self.reg.read(e["id"])))
+
+    # Grok r1: resolve cleared a commit op without looking at git.
+    def test_T_CLI_15b_resolve_refuses_a_commit_whose_index_does_not_match(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed\n")
+        snap = wt.snapshot(e)
+        new = wt.git(["commit-tree", snap["tree"], "-p", snap["head"]], cwd=p,
+                     input=b"m\n").text.strip()
+        wt.git(["update-ref", e["branch"], new, snap["head"]], cwd=p)  # landed; index old
+        op = self.reg.begin_op(e["id"], "commit", stage="ref_moved", new=new,
+                               expect_old=snap["head"], tree=snap["tree"])
+        self.reg.set_op(e["id"], op, state="unknown")
+        rc, out, err = self.run_cli("resolve", e["id"], "--op", op)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("index", err)
+        got = [o for o in self.reg.read(e["id"])["ops"] if o["op_id"] == op][0]
+        self.assertEqual(got["state"], "unknown")
+        wt.git(["read-tree", new], cwd=p)                  # the user makes them agree
+        rc, out, err = self.run_cli("resolve", e["id"], "--op", op)
+        self.assertEqual(rc, 0, err)
 
     def test_T_CLI_16_resolve_refuses_an_op_that_is_not_unknown(self):
         e, op = self.unknown()

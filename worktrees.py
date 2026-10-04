@@ -188,6 +188,16 @@ def _iso_log(cwd):
             f.write(os.path.realpath(str(cwd)) + "\n")
 
 
+def _feed(stdin, data):
+    try:
+        stdin.write(data)
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+    finally:
+        with contextlib.suppress(BrokenPipeError, ValueError, OSError):
+            stdin.close()
+
+
 def _run(cmd, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OUT,
          env_extra=None, input=None, optional_locks_off=False):
     """The process runner behind git() (and gh): see git()."""
@@ -199,27 +209,25 @@ def _run(cmd, cwd, timeout=DEFAULT_TIMEOUT_S, check=True, max_out=DEFAULT_MAX_OU
     out, err = [], []
     readers = [threading.Thread(target=_drain, args=(proc.stdout, max_out, out), daemon=True),
                threading.Thread(target=_drain, args=(proc.stderr, max_out, err), daemon=True)]
+    if input is not None:
+        # In a thread: a child that never reads must not stall us past the deadline.
+        readers.append(threading.Thread(target=_feed, args=(proc.stdin, input), daemon=True))
     for t in readers:
         t.start()
-    if input is not None:
-        try:
-            proc.stdin.write(input)
-        except BrokenPipeError:
-            pass
-        finally:
-            try:
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
+    # One deadline for everything: a child that exits while a grandchild
+    # (a hook's helper) keeps the pipes open must not outlive the timeout.
+    deadline = time.monotonic() + timeout
     try:
-        rc = proc.wait(timeout=timeout)
+        rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        for t in readers:
+            t.join(max(0.0, deadline - time.monotonic()))
+        if any(t.is_alive() for t in readers):
+            raise subprocess.TimeoutExpired(cmd, timeout)
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         for t in readers:
             t.join(KILL_GRACE_S)
         raise GitTimeout(cmd, timeout) from None
-    for t in readers:
-        t.join()
     res = GitResult(rc, out[0], err[0], out[1] or err[1])
     if check and rc != 0:
         raise GitError(cmd, rc, res.err_text)
@@ -454,6 +462,27 @@ class Registry:
                     rec["at"] = _now()
                     return
             raise KeyError(f"{wt_id} has no op {op_id}")
+        return self._mutate(wt_id, fn)
+
+    def finish_op(self, wt_id, op_id, op_fields, **fields):
+        """Close op `op_id` with `op_fields` AND update the entry in one write.
+
+        A crash between two writes could leave an op `done` while the entry
+        still described the old state (a discarded worktree still `active`,
+        so nothing could restore it). One mutation, one rename: both or neither.
+        """
+        def fn(e):
+            for k in ("id", "v", "ops"):
+                if k in fields:
+                    raise ValueError(f"{k} cannot be set through finish_op()")
+            for rec in e.get("ops") or []:
+                if rec.get("op_id") == op_id:
+                    rec.update(op_fields)
+                    rec["at"] = _now()
+                    break
+            else:
+                raise KeyError(f"{wt_id} has no op {op_id}")
+            e.update(fields)
         return self._mutate(wt_id, fn)
 
     def all(self, include_unreadable=False):
@@ -716,7 +745,7 @@ class Refused(Exception):
     """An action refused for a machine-readable `reason` (a route answers 409 with it).
 
     Reasons: busy, changed, identity, missing, tampered, signing, uncommitted,
-    remote_changed, non_ff, unknown.
+    remote_changed, rewrite, transport, relative, non_ff, unknown.
     """
 
     def __init__(self, reason, detail):
@@ -754,9 +783,46 @@ def _refuse_symlink(p, what):
                          "CORRAL_LIGHT_WORKTREES at a real folder)")
 
 
+def refuse_open_ops(entry, registry):
+    """Refuse a mutating action while any op on this worktree is not settled.
+
+    `unknown`: a past action's outcome could not be checked; only the CLI
+    resolves it. `intent`: an action is running in another process, or one
+    was cut short and the restart has not checked it yet. Reads the entry
+    as it is now, not the caller's copy.
+    """
+    try:
+        cur = registry.read(entry["id"])
+    except (OSError, ValueError, RegistryVersionError) as e:
+        raise Refused("missing", f"this branch's record cannot be read: {e}") from None
+    for o in cur.get("ops") or []:
+        if o.get("state") == "unknown":
+            raise Refused("unknown", "an action on this branch has an unknown outcome; "
+                                     "resolve it with `corral-light worktrees`")
+        if o.get("state") == "intent":
+            raise Refused("unknown", f"an earlier {o.get('op') or 'action'} on this branch has "
+                                     "not finished; restart the hub to check it, or resolve "
+                                     "it with `corral-light worktrees`")
+    return cur
+
+
 def agent_cwd(entry):
     """The folder the agent starts in: the worktree plus the subdir the user chose."""
     return Path(entry["path"]) / (entry.get("subdir") or "")
+
+
+def check_agent_cwd(entry):
+    """Refuse if the agent's folder resolves outside its worktree.
+
+    A subdir that is a committed symlink (replaced by a real folder only in
+    the main checkout) passes probe, and the new checkout restores the link.
+    Checked before every start, resume and dispatch, on the live disk."""
+    root = os.path.realpath(entry["path"])
+    real = os.path.realpath(agent_cwd(entry))
+    if real != root and not real.startswith(root + os.sep):
+        raise Refused("identity", f"this pane's folder {agent_cwd(entry)} resolves to {real}, "
+                                  "outside its own branch; the agent was not started")
+    return real
 
 
 def create(pr, title, owner_pane, registry=None):
@@ -796,9 +862,27 @@ def create(pr, title, owner_pane, registry=None):
             _crash_point("create:added")
             verify(entry)
         except BaseException as e:
+            if isinstance(e, GitError) and not isinstance(e, GitTimeout) and _added_anyway(entry):
+                # git exits non-zero when a post-checkout hook fails, AFTER the
+                # worktree and branch exist. Marking that `missing` orphaned a
+                # live worktree nothing could list or discard.
+                return registry.update(entry["id"], phase="active", warning=(
+                    "git reported an error after creating the worktree (a failing "
+                    f"post-checkout hook?): {str(e)[:ERR_SNIPPET]}"))
             registry.update(entry["id"], phase="missing", error=str(e)[:ERR_SNIPPET])
             raise
         return registry.update(entry["id"], phase="active")
+
+
+def _added_anyway(entry):
+    """Did `git worktree add` register the path and check out our branch despite failing?"""
+    try:
+        if os.path.realpath(entry["path"]) not in _registered_paths(entry):
+            return False
+        verify(entry)
+        return True
+    except Exception:                               # noqa: BLE001 — doubt means no
+        return False
 
 
 def _registered_paths(entry):
@@ -824,12 +908,37 @@ def verify(entry):
         raise IdentityError("tampered", f"{p} resolves outside {root}")
     want_admin = os.path.realpath(Path(entry["common_dir"]) / "worktrees" / entry["admin_name"])
     try:
-        dotgit = Path(p, ".git").read_text(encoding="utf-8").strip()
+        dotgit = read_regular(os.path.join(p, ".git")).decode("utf-8", "replace").strip()
     except OSError:
         raise IdentityError("tampered", f"{p}/.git is not a worktree link") from None
     if not dotgit.startswith("gitdir: ") or os.path.realpath(
             os.path.join(p, dotgit[len("gitdir: "):])) != want_admin:
         raise IdentityError("tampered", f"{p}/.git points somewhere else")
+    # The admin dir's `commondir` file says which repository git really uses
+    # from here; an agent can rewrite it, so ask git, not the registry.
+    cd = git(["rev-parse", "--git-common-dir"], cwd=p, check=False)
+    actual = os.path.realpath(os.path.join(p, cd.text.strip())) if cd.rc == 0 else None
+    if actual != os.path.realpath(entry["common_dir"]):
+        raise IdentityError("tampered", f"{p} now belongs to the repository at "
+                                        f"{actual or 'an unreadable location'}, not "
+                                        f"{entry['common_dir']}")
+    # What git will actually use from here: the work tree (core.worktree in a
+    # worktree config can move it), the git dir, and the index (a symlink can
+    # move it). Each must be this worktree's own, or the agent's ordinary git
+    # commands would write somewhere else, such as the main checkout.
+    lay = git(["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-path", "index"],
+              cwd=p, check=False)
+    parts = lay.text.splitlines() if lay.rc == 0 else []
+    if len(parts) < 3:
+        raise IdentityError("tampered", f"git cannot describe {p}'s layout")
+    top, gdir, index = (os.path.realpath(os.path.join(p, x)) for x in parts[:3])
+    if top != os.path.realpath(p):
+        raise IdentityError("tampered", f"git's work tree for {p} is now {top}")
+    if gdir != want_admin:
+        raise IdentityError("tampered", f"git's directory for {p} is now {gdir}")
+    if not index.startswith(want_admin + os.sep):
+        raise IdentityError("tampered", f"{p}'s index now resolves to {index}, outside "
+                                        f"its own admin dir")
     if os.path.realpath(p) not in _registered_paths(entry):
         raise IdentityError("missing", f"git no longer lists {p} as a worktree")
     sym = git(["symbolic-ref", "-q", "HEAD"], cwd=p, check=False)
@@ -903,7 +1012,9 @@ SNAPSHOT_TIMEOUT_S = 60
 SNAP_UNTRACKED_MAX = 512 << 10     # untracked files larger than this are named, not added
 BLOB_MAX = 512 << 10               # files larger than this are listed without hunks
 DIFF_FILE_MAX = 256 << 10          # patch bytes per file
-DIFF_TOTAL_MAX = 1536 << 10        # patch bytes per response (JSON stays under 2 MiB)
+DIFF_TOTAL_MAX = 1536 << 10        # JSON-encoded patch bytes per response
+DIFF_JSON_MAX = 2 << 20            # what diff() may encode to, metadata included
+REVIEW_JSON_MAX = 2 << 20          # the whole review response (hub.py caps bodies by this)
 DIFF_MAX_PATCHED_FILES = 400
 IGNORED_SAMPLE = 20
 REVIEW_REF = "refs/corral/review/"
@@ -963,12 +1074,14 @@ def snapshot(entry, tmp_dir=None):
         return _snapshot_locked(entry, tmp_dir)
 
 
-def _snapshot_locked(entry, tmp_dir=None):
-    """snapshot() for a caller that already holds repo_lock(entry)."""
+def _snapshot_locked(entry, tmp_dir=None, pin=True):
+    """snapshot() for a caller that already holds repo_lock(entry).
+
+    `pin=False` only looks: the review pin keeps naming what the user sees."""
     p = entry["path"]
     idx = _index_path(p)
     try:
-        real = Path(idx).read_bytes()
+        real = _read_index(idx)
         idx_mtime = os.stat(idx).st_mtime_ns
     except FileNotFoundError:
         real, idx_mtime = b"", None
@@ -992,9 +1105,10 @@ def _snapshot_locked(entry, tmp_dir=None):
     unstaged = set(_names(p, ["diff", "--name-only", "-z", "--no-renames", "--"]))
     ignored = _names(p, ["ls-files", "--others", "--ignored", "--exclude-standard",
                          "--directory", "-z"])
-    pin = git(["commit-tree", tree, "-p", head], cwd=p,
-              input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
-    git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
+    if pin:
+        pin = git(["commit-tree", tree, "-p", head], cwd=p,
+                  input=f"corral review snapshot {entry['id']}\n".encode()).text.strip()
+        git(["update-ref", REVIEW_REF + entry["id"], pin], cwd=p)
     return {"tree": tree, "head": head, "head_tree": head_tree, "base_sha": entry["base_sha"],
             "index_id": hashlib.sha256(real).hexdigest(),
             "staged_differs": sorted(staged & unstaged), "too_big": too_big,
@@ -1078,15 +1192,52 @@ def diff(entry, tree):
                 args = [a for a in _diff_tree_args("-p", "--no-color", "--src-prefix=a/",
                                                     "--dst-prefix=b/", base, tree, "--",
                                                     *sorted(spec)) if a != "-z"]
-                pr = git(args, cwd=p, max_out=min(DIFF_FILE_MAX, budget))
+                pr = git(args, cwd=p, max_out=min(DIFF_FILE_MAX, max(budget, 1)))
                 patched += 1
-                if pr.truncated:
-                    truncated = True
+                text = None if pr.truncated else pr.out.decode("utf-8", "replace")
+                cost = len(json.dumps(text)) if text is not None else 0
+                if text is None or cost > budget:
+                    truncated = True        # escaping can triple Unicode; charge what is sent
                 else:
-                    f["patch"] = pr.out.decode("utf-8", "replace")
-                    budget -= len(pr.out)
+                    f["patch"] = text
+                    budget -= cost
         files.append(f)
-    return {"base": base, "tree": tree, "files": files, "truncated": truncated}
+    return fit_review({"base": base, "tree": tree, "files": files, "truncated": truncated},
+                      limit=DIFF_JSON_MAX, at=None)
+
+
+def fit_review(obj, limit=REVIEW_JSON_MAX, at="diff"):
+    """Shrink a review until json.dumps() of it fits `limit`, and say so.
+
+    `obj[at]` (or `obj` itself when `at` is None) is a diff: patches go
+    first, largest first, then file rows from the end (`files_omitted`
+    counts them). Never touches the tree or anything an action depends on."""
+    d = obj if at is None else obj.get(at)
+    if not isinstance(d, dict) or len(json.dumps(obj)) <= limit:
+        return obj
+    files = d.get("files") or []
+    over = len(json.dumps(obj)) - limit
+    for f in sorted((f for f in files if f.get("patch")),
+                    key=lambda f: len(json.dumps(f["patch"])), reverse=True):
+        over -= len(json.dumps(f["patch"])) - len("null")
+        f["patch"] = None
+        d["truncated"] = True
+        if over <= 0:
+            return obj
+    while files and len(json.dumps(obj)) > limit:
+        cut = max(1, len(files) // 8)
+        del files[-cut:]
+        d["files_omitted"] = (d.get("files_omitted") or 0) + cut
+        d["truncated"] = True
+    big = obj.get("too_big") if at is not None else None
+    while big and len(json.dumps(obj)) > limit:
+        cut = max(1, len(big) // 8)
+        del big[-cut:]
+        obj["too_big_omitted"] = (obj.get("too_big_omitted") or 0) + cut
+    ign = (obj.get("ignored") or {}).get("sample") if at is not None else None
+    while ign and len(json.dumps(obj)) > limit:
+        del ign[-max(1, len(ign) // 8):]
+    return obj
 
 
 # ── crash points (tests only) ─────────────────────────────────────────────────
@@ -1113,31 +1264,89 @@ def _tree_of_index(p, content, tmp_dir):
         return git(["write-tree"], cwd=p, env_extra={"GIT_INDEX_FILE": tmp}).text.strip()
 
 
-def _replace_index(idx, content):
-    """Swap `content` in as the real index the way git does: O_EXCL index.lock, then rename."""
+def read_regular(path):
+    """Bytes of `path`, which must be a regular file reached without a symlink.
+
+    For every file an agent can replace (the worktree's .git file, its index,
+    the repository's config): a fifo would block a plain read forever (and a
+    review action or resume holding the pane's lock with it), and a symlink
+    could point anywhere. Opened non-blocking and without following links,
+    then checked on the open descriptor. FileNotFoundError passes through."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise IdentityError("tampered", f"{path} is not a regular file")
+        os.set_blocking(fd, True)
+        with os.fdopen(fd, "rb") as f:
+            fd = None
+            return f.read()
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _read_index(idx):
+    """read_regular() for the index, mapping a symlink (ELOOP) to IdentityError."""
+    try:
+        return read_regular(idx)
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise IdentityError("tampered", f"{idx} cannot be read as a plain file: {e}") from None
+
+
+def _index_id(idx):
+    """The identity snapshot() records: sha256 of the index bytes (none: of b"")."""
+    try:
+        return hashlib.sha256(_read_index(idx)).hexdigest()
+    except FileNotFoundError:
+        return hashlib.sha256(b"").hexdigest()
+
+
+def _replace_index(idx, content, expect_id=None):
+    """Swap `content` in as the real index the way git does: O_EXCL index.lock, then rename.
+
+    With `expect_id`, the index must still be that one once the lock is held
+    (git writes the index only under index.lock, so it cannot change after):
+    otherwise someone staged work, and it is left exactly as it is.
+    """
     lock = idx + ".lock"
     try:
         fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except FileExistsError:
         raise Refused("busy", "another git process holds the worktree's index.lock") from None
     try:
-        os.write(fd, content)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(lock, idx)
+        try:
+            if expect_id is not None and _index_id(idx) != expect_id:
+                raise Refused("changed", "something was staged in the worktree since review; "
+                                         "the index was left as it is")
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(lock, idx)
+    except BaseException:
+        _unlink_own_temp(lock)          # our own lock, never another process's
+        raise
 
 
-def _reconcile_index(p, new, tmp_dir):
-    """Point the real index at commit `new` without touching the work tree (step 6)."""
+def _reconcile_index(p, new, tmp_dir, expect_id=None):
+    """Point the real index at commit `new` without touching the work tree (step 6).
+
+    `expect_id` (the identity journalled with the commit) must match both
+    before the rebuild and under index.lock; otherwise Refused("changed").
+    """
     idx = _index_path(p)
-    with _temp_index(tmp_dir, Path(idx).read_bytes(), os.stat(idx).st_mtime_ns) as tmp:
+    if expect_id is not None and _index_id(idx) != expect_id:
+        raise Refused("changed", "something was staged in the worktree since review; "
+                                 "the index was left as it is")
+    with _temp_index(tmp_dir, _read_index(idx), os.stat(idx).st_mtime_ns) as tmp:
         env = {"GIT_INDEX_FILE": tmp}
         git(["read-tree", new], cwd=p, env_extra=env, timeout=COMMIT_TIMEOUT_S)
         git(["update-index", "-q", "--refresh"], cwd=p, env_extra=env, check=False,
             timeout=COMMIT_TIMEOUT_S)
         content = Path(tmp).read_bytes()
-    _replace_index(idx, content)
+    _replace_index(idx, content, expect_id)
 
 
 def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_dir=None):
@@ -1166,6 +1375,7 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
                                  "cannot be signed, so commit in the worktree by hand")
     v = verify(entry)
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         idx = _index_path(p)
         if os.path.exists(idx + ".lock"):
             raise Refused("busy", "another git process holds the worktree's index.lock")
@@ -1180,7 +1390,7 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
             return {"commit": None, "noop": True, "recovery_refs": []}
         recovery = []
         if now["staged_differs"]:
-            staged_tree = _tree_of_index(p, Path(idx).read_bytes(), tmp_dir)
+            staged_tree = _tree_of_index(p, _read_index(idx), tmp_dir)
             keep = git(["commit-tree", staged_tree, "-p", expect_head], cwd=p,
                        input=b"corral: staged content kept before hub commit\n").text.strip()
             ref = f"{RECOVERY_REF}{entry['id']}/{_ts()}-index"
@@ -1192,7 +1402,7 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
         new = git(["commit-tree", tree, "-p", expect_head], cwd=p, input=msg.encode(),
                   timeout=COMMIT_TIMEOUT_S).text.strip()
         op = registry.begin_op(entry["id"], "commit", stage="prepared", new=new,
-                               expect_old=expect_head, tree=tree)
+                               expect_old=expect_head, tree=tree, index_id=index_id)
         _crash_point("commit:prepared")
         r = git(["update-ref", entry["branch"], new, expect_head], cwd=p, check=False)
         if r.rc != 0:
@@ -1200,15 +1410,26 @@ def commit_tree(entry, tree, index_id, message, expect_head, registry=None, tmp_
             raise Refused("identity", "the branch moved while committing; nothing was committed")
         registry.set_op(entry["id"], op, stage="ref_moved")
         _crash_point("commit:ref_moved")
-        _reconcile_index(p, new, tmp_dir)
+        try:
+            _reconcile_index(p, new, tmp_dir, expect_id=index_id)
+        except Exception as err:            # noqa: BLE001 — the ref moved: never `intent`
+            registry.set_op(entry["id"], op, state="unknown", error=str(err)[:ERR_SNIPPET])
+            raise Refused("unknown", "the commit is on the branch but the index could not be "
+                                     f"updated ({err}); staged work was left as it is. Resolve "
+                                     "it with `corral-light worktrees`") from None
         _crash_point("commit:index")
-        ok = (git(["rev-parse", entry["branch"]], cwd=p).text.strip() == new
-              and _tree_of_index(p, Path(idx).read_bytes(), tmp_dir) == tree)
-        registry.set_op(entry["id"], op, state="done" if ok else "unknown", stage="done")
+        try:
+            ok = (git(["rev-parse", entry["branch"]], cwd=p).text.strip() == new
+                  and _tree_of_index(p, _read_index(idx), tmp_dir) == tree)
+        except Exception as err:            # noqa: BLE001 — the ref moved: never `intent`
+            registry.set_op(entry["id"], op, state="unknown", error=str(err)[:ERR_SNIPPET])
+            raise Refused("unknown", f"the commit is on the branch but checking it failed "
+                                     f"({err}); resolve it with `corral-light worktrees`") from None
         if not ok:
+            registry.set_op(entry["id"], op, state="unknown", stage="done")
             raise Refused("unknown", "the commit landed but the index does not match; "
                                      "resolve it with `corral-light worktrees`")
-        registry.update(entry["id"], last_commit=new)
+        registry.finish_op(entry["id"], op, {"state": "done", "stage": "done"}, last_commit=new)
         return {"commit": new, "noop": False, "recovery_refs": recovery}
 
 
@@ -1220,10 +1441,140 @@ _GITHUB_RE = re.compile(r"^(?:https://github\.com/|git@github\.com:|ssh://git@gi
                         r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
 
+def _repo_git(entry, args, **kw):
+    """git() run against the repository's own git dir (GIT_DIR=common_dir).
+
+    Publish decides and performs a push this way, so nothing in the worktree
+    (its .git file, the admin dir's commondir, a linked config.worktree) can
+    make the checks and the push read different repositories or configs."""
+    env = dict(kw.pop("env_extra", None) or {}, GIT_DIR=entry["common_dir"])
+    return git(args, cwd=entry["common_dir"], env_extra=env, **kw)
+
+
 def push_urls(entry, remote):
     """Where `git push <remote>` would really go: pushurl and pushInsteadOf applied."""
-    r = git(["remote", "get-url", "--push", "--all", "--", remote], cwd=entry["path"])
+    r = _repo_git(entry, ["remote", "get-url", "--push", "--all", "--", remote])
     return [u for u in r.text.splitlines() if u]
+
+
+def is_relative_local_url(url):
+    """True for a push URL git would read as a local path relative to its cwd.
+
+    git's rules: "scheme://" is a URL; "host:path" with no "/" before the
+    first ":" is scp-style ssh; anything else is a local path. A relative
+    one names a different repository depending on where git runs."""
+    if "://" in url:
+        return False
+    head, colon, _ = url.partition(":")
+    if colon and "/" not in head:
+        return False                        # scp-like: [user@]host:path
+    return not os.path.isabs(url)
+
+
+def rewrite_rule(entry, url):
+    """The url.<base>.insteadOf / pushInsteadOf rule git would apply to `url`, or None.
+
+    push() passes the confirmed URL to git, and git rewrites a URL argument
+    too, so a chained rule would send the push (and its check) elsewhere."""
+    r = _repo_git(entry, ["config", "--null", "--get-regexp",
+                          r"^url\..*\.(insteadof|pushinsteadof)$"], check=False)
+    if r.rc not in (0, 1) or r.truncated:   # 1 is "no such keys"; anything else is unknown
+        return f"git config could not be read ({r.err_text.strip()[:120]})"
+    # --null: "<key>\n<value>\0"; a key's subsection (the base URL) may hold spaces.
+    for rec in r.out.split(b"\0"):
+        if not rec:
+            continue
+        key, _, prefix = rec.decode("utf-8", "replace").partition("\n")
+        if url.startswith(prefix):          # an empty prefix matches every URL
+            return f"{key} {prefix!r}"
+    # A word that names a configured remote is that remote to `git push`, with
+    # its own pushurl, whatever its fetch URL says.
+    rr = _repo_git(entry, ["remote"], check=False)
+    if rr.rc != 0 or rr.truncated:
+        return "the configured remotes could not be listed"
+    names = [n for n in rr.text.split("\n") if n]   # any whitespace but newline is a name
+    if url in names:
+        return f"it is the name of the remote {url!r}"
+    if url and "/" not in url and os.sep not in url and any(
+            os.path.lexists(Path(entry["common_dir"]) / d / url) for d in ("remotes", "branches")):
+        return f"git reads {url!r} as a remote defined under .git/remotes or .git/branches"
+    # What git itself makes of the argument: insteadOf applied, and a word that
+    # names a configured remote becomes that remote's URL.
+    got = _repo_git(entry, ["ls-remote", "--get-url", "--", url], check=False)
+    if got.rc != 0 or got.text.strip() != url:
+        return f"git reads it as {got.text.strip() or 'something else'}"
+    return None
+
+
+# Keys that can change where or how a push travels without changing its URL.
+# Whole sections, not a list of known keys: http.* alone has curloptResolve,
+# proxies, TLS and redirect settings, and a denylist of names kept missing one.
+# url.* is here too: a repository-scoped rewrite rule is refused outright, not
+# only when rewrite_rule can see that it matches.
+# include.* and includeIf.* too: an include (a fifo, say) can serve these
+# checks one config and `git push` another.
+_TRANSPORT_KEYS = re.compile(r"^(core\.sshcommand|core\.gitproxy|http\..+|ssh\..+|url\..+|"
+                             r"include\..+|includeif\..+)$", re.I)
+
+
+def config_fingerprint(entry):
+    """sha256 of the repository's own config files, each required to be a
+    regular file: the checks before a push and the push itself must read the
+    same bytes. Raises Refused("transport") for a symlink, fifo or other
+    non-regular config."""
+    out = []
+    # The config files publish reads (it runs with GIT_DIR=common_dir), and the
+    # two links that tie the worktree to that repository, which must exist.
+    must = {Path(_admin_dir(entry)) / "commondir", Path(entry["path"]) / ".git"}
+    for f in (Path(entry["common_dir"]) / "config", Path(entry["common_dir"]) / "config.worktree",
+              Path(_admin_dir(entry)) / "config.worktree", *sorted(must)):
+        try:
+            data = read_regular(f)
+        except FileNotFoundError:
+            if f in must:
+                raise Refused("transport", f"{f} is missing, so which repository this "
+                                           "worktree belongs to cannot be checked") from None
+            out.append((str(f), None))
+            continue
+        except (IdentityError, OSError):
+            raise Refused("transport", f"{f} is not a regular file, so git may read "
+                                       "something different each time; nothing was pushed") from None
+        out.append((str(f), hashlib.sha256(data).hexdigest()))
+    return tuple(out)
+
+
+def transport_override(entry):
+    """A transport setting from this repository's own config (local or worktree
+    scope, includes followed), as "key=value (scope)", or None.
+
+    An agent can set these from inside its worktree with one `git config`,
+    and git would send the push (and the check after it) wherever they say.
+    The user's global and system config, and the hub's environment, are the
+    user's own and are honoured."""
+    r = _repo_git(entry, ["config", "--show-scope", "--null", "--get-regexp", "."],
+                  check=False, max_out=8 << 20)
+    if r.rc not in (0, 1) or r.truncated:
+        return "git config could not be read"
+    # --show-scope --null: "<scope>\0<key>\n<value>\0" per entry.
+    fields = r.out.split(b"\0")
+    for i in range(0, len(fields) - 1, 2):
+        scope = fields[i].decode("utf-8", "replace")
+        key, _, value = fields[i + 1].decode("utf-8", "replace").partition("\n")
+        if scope in ("local", "worktree", "command") and _TRANSPORT_KEYS.match(key):
+            return f"{key}={value!r} ({scope})"
+    # The linked worktree's own config.worktree: publish does not read it
+    # (GIT_DIR is the common dir), but the agent's git does; refuse it too.
+    own = Path(_admin_dir(entry)) / "config.worktree"
+    if own.is_file():
+        r = git(["config", "--file", str(own), "--null", "--get-regexp", "."],
+                cwd=entry["common_dir"], check=False, max_out=1 << 20)
+        if r.rc not in (0, 1) or r.truncated:
+            return f"{own} could not be read"
+        for rec in r.out.split(b"\0"):
+            key, _, value = rec.decode("utf-8", "replace").partition("\n")
+            if key and _TRANSPORT_KEYS.match(key):
+                return f"{key}={value!r} (worktree)"
+    return None
 
 
 def github_repo(url):
@@ -1244,6 +1595,7 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     """
     registry = registry or Registry()
     p = entry["path"]
+    refuse_open_ops(entry, registry)
     v = verify(entry)
     if v["oid"] != oid:
         raise Refused("identity", f"the branch is at {v['oid'][:12]}, not the reviewed {oid[:12]}")
@@ -1253,6 +1605,7 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     if st.out.strip(b"\0"):
         raise Refused("uncommitted", "the worktree has changes that are not committed; "
                                      "commit or discard them first")
+    cfg_before = config_fingerprint(entry)      # before any check reads the config
     urls = push_urls(entry, remote)
     if len(urls) != 1:
         raise Refused("remote_changed", f"{remote} has {len(urls)} push URLs; "
@@ -1260,11 +1613,31 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
     if urls[0] != push_url:
         raise Refused("remote_changed", f"{remote} now pushes to {urls[0]}, not the "
                                         f"{push_url} you confirmed")
+    rule = rewrite_rule(entry, push_url)
+    if rule:
+        raise Refused("rewrite", f"git would rewrite {push_url} again ({rule}), so the push "
+                                 "would not go where you confirmed; nothing was pushed")
+    if is_relative_local_url(push_url):
+        raise Refused("relative", f"{push_url} is a relative path, which names a different "
+                                  "repository depending on where git runs; set the remote "
+                                  "to an absolute path or a URL, then publish again")
+    over = transport_override(entry)
+    if over:
+        raise Refused("transport", f"this repository's own git config changes how pushes "
+                                   f"travel ({over}), so the push and its check could go "
+                                   "somewhere you did not confirm; remove it (or set it in "
+                                   "your global config instead), then publish again")
     ref = entry["branch"]
     op = registry.begin_op(entry["id"], "push", url=push_url, ref=ref, oid=oid)
     _crash_point("push:before")
-    r = git(["push", "--porcelain", "--", push_url, f"{oid}:{ref}"], cwd=p, check=False,
-            timeout=PUSH_TIMEOUT_S)
+    try:
+        r = _repo_git(entry, ["push", "--porcelain", "--", push_url, f"{oid}:{ref}"],
+                      check=False, timeout=PUSH_TIMEOUT_S)
+    except GitError as err:                 # timed out (a hook, a slow remote): may have pushed
+        registry.set_op(entry["id"], op, state="unknown", stage="push_failed",
+                        error=str(err)[:ERR_SNIPPET])
+        raise Refused("unknown", f"the push did not finish ({err}), so whether the remote has "
+                                 "it is not known; resolve it with `corral-light worktrees`") from None
     _crash_point("push:after")
     if r.rc != 0:
         registry.set_op(entry["id"], op, state="done", stage="refused")
@@ -1273,7 +1646,25 @@ def push(entry, remote, push_url, oid, reviewed_tree, registry=None):
             raise Refused("non_ff", "the remote branch has commits this one does not; "
                                     "it was not overwritten")
         raise GitError(["git", "push"], r.rc, r.err_text)
-    there = git(["ls-remote", "--", push_url, ref], cwd=p, timeout=PUSH_TIMEOUT_S).text.split()
+    try:
+        there = _repo_git(entry, ["ls-remote", "--", push_url, ref],
+                          timeout=PUSH_TIMEOUT_S).text.split()
+    except GitError as err:                 # the push ran: never leave it `intent`
+        registry.set_op(entry["id"], op, state="unknown", stage="check_failed",
+                        error=str(err)[:ERR_SNIPPET])
+        raise Refused("unknown", f"the push ran but the remote could not be checked ({err}); "
+                                 "resolve it with `corral-light worktrees`") from None
+    try:
+        same_cfg = config_fingerprint(entry) == cfg_before
+    except Refused:
+        same_cfg = False
+    if not same_cfg:
+        # The checks and the push may not have read the same config, so where
+        # the push went is not known: never report it done.
+        registry.set_op(entry["id"], op, state="unknown", stage="config_changed")
+        raise Refused("unknown", "the repository's git config changed while publishing, so "
+                                 "where the push went cannot be confirmed; resolve it with "
+                                 "`corral-light worktrees`")
     ok = bool(there) and there[0] == oid
     registry.set_op(entry["id"], op, state="done" if ok else "unknown", stage="done")
     if not ok:
@@ -1290,6 +1681,12 @@ def _gh(args, cwd, input=None):
         return None
 
 
+def _pr_head_owner(head, repo):
+    """The GitHub owner a PR's head lives under: the fork's for `owner:branch`,
+    else the base repo's. Lower case; "" when unknown."""
+    return (head.split(":", 1)[0] if ":" in head else (repo or "").split("/")[0]).lower()
+
+
 def open_pr(entry, title, body, repo, registry=None, remote="origin"):
     """Open (or find) the pull request for this branch on the confirmed `repo`.
 
@@ -1299,6 +1696,7 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
     always explicit, so gh never chooses between a fork and its parent.
     """
     registry = registry or Registry()
+    refuse_open_ops(entry, registry)      # before anything, found PR or not
     p = entry["path"]
     branch = entry["branch"][len("refs/heads/"):]
     base = entry["base_ref"][len("refs/heads/"):]
@@ -1317,15 +1715,21 @@ def open_pr(entry, title, body, repo, registry=None, remote="origin"):
         raise Refused("gh_signed_out", "gh is signed out; run `gh auth login` in a terminal, "
                                        "then publish again")
     found = _gh(["pr", "list", "--repo", repo, "--head", branch, "--state", "open",
-                 "--json", "url"], p)
+                 "--json", "url,headRepositoryOwner"], p)
+    owner = _pr_head_owner(head, repo)
     url = None
     if found is not None and found.rc == 0:
         try:
-            listed = json.loads(found.text or "[]")
-            url = listed[0]["url"] if listed else None
-        except (ValueError, KeyError, IndexError, TypeError):
+            # --head matches the branch name in any fork: keep the one from our head.
+            for pr in json.loads(found.text or "[]"):
+                login = ((pr.get("headRepositoryOwner") or {}).get("login") or "").lower()
+                if login and login == owner:    # no owner (a deleted fork) is not ours
+                    url = pr["url"]
+                    break
+        except (ValueError, KeyError, TypeError, AttributeError):
             url = None
     if not url:
+        refuse_open_ops(entry, registry)
         op = registry.begin_op(entry["id"], "pr", repo=repo, head=head)
         _crash_point("pr:before")
         made = _gh(["pr", "create", "--repo", repo, "--head", head, "--base", base,
@@ -1393,9 +1797,19 @@ def _procs_proc(root):
         try:
             if os.stat(base).st_uid != uid:
                 continue
-            hits = [os.readlink(f"{base}/cwd")]
         except OSError:
-            continue
+            continue                        # gone
+        # An unreadable cwd still has its open files read. A process whose cwd
+        # and fds are both unreadable (non-dumpable: keyring agents and the
+        # like) cannot be inspected by anyone without privilege; it is left
+        # out, as before, rather than blocking every Discard on the machine.
+        hits = []
+        try:
+            hits.append(os.readlink(f"{base}/cwd"))
+        except FileNotFoundError:
+            continue                        # gone
+        except OSError:
+            pass
         try:
             for fd in os.listdir(f"{base}/fd"):
                 with contextlib.suppress(OSError):
@@ -1424,7 +1838,9 @@ def _procs_lsof(root):
         raise ScanFailed("lsof is not installed, so open files cannot be checked")
     try:
         # cwd: beside the worktree, never inside it (lsof would count itself).
-        r = _run([lsof, "-nP", "-w", "-a", "-u", str(os.getuid()), "+D", root, "-F", "pc"],
+        where = ["+D", root] if os.path.isdir(root) else []
+        r = _run([lsof, "-nP", "-w", "-a", "-u", str(os.getuid()), *where, "-F", "pc",
+                  *([] if where else ["--", root])],
                  os.path.dirname(root), timeout=SCAN_TIMEOUT_S, check=False, max_out=8 << 20)
     except GitTimeout:
         raise ScanFailed(f"lsof took over {SCAN_TIMEOUT_S}s") from None
@@ -1438,12 +1854,45 @@ def _procs_lsof(root):
                 found.setdefault(pid, "?")
         elif line.startswith("c") and pid in found:
             found[pid] = line[1:120]
-    if not found and (r.err.strip() or r.rc not in (0, 1)):
+    # lsof's own warnings (e.g. a devfs it cannot stat on macOS) are not a
+    # failed scan; any other stderr line is.
+    errs = [l for l in r.err_text.splitlines() if l.strip() and not l.startswith("lsof: WARNING")]
+    if not found and (r.rc not in (0, 1) or errs):
         raise ScanFailed(f"lsof failed: {r.err_text.strip()[:200] or f'exit {r.rc}'}")
     return sorted(found.items())
 
 
-def _wait_lock_gone(idx):
+def _set_aside_stale_lock(idx, record):
+    """Move index.lock aside only if nothing can still be writing it.
+
+    `record` is {"lock", "stopped_at", "pid"?} from the pane whose agent is
+    stopped or dead. The lock must name the same file and predate the stop
+    (a git started since is never touched); the stopped writer, when its pid
+    is known, must be gone; and no process may hold the lock open. git keeps
+    its lock file open for as long as it holds the lock, so a live git from
+    anywhere (outside the worktree included) keeps it. Renamed, not deleted.
+    """
+    lock = idx + ".lock"
+    if not record or os.path.realpath(record.get("lock") or "") != os.path.realpath(lock):
+        return False
+    try:
+        if record.get("pid") is not None:
+            pid = int(record["pid"])
+            if pid <= 1 or _pid_running(pid):
+                return False
+        if os.stat(lock).st_mtime > float(record.get("stopped_at") or 0):
+            return False
+        if processes_in(lock):
+            return False
+        os.replace(lock, f"{lock}.corral-stale-{_ts()}")
+    except (OSError, TypeError, ValueError, ScanFailed):
+        return False
+    return True
+
+
+def _wait_lock_gone(idx, stale=None):
+    if stale and os.path.exists(idx + ".lock"):
+        _set_aside_stale_lock(idx, stale)
     deadline = time.monotonic() + LOCK_WAIT_S
     while os.path.exists(idx + ".lock"):
         if time.monotonic() > deadline:
@@ -1455,7 +1904,73 @@ def trash_dir():
     return worktree_root() / ".trash"
 
 
-def discard(entry, tree, registry=None, tmp_dir=None):
+def _admin_dir(entry):
+    """The worktree's git admin dir (.git/worktrees/<name>): its index and index.lock."""
+    return str(Path(entry["common_dir"]) / "worktrees" / entry["admin_name"])
+
+
+def _processes_using(entry):
+    """processes_in() over the worktree and its admin dir, de-duplicated."""
+    seen = {}
+    for root in (entry["path"], _admin_dir(entry)):
+        if os.path.isdir(root):
+            for pid, cmd in processes_in(root):
+                seen.setdefault(pid, cmd)
+    return sorted(seen.items())
+
+
+PREFLIGHT_SETTLE_S = 0.5       # two looks this far apart tell "outdated" from "still writing"
+
+
+def discard_preflight(entry, registry=None, agent_pgids=(), tree=None, tmp_dir=None):
+    """What can refuse a discard before the agent is stopped (converged finding 3).
+
+    Unsettled ops, a worktree that is not ours any more, an unusable trash
+    folder, and processes inside the worktree that are NOT in the agent's
+    process groups (`agent_pgids`): stopping the agent cannot clear those,
+    so killing it first would only lose its turn. With `tree`, a review
+    that no longer matches the files refuses here too. Raises Refused or
+    ValueError; returns the processes the agent's stop will end.
+    """
+    registry = registry or Registry()
+    refuse_open_ops(entry, registry)
+    verify(entry)
+    tdir = trash_dir()
+    _refuse_symlink(tdir, "trash folder")
+    try:
+        busy = _processes_using(entry)
+    except ScanFailed as e:
+        raise Refused("busy", f"could not check for processes inside the worktree ({e}); "
+                              "nothing was moved") from None
+    ours = set(agent_pgids or ())
+
+    def pgid(pid):
+        try:
+            return os.getpgid(pid)
+        except OSError:
+            return None
+    foreign = [(pid, cmd) for pid, cmd in busy if pgid(pid) not in ours]
+    if foreign:
+        raise Refused("busy", "still running inside the worktree: " +
+                      ", ".join(f"pid {pid} ({cmd})" for pid, cmd in foreign) +
+                      "; the agent was left running")
+    if tree is not None:
+        # An outdated review refuses here, before the stop. But if the files
+        # are still changing, the agent (or something it started) is writing:
+        # stopping it is what lets the next review hold (T-RMV-11).
+        def now():
+            with repo_lock(entry):
+                return _snapshot_locked(entry, tmp_dir, pin=False)["tree"]
+        first = now()
+        if first != tree:
+            time.sleep(PREFLIGHT_SETTLE_S)
+            if now() == first:
+                raise Refused("changed", "files changed since you opened review; refresh "
+                                         "it (the agent was left running)")
+    return [pid for pid, _ in busy]
+
+
+def discard(entry, tree, registry=None, tmp_dir=None, stale_lock=None):
     """Recovery ref, then move the whole worktree into <root>/.trash/. Deletes nothing.
 
     The caller stops the pane's writers first (D11); this refuses, naming
@@ -1468,8 +1983,9 @@ def discard(entry, tree, registry=None, tmp_dir=None):
     """
     registry = registry or Registry()
     p = entry["path"]
+    refuse_open_ops(entry, registry)
     try:
-        busy = processes_in(p)
+        busy = _processes_using(entry)
     except ScanFailed as e:
         raise Refused("busy", f"could not check for processes inside the worktree ({e}); "
                               "nothing was moved") from None
@@ -1477,8 +1993,9 @@ def discard(entry, tree, registry=None, tmp_dir=None):
         raise Refused("busy", "still running inside the worktree: " +
                       ", ".join(f"pid {pid} ({cmd})" for pid, cmd in busy))
     verify(entry)
-    _wait_lock_gone(_index_path(p))
+    _wait_lock_gone(_index_path(p), stale_lock)
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         now = _snapshot_locked(entry, tmp_dir or registry_dir() / "tmp")
         if now["tree"] != tree:
             raise Refused("changed", "files changed since you opened review; refresh it")
@@ -1501,8 +2018,8 @@ def discard(entry, tree, registry=None, tmp_dir=None):
         _crash_point("discard:journalled")
         git(["worktree", "move", "--", p, str(dest)], cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
         _crash_point("discard:moved")
-        registry.set_op(entry["id"], op, state="done", stage="done")
-        registry.update(entry["id"], phase="trashed", trash_path=str(dest))
+        registry.finish_op(entry["id"], op, {"state": "done", "stage": "done"},
+                           phase="trashed", trash_path=str(dest))
     return {"recovery_ref": ref, "trash_path": str(dest)}
 
 
@@ -1513,12 +2030,17 @@ def restore(entry, registry=None):
         raise ValueError("this worktree is not in trash")
     if os.path.lexists(entry["path"]):
         raise ValueError(f"{entry['path']} exists; refusing to overwrite it")
+    parent = Path(entry["path"]).parent
+    root = os.path.realpath(worktree_root())
+    if not os.path.lexists(parent) and os.path.realpath(parent.parent) == root:
+        parent.mkdir(mode=0o700)            # the repo's folder under the root, emptied by Discard
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         op = registry.begin_op(entry["id"], "restore", src=entry["trash_path"], dst=entry["path"])
         git(["worktree", "move", "--", entry["trash_path"], entry["path"]],
             cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
-        registry.set_op(entry["id"], op, state="done", stage="done")
-        e = registry.update(entry["id"], phase="active", trash_path=None)
+        e = registry.finish_op(entry["id"], op, {"state": "done", "stage": "done"},
+                               phase="active", trash_path=None)
     verify(e)
     return e
 
@@ -1544,14 +2066,22 @@ def purge(entry, confirm, registry=None):
     if os.path.islink(t) or not os.path.realpath(t).startswith(tdir + os.sep):
         raise ValueError(f"{t} is not inside {tdir}; refusing")
     with repo_lock(entry):
+        refuse_open_ops(entry, registry)
         op = registry.begin_op(entry["id"], "purge", path=t)
         git(["worktree", "remove", "--force", "--", t], cwd=entry["common_dir"], timeout=ADD_TIMEOUT_S)
-        want = entry.get("branch_oid_at_discard")
-        deleted = bool(want) and git(["update-ref", "-d", branch, want],
-                                     cwd=entry["common_dir"], check=False).rc == 0
-        registry.set_op(entry["id"], op, state="done", stage="done", branch_deleted=deleted)
-        registry.update(entry["id"], phase="purged", trash_path=None)
+        deleted = _delete_discarded_branch(entry)
+        registry.finish_op(entry["id"], op, {"state": "done", "stage": "done",
+                                             "branch_deleted": deleted},
+                           phase="purged", trash_path=None)
     return {"branch_deleted": deleted}
+
+
+def _delete_discarded_branch(entry):
+    """Delete the corral/* branch only if it is still at the OID recorded at discard."""
+    branch, want = entry.get("branch") or "", entry.get("branch_oid_at_discard")
+    if not branch.startswith(BRANCH_PREFIX) or not want:
+        return False
+    return git(["update-ref", "-d", branch, want], cwd=entry["common_dir"], check=False).rc == 0
 
 
 def is_integrated(entry):
@@ -1605,17 +2135,46 @@ def resolve_op(entry, op, registry):
             tip = new
         if tip == new and new:
             idx = _index_path(p)
-            if _tree_of_index(p, Path(idx).read_bytes(), tmp) != op.get("tree"):
+            if _tree_of_index(p, _read_index(idx), tmp) != op.get("tree"):
+                if not op.get("index_id"):
+                    # Journalled before the index identity existed: nothing can
+                    # tell staged work apart from the review, so touch nothing.
+                    return unknown("commit interrupted; the branch has it, but this journal "
+                                   "predates the index check, so the index was left as it "
+                                   "is; outcome unknown")
                 _wait_lock_gone(idx)
-                _reconcile_index(p, new, tmp)
-            if _tree_of_index(p, Path(idx).read_bytes(), tmp) == op.get("tree"):
-                done(stage="done")
-                registry.update(wid, last_commit=new)
+                try:
+                    # The identity journalled with the commit: anything staged
+                    # while the hub was down is left exactly as it is.
+                    _reconcile_index(p, new, tmp, expect_id=op.get("index_id"))
+                except Refused as err:
+                    return unknown(f"commit interrupted; the branch has it but the index "
+                                   f"was not updated ({err.detail}), outcome unknown")
+            if _tree_of_index(p, _read_index(idx), tmp) == op.get("tree"):
+                registry.finish_op(wid, op["op_id"], {"state": "done", "stage": "done"},
+                                   last_commit=new)
                 return "commit interrupted by a restart; finished it (outcome checked after restart)"
         return unknown("commit interrupted; branch and journal disagree, outcome unknown")
     if kind == "push":
-        there = git(["ls-remote", "--", op["url"], op["ref"]], cwd=entry["common_dir"],
-                    check=False, timeout=PUSH_TIMEOUT_S).text.split()
+        if is_relative_local_url(op.get("url") or ""):
+            return unknown("push interrupted; its URL is a relative path, so the remote "
+                           "cannot be checked unambiguously, outcome unknown")
+        # The same destination checks Publish ran: a rewrite or transport rule
+        # (added since, perhaps) would point this check at another repository.
+        try:
+            why = rewrite_rule(entry, op["url"]) or transport_override(entry)
+        except (Refused, GitError, OSError) as err:
+            why = str(err)
+        if why:
+            return unknown(f"push interrupted; the repository's git config now changes where "
+                           f"{op['url']} goes ({why}), so the remote cannot be checked, "
+                           "outcome unknown")
+        r = _repo_git(entry, ["ls-remote", "--", op["url"], op["ref"]],
+                      check=False, timeout=PUSH_TIMEOUT_S)
+        if r.rc != 0:
+            # Could not ask the remote: that is not "it did not happen".
+            return unknown("push interrupted; the remote could not be checked, outcome unknown")
+        there = r.text.split()
         if there and there[0] == op.get("oid"):
             done(stage="done")
             prev = registry.read(wid).get("published") or {}
@@ -1625,12 +2184,18 @@ def resolve_op(entry, op, registry):
         return "push interrupted by a restart; the remote does not have it, so it did not happen"
     if kind == "pr":
         found = _gh(["pr", "list", "--repo", op.get("repo", ""), "--head",
-                     entry["branch"][len("refs/heads/"):], "--state", "open", "--json", "url"],
-                    entry["common_dir"])
+                     entry["branch"][len("refs/heads/"):], "--state", "open",
+                     "--json", "url,headRepositoryOwner"], entry["common_dir"])
         try:
             listed = json.loads(found.text) if found and found.rc == 0 else None
         except ValueError:
             listed = None
+        if listed is not None:
+            # --head matches the branch name in any fork: only the PR from the
+            # head this op journalled is ours (the same rule as open_pr).
+            owner = _pr_head_owner(op.get("head") or "", op.get("repo") or "")
+            listed = [x for x in listed if isinstance(x, dict) and owner and
+                      ((x.get("headRepositoryOwner") or {}).get("login") or "").lower() == owner]
         if listed:
             done(stage="done", url=listed[0].get("url"))
             prev = registry.read(wid).get("published") or {}
@@ -1644,9 +2209,9 @@ def resolve_op(entry, op, registry):
         reg = _registered(entry["common_dir"]) or set()
         src, dst = os.path.realpath(op["src"]), os.path.realpath(op["dst"])
         if dst in reg and os.path.isdir(dst):
-            done(stage="done")
-            registry.update(wid, phase="trashed" if kind == "discard" else "active",
-                            trash_path=op["dst"] if kind == "discard" else None)
+            registry.finish_op(wid, op["op_id"], {"state": "done", "stage": "done"},
+                               phase="trashed" if kind == "discard" else "active",
+                               trash_path=op["dst"] if kind == "discard" else None)
             return f"{kind} interrupted by a restart; it completed (outcome checked after restart)"
         if src in reg and os.path.isdir(src):
             done(stage="not_done")
@@ -1654,8 +2219,10 @@ def resolve_op(entry, op, registry):
         return unknown(f"{kind} interrupted; the worktree is at neither place, outcome unknown")
     if kind == "purge":
         if not os.path.lexists(op.get("path", "")):
-            done(stage="done")
-            registry.update(wid, phase="purged", trash_path=None)
+            deleted = _delete_discarded_branch(entry)
+            registry.finish_op(wid, op["op_id"], {"state": "done", "stage": "done",
+                                                  "branch_deleted": deleted},
+                               phase="purged", trash_path=None)
             return "purge interrupted by a restart; the files are gone (outcome checked)"
         done(stage="not_done")
         return "purge interrupted by a restart; nothing was deleted"
@@ -1681,54 +2248,76 @@ def reconcile(registry=None):
         by_repo.setdefault(e.get("common_dir"), []).append(e)
     known = set()
     for common, group in by_repo.items():
-        reg = _registered(common) if common else None
+        try:
+            reg = _registered(common) if common else None
+        except Exception as err:            # noqa: BLE001 — one repo never stops the rest
+            for e in group:
+                for op in [o for o in e.get("ops") or [] if o.get("state") == "intent"]:
+                    registry.set_op(e["id"], op["op_id"], state="unknown",
+                                    error=str(err)[:ERR_SNIPPET])
+                note(e, "error", f"could not list the worktrees of {e.get('repo_top') or common} "
+                                 f"({err}); {e.get('branch') or e['id']} was not checked")
+            continue
         for e in group:
-            for k in ("path", "trash_path"):
-                if e.get(k):
-                    known.add(os.path.realpath(e[k]))
-            phase = e.get("phase")
-            if phase in ("purged", "missing", "tampered"):
-                continue
-            if reg is None:
-                registry.update(e["id"], phase="missing", error="the repository is gone")
-                note(e, "missing", f"{e['repo_top']} is gone; {e['branch']} cannot be checked")
-                continue
-            for op in [o for o in e.get("ops") or [] if o.get("state") == "intent"]:
-                note(e, "op", resolve_op(e, op, registry))
-            e = registry.read(e["id"])
-            if e["phase"] == "intent":
-                if os.path.realpath(e["path"]) in reg:
-                    try:
-                        verify(e)
-                        registry.update(e["id"], phase="active")
-                        continue
-                    except IdentityError:
-                        pass
-                registry.update(e["id"], phase="missing", error="creation did not finish")
-                note(e, "missing", f"creating {e['branch']} did not finish before a restart")
-                continue
-            if e["phase"] == "active":
-                if not _ref(e, e["branch"]):
-                    note(e, "branch", f"the branch {e['branch'][len('refs/heads/'):]} was deleted outside Corral")
-                    continue
-                try:
-                    verify(e)
-                except IdentityError as err:
-                    phase = "tampered" if err.reason == "tampered" else "missing"
-                    if err.reason == "identity":
-                        note(e, "identity", str(err))
-                        continue
-                    registry.update(e["id"], phase=phase, error=str(err))
-                    note(e, phase, str(err))
-            elif e["phase"] == "trashed":
-                t = e.get("trash_path")
-                if not t or os.path.realpath(t) not in reg or not os.path.isdir(t):
-                    registry.update(e["id"], phase="missing", error="the trashed copy is gone")
-                    note(e, "missing", f"the trashed copy of {e['branch']} is gone")
+            try:
+                _reconcile_entry(e, reg, registry, note, known)
+            except Exception as err:        # noqa: BLE001 — one entry never stops the rest
+                note(e, "error", f"could not check {e.get('branch') or e['id']}: {err}")
     for child in orphans(known):
         note(None, "orphan", f"{child} is under the worktree root but in no registry entry",
              path=str(child))
     return notes
+
+
+def _reconcile_entry(e, reg, registry, note, known):
+    """reconcile() for one entry; `known` collects its paths for orphans()."""
+    for k in ("path", "trash_path"):
+        if e.get(k):
+            known.add(os.path.realpath(e[k]))
+    phase = e.get("phase")
+    if phase in ("purged", "missing", "tampered"):
+        return
+    if reg is None:
+        registry.update(e["id"], phase="missing", error="the repository is gone")
+        note(e, "missing", f"{e['repo_top']} is gone; {e['branch']} cannot be checked")
+        return
+    for op in [o for o in e.get("ops") or [] if o.get("state") == "intent"]:
+        try:
+            note(e, "op", resolve_op(e, op, registry))
+        except Exception as err:            # noqa: BLE001 — one op never stops the rest
+            registry.set_op(e["id"], op["op_id"], state="unknown", error=str(err)[:ERR_SNIPPET])
+            note(e, "op", f"{op.get('op')} interrupted; checking it failed ({err}), "
+                          "outcome unknown")
+    e = registry.read(e["id"])
+    if e["phase"] == "intent":
+        if os.path.realpath(e["path"]) in reg:
+            try:
+                verify(e)
+                registry.update(e["id"], phase="active")
+                return
+            except IdentityError:
+                pass
+        registry.update(e["id"], phase="missing", error="creation did not finish")
+        note(e, "missing", f"creating {e['branch']} did not finish before a restart")
+        return
+    if e["phase"] == "active":
+        if not _ref(e, e["branch"]):
+            note(e, "branch", f"the branch {e['branch'][len('refs/heads/'):]} was deleted outside Corral")
+            return
+        try:
+            verify(e)
+        except IdentityError as err:
+            phase = "tampered" if err.reason == "tampered" else "missing"
+            if err.reason == "identity":
+                note(e, "identity", str(err))
+                return
+            registry.update(e["id"], phase=phase, error=str(err))
+            note(e, phase, str(err))
+    elif e["phase"] == "trashed":
+        t = e.get("trash_path")
+        if not t or os.path.realpath(t) not in reg or not os.path.isdir(t):
+            registry.update(e["id"], phase="missing", error="the trashed copy is gone")
+            note(e, "missing", f"the trashed copy of {e['branch']} is gone")
 
 
 def orphans(known=None, registry=None):

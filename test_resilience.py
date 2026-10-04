@@ -8,14 +8,13 @@ import json
 import os
 import signal
 import sys
-import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("CORRAL_LIGHT_STATE",
-                      tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("corral-light-test-")
 
 ROOT = Path(__file__).resolve().parent
 FAKE = ROOT / "testkit" / "fake_acp_agent.py"
@@ -37,7 +36,7 @@ class FakeLaneCase(unittest.TestCase):
     def setUp(self):
         import sessions
         self.sessions = sessions
-        self.agent_dir = tempfile.mkdtemp(prefix="fake-acp-")
+        self.agent_dir = tmpdir(self, "fake-acp-")
         sessions.AGENTS["fake"] = {
             "label": "Fake", "argv": [sys.executable, str(FAKE)],
             "requires": (str(FAKE),), "posture_via_config_dir": False,
@@ -133,14 +132,14 @@ class ResumeFromDead(FakeLaneCase):
         self.assertIn("p.state === 'dead') return p.resumable ? 'live' : 'none'", js)
 
 
-class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
-    """The pid is on disk, and restore() uses it to reap orphans."""
+class OrphanRig(FakeLaneCase):
+    """A private state dir plus real processes to stand in for orphans."""
 
     def setUp(self):
         super().setUp()
         import subprocess
         self.subprocess = subprocess
-        self.state = Path(tempfile.mkdtemp(prefix="corral-light-restore-"))
+        self.state = Path(tmpdir(self, "corral-light-restore-"))
         self._real_state = self.sessions.STATE
         self.sessions.STATE = self.state
         self.addCleanup(setattr, self.sessions, "STATE", self._real_state)
@@ -183,6 +182,11 @@ class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
             "role": "reviewer",
             "pid": pr.pid, "pgid": pr.pid, "pid_start": start}))
         return d
+
+
+
+class OrphansFromAPreviousHubAreReaped(OrphanRig):
+    """The pid is on disk, and restore() uses it to reap orphans."""
 
     def test_spawn_writes_pid_pgid_and_start_and_pause_clears_them(self):
         self.sessions.STATE = self._real_state      # create() uses the core dir
@@ -327,6 +331,118 @@ class OrphansFromAPreviousHubAreReaped(FakeLaneCase):
         self.assertEqual(self.mgr.not_restored, 1)
 
 
+
+LOCK_HOLDER = r"""
+import fcntl, os, sys
+f = open(os.path.join(sys.argv[1], "hub.lock"), "a+")
+fcntl.flock(f, fcntl.LOCK_EX)
+print("HELD", flush=True)
+sys.stdin.read()
+"""
+
+
+class ASecondManagerNeverReapsALiveHubsAgents(OrphanRig):
+    """A Manager bound to a state dir another live hub owns must refuse
+    before it signals anything (the 2026-10-02 round 2 bug bash: a seat's
+    `sessions.Manager()` on the live state SIGTERMed every agent on the wall).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._wait = self.sessions.HUB_LOCK_WAIT_S
+        self.sessions.HUB_LOCK_WAIT_S = 0.3
+        self.addCleanup(setattr, self.sessions, "HUB_LOCK_WAIT_S", self._wait)
+
+    def _live_adapter(self, key):
+        import acp
+        pr = self._spawn([sys.executable, str(FAKE)])
+        self.assertTrue(wait_for(lambda: acp.process_start_token(pr.pid)))
+        self._meta(key, pr, acp.process_start_token(pr.pid))
+        return pr
+
+    def _pidfile(self, pid, start):
+        (self.state / "hub.pid").write_text(json.dumps({"pid": pid, "start": start}))
+
+    def test_a_live_hub_named_in_hub_pid_blocks_restore(self):
+        import acp
+        hubp = self._spawn(["sleep", "30"])
+        self.assertTrue(wait_for(lambda: acp.process_start_token(hubp.pid)))
+        self._pidfile(hubp.pid, acp.process_start_token(hubp.pid))
+        agent = self._live_adapter("live1")
+        with self.assertRaises(self.sessions.StateInUse) as ar:
+            self.mgr.restore()
+        self.assertIn(str(hubp.pid), str(ar.exception))
+        self.assertIn("CORRAL_LIGHT_STATE", str(ar.exception))
+        time.sleep(0.3)
+        self.assertIsNone(agent.poll(), "a live hub's agent was signalled")
+        self.assertEqual(self.mgr.panes, {})
+
+    def test_a_held_hub_lock_blocks_restore(self):
+        import subprocess
+        holder = subprocess.Popen([sys.executable, "-c", LOCK_HOLDER, str(self.state)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  text=True)
+        self.addCleanup(lambda: (holder.stdin.close(), holder.wait(5),
+                                 holder.stdout.close()))
+        self.assertEqual(holder.stdout.readline().strip(), "HELD")
+        agent = self._live_adapter("live2")
+        with self.assertRaises(self.sessions.StateInUse):
+            self.mgr.restore()
+        time.sleep(0.3)
+        self.assertIsNone(agent.poll(), "a live hub's agent was signalled")
+
+    def test_a_stale_hub_pid_does_not_block_the_reap(self):
+        dead = self._spawn(["true"])
+        self.assertTrue(wait_for(lambda: dead.poll() is not None))
+        self._pidfile(dead.pid, "proc:1")
+        agent = self._live_adapter("orph2")
+        self.mgr.restore()
+        self.assertIsNotNone(agent.poll(), "a crashed hub's orphan survived restore")
+
+    def test_a_reused_hub_pid_does_not_block_the_reap(self):
+        other = self._spawn(["sleep", "30"])
+        self._pidfile(other.pid, "proc:0-not-this-process")
+        agent = self._live_adapter("orph3")
+        self.mgr.restore()
+        self.assertIsNotNone(agent.poll())
+
+    def test_this_process_may_restore_its_own_state_again(self):
+        self._pidfile(os.getpid(), self.sessions.acp.process_start_token(os.getpid()))
+        self.mgr.restore()
+        self.mgr.restore()
+
+    def test_a_forked_child_does_not_inherit_the_claim(self):
+        self.sessions.claim_state(self.state, wait=0)
+        pid = os.fork()
+        if pid == 0:                              # the child: never return to unittest
+            code = 3
+            try:
+                self.sessions.claim_state(self.state, wait=0)
+                code = 1                          # claimed: the parent's claim leaked
+            except self.sessions.StateInUse:
+                code = 0
+            except BaseException:                 # noqa: BLE001
+                code = 2
+            finally:
+                os._exit(code)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), 0,
+                         "a forked child reused its parent's claim on a live hub's state")
+
+    def test_the_lock_is_released_when_the_holder_exits(self):
+        import subprocess
+        holder = subprocess.Popen([sys.executable, "-c", LOCK_HOLDER, str(self.state)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  text=True)
+        self.assertEqual(holder.stdout.readline().strip(), "HELD")
+        holder.stdin.close()
+        holder.wait(5)
+        holder.stdout.close()
+        agent = self._live_adapter("orph4")
+        self.mgr.restore()
+        self.assertIsNotNone(agent.poll())
+
+
 HUB_SCRIPT = r"""
 import os, sys, time, json
 sys.path.insert(0, os.environ["LIGHT_ROOT"])
@@ -376,7 +492,7 @@ class ShutdownWritesNotesNotPauses(FakeLaneCase):
 
     def test_a_real_hub_process_writes_the_note_on_sigterm_and_exits(self):
         import subprocess
-        state = tempfile.mkdtemp(prefix="corral-light-sigterm-")
+        state = tmpdir(self, "corral-light-sigterm-")
         env = {**os.environ, "CORRAL_LIGHT_STATE": state, "LIGHT_ROOT": str(ROOT),
                "FAKE": str(FAKE), "FAKE_ACP_DIR": self.agent_dir}
         pr = subprocess.Popen([sys.executable, "-c", HUB_SCRIPT], env=env,
@@ -522,7 +638,7 @@ class TheTurnLedger(FakeLaneCase):
         super().setUp()
         from corral_core import sessions as core
         self.core = core
-        self.state = Path(tempfile.mkdtemp(prefix="corral-light-ledger-"))
+        self.state = Path(tmpdir(self, "corral-light-ledger-"))
         for mod in (self.sessions, core):
             real = mod.STATE
             mod.STATE = self.state
@@ -667,7 +783,7 @@ class TheWatcherPagesAndNeverRestarts(unittest.TestCase):
     def setUp(self):
         import watch
         self.watch = watch
-        self.state = Path(tempfile.mkdtemp(prefix="corral-light-watch-"))
+        self.state = Path(tmpdir(self, "corral-light-watch-"))
         real = watch.STATE
         watch.STATE = self.state
         self.addCleanup(setattr, watch, "STATE", real)

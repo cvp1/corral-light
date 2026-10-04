@@ -1511,10 +1511,12 @@ function reviewActions(snap, o) {
   const urls = remote ? remote.pushUrls || [] : [];
   // Left out for size, yet still untracked work: the hub refuses to push past it.
   const big = (snap.too_big || []).map(b => b.path);
-  const them = big.length === 1 ? 'it' : 'them';
+  const bigN = big.length + (snap.too_big_omitted || 0);   // the review may have trimmed the list
+  const them = bigN === 1 ? 'it' : 'them';
   const publish = uncommitted ? no('commit first: Push sends commits, not uncommitted files')
-                : big.length ? no(`${big.slice(0, 3).join(', ')}${big.length > 3 ? ' and more' : ''} ` +
-                                  `${big.length === 1 ? 'is' : 'are'} untracked and too large to ` +
+                : bigN ? no(`${big.length ? big.slice(0, 3).join(', ') : `${bigN} files`}` +
+                                  `${bigN > Math.min(big.length, 3) && big.length ? ' and more' : ''} ` +
+                                  `${bigN === 1 ? 'is' : 'are'} untracked and too large to ` +
                                   `commit; move ${them} out or add ${them} to .gitignore first`)
                 : !ahead ? no('nothing to push: this branch has no commits past its base')
                 : !remote ? no('this repo has no remote to push to')
@@ -1559,15 +1561,24 @@ function reviewBanners(snap) {
   if (n) out.push(`${n} ignored file${n === 1 ? ' is' : 's are'} not in this review; ` +
                   `Discard keeps ${n === 1 ? 'it' : 'them'} in trash.`);
   const big = snap.too_big || [];
-  if (big.length) out.push('Left out for size, untracked and over 512 KiB: ' +
-    big.slice(0, 5).map(b => b.path).join(', ') +
-    (big.length > 5 ? ` and ${big.length - 5} more` : '') + '. Commit leaves them out too.');
+  const bigN = big.length + (snap.too_big_omitted || 0);
+  if (bigN) out.push('Left out for size, untracked and over 512 KiB: ' +
+    (big.length ? big.slice(0, 5).map(b => b.path).join(', ') : `${bigN} file${bigN === 1 ? '' : 's'}`) +
+    (big.length && bigN > 5 ? ` and ${bigN - Math.min(big.length, 5)} more` : '') +
+    '. Commit leaves them out too.');
   const diff = snap.diff || {};
   const bin = (diff.files || []).filter(f => f.binary).length;
   if (bin) out.push(`${bin} binary file${bin === 1 ? '' : 's'}, often build output such as ` +
                     '__pycache__; listed first.');
   if (diff.truncated) out.push('The diff hit its size limit, so some files show no lines. ' +
                                'Their changes are still in what you commit.');
+  const sd = snap.staged_differs || [];
+  if (sd.length) out.push('Staged differently from the file on disk: ' +
+    sd.slice(0, 5).join(', ') + (sd.length > 5 ? ` and ${sd.length - 5} more` : '') +
+    '. Commit takes the files as they are on disk and keeps the staged version as a recovery ref.');
+  if (diff.files_omitted) out.push(`${diff.files_omitted} more changed file` +
+    `${diff.files_omitted === 1 ? ' is' : 's are'} not listed: the review hit its size limit, and ` +
+    'they are still in what you commit.');
   return out;
 }
 
@@ -1622,6 +1633,23 @@ function diffNodes(f) {
 /* The review dialog. R.snap is what is on screen; every action posts from it. */
 const R = { pane: null, snap: null, busy: false, loading: false, reason: '', done: null,
             painted: null };
+
+// Dismiss a dead pane. An own-branch pane asks first (F7): the hub answers
+// 409 own_branch, and the user picks review (to Discard) or keep-and-dismiss.
+async function forgetPane(p) {
+  try { await api('/api/session/forget', { pane: p.id }); await refresh(); return; }
+  catch (err) {
+    if (!(err.status === 409 && err.body && err.body.reason === 'own_branch')) {
+      toast(err.message, true); return;
+    }
+    // Review opens only on an active branch; any other phase goes straight to keep-and-dismiss.
+    if (p.worktree && p.worktree.phase === 'active' &&
+        confirm(err.message + '\n\nOpen review to discard the branch?')) { openReview(p); return; }
+    if (!confirm('Dismiss the pane and keep the branch? Reopen it from the archive to get back to it.')) return;
+    try { await api('/api/session/forget', { pane: p.id, keep_branch: true }); await refresh(); }
+    catch (e2) { toast(e2.message, true); }
+  }
+}
 
 async function openReview(p) {
   const dlg = $('#revdlg');
@@ -1750,7 +1778,8 @@ function wireReview() {
     () => api('/api/session/worktree/commit',
               commitBody(R.pane, R.snap, $('#rev-msg').value.trim())),
     async r => {
-      R.done = { text: `committed ${shortSha(r.commit)}` };
+      R.done = { text: r.noop ? 'nothing to commit: the files match the last commit'
+                              : `committed ${shortSha(r.commit)}` };
       $('#rev-msg').value = '';
       await loadReview();
     });
@@ -2426,8 +2455,7 @@ function render() {
       const f = el('button', 'a', '✕'); f.title = 'dismiss — remove from the list';
       f.onclick = async e => {
         e.stopPropagation();
-        try { await api('/api/session/forget', { pane: p.id }); await refresh(); }
-        catch (err) { toast(err.message, true); }
+        await forgetPane(p);
       };
       acts.appendChild(f);
     }
@@ -2701,8 +2729,7 @@ function render() {
     c.appendChild(el('div', 't', `${p.title || p.label} — agent stopped`));
     c.appendChild(el('div', 'm', p.error || 'click to dismiss'));
     c.onclick = async () => {
-      try { await api('/api/session/forget', { pane: p.id }); await refresh(); }
-      catch (e) { toast(e.message, true); }
+      await forgetPane(p);
     };
     if (p.resumable || p.deadCause === 'auth') {
       const acts = el('div', 'facts');

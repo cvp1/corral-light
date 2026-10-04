@@ -167,6 +167,33 @@ def v_purge(a, reg, out, err, stdin):
     return 0
 
 
+def commit_still_unsettled(e, op):
+    """Why a commit op must not be marked resolved yet, or None.
+
+    If the branch has the commit but the worktree's index still holds the
+    tree from before it, a plain `git commit` there would put the old bytes
+    on the tip; the user makes the index agree first, then resolves."""
+    if op.get("op") != "commit" or not op.get("new") or not os.path.isdir(e.get("path") or ""):
+        return None
+    tip = wt.git(["rev-parse", "--verify", "-q", e["branch"]], cwd=e["path"],
+                 check=False).text.strip()
+    if tip != op["new"]:
+        return None
+    idx = wt._index_path(e["path"])
+    want = wt.git(["rev-parse", op["new"] + "^{tree}"], cwd=e["path"]).text.strip()
+    try:
+        have = wt._tree_of_index(e["path"], wt._read_index(idx), wt.registry_dir() / "tmp")
+    except (OSError, wt.Refused) as x:
+        return f"the index in {e['path']} cannot be read ({x}); fix it, then resolve again"
+    if have != want:
+        return (f"the branch has commit {op['new'][:12]}, but the index in {e['path']} does "
+                f"not match it, so a plain `git commit` there would undo it. Make them agree "
+                f"(for example `git -C {e['path']} reset -q`, which keeps your files but "
+                f"drops anything staged only in the index; check `git -C {e['path']} diff "
+                f"--cached` first), then resolve again")
+    return None
+
+
 def v_resolve(a, reg, out, err, stdin):
     e = get(reg, a.id)
     ops = unknown_ops(e)
@@ -185,6 +212,9 @@ def v_resolve(a, reg, out, err, stdin):
         raise Refused(f"{a.id} has no action {a.op}")
     if match[0].get("state") != "unknown":
         raise Refused(f"{a.op} is {match[0].get('state')}, not unknown; nothing to resolve")
+    why = commit_still_unsettled(e, match[0])
+    if why:
+        raise Refused(why)
     reg.set_op(a.id, a.op, state="done", stage="resolved_by_user")
     out.write(f"{a.op} marked resolved; the pane can act again\n")
     return 0

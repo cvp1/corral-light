@@ -279,7 +279,7 @@ def resolve(role_id, *, lane=None, posture=None, effort=None, agents=None,
         raise RoleError(f"{spec.get('label', agent)}: {spec['unavailable']}")
     notes = []
     want_posture = _valid_posture(posture, f"role {role.id!r}") or role.posture
-    if want_posture and not sessions.posture_enforceable(spec):
+    if want_posture and not sessions.posture_enforceable(spec, want_posture):
         notes.append(f"{spec.get('label', agent)} manages its own permissions — "
                      f"the role's posture ({want_posture}) was NOT applied")
         want_posture = None

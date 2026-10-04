@@ -189,6 +189,10 @@ AGENTS = {
         "argv": [sys.executable, str(GROK_LAUNCHER)],
         "requires": (str(GROK_LAUNCHER),),
         "posture_via_config_dir": False,
+        # No ACP mode option and no --permission-mode on `grok agent`: the
+        # posture is realized by argv at spawn (CORRAL_POSTURE -> launcher).
+        # Postures absent here (edits) are reported as not enforced.
+        "posture_via_argv": __import__("grok_launcher").POSTURE_REALIZED,
         "tools": True,
         "needs": "needs Grok CLI authentication",
     },
@@ -444,7 +448,7 @@ vendor_env_present = _core.vendor_env_present
 strip_prefixes = _core.strip_prefixes
 
 
-def spawn_env(spec, config_dir=None):
+def spawn_env(spec, config_dir=None, posture=None):
     """The environment one agent process launches under (start and resume)."""
     env = {}
     if NODE_BIN:
@@ -454,6 +458,10 @@ def spawn_env(spec, config_dir=None):
     # reports postureEnforced: false.
     if spec["posture_via_config_dir"] and config_dir is not None:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    # Argv lanes (grok) read the posture in their launcher and turn it into
+    # the vendor's own flag; other lanes never see it.
+    if spec.get("posture_via_argv") and posture:
+        env["CORRAL_POSTURE"] = posture
     return env
 
 
@@ -492,11 +500,18 @@ def usable_credential(path):
     return has_token(doc)
 
 
-def posture_enforceable(spec):
-    """Can Corral impose a posture on this lane on this host?"""
+def posture_enforceable(spec, posture=None):
+    """Can Corral impose a posture on this lane on this host?
+
+    With `posture`, whether THAT posture can be imposed (an argv lane realizes
+    only the postures its launcher maps); without, whether any can.
+    """
     # ACP mode needs no config dir; the live pane reports what it actually got.
     if spec.get("posture_via_acp_mode"):
         return True
+    via_argv = spec.get("posture_via_argv")
+    if via_argv:
+        return posture is None or posture in via_argv
     if not spec.get("posture_via_config_dir"):
         return False
     if darwin_keychain_blocks_isolation():
@@ -808,11 +823,77 @@ class Pane(_core.PaneBase):
                                "parked": parked})
         return parked
 
+    def _report_parked(self, parked, live):
+        """Name, in the ledger and a note, what a review action's hold parked.
+
+        `live`: the agent is alive and idle, so its attachment was left as it
+        is (its events and permission cards keep arriving). A parked message
+        from another pane tells its sender at once, not at its wait's timeout."""
+        for t in parked:
+            if getattr(t, "peer", False):
+                self.emit("peer_result", {"turn": getattr(t, "turn", None), "delivered": False,
+                                          "reason": "parked: a review action held the pane"},
+                          activity=False)
+        if not live:
+            for t in parked:
+                self._turns().mark(getattr(t, "turn", None), "interrupted",
+                                   why="the agent stopped before it was sent",
+                                   was="accepted")
+            names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
+                                   ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                              for t in parked)
+            self.emit("note", {"text": f"{len(parked)} queued message(s) were "
+                                       f"not sent when the agent stopped, and "
+                                       f"will not be sent now: {names}",
+                               "parked": parked})
+            return
+        for t in parked:
+            self._turns().mark(getattr(t, "turn", None), "interrupted",
+                               why="a review action failed while it waited",
+                               was="accepted")
+        if parked:
+            names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
+                                   ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+                              for t in parked)
+            self.emit("note", {"text": f"{len(parked)} message(s) typed during the review "
+                                       f"action were not sent because it failed: {names}",
+                               "parked": parked})
+        return parked
+
+    def _no_review_action(self):
+        """Hold this pane's action lock while an agent is attached (resume, /clear),
+        so a review action and a new agent never interleave: Discard cannot
+        move the folder under an agent that is starting, and an agent cannot
+        start while Discard runs. Refuses at once if an action holds it."""
+        if not self.worktree_id:
+            return contextlib.nullcontext()
+        if not self._action_lock.acquire(blocking=False):
+            raise ValueError("a review action is running on this pane; "
+                             "try again when it finishes")
+        lock = self._action_lock
+
+        @contextlib.contextmanager
+        def held():
+            try:
+                yield
+            finally:
+                lock.release()
+        return held()
+
     def resume(self):
         """Attach a fresh agent process to this pane's conversation (from detached or dead)."""
+        with self._no_review_action():
+            return self._resume()
+
+    def _resume(self):
         if self.state not in self.RESUMABLE:
             raise ValueError(f"pane is {self.state}, not detached or dead")
         if self.worktree_id:
+            # A review action holds the pane: Discard may be moving its folder,
+            # and a resumed agent would keep writing into the trash.
+            if self.held:
+                raise ValueError("a review action is running on this pane; "
+                                 "try again when it finishes")
             # Read the entry as it is now: the CLI restores or resolves it from
             # another process, so a reason cached at discard may be stale.
             self.worktree_blocked = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self))
@@ -841,7 +922,7 @@ class Pane(_core.PaneBase):
             if self._log is None:      # pause() closed it; reopen for this attachment
                 self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
             spec = AGENTS[self.agent]
-            env = spawn_env(spec, self._config_dir())
+            env = spawn_env(spec, self._config_dir(), self.posture)
             self._expect_exit = False        # a NEW process; its exit is real news
             with self._turn_lock:
                 self._generation += 1        # a new attachment; retire any stale drain
@@ -956,6 +1037,12 @@ class Pane(_core.PaneBase):
         old turns out of view without deleting a byte (PRINCIPLES 18).
         Returns the turn id of the /clear itself.
         """
+        with self._no_review_action():
+            if self.worktree_id:
+                self._refuse_blocked_worktree()
+            return self._clear_context(via)
+
+    def _clear_context(self, via=None):
         if self.state == "starting":
             raise ValueError("this pane is still starting — try /clear again "
                              "in a moment")
@@ -1143,21 +1230,22 @@ class Pane(_core.PaneBase):
         cause = "auth" if claude_auth.is_auth_error(reason) else None
         self._flush_text()              # its last words land before `dead`
         self._flush_thought()
-        self.state = "dead"
+        # Reason first, then state: anyone who sees `dead` also sees why.
         self.error = claude_auth.explain(reason)
         self.dead_cause = cause
         self.dead_login = (claude_auth.status().get("refreshExpiresAt")
                            if cause else None)
+        self.state = "dead"
         self.emit("dead", {"reason": self.error, "cause": cause})
 
 
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self):
-        spec = AGENTS[self.agent]
-        env = spawn_env(spec, self._config_dir())
         self._expect_exit = False        # a NEW process; its exit is real news
         try:
+            spec = AGENTS[self.agent]
+            env = spawn_env(spec, self._config_dir(), self.posture)
             self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
                                         strip_env=strip_prefixes(),
                                         **self._bind(self._generation))
@@ -1190,6 +1278,12 @@ class Pane(_core.PaneBase):
             # rather than orphan it.
             self._reap_failed_client()
             self._dead(str(e))
+        except Exception as e:              # noqa: BLE001
+            # Anything else (an unreadable config dir, a failed save) must not
+            # leave the pane `starting` for good: that refuses resume, /clear
+            # and every review action. Dead is resumable and discardable.
+            self._reap_failed_client()
+            self._dead(f"could not start: {type(e).__name__}: {e}")
         return self
 
 
@@ -1223,13 +1317,27 @@ class Pane(_core.PaneBase):
         leaves a note in the pane and returns False.
         """
         spec = AGENTS[self.agent]
+        label = spec["label"]
+        via_argv = spec.get("posture_via_argv")
+        if via_argv:
+            # Argv lanes: the launcher turned the posture into the vendor's own
+            # flag at spawn; say what that flag actually does.
+            realized = via_argv.get(self.posture)
+            if realized is None:
+                self.emit("note", {"text": f"{label} has no mode for posture "
+                                           f"{self.posture!r}; it runs under its "
+                                           f"own default (a card for each shell "
+                                           f"command it does not auto-allow)"})
+                return False
+            self.emit("note", {"text": f"posture {self.posture} on {label}: "
+                                       f"{realized}"})
+            return True
         if not spec.get("posture_via_acp_mode"):
             # Config-dir lanes: the posture was set (or not) at spawn.
             return posture_enforceable(spec)
         want = POSTURE_MODE.get(self.posture)
         cfg = self.config.get("mode") or {}
         allowed = {o["value"] for o in cfg.get("options") or []}
-        label = spec["label"]
         if want is None:
             self.emit("note", {"text": f"no permission mode is mapped for "
                                        f"posture {self.posture!r}; left at "
@@ -1334,6 +1442,11 @@ class Pane(_core.PaneBase):
         # loading the old conversation only to throw it away is wasted work.
         if (text or "").strip() == "/clear":
             return self.clear_context(via)
+        if self.worktree_id:
+            self._refuse_blocked_worktree()
+            if self.held and self.state in self.RESUMABLE:
+                raise ValueError("a review action is running on this pane; "
+                                 "send again when it finishes")
         # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
         # stopped means "bring it back", exactly as it does for a paused one.
         # resume() parks — never sends — whatever was queued when it died.
@@ -1390,16 +1503,24 @@ class Pane(_core.PaneBase):
             return tid
 
     def _drain(self):
-        """Run queued prompts strictly in order until the pane is empty."""
+        """Run queued prompts strictly in order until the pane is empty.
+
+        Bound to the attachment it started on: once /clear, resume or pause
+        retires it (a new generation), it touches nothing and sends nothing,
+        and it never sends while a review action holds the pane."""
+        with self._turn_lock:
+            born = self._generation
         while True:
             with self._turn_lock:
+                if self._generation != born:
+                    return              # retired: a newer attachment owns the pane
                 # Read the client inside the lock: pause() can set it to None concurrently.
                 client = self.client
-                gen = self._generation
+                gen = born
                 # Re-admit replies held behind the turn that just ended.
                 self._release_held_peers_locked()
-                if not self._queue or self.state == "dead" or client is None:
-                    self._turn_running = False
+                if self.held or not self._queue or self.state == "dead" or client is None:
+                    self._turn_running = False   # a hold's release restarts the drain
                     return
                 text = self._queue.pop(0)
                 # Re-check for a pending card: a peer turn never runs while one is open.
@@ -1410,6 +1531,17 @@ class Pane(_core.PaneBase):
                 self._in_flight = text
             lg = self._turns()
             tid = getattr(text, "turn", None)
+            if self.worktree_id and self._refuse_queued_into_blocked_branch(text, gen, lg):
+                return
+            with self._turn_lock:
+                # The gate ran git outside the lock: check nothing moved meanwhile.
+                if self._generation != gen:
+                    return              # /clear or pause already accounted for it
+                if self.held:
+                    self._queue.insert(0, text)
+                    self._in_flight = None
+                    self._turn_running = False
+                    return
             lg.mark(tid, "dispatched")
             try:
                 r = client.prompt(self.acp_session, text)
@@ -1477,9 +1609,52 @@ class Pane(_core.PaneBase):
 
     # ── own-branch worktrees: the held queue (D11) ──────────────────────────
 
+    def _refuse_queued_into_blocked_branch(self, text, gen, lg):
+        """The gate again, just before a queued turn is sent: the turn before it
+        may have switched the branch, or an op may have become unknown since
+        it was queued. If blocked, this turn and the rest of the queue are not
+        sent, each named in a note. Returns True when it stopped the drain."""
+        why = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self))
+        if not why:
+            return False
+        with self._turn_lock:
+            if self._generation != gen:
+                return True                 # a newer attachment owns the pane
+            lost, self._queue = [text] + list(self._queue), []
+            self._turn_running = False
+            self._in_flight = None
+        self.worktree_blocked = why
+        for t in lost:
+            lg.mark(getattr(t, "turn", None), "interrupted", why=f"not sent: {why}",
+                    was="accepted")
+            if getattr(t, "peer", False):
+                self.emit("peer_result", {"turn": getattr(t, "turn", None),
+                                          "delivered": False, "reason": why}, activity=False)
+        names = "; ".join(repr(t[:PARKED_PREVIEW_CHARS] +
+                               ("…" if len(t) > PARKED_PREVIEW_CHARS else "")) for t in lost)
+        self.emit("note", {"text": f"{len(lost)} queued message(s) were not sent: {why}: "
+                                   f"{names}", "parked": lost})
+        if self.state not in ("dead", "detached"):
+            self.state = "ready"
+        return True
+
+    def _refuse_blocked_worktree(self):
+        """Raise ValueError if this pane's own branch must not get new work: an
+        op with an unknown outcome or not yet settled, or a worktree that is
+        trashed or gone. While this pane's own action holds it, that action's
+        `intent` op is its own; sends then queue behind the hold (D11)."""
+        why = self.mgr._worktree_blocked_reason(self.mgr.worktree_entry(self),
+                                                include_intent=not self.held)
+        self.worktree_blocked = why
+        if why:
+            raise ValueError(why)
+
     def _dispatch(self, item, at=None):
         """As the core's, except that while a review action holds the pane the
-        prompt is queued and no drain starts."""
+        prompt is queued and no drain starts, and nothing (a peer message
+        included) is dispatched into a blocked own branch."""
+        if self.worktree_id:
+            self._refuse_blocked_worktree()
         if self.held:
             if at is None:
                 self._queue.append(item)
@@ -1543,17 +1718,25 @@ class Pane(_core.PaneBase):
     def release_hold(self, drain):
         """End a review action's hold. `drain`: run what queued meanwhile (after
         Commit or Publish); otherwise keep it visible as not sent (Discard, failure)."""
+        parked, live = [], False
         with self._turn_lock:
+            if not drain and self._queue:
+                # Taken in the same critical section that ends the hold, so a
+                # send arriving now cannot dispatch what is about to be parked.
+                parked, self._queue = list(self._queue), []
+                live = self.client is not None and self.client.alive
+                if not live:                # a dead attachment: retire any stale drain
+                    self._turn_running = False
+                    self._generation += 1
             self.held = False
-            if not self._queue:
-                return
-            if drain and self.state not in ("dead", "detached") and not self._turn_running:
+            if drain and self._queue and self.state not in ("dead", "detached") \
+                    and not self._turn_running:
                 self.state = "busy"
                 self._turn_running = True
                 threading.Thread(target=self._drain, daemon=True).start()
                 return
-        if not drain:
-            self._park_stale_queue()
+        if parked:
+            self._report_parked(parked, live)
 
     def _on_permission(self, req):
         """Worktree panes never offer "allow always": Phase 0 showed Claude saves
@@ -1702,6 +1885,107 @@ class Pane(_core.PaneBase):
 # model, while "opusXYZ" is refused; acceptance does not prove an alias is real.
 MODEL_EXTRAS = {}
 
+
+
+# ── one hub per state dir ─────────────────────────────────────────────────
+# restore() reaps every adapter whose pgid is on disk. Run by a second process
+# on a state dir a live hub owns, that kills the live hub's agents, so restore()
+# first claims the dir: an exclusive lock held for the process's lifetime, plus
+# hub.pid, which also covers a running hub that predates the lock.
+HUB_LOCK_WAIT_S = 10       # a restarting hub may briefly overlap its predecessor
+
+
+class StateInUse(RuntimeError):
+    """Another live hub owns this state dir; nothing was signalled."""
+
+
+_CLAIMED = {}              # resolved state dir -> the open, locked hub.lock
+_CLAIM_GUARD = threading.Lock()
+
+
+def _forget_claims_in_child():
+    """A forked child is a different process: it must claim for itself, and
+    its own flock on hub.lock then conflicts with the parent's."""
+    global _CLAIM_GUARD
+    _CLAIM_GUARD = threading.Lock()         # another thread may have held it
+    _CLAIMED.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_claims_in_child)
+
+
+def _other_live_hub(state):
+    """The pid hub.pid names when it is alive and not this process, else None."""
+    try:
+        rec = json.loads((state / "hub.pid").read_text(encoding="utf-8"))
+        pid = int(rec["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if pid == os.getpid() or pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass                                    # exists, not ours to signal
+    except OSError:
+        return None
+    now = acp.process_start_token(pid)
+    if now is None:
+        return None                             # gone between the two checks
+    want = rec.get("start")
+    if want and now != want:
+        return None                             # the pid was reused
+    return pid
+
+
+def claim_state(state=None, wait=None):
+    """Make this process the only hub on `state`, or raise StateInUse.
+
+    Idempotent within a process. The lock is released when the process exits,
+    however it exits, so a crashed hub never blocks its successor.
+    """
+    state = Path(state if state is not None else STATE)
+    wait = HUB_LOCK_WAIT_S if wait is None else wait
+    try:
+        import fcntl
+    except ImportError:                         # no flock: hub.pid alone
+        fcntl = None
+    with _CLAIM_GUARD:
+        state.mkdir(parents=True, exist_ok=True)
+        key = str(state.resolve())
+        if _CLAIMED.get(key, (None,))[0] == os.getpid():
+            return
+        f = open(state / "hub.lock", "a+", encoding="utf-8")
+        deadline = time.monotonic() + max(0.0, wait)
+        try:
+            while True:
+                held = True
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        held = False
+                other = _other_live_hub(state) if held else None
+                if held and other is None:
+                    _CLAIMED[key] = (os.getpid(), f)
+                    return
+                if held and fcntl is not None:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+                if time.monotonic() >= deadline:
+                    who = (f"a running hub (pid {other})" if other is not None
+                           else f"another process (it holds {state / 'hub.lock'})")
+                    raise StateInUse(
+                        f"corral-light: {state} belongs to {who}; starting a "
+                        f"second Manager there would stop that hub's agents, so "
+                        f"nothing was touched. Point CORRAL_LIGHT_STATE (and "
+                        f"CORRAL_LIGHT_WORKTREES) at a private dir.")
+                time.sleep(0.1)
+        except BaseException:
+            f.close()
+            raise
 
 
 def _clear_pid_record(pane_dir):
@@ -1969,15 +2253,25 @@ class Manager(_core.ManagerBase):
             try:
                 e = _wt.create(pr, title or "", pane.id, registry=self.worktree_registry())
             except Exception:
-                self.panes.pop(pane.id, None)  # no worktree, no pane
+                with self._lock:
+                    self.panes.pop(pane.id, None)  # no worktree, no pane
                 raise
             pane.worktree_id = e["id"]
             pane.cwd = str(_wt.agent_cwd(e))
             pane.title = Pane._default_title(agent, cwd)   # the repo's name, not the slug
             pane._preamble_due = True
             pane.save_meta()
+            if e.get("warning"):
+                pane.emit("note", {"text": f"own branch: {e['warning']}"}, activity=False)
         try:
-            pane.start()
+            if pane.worktree_id:
+                # The first attachment holds the action lock like resume and
+                # /clear do, so no review action runs while the agent starts.
+                with pane._action_lock:
+                    _wt.check_agent_cwd(e)   # never start an agent outside its branch
+                    pane.start()
+            else:
+                pane.start()
         except Exception as e:
             if pane.worktree_id:
                 # D14: the pane stays, dead, owning its worktree; Resume retries
@@ -1985,7 +2279,8 @@ class Manager(_core.ManagerBase):
                 pane.state, pane.error = "dead", f"could not start: {e}"
                 pane.save_meta()
                 raise
-            self.panes.pop(pane.id, None)     # never leave a phantom in the roster
+            with self._lock:
+                self.panes.pop(pane.id, None)     # never leave a phantom in the roster
             raise
         return pane
 
@@ -1995,6 +2290,7 @@ class Manager(_core.ManagerBase):
         Restored panes are `detached` (no process until wanted); MAX_PANES caps
         live processes on resume.
         """
+        claim_state()              # before anything is read, written or signalled
         root = STATE / "panes"
         if not root.is_dir():
             return
@@ -2180,6 +2476,20 @@ class Manager(_core.ManagerBase):
 
     # ── own-branch worktrees ─────────────────────────────────────────────────
 
+    def forget(self, pane_id, keep_branch=False):
+        """As the core's, except that an own-branch pane asks first (F7):
+        Forget offers Discard, and dismisses only with `keep_branch`. The
+        branch and its folder are never touched here."""
+        p = self.get(pane_id)
+        if p.worktree_id and not keep_branch:
+            e = self.worktree_entry(p)
+            if e and e.get("phase") in ("active", "intent"):
+                branch = (e.get("branch") or "")[len("refs/heads/"):]
+                raise _wt.Refused("own_branch", f"this pane owns the branch {branch}; open "
+                                  "review to Discard it, or dismiss the pane and keep the "
+                                  "branch (reopen it from the archive later)")
+        return super().forget(pane_id)
+
     def worktree_registry(self):
         reg = getattr(self, "_wt_registry", None)
         if reg is None:
@@ -2195,7 +2505,7 @@ class Manager(_core.ManagerBase):
         except (OSError, ValueError, _wt.RegistryVersionError):
             return None
 
-    def _worktree_blocked_reason(self, entry):
+    def _worktree_blocked_reason(self, entry, include_intent=True):
         if entry is None:
             return "this pane's own-branch record is missing; see `corral-light worktrees`"
         phase = entry.get("phase")
@@ -2203,8 +2513,26 @@ class Manager(_core.ManagerBase):
             return "this branch was discarded; restore it from `corral-light worktrees` to resume"
         if phase in ("missing", "tampered", "purged"):
             return f"this pane's worktree is {phase}: {entry.get('error') or ''}".strip()
+        if phase == "intent":
+            return ("this pane's worktree was never finished being created; restart the hub "
+                    "to check it, or see `corral-light worktrees`")
         if any(o.get("state") == "unknown" for o in entry.get("ops") or []):
             return "an action on this branch has an unknown outcome; resolve it with `corral-light worktrees`"
+        if include_intent and any(o.get("state") == "intent" for o in entry.get("ops") or []):
+            return ("an action on this branch has not finished; restart the hub to check it, "
+                    "or resolve it with `corral-light worktrees`")
+        if phase == "active":
+            try:
+                _wt.verify(entry)            # still our branch, our admin dir, under the root
+                _wt.check_agent_cwd(entry)
+            except _wt.Refused as e:
+                if e.reason == "identity" and entry.get("branch") and entry.get("path"):
+                    short = entry["branch"][len("refs/heads/"):]
+                    return (f"{e.detail}; switch it back with `git -C {entry['path']} "
+                            f"switch {short}`, then try again")
+                return e.detail
+            except (OSError, _wt.GitError) as e:
+                return f"this pane's own branch could not be checked: {e}"
         return None
 
     def _worktree_restore(self):
@@ -2278,20 +2606,37 @@ class Manager(_core.ManagerBase):
         e = self.worktree_entry(p)
         if e is None:
             raise _wt.Refused("missing", "this pane's own-branch record is missing")
+        # Unsettled ops first (`unknown`, or an `intent` from another process),
+        # then a phase that leaves nothing to act on.
+        _wt.refuse_open_ops(e, self.worktree_registry())
+        why = self._worktree_blocked_reason(e)
+        if why:
+            raise _wt.Refused("blocked", why)
         if not p._action_lock.acquire(blocking=False):
             raise _wt.Refused("busy", "another action is already running on this pane")
-        ok = False
+        ok = held = False
         try:
+            # Again under the lock: another action may have settled an op as
+            # unknown, or the worktree changed, between the checks above and now.
+            e = self.worktree_entry(p)
+            if e is None:
+                raise _wt.Refused("missing", "this pane's own-branch record is missing")
+            _wt.refuse_open_ops(e, self.worktree_registry())
+            why = self._worktree_blocked_reason(e)
+            if why:
+                raise _wt.Refused("blocked", why)
             with p._turn_lock:
-                if p._turn_running or p.state in ("busy", "needs-you", "uncertain") or p.pending:
+                if (p._turn_running or p.pending or
+                        p.state in ("busy", "needs-you", "uncertain", "starting")):
                     raise _wt.Refused("busy", "the agent is still working; wait for its turn to end")
-                p.held = True
+                p.held = held = True
             result = fn(p, e)
             ok = True
             return result
         finally:
             try:
-                p.release_hold(drain=ok and drain_after)
+                if held:                    # never release a hold this call did not take
+                    p.release_hold(drain=ok and drain_after)
             finally:
                 p._action_lock.release()
 
@@ -2301,7 +2646,7 @@ class Manager(_core.ManagerBase):
         e = self.worktree_entry(p)
         if not e:
             raise ValueError("this pane is not on its own branch")
-        names = _wt.git(["remote"], cwd=e["path"]).text.split()
+        names = [n for n in _wt.git(["remote"], cwd=e["path"]).text.split("\n") if n]
         out = []
         for n in names:
             urls = _wt.push_urls(e, n)
@@ -2327,7 +2672,7 @@ class Manager(_core.ManagerBase):
             snap = _wt.snapshot(e, tmp_dir=p.dir)
             snap["diff"] = _wt.diff(e, snap["tree"])
             snap["summary"] = p.worktree_summary = _wt.summary(e)
-            return snap
+            return _wt.fit_review(snap)       # the encoded response fits its cap
         return self._worktree_action(pane_id, go, drain_after=True)
 
     def worktree_commit(self, pane_id, tree, head, index_id, message):
@@ -2352,17 +2697,37 @@ class Manager(_core.ManagerBase):
         return self._worktree_action(pane_id, go, drain_after=True)
 
     def worktree_discard(self, pane_id, tree):
-        """Stop the agent (cancel, then end its process group), then discard (D9)."""
+        """Preflight, then stop the agent (cancel, then end its process group),
+        then discard (D9).
+
+        The preflight refuses what stopping the agent cannot fix (an unsettled
+        op, a foreign process inside the worktree, a worktree that is not ours)
+        while the agent still runs, so a refusal never costs its turn.
+        """
         def go(p, e):
-            if p.client and p.client.alive:
+            reg = self.worktree_registry()
+            alive = bool(p.client and p.client.alive)
+            # The client's own group id (it starts the agent in a new session).
+            pg = getattr(p.client, "pgid", None) if alive else None
+            _wt.discard_preflight(e, reg, agent_pgids={pg} if pg else (),
+                                  tree=tree, tmp_dir=p.dir)
+            # What _wt needs to recognise an index.lock this agent's git left;
+            # with no live client, the agent is already gone.
+            stale = {"pid": (getattr(getattr(p.client, "p", None), "pid", None) or p.pid)
+                     if alive else p.pid,
+                     "start": p.pid_start,
+                     "lock": _wt._index_path(e["path"]) + ".lock",
+                     "stopped_at": time.time()}
+            if alive:
                 p._expect_exit = True
                 with contextlib.suppress(Exception):
                     p.client.cancel(p.acp_session)
                 p.client.close()           # TERM then KILL of the adapter's group
                 p.client = None
+                stale["stopped_at"] = time.time()
             p.pid = p.pgid = p.pid_start = None
             p.state = "detached"
-            r = _wt.discard(e, tree, registry=self.worktree_registry(), tmp_dir=p.dir)
+            r = _wt.discard(e, tree, registry=reg, tmp_dir=p.dir, stale_lock=stale)
             p.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(p))
             p.save_meta()
             p.emit("worktree", {"discarded": r}, activity=False)

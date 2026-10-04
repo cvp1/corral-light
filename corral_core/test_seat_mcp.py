@@ -617,9 +617,9 @@ class TheCallerIsTheHubsOwnUser(unittest.TestCase):
                 s.close()
 
     def test_the_row_for_the_CLIENT_end_decides_not_the_servers(self):
-        import tempfile
         from corral_core import edge
-        d = tempfile.mkdtemp()
+        from testkit.scratch import tmpdir
+        d = tmpdir(self)
         # Two rows for one connection: the server's accepted socket (uid 1000)
         # and the client's (uid 4242). Only the client row may answer.
         rows = ["  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",

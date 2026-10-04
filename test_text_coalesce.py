@@ -5,13 +5,12 @@ Run: python3 -m unittest test_text_coalesce -v
 """
 import os
 import queue
-import tempfile
 import threading
 import time
 import unittest
 
-os.environ.setdefault("CORRAL_LIGHT_STATE",
-                      tempfile.mkdtemp(prefix="corral-light-coalesce-"))
+from testkit.scratch import default_state  # noqa: E402
+default_state("corral-light-coalesce-")
 
 import sessions                                   # noqa: E402
 from corral_core import sessions as core          # noqa: E402

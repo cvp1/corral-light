@@ -14,7 +14,6 @@ import signal
 import socketserver
 import stat
 import sys
-import tempfile
 import threading
 import time
 import unittest
@@ -23,7 +22,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 # Before anything imports sessions (STATE binds at import time): never the live store.
-os.environ.setdefault("CORRAL_LIGHT_STATE", tempfile.mkdtemp(prefix="corral-light-test-"))
+from testkit.scratch import default_state, tmpdir  # noqa: E402
+default_state("corral-light-test-")
 FIXTURES = ROOT / "testkit" / "fixtures" / "merge-tree"
 
 # Isolate every git call in this suite from the user's config.
@@ -47,7 +47,7 @@ class GitCase(unittest.TestCase):
         self._env.start()
         self.addCleanup(self._env.stop)
         # realpath: on macOS mkdtemp answers /var/folders/..., a symlink into /private.
-        self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="corral-wt-test-")))
+        self.tmp = Path(os.path.realpath(tmpdir(self, "corral-wt-test-")))
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         wt.git(["init", "-q", "-b", "main"], cwd=self.repo)
@@ -1225,7 +1225,10 @@ env | grep -q '^GH_PROMPT_DISABLED=1$' || {{ echo noenv >> {state}/argv; }}
 case "$1 $2" in
   "auth status") {'exit 0' if signed_in else 'echo "not logged in" >&2; exit 1'} ;;
   "pr list") cat {state}/pr 2>/dev/null || echo "[]" ;;
-  "pr create") cat > {state}/body; echo '[{{"url":"https://github.com/o/r/pull/7"}}]' > {state}/pr;
+  "pr create") cat > {state}/body; h=""; r=""; prev="";
+               for a in "$@"; do [ "$prev" = "--head" ] && h="$a"; [ "$prev" = "--repo" ] && r="$a"; prev="$a"; done;
+               case "$h" in *:*) o="${{h%%:*}}";; *) o="${{r%%/*}}";; esac;
+               echo '[{{"url":"https://github.com/o/r/pull/7","headRepositoryOwner":{{"login":"'"$o"'"}}}}]' > {state}/pr;
                echo https://github.com/o/r/pull/7 ;;
 esac
 """
@@ -2073,9 +2076,6 @@ def _alive(pid):
         return False
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TheMacAddendum(unittest.TestCase):
     """docs/worktree-plan-macos.md M1-M4, checked here by forcing the darwin paths.
@@ -2261,3 +2261,1558 @@ class TheMacClaudeHome(LifecycleCase):
         after = (_tree_snapshot(self.home / ".claude"),
                  (self.home / ".claude.json").read_bytes())
         self.assertEqual(after, before)
+
+
+# ── Bug bash 2026-10-02, round 1 (reviews/2026-10-02-own-branch-bugbash) ──────
+# Each test below was written from a reviewer's repro and failed at b6f7dfc.
+
+def _unknown_op(reg, wid, kind="commit"):
+    op = reg.begin_op(wid, kind, stage="ref_moved")
+    reg.set_op(wid, op, state="unknown")
+    return op
+
+
+def _staged_blob(p, rel):
+    return wt.git(["rev-parse", ":" + rel], cwd=p).text.strip()
+
+
+def _reachable(p, oid):
+    objs = wt.git(["rev-list", "--objects", "--all", "--reflog"], cwd=p,
+                  max_out=64 << 20).text
+    return oid in objs or wt.git(["rev-parse", ":a.txt"], cwd=p).text.strip() == oid
+
+
+# A discard killed right after its first registry write once the move is done.
+CRASH_AFTER_MOVE = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+import worktrees as wt
+reg = wt.Registry()
+e = reg.read(sys.argv[2])
+snap = wt.snapshot(e)
+dst_prefix = str(wt.trash_dir() / e["id"])
+real = wt.atomic_write_json
+
+def write_then_die(path, obj):
+    real(path, obj)
+    moved = any(str(c).startswith(dst_prefix) for c in wt.trash_dir().iterdir()) \
+        if wt.trash_dir().is_dir() else False
+    if moved and str(path).endswith(e["id"] + ".json"):
+        os.kill(os.getpid(), signal.SIGKILL)
+wt.atomic_write_json = write_then_die
+wt.discard(e, snap["tree"])
+"""
+
+
+class BugBashLibrary(CreateCase):
+    """worktrees.py findings: the gate, the index swap, discard, purge, create."""
+
+    # Converged 1: an `unknown` or `intent` op blocks every mutating action.
+    def test_BB_1_actions_refuse_while_an_op_is_unknown(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("despite unknown\n")
+        snap = wt.snapshot(e)
+        _unknown_op(self.reg, e["id"])
+        e = self.reg.read(e["id"])
+        with self.assertRaises(wt.Refused) as cm:
+            wt.commit_tree(e, snap["tree"], snap["index_id"], "m", expect_head=snap["head"],
+                           registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.discard(e, snap["tree"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        self.assertTrue(p.exists())
+        self.assertEqual(wt.git(["rev-parse", e["branch"]], cwd=p).text.strip(), e["base_sha"])
+
+    def test_BB_1b_an_intent_op_from_another_process_also_blocks(self):
+        e = self.make()
+        (Path(e["path"]) / "a.txt").write_text("x\n")
+        snap = wt.snapshot(e)
+        self.reg.begin_op(e["id"], "commit", stage="prepared")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.commit_tree(self.reg.read(e["id"]), snap["tree"], snap["index_id"], "m",
+                           expect_head=snap["head"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+
+    # Converged 2 (Astra): work staged while the hub was down is never replaced.
+    def test_BB_2_restart_never_replaces_an_index_staged_while_the_hub_was_down(self):
+        import subprocess
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed\n")
+        env = dict(os.environ, CORRAL_WT_TEST="1", CORRAL_WT_CRASH_AT="commit:ref_moved")
+        r = subprocess.run([sys.executable, "-c", CRASH_SCRIPT, str(ROOT), e["id"], "commit"],
+                           env=env, capture_output=True, timeout=120)
+        self.assertEqual(r.returncode, -signal.SIGKILL, r.stderr.decode()[-500:])
+        (p / "a.txt").write_text("unique staged content\n")
+        wt.git(["add", "a.txt"], cwd=p)
+        blob = _staged_blob(p, "a.txt")
+        (p / "a.txt").write_text("reviewed\n")
+        wt.reconcile(self.reg)
+        self.assertEqual(_staged_blob(p, "a.txt"), blob, "the staged work was replaced")
+        self.assertEqual(self.reg.read(e["id"])["ops"][-1]["state"], "unknown")
+
+    # Converged 2 (Astra, live): staging between the check and the swap.
+    def test_BB_3_staging_during_the_swap_is_never_lost(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed\n")
+        snap = wt.snapshot(e)
+        real = wt._reconcile_index
+        blobs = []
+
+        def stage_first(*a, **k):
+            (p / "a.txt").write_text("unique staged content\n")
+            wt.git(["add", "a.txt"], cwd=p)
+            blobs.append(_staged_blob(p, "a.txt"))
+            (p / "a.txt").write_text("reviewed\n")
+            return real(*a, **k)
+        with mock.patch.object(wt, "_reconcile_index", stage_first):
+            with self.assertRaises(wt.Refused) as cm:
+                wt.commit_tree(e, snap["tree"], snap["index_id"], "m",
+                               expect_head=snap["head"], registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        self.assertEqual(_staged_blob(p, "a.txt"), blobs[0], "the staged work was replaced")
+        self.assertEqual(self.reg.read(e["id"])["ops"][-1]["state"], "unknown")
+
+    # Converged 2 (Grok): a failed swap after update-ref is `unknown`, not a stuck intent.
+    def test_BB_4_a_failed_index_swap_after_the_ref_moved_is_unknown(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed line\n")
+        snap = wt.snapshot(e)
+
+        calls = []
+
+        def boom(idx, content, expect_id=None):     # the real signature (round 2)
+            calls.append(expect_id)
+            raise wt.Refused("busy", "index.lock appeared while swapping the index")
+        with mock.patch.object(wt, "_replace_index", boom):
+            with self.assertRaises(wt.Refused) as cm:
+                wt.commit_tree(e, snap["tree"], snap["index_id"], "feat",
+                               expect_head=snap["head"], registry=self.reg)
+        self.assertEqual(calls, [snap["index_id"]], "the stub never ran")
+        self.assertEqual(cm.exception.reason, "unknown")
+        op = self.reg.read(e["id"])["ops"][-1]
+        self.assertEqual(op["state"], "unknown", op)
+
+    # Converged 2 (Grok): one entry that cannot be resolved does not stop the rest.
+    def test_BB_5_one_failing_entry_does_not_abort_reconcile(self):
+        a = self.make(title="first", owner="pane0001")
+        b = self.make(title="second", owner="pane0002")
+        self.reg.begin_op(a["id"], "push", url="https://example.invalid/x.git",
+                          ref=a["branch"], oid=a["base_sha"])
+        missing = Path(b["path"])
+        import shutil
+        shutil.rmtree(missing)                      # the test's own temp tree
+        real = wt.git
+
+        def timeout(args, *x, **k):
+            if args and args[0] == "ls-remote":
+                raise wt.GitTimeout(["git", "ls-remote"], 1)
+            return real(args, *x, **k)
+        with mock.patch.object(wt, "git", timeout):
+            notes = wt.reconcile(self.reg)
+        self.assertEqual(self.reg.read(b["id"])["phase"], "missing", notes)
+        self.assertEqual(self.reg.read(a["id"])["ops"][-1]["state"], "unknown")
+
+    # Single seat (Astra): op `done` and phase `trashed` land in one write.
+    def test_BB_6_discard_killed_after_its_first_post_move_write_stays_restorable(self):
+        import subprocess
+        e = self.make()
+        (Path(e["path"]) / "w.txt").write_text("work to keep\n")
+        r = subprocess.run([sys.executable, "-c", CRASH_AFTER_MOVE, str(ROOT), e["id"]],
+                           env=dict(os.environ), capture_output=True, timeout=120)
+        self.assertEqual(r.returncode, -signal.SIGKILL, r.stderr.decode()[-500:])
+        wt.reconcile(self.reg)
+        got = self.reg.read(e["id"])
+        self.assertEqual(got["phase"], "trashed", got)
+        back = wt.restore(got, registry=self.reg)
+        self.assertEqual(Path(back["path"], "w.txt").read_text(), "work to keep\n")
+
+    # Single seat (Gemini): an interrupted purge still deletes the branch.
+    def test_BB_7_purge_resolved_after_a_restart_deletes_the_branch(self):
+        e = self.make()
+        snap = wt.snapshot(e)
+        wt.discard(e, snap["tree"], registry=self.reg)
+        e = self.reg.read(e["id"])
+        wt.git(["worktree", "remove", "--force", "--", e["trash_path"]], cwd=self.repo)
+        self.reg.begin_op(e["id"], "purge", path=e["trash_path"])   # as a SIGKILL left it
+        wt.reconcile(self.reg)
+        self.assertEqual(self.reg.read(e["id"])["phase"], "purged")
+        self.assertIsNone(wt._ref(e, e["branch"]), "the corral branch was left behind")
+
+    # Single seat (Grok): a failing post-checkout hook does not orphan a live worktree.
+    def test_BB_8_a_failing_post_checkout_hook_leaves_a_usable_worktree(self):
+        hook = self.repo / ".git" / "hooks" / "post-checkout"
+        hook.write_text("#!/bin/sh\necho hook says no >&2\nexit 1\n")
+        hook.chmod(0o755)
+        e = self.make()
+        self.assertEqual(e["phase"], "active")
+        self.assertIn("hook says no", e.get("warning") or "")
+        wt.verify(e)
+
+    # Single seat (Gemini): a lock our own stopped agent left is cleared, not waited out.
+    def test_BB_9_a_stale_lock_from_our_stopped_agent_does_not_block_discard(self):
+        import subprocess
+        e = self.make()
+        snap = wt.snapshot(e)
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        lock = wt._index_path(e["path"]) + ".lock"
+        Path(lock).write_bytes(b"partial")
+        rec = {"pid": gone.pid, "start": "x", "lock": lock, "stopped_at": time.time()}
+        with mock.patch.object(wt, "LOCK_WAIT_S", 0.3):
+            r = wt.discard(e, snap["tree"], registry=self.reg, stale_lock=rec)
+        self.assertTrue(Path(r["trash_path"]).exists())
+        self.assertFalse(os.path.exists(lock))
+
+    def test_BB_9b_a_lock_whose_owner_is_alive_is_never_cleared(self):
+        e = self.make()
+        snap = wt.snapshot(e)
+        lock = wt._index_path(e["path"]) + ".lock"
+        Path(lock).write_bytes(b"partial")
+        rec = {"pid": os.getpid(), "start": "x", "lock": lock, "stopped_at": time.time()}
+        with mock.patch.object(wt, "LOCK_WAIT_S", 0.3):
+            with self.assertRaises(wt.Refused) as cm:
+                wt.discard(e, snap["tree"], registry=self.reg, stale_lock=rec)
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertEqual(Path(lock).read_bytes(), b"partial")
+
+
+class BugBashHub(LifecycleCase):
+    """sessions.py findings: the gate on sends, Discard's order, Forget."""
+
+    # Converged 1 (Astra, Grok): no review action runs on an `unknown` op.
+    def test_BB_10_every_review_action_refuses_while_an_op_is_unknown(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        _unknown_op(self.reg, p.worktree_id)
+        acts = {
+            "snapshot": lambda: self.mgr.worktree_snapshot(p.id),
+            "commit": lambda: self.mgr.worktree_commit(p.id, snap["tree"], snap["head"],
+                                                       snap["index_id"], "m"),
+            "publish": lambda: self.mgr.worktree_publish(p.id, snap["head"], snap["tree"],
+                                                         "origin", "x"),
+            "discard": lambda: self.mgr.worktree_discard(p.id, snap["tree"]),
+        }
+        for name, act in acts.items():
+            with self.subTest(action=name):
+                with self.assertRaises(wt.Refused) as cm:
+                    act()
+                self.assertEqual(cm.exception.reason, "unknown")
+        self.assertEqual(p.state, "ready", "a refused action stopped the agent")
+        self.assertTrue(p.client and p.client.alive)
+
+    # Converged 1 (Astra): nothing is dispatched into a pane whose op is unknown.
+    def test_BB_11_a_send_to_a_pane_with_an_unknown_op_never_runs(self):
+        p = self.pane()
+        _unknown_op(self.reg, p.worktree_id)
+        with self.assertRaises(ValueError):
+            p.send("write unknown.txt writing while blocked")
+        time.sleep(0.3)
+        self.assertFalse(Path(self.entry(p)["path"], "unknown.txt").exists())
+
+    # Converged 4 (Astra, PROVEN): a real send during discard never reaches the trash.
+    def test_BB_12_a_real_send_during_discard_never_writes_into_trash(self):
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        real = wt.processes_in
+
+        def scan_then_send(path):
+            found = real(path)
+            try:
+                p.send("write AFTER_DISCARD.txt this should be impossible")
+            except Exception:                    # noqa: BLE001 — refusing is fine
+                pass
+            return found
+        with mock.patch.object(wt, "processes_in", scan_then_send):
+            r = self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertFalse(p.client and p.client.alive, "an agent survived the discard")
+        with self.assertRaises(Exception):
+            p.send("write AFTER_DISCARD.txt this should be impossible")
+        time.sleep(0.5)
+        self.assertFalse(Path(r["trash_path"], "AFTER_DISCARD.txt").exists())
+
+    # Converged 3 (Grok, Gemini): a refused discard leaves the agent running.
+    def test_BB_13_a_discard_refused_by_an_outside_process_leaves_the_agent_alone(self):
+        import subprocess
+        p = self.pane()
+        self.say(p, "write a.txt x")
+        snap = self.mgr.worktree_snapshot(p.id)
+        outsider = subprocess.Popen(["sleep", "30"], cwd=self.entry(p)["path"],
+                                    start_new_session=True)
+        self.addCleanup(outsider.wait)
+        self.addCleanup(outsider.kill)
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertIn(str(outsider.pid), str(cm.exception.detail))
+        self.assertEqual(p.state, "ready")
+        self.assertTrue(p.client and p.client.alive, "the refused discard killed the agent")
+        self.say(p, "write b.txt still working")
+
+    # Single seat (Gemini): Forget on an own-branch pane offers Discard first.
+    def test_BB_14_forget_on_an_own_branch_pane_asks_first(self):
+        p = self.pane()
+        p.client.close()
+        p.state = "dead"
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.forget(p.id)
+        self.assertEqual(cm.exception.reason, "own_branch")
+        self.assertIn(p.id, self.mgr.panes)
+        self.mgr.forget(p.id, keep_branch=True)
+        self.assertNotIn(p.id, self.mgr.panes)
+        self.assertEqual(self.reg.read(p.worktree_id)["phase"], "active")
+
+
+# ── round 2 bug bash (reviews/2026-10-02-own-branch-bugbash/r2-synthesis.md) ──
+
+def _hold_lock_open(test, idx, cwd):
+    """A real git that holds `idx`.lock open from OUTSIDE the worktree."""
+    import subprocess
+    live = subprocess.Popen(["git", "--git-dir=" + str(Path(idx).parent), "update-index",
+                             "--index-info"], cwd=cwd, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=wt.git_env())
+    test.addCleanup(lambda: live.communicate(timeout=5))
+    test.assertTrue(wait_for(lambda: os.path.exists(idx + ".lock")), "git did not take index.lock")
+    return live
+
+
+class BugBash2Library(CreateCase):
+    """worktrees.py findings from round 2."""
+
+    # Both seats: restore moved a trashed worktree while an op was unsettled.
+    def test_BB2_1_restore_refuses_while_an_op_is_unknown(self):
+        e = self.make()
+        wt.discard(e, wt.snapshot(e)["tree"], registry=self.reg)
+        e = self.reg.read(e["id"])
+        op = self.reg.begin_op(e["id"], "purge", path=e["trash_path"])
+        self.reg.set_op(e["id"], op, state="unknown")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.restore(self.reg.read(e["id"]), registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        self.assertEqual(self.reg.read(e["id"])["phase"], "trashed")
+        self.assertTrue(Path(e["trash_path"]).is_dir())
+
+    # Astra: a commit journal written before index_id existed lost staged work.
+    def test_BB2_2_an_old_commit_journal_never_rebuilds_the_index(self):
+        e = self.make()
+        p = Path(e["path"])
+        (p / "a.txt").write_text("reviewed\n")
+        snap = wt.snapshot(e)
+        new = wt.git(["commit-tree", snap["tree"], "-p", snap["head"]], cwd=p,
+                     input=b"reviewed commit\n").text.strip()
+        op = self.reg.begin_op(e["id"], "commit", stage="ref_moved", new=new,
+                               expect_old=snap["head"], tree=snap["tree"])   # no index_id
+        wt.git(["update-ref", e["branch"], new, snap["head"]], cwd=p)
+        (p / "a.txt").write_text("unique staged work during downtime\n")
+        wt.git(["add", "a.txt"], cwd=p)
+        blob = _staged_blob(p, "a.txt")
+        wt.reconcile(self.reg)
+        self.assertEqual(_staged_blob(p, "a.txt"), blob, "staged work was overwritten")
+        got = [o for o in self.reg.read(e["id"])["ops"] if o["op_id"] == op][0]
+        self.assertEqual(got["state"], "unknown")
+
+    # Astra: an exception in the post-update-ref check left the op `intent`.
+    def test_BB2_3_a_failing_post_commit_check_is_unknown(self):
+        e = self.make()
+        (Path(e["path"]) / "a.txt").write_text("review\n")
+        snap = wt.snapshot(e)
+        real = wt.git
+
+        def git(args, *a, **k):
+            if args == ["rev-parse", e["branch"]]:
+                raise wt.GitTimeout(["git", *args], 20)
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", git):
+            with self.assertRaises(wt.Refused) as cm:
+                wt.commit_tree(e, snap["tree"], snap["index_id"], "review", snap["head"],
+                               registry=self.reg)
+        self.assertEqual(cm.exception.reason, "unknown")
+        self.assertEqual(self.reg.read(e["id"])["ops"][-1]["state"], "unknown")
+
+    # Astra: a repository scan that raised aborted reconcile for every repository.
+    def test_BB2_4_a_failing_repository_scan_flags_its_entries_and_goes_on(self):
+        e = self.make()
+        op = self.reg.begin_op(e["id"], "commit", stage="prepared")
+        other = self.tmp / "other"
+        other.mkdir()
+        wt.git(["init", "-q", "-b", "main"], cwd=other)
+        (other / "b.txt").write_text("b\n")
+        wt.git(["add", "-A"], cwd=other)
+        wt.git(["commit", "-qm", "base"], cwd=other)
+        f = self.make(title="second", owner="pane0002", cwd=other)
+        import shutil
+        shutil.rmtree(f["path"])                     # the test's own temp tree
+        real = wt._registered
+
+        def boom(common):
+            if os.path.realpath(common) == os.path.realpath(e["common_dir"]):
+                raise wt.GitTimeout(["git", "worktree", "list"], 20)
+            return real(common)
+        with mock.patch.object(wt, "_registered", boom):
+            notes = wt.reconcile(self.reg)
+        got = [o for o in self.reg.read(e["id"])["ops"] if o["op_id"] == op][0]
+        self.assertEqual(got["state"], "unknown", "an op that could not be checked stayed intent")
+        self.assertEqual(self.reg.read(e["id"])["phase"], "active", "a scan failure is not 'missing'")
+        self.assertEqual(self.reg.read(f["id"])["phase"], "missing", "the other repo was never checked")
+        self.assertTrue(any(n["kind"] == "error" and n["id"] == e["id"] for n in notes), notes)
+
+    # Astra: a lock a live process holds open was set aside on a dead pid's say-so.
+    def test_BB2_5_a_lock_a_live_process_holds_is_never_set_aside(self):
+        e = self.make()
+        idx = wt._index_path(e["path"])
+        live = _hold_lock_open(self, idx, self.tmp)
+        rec = {"pid": 999999, "start": "proc:1", "lock": idx + ".lock",
+               "stopped_at": time.time() + 60}
+        os.utime(idx + ".lock", (time.time() - 30, time.time() - 30))
+        self.assertFalse(wt._set_aside_stale_lock(idx, rec))
+        self.assertTrue(os.path.exists(idx + ".lock"))
+        self.assertIsNone(live.poll())
+
+    def test_BB2_6_an_abandoned_lock_is_set_aside_without_a_writer_pid(self):
+        e = self.make()
+        idx = wt._index_path(e["path"])
+        Path(idx + ".lock").write_bytes(b"left by a killed agent")
+        os.utime(idx + ".lock", (time.time() - 30, time.time() - 30))
+        self.assertTrue(wt._set_aside_stale_lock(idx, {"lock": idx + ".lock",
+                                                       "stopped_at": time.time()}))
+        self.assertFalse(os.path.exists(idx + ".lock"))
+
+
+class BugBash2Publish(PubCase):
+    stub_gh = ThePullRequest.stub_gh
+    pr = ThePullRequest.pr
+
+    # Gemini: with a PR already open, open_pr skipped the gate and wrote the registry.
+    def test_BB2_7_open_pr_refuses_an_unsettled_op_even_when_the_pr_exists(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/o/r.git"], cwd=self.repo)
+        gh, state = self.stub_gh()
+        (state / "pr").write_text('[{"url":"https://github.com/o/r/pull/7"}]')
+        _unknown_op(self.reg, self.e["id"])
+        before = self.reg.read(self.e["id"]).get("published")
+        with self.assertRaises(wt.Refused) as cm:
+            self.pr(gh)
+        self.assertEqual(cm.exception.reason, "unknown")
+        self.assertEqual(self.reg.read(self.e["id"]).get("published"), before)
+
+
+class BugBash2Hub(LifecycleCase):
+    """sessions.py findings from round 2."""
+
+    # Both seats: `intent` did not block sends, peer dispatch or resume.
+    def test_BB2_10_an_intent_op_blocks_send_and_resume(self):
+        p = self.pane()
+        e = self.entry(p)
+        self.reg.begin_op(e["id"], "commit", stage="ref_moved")
+        target = Path(e["path"]) / "intent-bypass.txt"
+        with self.assertRaises(ValueError):
+            p.send("write intent-bypass.txt dispatch while intent")
+        time.sleep(0.5)
+        self.assertFalse(target.exists(), "the agent got work during an unsettled op")
+        p.pause()
+        with self.assertRaises(ValueError):
+            p.resume()
+
+    # Astra: /clear started a replacement agent despite an unknown op.
+    def test_BB2_11_clear_refuses_while_an_op_is_unknown(self):
+        p = self.pane()
+        old = p.client.p.pid
+        _unknown_op(self.reg, p.worktree_id)
+        with self.assertRaises(ValueError):
+            p.send("/clear")
+        self.assertEqual(p.client.p.pid, old)
+
+    # Astra: /clear during Discard left an agent alive in the trash.
+    def test_BB2_12_clear_during_discard_is_refused(self):
+        p = self.pane()
+        snap = self.mgr.worktree_snapshot(p.id)
+        real, calls, errs = wt.processes_in, [], []
+
+        def scan(path):
+            found = real(path)
+            calls.append(1)
+            if len(calls) == 2:
+                try:
+                    p.send("/clear")
+                except ValueError as err:
+                    errs.append(str(err))
+            return found
+        with mock.patch.object(wt, "processes_in", scan):
+            self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertTrue(errs, "/clear was accepted while Discard held the pane")
+        self.assertFalse(p.client and p.client.alive, "an agent survived the move to trash")
+
+    # Astra: a resume that passed its hold check before Discard started an agent inside it.
+    def test_BB2_13_resume_and_discard_never_interleave(self):
+        p = self.pane()
+        snap = self.mgr.worktree_snapshot(p.id)
+        p.pause()
+        entered, release = threading.Event(), threading.Event()
+        reserve = self.mgr._reserve_live
+
+        def reserve_wait(pane):
+            entered.set()
+            release.wait(5)
+            return reserve(pane)
+        errs = []
+
+        def resume():
+            try:
+                p.resume()
+            except Exception as err:                 # noqa: BLE001
+                errs.append(repr(err))
+        with mock.patch.object(self.mgr, "_reserve_live", reserve_wait):
+            t = threading.Thread(target=resume)
+            t.start()
+            self.assertTrue(entered.wait(5))
+            try:
+                with self.assertRaises(wt.Refused) as cm:
+                    self.mgr.worktree_discard(p.id, snap["tree"])
+            finally:
+                release.set()
+                t.join(10)
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertEqual(errs, [])
+        self.assertEqual(self.entry(p)["phase"], "active", "the folder moved under a resuming agent")
+
+    # Both seats: Discard on an outdated review stopped the agent before refusing.
+    def test_BB2_14_an_outdated_review_refuses_before_the_agent_is_stopped(self):
+        p = self.pane()
+        snap = self.mgr.worktree_snapshot(p.id)
+        old = p.client
+        Path(self.entry(p)["path"], "a.txt").write_text("changed since review\n")
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(cm.exception.reason, "changed")
+        self.assertTrue(old.alive, "the refusal cost the agent")
+        self.assertIs(p.client, old)
+
+    # Astra: Discard renamed a live outside git's index.lock and moved the folder.
+    def test_BB2_15_a_live_git_outside_the_worktree_refuses_discard(self):
+        p = self.pane()
+        e = self.entry(p)
+        snap = self.mgr.worktree_snapshot(p.id)
+        idx = wt._index_path(e["path"])
+        live = _hold_lock_open(self, idx, self.tmp)
+        old = p.client
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertTrue(os.path.exists(idx + ".lock"))
+        self.assertIsNone(live.poll())
+        self.assertTrue(old.alive, "the refusal cost the agent")
+        self.assertEqual(self.entry(p)["phase"], "active")
+
+    # Gemini: with the agent already dead, its abandoned lock made Discard time out.
+    def test_BB2_16_a_dead_agents_abandoned_lock_does_not_block_discard(self):
+        p = self.pane()
+        snap = self.mgr.worktree_snapshot(p.id)
+        os.kill(p.client.p.pid, signal.SIGKILL)
+        self.assertTrue(wait_for(lambda: p.state == "dead"))
+        idx = wt._index_path(self.entry(p)["path"])
+        Path(idx + ".lock").write_bytes(b"left by the killed agent")
+        os.utime(idx + ".lock", (time.time() - 30, time.time() - 30))
+        with mock.patch.object(wt, "LOCK_WAIT_S", 1):
+            r = self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(self.entry(p)["phase"], "trashed")
+        self.assertTrue(Path(r["trash_path"]).is_dir())
+
+    # Gemini: Forget offered review for a branch whose review cannot open.
+    def test_BB2_17_forget_offers_review_only_for_an_active_branch(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        body = js[js.index("async function forgetPane(p)"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("p.worktree.phase === 'active'", body)
+
+
+
+# ── round 1 leftovers (synthesis.md: deferred, then medium and low) ──────────
+
+class BugBash3Library(CreateCase):
+
+    # Astra r1-4: a committed symlink makes the chosen subdir land outside the worktree.
+    def test_BB3_1_an_agent_folder_outside_the_worktree_is_refused(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        os.symlink(outside, self.repo / "pkg")
+        wt.git(["add", "pkg"], cwd=self.repo)
+        wt.git(["commit", "-qm", "pkg link"], cwd=self.repo)
+        os.unlink(self.repo / "pkg")
+        (self.repo / "pkg").mkdir()                   # uncommitted: a real dir now
+        e = self.make(cwd=self.repo / "pkg")
+        self.assertEqual(e["subdir"], "pkg")
+        with self.assertRaises(wt.Refused) as cm:
+            wt.check_agent_cwd(e)
+        self.assertEqual(cm.exception.reason, "identity")
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        self.assertIn("outside", m._worktree_blocked_reason(e))
+
+    def test_BB3_1b_a_normal_subdir_passes(self):
+        (self.repo / "sub").mkdir()
+        (self.repo / "sub" / "f.txt").write_text("f\n")
+        wt.git(["add", "-A"], cwd=self.repo)
+        wt.git(["commit", "-qm", "sub"], cwd=self.repo)
+        e = self.make(cwd=self.repo / "sub")
+        wt.check_agent_cwd(e)
+
+    # Astra r1-7: one deadline covers a child that keeps git's pipes open.
+    def test_BB3_2_the_timeout_covers_inherited_pipes(self):
+        stub = self.stub_git("sleep 30 &\nexit 0")
+        t0 = time.monotonic()
+        with self.assertRaises(wt.GitTimeout):
+            wt._run([str(stub)], self.tmp, timeout=0.5)
+        self.assertLess(time.monotonic() - t0, 8, "the reader join outlived the timeout")
+
+    # Astra r1-8: Unicode patches expand under JSON escaping past the 2 MiB cap.
+    def test_BB3_3_the_encoded_review_stays_under_its_cap(self):
+        import json
+        e = self.make()
+        p = Path(e["path"])
+        for i in range(10):
+            (p / f"u{i}.txt").write_text(("é" * 99 + "\n") * 1200, encoding="utf-8")
+        snap = wt.snapshot(e)
+        d = wt.diff(e, snap["tree"])
+        self.assertTrue(d["truncated"])
+        self.assertLessEqual(len(json.dumps(d)), wt.DIFF_JSON_MAX)
+        full = wt.fit_review(dict(snap, diff=d,
+                                  summary={"files": 10}))
+        self.assertLessEqual(len(json.dumps(full)), wt.REVIEW_JSON_MAX)
+
+    def test_BB3_3b_fit_review_drops_patches_then_files_and_says_so(self):
+        import json
+        files = [{"path": f"f{i}", "patch": "一" * 40000} for i in range(30)]
+        files += [{"path": "x" * 900 + str(i), "patch": None} for i in range(4000)]
+        out = wt.fit_review({"tree": "t", "diff": {"files": files, "truncated": False}})
+        self.assertLessEqual(len(json.dumps(out)), wt.REVIEW_JSON_MAX)
+        self.assertTrue(out["diff"]["truncated"])
+        self.assertTrue(out["diff"].get("files_omitted"))
+
+    # Grok r1-9: a pid whose cwd cannot be read was skipped before its fds were read.
+    def test_BB3_4_an_unreadable_cwd_still_scans_the_fds(self):
+        import subprocess
+        e = self.make()
+        held = Path(e["path"]) / "held.txt"
+        held.write_text("x\n")
+        c = subprocess.Popen([sys.executable, "-c",
+                              "import sys,time; f=open(sys.argv[1]); print('open', flush=True); "
+                              "time.sleep(30)", str(held)], cwd=self.tmp,
+                             stdout=subprocess.PIPE, start_new_session=True)
+        self.addCleanup(lambda: (c.kill(), c.wait(), c.stdout.close()))
+        c.stdout.readline()
+        real = os.readlink
+
+        def rl(path, *a, **k):
+            if str(path) == f"/proc/{c.pid}/cwd":
+                raise PermissionError(13, "denied")
+            return real(path, *a, **k)
+        if not wt._have_proc():
+            self.skipTest("no /proc: the Linux scan did not run here")
+        with mock.patch.object(wt.os, "readlink", rl):
+            found = [pid for pid, _ in wt.processes_in(e["path"])]
+        self.assertIn(c.pid, found)
+
+    # Gemini r1: restore failed when the repo's folder under the root was gone.
+    def test_BB3_5_restore_recreates_the_repo_folder_under_the_root(self):
+        e = self.make()
+        wt.discard(e, wt.snapshot(e)["tree"], registry=self.reg)
+        parent = Path(e["path"]).parent
+        os.rmdir(parent)                              # empty once the worktree moved
+        got = wt.restore(self.reg.read(e["id"]), registry=self.reg)
+        self.assertEqual(got["phase"], "active")
+        self.assertTrue(Path(e["path"]).is_dir())
+
+    # Gemini r1: a harmless lsof warning on stderr failed the macOS scan.
+    def test_BB3_6_an_lsof_warning_with_no_records_is_none(self):
+        stub = self.stub_git('echo "lsof: WARNING: can\'t stat() devfs file system /dev" >&2\nexit 1')
+        e = self.make()
+        with mock.patch.object(wt, "_lsof_bin", lambda: str(stub)):
+            self.assertEqual(wt._procs_lsof(os.path.realpath(e["path"])), [])
+
+    def test_BB3_6b_an_lsof_error_about_the_path_still_fails(self):
+        e = self.make()
+        root = os.path.realpath(e["path"])
+        stub = self.stub_git(f'echo "lsof: status error on {root}: No such file" >&2\nexit 1')
+        with mock.patch.object(wt, "_lsof_bin", lambda: str(stub)):
+            with self.assertRaises(wt.ScanFailed):
+                wt._procs_lsof(root)
+
+
+class BugBash3Publish(PubCase):
+    stub_gh = ThePullRequest.stub_gh
+    pr = ThePullRequest.pr
+
+    # Astra r1-3: a confirmed URL that another rewrite rule would redirect.
+    def test_BB3_10_a_url_git_would_rewrite_again_is_refused(self):
+        # alias:r -> the confirmed URL (one rewrite, what the dialog shows);
+        # the confirmed URL -> another repo (the second rewrite git applies).
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "alias:r"], cwd=self.repo)
+        wt.git(["config", f"url.{self.url}.insteadOf", "alias:r"], cwd=self.repo)
+        wt.git(["config", f"url.{other}.insteadOf", self.url], cwd=self.repo)
+        self.assertEqual(wt.push_urls(self.e, "origin"), [self.url], "the dialog's URL")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertIsNone(wt.git(["ls-remote", str(other), self.e["branch"]],
+                                 cwd=self.tmp).text.strip() or None)
+
+    def test_BB3_10b_a_push_rewrite_counts_too(self):
+        wt.git(["config", "url.ssh://elsewhere/.pushInsteadOf", self.url], cwd=self.repo)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertIn(cm.exception.reason, ("rewrite", "remote_changed"))
+
+    # Grok r1-8: an open PR from another owner's fork is not this branch's PR.
+    def test_BB3_11_a_pr_from_another_head_owner_is_not_ours(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/me/r.git"], cwd=self.repo)
+        gh, state = self.stub_gh()
+        (state / "pr").write_text('[{"url":"https://github.com/o/r/pull/3",'
+                                  '"headRepositoryOwner":{"login":"stranger"}}]')
+        r = self.pr(gh, repo="o/r")
+        self.assertEqual(r["pr_url"], "https://github.com/o/r/pull/7", "a stranger's PR was reused")
+        argv = (state / "argv").read_text()
+        self.assertIn("pr create", argv)
+        self.assertIn("--head me:", argv)
+
+    def test_BB3_11b_our_own_open_pr_is_reused(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/me/r.git"], cwd=self.repo)
+        gh, state = self.stub_gh()
+        (state / "pr").write_text('[{"url":"https://github.com/o/r/pull/3",'
+                                  '"headRepositoryOwner":{"login":"me"}}]')
+        r = self.pr(gh, repo="o/r")
+        self.assertEqual(r["pr_url"], "https://github.com/o/r/pull/3")
+        self.assertNotIn("pr create", (state / "argv").read_text())
+
+
+class BugBash3Hub(LifecycleCase):
+
+    def test_BB3_20_an_agent_folder_outside_the_worktree_never_starts(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        os.symlink(outside, self.repo / "pkg")
+        wt.git(["add", "pkg"], cwd=self.repo)
+        wt.git(["commit", "-qm", "pkg link"], cwd=self.repo)
+        os.unlink(self.repo / "pkg")
+        (self.repo / "pkg").mkdir()
+        with self.assertRaises(Exception):
+            self.mgr.create("fake", str(self.repo / "pkg"), worktree=True)
+        live = [p for p in self.mgr.panes.values() if p.client and p.client.alive]
+        self.assertEqual(live, [], "an agent started outside its worktree")
+
+    # Gemini r1-8 / Grok r1-6: the browser's review text.
+    def test_BB3_21_review_text_for_noop_commits_and_staged_differs(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("r.noop", js)
+        body = js[js.index("function reviewBanners(snap)"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("staged_differs", body)
+
+    # Gemini r1-5: create's failure paths mutate the roster under its lock.
+    def test_BB3_22_create_failure_paths_pop_under_the_lock(self):
+        import inspect
+        import sessions
+        lines = inspect.getsource(sessions.Manager.create).splitlines()
+        pops = [i for i, l in enumerate(lines) if "self.panes.pop(" in l]
+        self.assertTrue(pops)
+        for i in pops:
+            self.assertTrue(lines[i - 1].strip().startswith("with self._lock:"), lines[i])
+
+
+# ── round 3 panel (reviews/2026-10-02-own-branch-bugbash/r3-*.md) ─────────────
+
+class BugBash4Hub(LifecycleCase):
+
+    # Astra r3-1: the first agent start did not hold the action lock.
+    def test_BB4_1_review_refuses_while_the_first_agent_starts(self):
+        import sessions
+        entered, release, done, errs = (threading.Event(), threading.Event(),
+                                         threading.Event(), [])
+        start = sessions.Pane.start
+
+        def slow(pane):
+            entered.set()
+            release.wait(10)
+            return start(pane)
+
+        def create():
+            try:
+                self.pane()
+            except Exception as err:                 # noqa: BLE001
+                errs.append(repr(err))
+            finally:
+                done.set()
+        with mock.patch.object(sessions.Pane, "start", slow):
+            t = threading.Thread(target=create)
+            t.start()
+            self.assertTrue(entered.wait(5))
+            p = next(iter(self.mgr.panes.values()))
+            try:
+                with self.assertRaises(wt.Refused) as cm:
+                    self.mgr.worktree_snapshot(p.id)
+                self.assertEqual(cm.exception.reason, "busy")
+            finally:
+                release.set()
+                t.join(15)
+        self.assertEqual(errs, [])
+        self.assertEqual(self.entry(p)["phase"], "active")
+        self.assertTrue(p.client and p.client.alive)
+
+    # Astra r3-2: a busy refusal released a hold it never took and retired the agent.
+    def test_BB4_2_a_busy_refusal_leaves_the_running_turn_alone(self):
+        p = self.pane()
+        p.send("sleep 0.7")
+        self.assertTrue(wait_for(lambda: p._turn_running))
+        p.send("write queued.txt q")
+        gen = p._generation
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_snapshot(p.id)
+        self.assertEqual(cm.exception.reason, "busy")
+        self.assertEqual(p._generation, gen, "the refusal retired the live attachment")
+        self.assertTrue(wait_for(lambda: (Path(self.entry(p)["path"]) / "queued.txt").exists(),
+                                 timeout=15), "the queued message was dropped")
+        self.assertTrue(wait_for(lambda: p.state == "ready", timeout=15), p.state)
+        p.send("perm")
+        self.assertTrue(wait_for(lambda: bool(p.pending), timeout=10),
+                        "a permission card never reached the pane")
+
+    # The same for an action that held the pane and then failed: the type-ahead
+    # is parked, but the live agent keeps its attachment.
+    def test_BB4_3_a_failed_action_parks_type_ahead_but_keeps_the_agent(self):
+        p = self.pane()
+        gen = p._generation
+
+        def boom(e, tmp_dir=None):
+            p.send("write never.txt n")                # queued behind the hold
+            raise wt.Refused("busy", "simulated failure")
+        with mock.patch.object(wt, "snapshot", boom):
+            with self.assertRaises(wt.Refused):
+                self.mgr.worktree_snapshot(p.id)
+        self.assertEqual(p._generation, gen)
+        self.assertEqual(p._queue, [])
+        self.assertFalse((Path(self.entry(p)["path"]) / "never.txt").exists())
+        self.say(p, "write after.txt a")
+        self.assertTrue((Path(self.entry(p)["path"]) / "after.txt").exists())
+
+    # Astra r3-4: resume and send after the worktree was switched to another branch.
+    def test_BB4_4_a_worktree_on_another_branch_blocks_resume_and_send(self):
+        p = self.pane()
+        p.pause()
+        wt.git(["switch", "-qc", "foreign-branch"], cwd=self.entry(p)["path"])
+        wt.reconcile(self.reg)
+        with self.assertRaises(ValueError) as cm:
+            p.resume()
+        self.assertIn("foreign-branch", str(cm.exception))
+        with self.assertRaises(ValueError):
+            p.send("write branch-bypass.txt x")
+        self.assertFalse((Path(self.entry(p)["path"]) / "branch-bypass.txt").exists())
+
+
+class BugBash4Publish(PubCase):
+    stub_gh = ThePullRequest.stub_gh
+    pr = ThePullRequest.pr
+
+    # Astra r3-3a: git accepts an empty insteadOf prefix; it matches every URL.
+    def test_BB4_10_an_empty_rewrite_prefix_is_refused(self):
+        wt.git(["config", "url.dst/.insteadOf", ""], cwd=self.repo)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=wt.push_urls(self.e, "origin")[0])
+        self.assertIn(cm.exception.reason, ("rewrite", "remote_changed"))
+
+    # Astra r3-3b: a URL that git reads as another remote's name.
+    def test_BB4_11_a_url_that_names_another_remote_is_refused(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "destination"], cwd=self.repo)
+        wt.git(["remote", "add", "destination", str(other)], cwd=self.repo)
+        url = wt.push_urls(self.e, "origin")[0]
+        self.assertEqual(url, "destination")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=url)
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    # Gemini r3-1: a listed PR with no head owner (a deleted fork) is not ours.
+    def test_BB4_12_a_pr_with_no_head_owner_is_not_reused(self):
+        wt.git(["remote", "set-url", "origin", "https://github.com/o/r.git"], cwd=self.repo)
+        gh, state = self.stub_gh()
+        (state / "pr").write_text('[{"url":"https://github.com/o/r/pull/3",'
+                                  '"headRepositoryOwner":null}]')
+        r = self.pr(gh)
+        self.assertEqual(r["pr_url"], "https://github.com/o/r/pull/7")
+
+
+class BugBash4Library(CreateCase):
+
+    # Astra r3 non-blocking: a huge too_big inventory overflowed the cap.
+    def test_BB4_20_fit_review_trims_inventories_too(self):
+        import json
+        obj = {"tree": "a" * 40,
+               "too_big": [{"path": "一" * 60 + str(i), "size": 600000} for i in range(6000)],
+               "diff": {"files": [], "truncated": False}}
+        out = wt.fit_review(obj)
+        self.assertLessEqual(len(json.dumps(out)), wt.REVIEW_JSON_MAX)
+        self.assertTrue(out.get("too_big_omitted"))
+
+
+
+class BugBash4Restart(PubCase):
+    stub_gh = ThePullRequest.stub_gh
+
+    # Grok r3-1: restart settled an interrupted PR op on any open PR with that branch name.
+    def _interrupted_pr(self, listed, head="me:corral/fix-login", repo="o/r"):
+        gh, state = self.stub_gh()
+        (state / "pr").write_text(listed)
+        op = self.reg.begin_op(self.e["id"], "pr", repo=repo, head=head)
+        with mock.patch.object(wt, "GH_BIN", gh):
+            note = wt.resolve_op(self.reg.read(self.e["id"]),
+                                 [o for o in self.reg.read(self.e["id"])["ops"]
+                                  if o["op_id"] == op][0], self.reg)
+        got = [o for o in self.reg.read(self.e["id"])["ops"] if o["op_id"] == op][0]
+        return note, got, (state / "argv").read_text()
+
+    def test_BB4_30_a_strangers_pr_does_not_settle_ours(self):
+        note, got, argv = self._interrupted_pr(
+            '[{"url":"https://github.com/o/r/pull/1","headRepositoryOwner":{"login":"stranger"}}]')
+        self.assertEqual((got["state"], got.get("stage")), ("done", "not_done"), note)
+        self.assertIsNone((self.reg.read(self.e["id"]).get("published") or {}).get("pr_url"))
+        self.assertIn("headRepositoryOwner", argv)
+
+    def test_BB4_31_our_pr_settles_it(self):
+        note, got, _ = self._interrupted_pr(
+            '[{"url":"https://github.com/o/r/pull/1","headRepositoryOwner":{"login":"stranger"}},'
+            '{"url":"https://github.com/o/r/pull/9","headRepositoryOwner":{"login":"me"}}]')
+        self.assertEqual((got["state"], got.get("url")), ("done", "https://github.com/o/r/pull/9"))
+        self.assertEqual(self.reg.read(self.e["id"])["published"]["pr_url"],
+                         "https://github.com/o/r/pull/9")
+
+    def test_BB4_32_a_same_repo_head_uses_the_repo_owner(self):
+        note, got, _ = self._interrupted_pr(
+            '[{"url":"https://github.com/o/r/pull/4","headRepositoryOwner":{"login":"o"}}]',
+            head="corral/fix-login")
+        self.assertEqual(got.get("url"), "https://github.com/o/r/pull/4")
+
+    # Grok r3 non-blocking: an unreadable git config must not skip the rewrite check.
+    def test_BB4_33_an_unreadable_config_refuses_the_push(self):
+        real = wt.git
+
+        def git(args, *a, **k):
+            if args[:1] == ["config"] and "--get-regexp" in args:
+                return wt.GitResult(128, b"", b"fatal: bad config line 3", False)
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", git):
+            self.assertTrue(wt.rewrite_rule(self.e, self.url))
+
+
+
+# ── round 4 panel ─────────────────────────────────────────────────────────────
+
+class BugBash5Hub(LifecycleCase):
+
+    # Astra r4: queued turns were sent without the gate being checked again.
+    def test_BB5_1_a_queued_turn_after_a_branch_switch_is_not_sent(self):
+        p = self.pane()
+        path = Path(self.entry(p)["path"])
+        p.send("sleep 0.6")
+        self.assertTrue(wait_for(lambda: p._turn_running))
+        p.send("checkout foreign-branch")                # both queued while on our branch
+        p.send("write after.txt on the foreign branch")
+        self.assertTrue(wait_for(lambda: p.state == "ready" and not p._turn_running,
+                                 timeout=15), p.state)
+        time.sleep(0.3)
+        self.assertFalse((path / "after.txt").exists(), "a queued turn ran on another branch")
+        self.assertIn("foreign-branch", p.worktree_blocked or "")
+
+    def test_BB5_2_a_queued_turn_after_an_op_went_unknown_is_not_sent(self):
+        p = self.pane()
+        path = Path(self.entry(p)["path"])
+        p.send("sleep 0.6")
+        self.assertTrue(wait_for(lambda: p._turn_running))
+        p.send("write late.txt x")
+        _unknown_op(self.reg, p.worktree_id)
+        self.assertTrue(wait_for(lambda: p.state == "ready" and not p._turn_running,
+                                 timeout=15), p.state)
+        time.sleep(0.3)
+        self.assertFalse((path / "late.txt").exists(), "a queued turn ran with an unknown op")
+        notes = [e["data"]["text"] for e in p.events if e["kind"] == "note"]
+        self.assertTrue(any("not sent" in n for n in notes), notes)
+
+
+    # Gemini r4: a start that failed with anything but AgentError left the pane
+    # `starting` for good, and `starting` now refuses every review action.
+    def test_BB5_3_a_failed_start_leaves_the_pane_dead_not_starting(self):
+        import sessions
+        p = self.pane()
+        p.pause()
+        p.acp_session = None                          # the D14 retry path
+        with mock.patch.object(sessions, "spawn_env",
+                               mock.Mock(side_effect=OSError("config dir unreadable"))):
+            try:
+                p.resume()
+            except Exception:                         # noqa: BLE001
+                pass
+        self.assertEqual(p.state, "dead", p.state)
+        self.assertIn("config dir unreadable", p.error or "")
+        snap = self.mgr.worktree_snapshot(p.id)      # not refused as busy
+        self.mgr.worktree_discard(p.id, snap["tree"])
+        self.assertEqual(self.entry(p)["phase"], "trashed")
+
+    def test_BB5_4_a_failed_clear_leaves_the_pane_dead_not_starting(self):
+        import sessions
+        p = self.pane()
+        with mock.patch.object(sessions, "spawn_env",
+                               mock.Mock(side_effect=OSError("config dir unreadable"))):
+            try:
+                p.send("/clear")
+            except Exception:                         # noqa: BLE001
+                pass
+        self.assertEqual(p.state, "dead", p.state)
+
+
+    def test_BB5_5_a_worktree_still_in_intent_blocks(self):
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        self.assertIn("never finished", m._worktree_blocked_reason({"phase": "intent", "ops": []}))
+
+
+class BugBash5Publish(PubCase):
+
+    # Astra r4: a URL that is also a remote's name, whose fetch URL is its own name.
+    def test_BB5_10_a_url_equal_to_a_remote_name_is_refused(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "dest"], cwd=self.repo)
+        wt.git(["remote", "add", "dest", "dest"], cwd=self.repo)
+        wt.git(["remote", "set-url", "--push", "dest", str(other)], cwd=self.repo)
+        url = wt.push_urls(self.e, "origin")[0]
+        self.assertEqual(url, "dest")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=url)
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    def test_BB5_11_a_legacy_remotes_file_counts_as_a_remote_name(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "origin", "legacy"], cwd=self.repo)
+        d = Path(self.e["common_dir"]) / "remotes"
+        d.mkdir(exist_ok=True)
+        (d / "legacy").write_text(f"URL: {other}\n")
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url="legacy")
+        self.assertEqual(cm.exception.reason, "rewrite")
+
+
+
+# ── round 5 panel ─────────────────────────────────────────────────────────────
+
+class BugBash6Hub(LifecycleCase):
+
+    # Astra r5-1: a drain retired by /clear picked up the new generation and
+    # dispatched type-ahead while a review action held the pane.
+    def test_BB6_1_a_retired_drain_never_dispatches_during_a_hold(self):
+        p = self.pane()
+        at_tail, release_tail = threading.Event(), threading.Event()
+        in_review, release_review = threading.Event(), threading.Event()
+        tail, snap_real, calls, errs = self.mgr.worktree_turn_ended, wt.snapshot, [], []
+
+        def slow_tail(pane):
+            calls.append(1)
+            if len(calls) == 1:
+                at_tail.set()
+                release_tail.wait(10)
+            return tail(pane)
+
+        def slow_snapshot(*a, **k):
+            in_review.set()
+            release_review.wait(10)
+            return snap_real(*a, **k)
+
+        def review():
+            try:
+                self.mgr.worktree_snapshot(p.id)
+            except BaseException as err:              # noqa: BLE001
+                errs.append(err)
+        target = Path(self.entry(p)["path"]) / "during-review.txt"
+        with mock.patch.object(self.mgr, "worktree_turn_ended", slow_tail):
+            p.send("pwd")
+            self.assertTrue(at_tail.wait(10))
+            p.send("/clear")
+            with mock.patch.object(wt, "snapshot", slow_snapshot):
+                th = threading.Thread(target=review)
+                th.start()
+                try:
+                    self.assertTrue(in_review.wait(10))
+                    self.assertTrue(p.held)
+                    p.send("write during-review.txt queued behind the hold")
+                    release_tail.set()
+                    time.sleep(1.5)
+                    self.assertFalse(target.exists(), "a retired drain dispatched during the hold")
+                finally:
+                    release_tail.set()
+                    release_review.set()
+                    th.join(10)
+        self.assertEqual(errs, [])
+        self.assertTrue(wait_for(target.exists, timeout=10),
+                        "the queued message never ran after the hold ended")
+
+    # Gemini r5: a parked peer message never told its sender.
+    def test_BB6_2_a_parked_peer_message_reports_not_delivered(self):
+        import sessions
+        p = self.pane()
+        item = sessions._core.QueuedText("from another pane", "t-peer-1")
+        item.peer = True
+        p._report_parked([item], live=True)
+        res = [e["data"] for e in p.events if e["kind"] == "peer_result"]
+        self.assertTrue(any(r.get("turn") == "t-peer-1" and r.get("delivered") is False
+                            for r in res), res)
+
+
+class BugBash6Publish(PubCase):
+
+    # Astra r5-2: a remote name with a non-breaking space escaped str.split().
+    def test_BB6_10_a_remote_name_with_unicode_space_is_refused(self):
+        other = self.tmp / "unconfirmed.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        name = "release mirror"
+        wt.git(["remote", "set-url", "origin", name], cwd=self.repo)
+        wt.git(["remote", "add", name, name], cwd=self.repo)
+        wt.git(["remote", "set-url", "--push", name, str(other)], cwd=self.repo)
+        url = wt.push_urls(self.e, "origin")[0]
+        self.assertEqual(url, name)
+        with self.assertRaises(wt.Refused) as cm:
+            self.push(push_url=url)
+        self.assertEqual(cm.exception.reason, "rewrite")
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    # Grok r5-1: a repo-local core.sshCommand (or proxy, or TLS override) sends
+    # the push, and its check, somewhere the user did not confirm.
+    def test_BB6_11_repo_local_transport_overrides_are_refused(self):
+        for key, value in (("core.sshCommand", "sh -c 'exit 1'"),
+                           ("core.gitProxy", "evil-proxy"),
+                           ("http.proxy", "http://127.0.0.1:9"),
+                           ("http.https://github.com/.sslVerify", "false"),
+                           # Grok r6: maps the confirmed host to another address.
+                           ("http.curloptResolve", "confirmed.invalid:80:127.0.0.2"),
+                           ("http.http://confirmed.invalid/repo.git.curloptResolve",
+                            "confirmed.invalid:80:127.0.0.2"),
+                           ("http.followRedirects", "true"),
+                           ("ssh.variant", "simple")):
+            with self.subTest(key=key):
+                wt.git(["config", key, value], cwd=self.repo)
+                try:
+                    with self.assertRaises(wt.Refused) as cm:
+                        self.push()
+                    self.assertEqual(cm.exception.reason, "transport")
+                    self.assertIn(key.rsplit(".", 1)[-1].lower(), cm.exception.detail.lower())
+                finally:
+                    wt.git(["config", "--unset", key], cwd=self.repo)
+        self.assertEqual(self.push()["pushed"], self.oid)     # nothing set: it pushes
+
+    # Gemini r7: a rewrite rule whose base holds a space was misparsed and missed.
+    def test_BB6_13_a_rewrite_rule_with_a_space_in_its_base_is_refused(self):
+        other = self.tmp / "repo path.git"
+        wt.git(["init", "-q", "--bare", str(other)], cwd=self.tmp)
+        wt.git(["remote", "set-url", "--push", "origin", self.url], cwd=self.repo)
+        wt.git(["config", f"url.{other}.pushInsteadOf", self.url], cwd=self.repo)
+        self.assertEqual(wt.push_urls(self.e, "origin"), [self.url])
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertIn(cm.exception.reason, ("rewrite", "transport"))
+        self.assertEqual(wt.git(["ls-remote", str(other)], cwd=self.tmp).text.strip(), "")
+
+    def test_BB6_14_rewrite_rule_parses_keys_with_spaces(self):
+        # A GLOBAL pushInsteadOf: transport_override does not see it and
+        # ls-remote --get-url does not apply it, so only the parser can.
+        g = self.tmp / "global.gitconfig"
+        g.write_text(f'[url "https://x.invalid/a b/"]\n\tpushInsteadOf = {self.url}\n')
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(g)}):
+            rule = wt.rewrite_rule(self.e, self.url)
+        self.assertIsNotNone(rule)
+        self.assertIn("pushinsteadof", rule.lower())
+        self.assertIn("a b", rule)
+
+    def test_BB6_12_a_worktree_scoped_override_counts_too(self):
+        wt.git(["config", "extensions.worktreeConfig", "true"], cwd=self.repo)
+        wt.git(["config", "--worktree", "core.sshCommand", "evil"], cwd=self.e["path"])
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "transport")
+
+
+
+# ── round 8 panel ─────────────────────────────────────────────────────────────
+
+class BugBash7Publish(PubCase):
+
+    # Grok r8: an include (or the config itself) that serves the checks one
+    # thing and `git push` another.
+    def test_BB7_1_a_repository_include_is_refused(self):
+        inc = self.tmp / "extra.gitconfig"
+        inc.write_text("[core]\n\tautocrlf = false\n")
+        for key in ("include.path", "includeIf.onbranch:corral/**.path"):
+            with self.subTest(key=key):
+                wt.git(["config", key, str(inc)], cwd=self.repo)
+                try:
+                    with self.assertRaises(wt.Refused) as cm:
+                        self.push()
+                    self.assertEqual(cm.exception.reason, "transport")
+                    self.assertIn("include", cm.exception.detail.lower())
+                finally:
+                    wt.git(["config", "--unset", key], cwd=self.repo)
+
+    def test_BB7_2_a_config_that_is_not_a_regular_file_is_refused(self):
+        cfg = Path(self.e["common_dir"]) / "config"
+        real = cfg.with_name("config.real")
+        os.replace(cfg, real)
+        os.symlink(real, cfg)
+        self.addCleanup(lambda: (os.unlink(cfg), os.replace(real, cfg)))
+        with self.assertRaises(wt.Refused) as cm:
+            self.push()
+        self.assertEqual(cm.exception.reason, "transport")
+        self.assertIn("regular file", cm.exception.detail)
+
+    def test_BB7_3_a_config_changed_during_publish_is_unknown_not_done(self):
+        cfg = Path(self.e["common_dir"]) / "config"
+        real = wt.git
+
+        def git(args, *a, **k):
+            r = real(args, *a, **k)
+            if args[:1] == ["push"]:
+                with open(cfg, "a") as f:
+                    f.write("[core]\n\tbare = false\n")
+            return r
+        with mock.patch.object(wt, "git", git):
+            with self.assertRaises(wt.Refused) as cm:
+                self.push()
+        self.assertEqual(cm.exception.reason, "unknown")
+        op = [o for o in self.reg.read(self.e["id"])["ops"] if o["op"] == "push"][-1]
+        self.assertEqual(op["state"], "unknown")
+        self.assertNotIn("url", self.reg.read(self.e["id"]).get("published") or {})
+
+
+
+# ── round 9 panel ─────────────────────────────────────────────────────────────
+
+class BugBash8Hub(LifecycleCase):
+
+    # Astra r9: the admin dir's `commondir` file was trusted, so an agent could
+    # point its worktree at another clone and commit there.
+    def _retarget(self, e):
+        other = self.tmp / "other.git"
+        wt.git(["clone", "-q", "--bare", str(self.repo), str(other)], cwd=self.tmp)
+        link = Path(wt._admin_dir(e)) / "commondir"
+        old = link.read_bytes()
+        self.addCleanup(link.write_bytes, old)
+        link.write_text(str(other) + "\n")
+        return other
+
+    def test_BB8_1_a_retargeted_commondir_fails_verify_and_blocks_dispatch(self):
+        p = self.pane()
+        e = self.entry(p)
+        tip = wt.git(["rev-parse", e["branch"]], cwd=self.repo).text.strip()
+        other = self._retarget(e)
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+        self.assertIsNotNone(self.mgr._worktree_blocked_reason(e))
+        with self.assertRaises(ValueError):
+            p.send("commit agent commit after commondir change")
+        self.assertEqual(wt.git(["rev-parse", e["branch"]], cwd=other).text.strip(), tip)
+
+    def test_BB8_3_the_commondir_link_is_fingerprinted(self):
+        p = self.pane()
+        e = self.entry(p)
+        link = Path(wt._admin_dir(e)) / "commondir"
+        old = link.read_bytes()
+        self.addCleanup(link.write_bytes, old)
+        before = wt.config_fingerprint(e)
+        link.write_bytes(old + b"\n")
+        self.assertNotEqual(wt.config_fingerprint(e), before, "commondir is not fingerprinted")
+
+    def test_BB8_2_publish_refuses_a_retargeted_commondir(self):
+        p = self.pane()
+        e = self.entry(p)
+        self._retarget(e)
+        tree = wt.git(["rev-parse", "HEAD^{tree}"], cwd=e["path"]).text.strip()
+        with self.assertRaises(wt.Refused):
+            wt.push(e, "origin", str(self.tmp / "x.git"), e["base_sha"], tree, registry=self.reg)
+
+
+
+class BugBash8Publish(PubCase):
+
+    # Grok r9: every git call that decides or performs the push runs against
+    # the repository's git dir, so worktree links cannot redirect any of them.
+    def test_BB8_10_publish_decides_and_pushes_from_the_repositorys_git_dir(self):
+        real, seen = wt.git, []
+
+        def spy(args, *a, **k):
+            seen.append((args[0], (k.get("env_extra") or {}).get("GIT_DIR"), k.get("cwd")))
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", spy):
+            self.push()
+        decide = [x for x in seen if x[0] in ("push", "ls-remote", "remote", "config")]
+        self.assertTrue(decide)
+        for verb, gd, cwd in decide:
+            self.assertEqual((gd, str(cwd)), (self.e["common_dir"], self.e["common_dir"]), verb)
+
+    def test_BB8_11_a_missing_commondir_refuses(self):
+        link = Path(wt._admin_dir(self.e)) / "commondir"
+        old = link.read_bytes()
+        link.unlink()
+        self.addCleanup(link.write_bytes, old)
+        with self.assertRaises(wt.Refused):
+            self.push()
+
+
+
+# ── round 10 panel ────────────────────────────────────────────────────────────
+
+def _bounded(test, fn, seconds=10):
+    """Run fn in a thread; fail (not hang) if it does not return in time."""
+    box = {}
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as err:                  # noqa: BLE001
+            box["error"] = err
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(seconds)
+    test.assertFalse(th.is_alive(), "blocked reading a file the agent controls")
+    return box
+
+
+class BugBash9Library(CreateCase):
+
+    # Astra r10: verify() read the worktree's .git with a plain Python read; a
+    # fifo there blocked it forever (and with it a resume holding the lock).
+    def _fifo(self, path):
+        path = Path(path)
+        old = path.read_bytes() if path.exists() else None
+        path.unlink(missing_ok=True)
+        os.mkfifo(path)
+
+        def restore():
+            path.unlink(missing_ok=True)
+            if old is not None:
+                path.write_bytes(old)
+        self.addCleanup(restore)
+
+    def test_BB9_1_a_fifo_dotgit_fails_verify_without_blocking(self):
+        e = self.make()
+        self._fifo(Path(e["path"]) / ".git")
+        box = _bounded(self, lambda: wt.verify(e))
+        self.assertIsInstance(box.get("error"), wt.IdentityError)
+
+    def test_BB9_2_a_fifo_index_refuses_snapshot_without_blocking(self):
+        e = self.make()
+        self._fifo(wt._index_path(e["path"]))
+        box = _bounded(self, lambda: wt.snapshot(e))
+        self.assertIsInstance(box.get("error"), wt.Refused)
+
+    def test_BB9_3_an_index_symlinked_to_a_fifo_is_refused_without_blocking(self):
+        # git resolves a symlinked index itself, so a link to a regular file
+        # is read the same by git and by the hub; a link to a fifo is the hazard.
+        e = self.make()
+        idx = Path(wt._index_path(e["path"]))
+        real = idx.with_name("index.real")
+        fifo = self.tmp / "index.fifo"
+        os.replace(idx, real)
+        os.mkfifo(fifo)
+        os.symlink(fifo, idx)
+        self.addCleanup(lambda: (idx.unlink(), os.replace(real, idx)))
+        box = _bounded(self, lambda: wt.snapshot(e))
+        self.assertIsInstance(box.get("error"), (wt.Refused, wt.GitError))
+
+class BugBash9Hub(LifecycleCase):
+
+    def test_BB9_10_resume_with_a_fifo_dotgit_refuses_and_releases_the_lock(self):
+        p = self.pane()
+        p.pause()
+        dotgit = Path(self.entry(p)["path"]) / ".git"
+        old = dotgit.read_bytes()
+        dotgit.unlink()
+        os.mkfifo(dotgit)
+        self.addCleanup(lambda: (dotgit.unlink(), dotgit.write_bytes(old)))
+        box = _bounded(self, p.resume)
+        self.assertIsInstance(box.get("error"), ValueError)
+        self.assertFalse(p._action_lock.locked(), "resume left the action lock held")
+
+
+
+class BugBash9Publish(PubCase):
+
+    # Grok r10: a relative push URL resolves against git's cwd, which is not
+    # the folder the user meant; a decoy there received the push.
+    def test_BB9_20_a_relative_local_push_url_is_refused(self):
+        decoy = Path(self.e["common_dir"]) / "proj.git"
+        wt.git(["init", "-q", "--bare", str(decoy)], cwd=self.tmp)
+        for rel in ("../proj.git", "proj.git", "./x/../proj.git"):
+            with self.subTest(url=rel):
+                wt.git(["remote", "set-url", "origin", rel], cwd=self.repo)
+                with self.assertRaises(wt.Refused) as cm:
+                    self.push(push_url=rel)
+                self.assertEqual(cm.exception.reason, "relative")
+        self.assertEqual(wt.git(["ls-remote", str(decoy)], cwd=self.tmp).text.strip(), "")
+
+    def test_BB9_21_absolute_paths_and_urls_are_not_relative(self):
+        for url in ("/srv/git/r.git", "file:///srv/git/r.git", "https://github.com/o/r.git",
+                    "ssh://git@host/r.git", "git@github.com:o/r.git", "host:path/r.git"):
+            with self.subTest(url=url):
+                self.assertFalse(wt.is_relative_local_url(url))
+        for url in ("../r.git", "r.git", "./r", "sub/dir/r.git", "./a:b"):
+            with self.subTest(url=url):
+                self.assertTrue(wt.is_relative_local_url(url))
+
+    def test_BB9_22_restart_checks_an_interrupted_push_from_the_repository(self):
+        real, seen = wt.git, []
+
+        def spy(args, *a, **k):
+            seen.append((args[0], (k.get("env_extra") or {}).get("GIT_DIR")))
+            return real(args, *a, **k)
+        op = self.reg.begin_op(self.e["id"], "push", url=self.url, ref=self.e["branch"],
+                               oid=self.oid)
+        with mock.patch.object(wt, "git", spy):
+            wt.resolve_op(self.reg.read(self.e["id"]),
+                          [o for o in self.reg.read(self.e["id"])["ops"] if o["op_id"] == op][0],
+                          self.reg)
+        self.assertIn(("ls-remote", self.e["common_dir"]), seen)
+
+
+
+# ── round 11 panel ────────────────────────────────────────────────────────────
+
+class BugBash10Library(CreateCase):
+
+    # Astra r11-1: a worktree-scoped core.worktree routed the pane's git to the
+    # main checkout while verify() still passed.
+    def test_BB10_1_a_redirected_work_tree_fails_verify(self):
+        e = self.make()
+        wt.git(["config", "extensions.worktreeConfig", "true"], cwd=self.repo)
+        wt.git(["config", "--worktree", "core.worktree", str(self.repo)], cwd=e["path"])
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+        import sessions
+        m = sessions.Manager.__new__(sessions.Manager)
+        self.assertIsNotNone(m._worktree_blocked_reason(e))
+
+    # Astra r11-2: an index symlinked to the main checkout's index.
+    def test_BB10_2_an_index_outside_the_admin_dir_fails_verify(self):
+        e = self.make()
+        idx = Path(wt._index_path(e["path"]))
+        real = idx.with_name("index.saved")
+        os.replace(idx, real)
+        os.symlink(self.repo / ".git" / "index", idx)
+        self.addCleanup(lambda: (idx.unlink(), os.replace(real, idx)))
+        with self.assertRaises(wt.IdentityError) as cm:
+            wt.verify(e)
+        self.assertEqual(cm.exception.reason, "tampered")
+
+    def test_BB10_3_an_index_symlinked_inside_the_admin_dir_still_passes(self):
+        e = self.make()
+        idx = Path(wt._index_path(e["path"]))
+        real = idx.with_name("index.real")
+        os.replace(idx, real)
+        os.symlink(real, idx)
+        self.addCleanup(lambda: (idx.unlink(), os.replace(real, idx)))
+        wt.verify(e)
+
+
+class BugBash10Hub(CreateCase):
+
+    # Astra r11-3: a review action checked the gates before taking the pane's
+    # action lock, so an overlapping Commit could leave an op unknown first.
+    def test_BB10_10_review_rechecks_the_gates_after_taking_the_lock(self):
+        import sessions
+        import types
+        e = self.make()
+        p = types.SimpleNamespace(id="review", worktree_id=e["id"],
+                                  _action_lock=threading.Lock(), _turn_lock=threading.Lock(),
+                                  _turn_running=False, pending={}, state="ready", held=False,
+                                  dir=self.tmp / "pane")
+        p.dir.mkdir()
+        p.emit = lambda *a, **k: None
+        p.release_hold = lambda **k: setattr(p, "held", False)
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes, m._wt_registry, m._lock = {p.id: p}, self.reg, threading.Lock()
+        (Path(e["path"]) / "a.txt").write_text("reviewed change\n")
+        snap = wt.snapshot(e)
+        passed, go, results, errors = threading.Event(), threading.Event(), [], []
+        real_gate = m._worktree_blocked_reason
+
+        def delayed_gate(entry, *a, **k):
+            r = real_gate(entry, *a, **k)
+            if threading.current_thread().name == "delayed-review" and not passed.is_set():
+                passed.set()
+                go.wait(10)
+            return r
+        m._worktree_blocked_reason = delayed_gate
+
+        def review():
+            try:
+                results.append(m.worktree_snapshot(p.id))
+            except BaseException as err:              # noqa: BLE001
+                errors.append(err)
+        th = threading.Thread(target=review, name="delayed-review")
+        th.start()
+        try:
+            self.assertTrue(passed.wait(10))
+            with mock.patch.object(wt, "_replace_index",
+                                   side_effect=wt.Refused("busy", "injected")):
+                with self.assertRaises(wt.Refused):
+                    m.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "c")
+            self.assertEqual(self.reg.read(e["id"])["ops"][-1]["state"], "unknown")
+        finally:
+            go.set()
+            th.join(10)
+        self.assertEqual(results, [], "review ran while an op was unknown")
+        self.assertTrue(errors and isinstance(errors[0], wt.Refused), errors)
+
+
+
+class BugBash10Publish(PubCase):
+
+    # Grok r11: restart settled an interrupted push by ls-remote, which a
+    # url.*.insteadOf added since then sends to a decoy holding the oid.
+    def test_BB10_20_restart_does_not_settle_a_push_through_a_rewrite(self):
+        decoy = self.tmp / "decoy.git"
+        wt.git(["clone", "-q", "--bare", str(self.repo), str(decoy)], cwd=self.tmp)
+        wt.git(["push", "-q", str(decoy), f"{self.oid}:{self.e['branch']}"], cwd=self.e["path"])
+        op = self.reg.begin_op(self.e["id"], "push", url=self.url, ref=self.e["branch"],
+                               oid=self.oid)
+        wt.git(["config", f"url.{decoy}.insteadOf", self.url], cwd=self.repo)
+        note = wt.resolve_op(self.reg.read(self.e["id"]),
+                             [o for o in self.reg.read(self.e["id"])["ops"]
+                              if o["op_id"] == op][0], self.reg)
+        got = [o for o in self.reg.read(self.e["id"])["ops"] if o["op_id"] == op][0]
+        self.assertEqual(got["state"], "unknown", note)
+        self.assertNotIn("url", self.reg.read(self.e["id"]).get("published") or {})
+
+    # Grok r11: a push that timed out stayed `intent` until a restart.
+    def test_BB10_21_a_push_that_times_out_is_unknown(self):
+        real = wt.git
+
+        def git(args, *a, **k):
+            if args[:1] == ["push"]:
+                raise wt.GitTimeout(["git", "push"], 120)
+            return real(args, *a, **k)
+        with mock.patch.object(wt, "git", git):
+            with self.assertRaises(wt.Refused) as cm:
+                self.push()
+        self.assertEqual(cm.exception.reason, "unknown")
+        op = [o for o in self.reg.read(self.e["id"])["ops"] if o["op"] == "push"][-1]
+        self.assertEqual(op["state"], "unknown")
+
+
+if __name__ == "__main__":
+    unittest.main()

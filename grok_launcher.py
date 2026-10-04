@@ -70,13 +70,41 @@ def unavailable_reason() -> str | None:
     return None
 
 
-def build_argv(grok: str, model: str | None = None) -> list[str]:
-    # --model is an option of `grok agent` and must precede `stdio`.
+# Corral postures the Grok agent can realize, and the argv that realizes each.
+# `grok agent stdio` advertises no ACP permission mode (configOptions: null)
+# and accepts no --permission-mode; its only knob is --always-approve, applied
+# at spawn. With no flag the agent runs reads itself but raises a card for
+# every shell command its own policy does not auto-allow (pipelines, heredocs,
+# process inspection...), so a pane under `auto` blocked on a card per command.
+#   auto   -> --always-approve: Grok approves every tool call itself (no
+#             classifier, no escalation — looser than Claude's `auto`).
+#   strict -> no flag: Grok's own default, a card for each shell command it
+#             does not auto-allow (never looser than Claude's `default`).
+#   edits  -> not realizable: Grok has no accept-edits mode, so the pane
+#             reports the posture as NOT enforced and runs under Grok's default.
+POSTURE_ARGV = {
+    "auto": ["--always-approve"],
+    "strict": [],
+}
+POSTURE_REALIZED = {
+    "auto": "--always-approve: Grok approves every tool call itself",
+    "strict": "Grok's own default: a card for each shell command it does not auto-allow",
+}
+
+
+def build_argv(grok: str, model: str | None = None,
+               posture: str | None = None) -> list[str]:
+    # --model and --always-approve are options of `grok agent` and must
+    # precede `stdio`.
     argv = [grok, "agent"]
     if model:
         # The agent does not support session/set_config_option, so the model
         # can only be chosen at spawn.
         argv += ["--model", model]
+    if posture:
+        # An unmapped posture (edits) adds nothing: Grok's default applies and
+        # sessions.py reports the posture as not enforced.
+        argv += POSTURE_ARGV.get(posture, [])
     argv.append("stdio")
     return argv
 
@@ -137,9 +165,11 @@ def main(argv: list[str] | None = None) -> int:
     if not grok:
         print(unavailable_message(), file=sys.stderr, flush=True)
         return 127
-    # Set by sessions.py only when a model was requested; otherwise the
-    # CLI's default applies.
-    command = build_argv(grok, os.environ.get("CORRAL_GROK_MODEL") or None)
+    # CORRAL_GROK_MODEL: set only when a model was requested; otherwise the
+    # CLI's default applies. CORRAL_POSTURE: the pane's posture, set by
+    # sessions.spawn_env for this lane.
+    command = build_argv(grok, os.environ.get("CORRAL_GROK_MODEL") or None,
+                         os.environ.get("CORRAL_POSTURE") or None)
     if args.print_argv:
         print(" ".join(command), flush=True)
         return 0
