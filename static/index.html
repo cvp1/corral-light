@@ -29,19 +29,21 @@
     <div class="brand">Corral <span class="lightmark">light</span></div>
     <!-- Quick start: the New dialog's defaults, without the dialog. -->
     <div class="newrow">
-      <button class="new" id="new">＋ New conversation</button>
+      <!-- .long drops on a narrow rail, leaving "＋ New" and "⌕ ⌘K". -->
+      <button class="new" id="new">＋ New<span class="long"> conversation</span></button>
       <button class="newquick" id="new-quick" type="button"
               title="Start the default agent now (right-click to set it)" aria-label="Start the default agent now">⚡</button>
     </div>
-    <button class="search-trigger" id="search-trigger" type="button"
-            aria-label="Search panes and notes">
-      <span>Search</span><kbd>⌘K</kbd>
-    </button>
-    <button class="search-trigger" id="crossfeed" type="button"
-            title="Round two: every live pane gets the others' last answers"
-            aria-label="Cross-feed answers between panes">
-      <span>Cross-feed</span><kbd>⇄</kbd>
-    </button>
+    <!-- Search and cross-feed share a row, like New and ⚡ above them. -->
+    <div class="newrow tools">
+      <button class="search-trigger" id="search-trigger" type="button"
+              aria-label="Search panes and notes">
+        <span class="si">⌕</span><span class="long">Search</span><kbd>⌘K</kbd>
+      </button>
+      <button class="newquick" id="crossfeed" type="button"
+              title="Cross-feed: every live pane gets the others' last answers"
+              aria-label="Cross-feed answers between panes">⇄</button>
+    </div>
     <div class="lab">Conversations</div>
     <div id="roster" class="roster"></div>
     <div class="foot"><span id="conn" class="conn">connecting…</span>

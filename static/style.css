@@ -271,15 +271,23 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .rit .t{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rit.min{opacity:.82}
 .rit.min .t{font-style:italic}
+/* Scheduled rows keep a single hover ✕ (unschedule / dismiss). */
 .rit .acts{display:flex;gap:2px;opacity:0;transition:.12s}
 .rit:hover .acts,.rit.on .acts{opacity:1}
 .rit .a{font-size:12.5px;color:var(--faint);padding:2px 4px;border-radius:4px;line-height:1}
 .rit .a:hover{color:var(--ink);background:var(--line)}
+.rit .more{flex:none;width:22px;height:22px;padding:0;border-radius:6px;color:var(--faint);
+  font-size:15px;line-height:1;display:inline-flex;align-items:center;justify-content:center;
+  opacity:0;transition:opacity .12s}
+.rit:hover .more,.rit.on .more,.rit .more:focus-visible{opacity:1}
+.rit .more:hover{color:var(--ink);background:var(--line)}
+.rit .pinmark{color:var(--gold);font-size:10px;flex:none}
 .rit input.ren{width:100%;background:var(--ground);border:1px solid var(--ember);border-radius:6px;
   color:var(--ink);font-size:12.5px;padding:3px 6px;font-family:var(--sans)}
 .rit .badge,.minchip .badge{font-family:var(--mono);font-size:10.5px;color:var(--ground);background:var(--gold);
   border-radius:8px;padding:1px 6px;font-weight:700;flex:none}
-.rit .s{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.rit .s{font-family:var(--mono);font-size:11.5px;color:var(--faint);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @keyframes pulse{50%{opacity:.35}}
 
 /* ── center column: room bar over grid or stage ── */
@@ -323,9 +331,6 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .minchip .mt{flex:1;text-align:left}
 .minchip .d{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none;box-sizing:border-box}
 /* Mark the pane that owns the whole grid. */
-.pane.solo .ph::before{content:'⛶ full';font-family:var(--mono);font-size:10.5px;
-  text-transform:uppercase;letter-spacing:.7px;border:1px solid var(--line2);
-  border-radius:20px;padding:2px 7px;color:var(--sage);flex:none}
 .minchip.needs-you{border-color:var(--gold);color:var(--ink)}
 .minchip.needs-you .d{background:var(--gold);animation:pulse .9s infinite}
 .minchip.busy .d{background:var(--dusk);animation:pulse 1.4s infinite}
@@ -372,34 +377,52 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
   display:flex;flex-direction:column;min-height:340px;max-height:100%;overflow:hidden}
 .pane.attn{border-color:var(--gold);box-shadow:0 0 0 1px rgba(255,201,60,.22)}
 .pane.dead{opacity:.66}
-.ph{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--line);
-  background:var(--raise)}
-.ph .nm{font-size:12.5px;font-weight:600}
-.ph .meta{font-family:var(--mono);font-size:11.5px;color:var(--faint);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
-.ph .pill{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;
-  border:1px solid var(--line2);border-radius:20px;padding:2px 7px;color:var(--dim)}
-.ph .pill.cfg{cursor:pointer;color:var(--dusk);border-color:var(--line2)}
-.ph .pill.cfg:hover{color:var(--ink);border-color:var(--ember)}
-.ph .pill.strict{color:var(--sage);border-color:color-mix(in srgb, var(--sage) 55%, var(--line2))}
-.ph .pill.auto{color:var(--rust);border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
+/* pane header: a line of identity and controls, then a quiet line of facts */
+.ph{display:flex;flex-direction:column;gap:3px;padding:7px 8px 7px 12px;
+  border-bottom:1px solid var(--line);background:var(--raise)}
+.ph1{display:flex;align-items:center;gap:8px;min-height:24px;min-width:0}
+.ph1 .dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--faint)}
+.ph1 .dot.d-your-turn{background:var(--sage)}
+.ph1 .dot.d-working{background:var(--dusk);animation:pulse 1.4s infinite}
+.ph1 .dot.d-needs-you{background:var(--gold);animation:pulse .9s infinite}
+.ph1 .dot.d-dead{background:var(--rust)}
+.ph1 .dot.d-idle{background:var(--line2)}
+.ph1 .dot.d-paused{background:transparent;border:1px solid var(--line2)}
+.ph .nm{font-size:13px;font-weight:650;letter-spacing:-.1px;min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The state word: quiet by default; only needs-you and your-turn carry colour. */
+.ph1 .st{font-family:var(--mono);font-size:10.5px;letter-spacing:.8px;text-transform:uppercase;
+  color:var(--faint);flex:none}
+.ph1 .st.d-needs-you{color:var(--gold)}
+.ph1 .st.d-your-turn{color:var(--sage)}
+.ph1 .st.d-working{color:var(--dusk)}
+.ph1 .st.d-dead{color:var(--rust)}
+.ph1 .ctl{display:flex;align-items:center;gap:1px;margin-left:auto;flex:none}
+.ph .x{width:26px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;
+  border-radius:7px;color:var(--faint);font-size:15px;line-height:1}
+.ph .x:hover{color:var(--ink);background:color-mix(in srgb,var(--ink) 9%,transparent)}
+.ph .x.close:hover{color:var(--rust)}
+.ph .x.more{font-size:17px;letter-spacing:-1px}
+/* Facts: plain mono text, dot-separated, no badges. The directory yields first. */
+.ph2{display:flex;align-items:center;min-width:0;padding:0 4px 0 15px;
+  font-family:var(--mono);font-size:11px;color:var(--faint);white-space:nowrap}
+.ph2 .f{display:inline-block;flex:none;min-width:0;padding:0;border:0;background:none;
+  color:inherit;font:inherit;text-transform:none;letter-spacing:0;border-radius:3px}
+.ph2 .f + .f::before{content:'·';margin:0 6px;color:var(--line2)}
+.ph2 .f.meta{flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
+.ph2 button.f{cursor:pointer}
+.ph2 button.f:hover{color:var(--ink);text-decoration:underline dotted;text-underline-offset:3px}
+.ph2 .f.seat{color:var(--ink)}
+.ph2 .f.seat.withheld{color:var(--faint);text-decoration:line-through}
+.ph2 .f.cfg{color:var(--dim)}
+.ph2 .f.strict{color:var(--sage)}
+.ph2 .f.auto{color:var(--rust)}
 /* Unknown posture: deliberately drab so it never reads as a safety assurance. */
-.ph .pill.unknown{color:var(--faint);border-color:var(--line);border-style:dashed}
-/* The pane's state pill: quiet by default; only needs-you stands out. */
-.ph .pill.st{color:var(--dim)}
-.ph .pill.st.d-needs-you{color:var(--gold);
-  border-color:color-mix(in srgb, var(--gold) 55%, var(--line2))}
-.ph .pill.st.d-your-turn{color:var(--sage);
-  border-color:color-mix(in srgb, var(--sage) 55%, var(--line2))}
-.ph .pill.st.d-working{color:var(--dusk)}
-.ph .pill.st.d-dead{color:var(--rust);
-  border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
-.ph .pill.st.d-idle{color:var(--faint);border-style:dashed}
-.ph .pill.st.d-paused{color:var(--dim);border-style:dashed}
-.ph .pill.ctx{color:var(--dim)}
-.ph .pill.ctx.warn{color:var(--rust);border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
-.ph .x{color:var(--faint);font-size:15px;padding:0 3px}
-.ph .x:hover{color:var(--rust)}
+.ph2 .f.unknown{font-style:italic}
+.ph2 .f.ctx.warn{color:var(--rust)}
+.ph2 .f.wt{flex:0 1 auto;max-width:22em;overflow:hidden;text-overflow:ellipsis;color:var(--dusk)}
+.ph2 .f.wt.warn{color:var(--rust)}
+.ph2 .f.wt.gone{color:var(--faint);text-decoration:line-through}
 
 .log{flex:1;overflow-y:auto;overflow-x:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
 .msg{font-size:13.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
@@ -447,10 +470,6 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .steps:hover{color:var(--dim);border-left-color:var(--ember)}
 .steps .cx{color:var(--faint);margin-right:6px}
 .detail{display:flex;flex-direction:column;gap:6px;margin-left:10px}
-.ph .eye{color:var(--faint);font-size:12.5px;padding:0 4px}
-.ph .eye.on{color:var(--ember);border:1px solid var(--ember);border-radius:10px;
-  padding:1px 7px;font-size:11.5px;letter-spacing:.02em}
-.ph .eye:hover{color:var(--ink)}
 
 /* permission — the thing this whole app exists for */
 .perm{border:1px solid var(--gold);background:color-mix(in srgb, var(--gold) 18%, var(--raise));border-radius:8px;padding:11px 12px}
@@ -699,7 +718,6 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .blrow .t{font-size:12.5px}
 
 /* pause / archive / order / pin / stage */
-.rit .a.on{color:var(--gold)}
 .rit.arc{opacity:.7}
 .rit.arc .dot{background:transparent;border:1px solid var(--line2)}
 .rit.dragging{opacity:.45}
@@ -822,7 +840,7 @@ details.tsec>.abody{padding:0 2px 14px}
  * (the chip says so), and find paints every match. */
 .log ::selection{background:color-mix(in srgb, var(--dusk) 42%, transparent)}
 .pane.selhold{position:relative}
-.pane.selhold::after{content:'⏸ paused while you select';position:absolute;top:44px;right:10px;
+.pane.selhold::after{content:'⏸ paused while you select';position:absolute;top:58px;right:10px;
   font-family:var(--mono);font-size:10.5px;letter-spacing:.5px;color:var(--gold);
   background:var(--raise);border:1px solid var(--line2);border-radius:8px;
   padding:2px 8px;pointer-events:none;z-index:3}
@@ -959,10 +977,8 @@ body{
   border-color:var(--hairline);border-radius:14px;
   background:color-mix(in srgb,var(--panel) 94%,transparent);box-shadow:var(--shadow-md);
 }
-.ph{min-height:42px;padding:8px 11px;border-bottom-color:var(--hairline);
+.ph{border-bottom-color:var(--hairline);
   background:linear-gradient(180deg,color-mix(in srgb,var(--raise) 96%,white 2%),var(--raise))}
-.ph .nm{font-size:12.5px;font-weight:650;letter-spacing:-.08px}
-.ph .pill{background:color-mix(in srgb,var(--ground) 26%,transparent)}
 .log{padding:16px 16px;gap:11px}
 .msg{font-size:13.5px;line-height:1.62}
 .composer{padding:10px 11px;border-top-color:var(--hairline);background:color-mix(in srgb,var(--raise) 94%,transparent)}
@@ -1018,7 +1034,8 @@ body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 @media(max-width:1100px){
   .app{grid-template-columns:190px minmax(0,1fr) 250px}
   .app.railshut{grid-template-columns:190px minmax(0,1fr) 38px}
-  .search-trigger span{display:none}
+  .rail .long{display:none}
+  .new{white-space:nowrap}
 }
 @media(max-width:820px){
   /* Include .railshut so its desktop column template does not leak onto mobile. */
@@ -1094,10 +1111,9 @@ body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 /* ── palette: attach, not browse ─────────────────────────────────────────
  * Light-only additions to the shared palette chrome: a snippet and a per-row hint.
  */
-.search-trigger{
-  /* In the left rail under New, the same width as the button above it. */
-  width:calc(100% - 28px);margin:0 14px 12px;justify-content:space-between;
-}
+.newrow .search-trigger{flex:1;width:auto;margin:0;justify-content:space-between}
+.search-trigger .si{font-size:14px;line-height:1;color:var(--faint);margin-right:-2px}
+.search-trigger .long{flex:1;text-align:left}
 .palrow{align-items:flex-start}
 .palt{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
 .palt .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1124,12 +1140,6 @@ body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 .msg.user .viatag{font-family:var(--mono);font-size:10px;letter-spacing:.6px;
   text-transform:uppercase;color:var(--faint);margin-right:8px}
 
-/* seats */
-.ph .pill.seat{cursor:pointer;color:var(--ink);border-color:var(--line2);text-transform:none;letter-spacing:0}
-.ph .pill.seat:hover{border-color:var(--ember)}
-.ph .pill.seat.withheld{color:var(--faint);border-style:dashed}
-.ph .x.seatadd{opacity:.55}
-.ph .x.seatadd:hover{opacity:1}
 
 /* a message from another pane's agent: visibly NOT the operator's bubble
    (left-aligned, outlined, sender on its own line) */
@@ -1159,7 +1169,8 @@ body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 
 /* New conversation + the ⚡ quick-start beside it. The row owns the margin
    so the two buttons sit flush; .new keeps its own look. */
-.newrow{display:flex;gap:6px;margin:0 12px 17px}
+.newrow{display:flex;gap:6px;margin:0 12px 8px}
+.newrow.tools{margin-bottom:16px}
 .newrow .new{flex:1;margin:0}
 .newquick{flex:none;width:36px;padding:0;border:1px solid color-mix(in srgb,var(--line2) 72%,transparent);
   border-radius:10px;background:var(--raise);color:var(--faint);font-size:13px;box-shadow:var(--shadow-sm)}
@@ -1184,12 +1195,6 @@ body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 .wtrow{display:flex;flex-direction:column;gap:4px}
 .wtrow .wtcut{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
 .hint.err{color:var(--rust)}
-.ph .pill.wt{cursor:pointer;font-family:var(--mono);background:none;color:var(--dusk);
-  border-color:var(--line2);white-space:nowrap;max-width:22em;overflow:hidden;text-overflow:ellipsis;
-  flex:0 1 auto;min-width:6.5em}
-.ph .pill.wt:hover{color:var(--ink);border-color:var(--ember)}
-.ph .pill.wt.warn{color:var(--rust);border-color:color-mix(in srgb, var(--rust) 55%, var(--line2))}
-.ph .pill.wt.gone{color:var(--faint);border-style:dashed}
 .ncard.wt{border-left-color:var(--sage)}
 dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh - 32px))}
 .dlg.rev{height:100%;box-sizing:border-box;gap:9px}
@@ -1233,8 +1238,27 @@ dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh 
 #rev-done a{color:var(--ember)}
 .dlg.rev menu .btn:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:820px){
-  .ph .pill.wt{max-width:9em}
+  .ph2 .f.wt{max-width:9em}
   dialog#revdlg{width:100vw;height:100vh;max-height:100vh;margin:0;border-radius:0}
   .revbody{grid-template-columns:1fr;grid-template-rows:minmax(90px,28%) 1fr}
   .dlg.rev menu{flex-wrap:wrap}
 }
+
+/* ── the pane menu ───────────────────────────────────────────────────────
+ * Every pane action that is not find, minimize or close. Dropped from the
+ * header's ⋯, or opened on a roster row by right-click. */
+.pmenu-veil{position:fixed;inset:0;z-index:79}
+.pmenu{position:fixed;z-index:80;min-width:228px;max-width:320px;padding:6px;
+  background:color-mix(in srgb,var(--panel) 96%,transparent);border:1px solid var(--line2);
+  border-radius:12px;box-shadow:var(--shadow-md);backdrop-filter:blur(24px) saturate(130%)}
+.pmenu .mh{font-size:12px;font-weight:650;color:var(--dim);padding:5px 10px 6px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pmenu .mi{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px 7px 8px;
+  border-radius:8px;text-align:left;font-size:12.5px;color:var(--ink)}
+.pmenu .mi:hover,.pmenu .mi:focus-visible{background:var(--raise);outline:none}
+.pmenu .mi.danger{color:var(--rust)}
+.pmenu .mi .chk{width:12px;flex:none;color:var(--sage);font-size:11px;text-align:center}
+.pmenu .mi .ml{flex:1}
+.pmenu .mi .mk{font-family:var(--mono);font-size:10.5px;color:var(--faint);
+  border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:16px}
+.pmenu .msep{height:1px;background:var(--line);margin:5px 6px}
