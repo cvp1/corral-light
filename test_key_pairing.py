@@ -28,7 +28,8 @@ from unittest import mock
 # shell that exported the real CORRAL_LIGHT_STATE (private-hub recipes do)
 # would keep it.
 _LIVE_STATE = (Path.home() / ".local/share/corral-light").resolve()
-os.environ["CORRAL_LIGHT_STATE"] = tempfile.mkdtemp(prefix="light-key-pairing-")
+from testkit.scratch import process_tmpdir, tmpdir                 # noqa: E402
+os.environ["CORRAL_LIGHT_STATE"] = process_tmpdir("light-key-pairing-")
 if Path(os.environ["CORRAL_LIGHT_STATE"]).resolve() == _LIVE_STATE:
     raise SystemExit("refusing: test_key_pairing would run against the live hub's state")
 
@@ -83,7 +84,7 @@ class Authn:
 @unittest.skipIf(OPENSSL is None, "no openssl on this machine")
 class Base(unittest.TestCase):
     def setUp(self):
-        d = Path(tempfile.mkdtemp(prefix="test-keypair-"))
+        d = Path(tmpdir(self, "test-keypair-"))
         self.state = d
         self.patches = [mock.patch.multiple(
             auth, STATE=d, LOCKFILE=d / "pair.lock", PAIRFILE=d / "pairing.json",

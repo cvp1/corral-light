@@ -252,7 +252,7 @@ class OrphansFromAPreviousHubAreReaped(OrphanRig):
 
     def _stand_in_hub(self, name="hub.py"):
         import acp
-        d = Path(tempfile.mkdtemp(prefix="stand-in-hub-"))
+        d = Path(tmpdir(self, "stand-in-hub-"))
         (d / name).write_text(self.STAND_IN_HUB)
         pidfile = d / "adapter.pid"
         hub = self.subprocess.Popen([sys.executable, str(d / name), str(pidfile)],
