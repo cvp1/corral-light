@@ -105,7 +105,7 @@ def run_lane(hub, lane, cwd, perm=True):
     word = random.choice(WORDS) + str(random.randint(10, 99))
     try:
         p = hub.post("/api/session/new", {"agent": lane["key"], "cwd": str(cwd),
-                                          "posture": "strict"},
+                                          "posture": "strict", "background": True},
                      timeout=consult.HANDSHAKE_S)["pane"]
     except ConsultError as e:
         row["open"] = f"no: {e}"[:80]

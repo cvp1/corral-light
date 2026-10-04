@@ -2466,7 +2466,9 @@ function render() {
       // Full title and state in the name: the label ellipsizes and colour alone
       // is not enough. Display state first, raw state in parentheses.
       const full = `${p.title || p.label} — ${DISPLAY_LABEL[cdisp] || cdisp}`
-                 + ` (${p.state}), click to restore`;
+                 + ` (${p.state})`
+                 + (p.background ? ', in the background until it needs you' : '')
+                 + ', click to restore';
       c.title = full;
       c.setAttribute('aria-label', full);
       c.onclick = () => setMin(p, false);
@@ -2666,7 +2668,7 @@ function render() {
 async function setMin(p, flag) {
   try {
     await api('/api/session/minimize', { pane: p.id, minimized: flag });
-    p.minimized = flag; render();
+    p.minimized = flag; p.background = false; render();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -3029,7 +3031,8 @@ async function renderRigList() {
 async function rigUp(name, btn) {
   const out = $('#rig-out');
   if (btn) btn.disabled = true;
-  out.replaceChildren(el('div', 'hint', `Bringing up ${name}… each seat may take a handshake.`));
+  out.replaceChildren(el('div', 'hint', `Bringing up ${name}… each seat may take a handshake. ` +
+    'Seats start minimized; one that needs you comes back on its own.'));
   try {
     const r = await api('/api/session/rigs/up', { name });
     out.replaceChildren(el('div', 'hint', `rig ${name}:`), ...rigOutcomeRows(r));

@@ -456,6 +456,17 @@ class AnUnsetPostureIsNotAClaim(unittest.TestCase):
     def test_an_explicit_posture_is_still_posted(self):
         self.assertEqual(self._new_body(posture="strict")["posture"], "strict")
 
+    def test_new_panes_open_in_the_background_by_default(self):
+        self.assertIs(self._new_body()["background"], True)
+        self.assertNotIn("background", self._new_body(background=False))
+        for verb in ("ask", "fanout"):
+            args = consult.build_parser().parse_args(
+                [verb, "--lane", "grok", "--prompt", "x"])
+            self.assertFalse(args.foreground)
+            args = consult.build_parser().parse_args(
+                [verb, "--lane", "grok", "--prompt", "x", "--foreground"])
+            self.assertTrue(args.foreground)
+
     def test_the_cli_no_longer_defaults_to_strict(self):
         """The argparse flag must not default to `strict` either."""
         for verb in ("ask", "fanout"):
