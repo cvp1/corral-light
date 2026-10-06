@@ -1904,6 +1904,15 @@ class Pane(_core.PaneBase):
     # Grok, docs/ux-10x-phase0.md). Code often contains "/", so these are not
     # held to the path-like rule; every other key is.
     CONTENT_KEYS = ("old_string", "new_string", "replace_all", "content", "variant", "edits")
+    EDIT_ITEM_KEYS = frozenset(("old_string", "new_string", "replace_all"))
+    LOCATION_KEYS = frozenset(("path", "line"))
+
+    @staticmethod
+    def _path_like(v):
+        """Could this unrecognised rawInput value name a file outside the
+        tree? A separator, a parent step or a home shorthand anywhere in it."""
+        blob = json.dumps(v, default=str)
+        return "/" in blob or ".." in blob or "~" in blob
 
     def _in_tree_write(self, req):
         """The paths of a write request when every one of them resolves inside
@@ -1918,10 +1927,11 @@ class Pane(_core.PaneBase):
             return None
         raw_paths = []
         for loc in tc.get("locations") or []:
-            if not isinstance(loc, dict):
+            # Only the shape lanes send: {path, line?}. A location naming its
+            # file any other way (a uri, say) is a path this check cannot see.
+            if not isinstance(loc, dict) or "path" not in loc or set(loc) - self.LOCATION_KEYS:
                 return None
-            if "path" in loc:
-                raw_paths.append(loc["path"])
+            raw_paths.append(loc["path"])
         for item in tc.get("content") or []:
             if isinstance(item, dict) and item.get("type") == "diff":
                 raw_paths.append(item.get("path"))
@@ -1931,9 +1941,14 @@ class Pane(_core.PaneBase):
         for k, v in (ri or {}).items():
             if k in self.PATH_KEYS:
                 raw_paths.append(v)
+            elif k == "edits":
+                # MultiEdit's list of text edits: text only, never a nested path.
+                if not isinstance(v, list) or not all(
+                        isinstance(x, dict) and not set(x) - self.EDIT_ITEM_KEYS for x in v):
+                    return None
             elif k in self.CONTENT_KEYS:
                 continue
-            elif "/" in json.dumps(v, default=str):
+            elif self._path_like(v):
                 return None                          # an unrecognised path-like key
         if not raw_paths:
             return None
@@ -2443,7 +2458,7 @@ class Manager(_core.ManagerBase):
 
     def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None,
                role=None, role_sha=None, worktree=False, title=None,
-               background=False, review_at_end=False):
+               background=False, review_at_end=False, challenge_of=None):
         """`background`: a bulk spawner's pane (rig, panel, eval, schedule)
         starts minimized and restores itself when it needs the operator."""
         if agent.startswith("host:"):
@@ -2497,6 +2512,9 @@ class Manager(_core.ManagerBase):
             if background:
                 # Before registration, so no browser ever sees it on the wall.
                 pane.minimized = pane.background = True
+            # A blind reviewer: set before start() so its first session/new
+            # carries no seat tools (Pane._native_mcp).
+            pane.challenge_of = challenge_of
             self.panes[pane.id] = pane
         if worktree:
             try:
@@ -2981,9 +2999,21 @@ class Manager(_core.ManagerBase):
         if spec.get("unavailable"):
             raise _wt.Refused("lane", f"{spec['label']}: {spec['unavailable']}")
         lock = self.__dict__.setdefault("_chl_lock", threading.Lock())
+        starting = self.__dict__.setdefault("_chl_starting", set())
+        # Check and reserve in one hold: two quick clicks must not both pass
+        # the busy check while the first is still freezing its snapshot.
         with lock:
-            if any(c.get("state") == "running" for c in p.challenges or ()):
+            if p.id in starting or any(c.get("state") == "running"
+                                       for c in p.challenges or ()):
                 raise _wt.Refused("busy", "a challenge of this branch is already running")
+            starting.add(p.id)
+        try:
+            return self._challenge_start(p, pane_id, lane, spec, criteria, lock)
+        finally:
+            with lock:
+                starting.discard(p.id)
+
+    def _challenge_start(self, p, pane_id, lane, spec, criteria, lock):
         snap = self.worktree_snapshot(pane_id, mark_reviewed=False)
         e = self.worktree_entry(p) or {}
         base = (e.get("base_ref") or "")[len("refs/heads/"):] or None
@@ -3001,8 +3031,10 @@ class Manager(_core.ManagerBase):
         with lock:
             p.challenges = ([rec] + [c for c in p.challenges or ()])[:_chl.MAX_CHALLENGES]
         try:
-            r = self.create(lane, str(cwd), posture="strict", background=True)
-            r.challenge_of = p.id
+            # challenge_of goes in before start(): the agent's MCP servers are
+            # fixed at session/new, so setting it afterwards leaves seat tools.
+            r = self.create(lane, str(cwd), posture="strict", background=True,
+                            challenge_of=p.id)
             r.title, r.title_locked = f"challenge · {branch}"[:80], True
             r.save_meta()
             rec["reviewerPane"], rec["model"] = r.id, r.model
@@ -3031,7 +3063,15 @@ class Manager(_core.ManagerBase):
         return out
 
     def _challenge_watch(self, p, cid, r):
-        """Wait for the reviewer's turn to end, its death, or the timeout (C7)."""
+        """Wait for the reviewer's turn to end, its death, or the timeout (C7).
+        Never leaves the challenge `running`: that would refuse every later one."""
+        try:
+            self._challenge_wait(p, cid, r)
+        except Exception as err:                 # noqa: BLE001 — recorded, never stranded
+            self._challenge_set(p, cid, state="failed",
+                                error=f"the hub could not read the review: {err!r}"[:400])
+
+    def _challenge_wait(self, p, cid, r):
         deadline = time.monotonic() + self.CHALLENGE_TIMEOUT_S
         while True:
             if self.panes.get(r.id) is not r:

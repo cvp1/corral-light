@@ -370,6 +370,11 @@ check(/wtRailCards\(panes, wtSeen\(\)\)/.test(fn('render')), 'render builds the 
   eq(blocked([rae(null)]), 1, 'T-SNP-16 a due review counts as blocked');
   eq(blocked([rae('d1'), rp('a', 'your-turn', s4)]), 0,
      'T-SNP-16 a reviewed one, or an ordinary card, does not');
+  eq(cards([{ ...rae(null), _disp: 'idle' }], {}).length, 1,
+     'T-SNP-16 an unreviewed review-at-end card survives idle (aged, or a peer turn)');
+  eq(cards([{ ...rae(null), _disp: 'working' }, { ...rae(null), _disp: 'paused' }], {}).length, 0,
+     'T-SNP-16 but not while the agent works, or on a paused pane');
+  eq(blocked([{ ...rae(null), _disp: 'idle' }]), 1, 'T-SNP-16 an idle due review still blocks');
   eq(blocked([{ ...rae(null), _disp: 'needs-you', pending: ['p1'] }]), 1,
      'T-SNP-16 a pending card first: the permission counts, the review waits for the turn');
   const r = fn('render');

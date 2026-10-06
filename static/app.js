@@ -1586,13 +1586,16 @@ function paneDir(p) {
 
 /* A worktree pane whose turn it is, with changes the user has not reviewed.
  * With "Review at the end" the hub keeps what was reviewed (so every device
- * agrees) and the card blocks: the approval for in-branch edits moved here. */
+ * agrees) and the card blocks: the approval for in-branch edits moved here.
+ * That card must not age away: once the turn has ended it stays through
+ * `idle` too (thirty quiet minutes, or a turn a peer started). */
 function wtRailCards(panes, seen) {
   return panes.filter(p => {
     const w = p.worktree, s = w && w.summary;
     const last = w && w.reviewAtEnd ? w.reviewedDigest : seen[p.id];
+    const shows = w && w.reviewAtEnd ? ['your-turn', 'idle'] : ['your-turn'];
     return !!(w && w.phase === 'active' && s && s.files > 0 &&
-              displayState(p) === 'your-turn' && s.digest !== last);
+              shows.includes(displayState(p)) && s.digest !== last);
   });
 }
 /* A review that blocks: a "Review at the end" pane with unreviewed changes. */

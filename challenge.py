@@ -16,6 +16,8 @@ MAX_FINDINGS = 50
 MAX_RAW = 20_000             # of the reviewer's answer kept with the challenge
 MAX_CRITERIA = 4_000
 FIELD_CAP = 1_000            # per finding field
+MAX_NAMES = 100              # file names listed in the prompt's header
+MAX_NAME = 300               # characters of one quoted file name there
 SEVERITIES = ("high", "medium", "low")
 VERDICTS = ("accept", "amend", "reject")
 
@@ -45,7 +47,12 @@ def build_prompt(criteria, base, diff, cap=PROMPT_CAP, nonce=None):
     criteria = str(criteria or "").strip()[:MAX_CRITERIA]
     tag = f"corral-diff-{nonce or secrets.token_hex(6)}"
     files = list((diff or {}).get("files") or [])
-    names = [f.get("path") or "?" for f in files]
+    # File names are the author's to choose (a newline, then instructions)
+    # and they sit outside the fence: quote each one so it stays one line of
+    # data, and cap how many and how long.
+    names = [json.dumps(str(f.get("path") or "?"))[:MAX_NAME] for f in files[:MAX_NAMES]]
+    if len(files) > MAX_NAMES:
+        names.append(f"and {len(files) - MAX_NAMES} more")
     head = INSTRUCTIONS.format(tag=tag) + (
         "\n\nAcceptance criteria (from the operator):\n" + criteria +
         f"\n\nBase branch: {base or '(unknown)'}. Files changed: " +
@@ -97,7 +104,7 @@ def parse_answer(text):
             continue
         try:
             line = int(f.get("line"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):     # 1e999 parses to inf
             line = None
         sev = str(f.get("severity") or "").lower()
         out.append({"file": _cap(f.get("file")) or None,

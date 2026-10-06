@@ -169,6 +169,31 @@ class ThePolicy(RaeCase):
         self.assertEqual(self.ask(p, self.edit(inside, rawInput={
             "file_path": inside, "new_string": "see /etc/hosts", "flag": True})), "auto")
 
+    def test_T_SNP_7b_paths_hidden_beside_a_good_one_raise_a_card(self):
+        p = self.rae()
+        inside = os.path.join(self.root(p), "a.txt")
+        outside = str(self.tmp / "x")
+        # A path nested in MultiEdit's edits list.
+        self.assert_card(p, self.edit(inside, rawInput={
+            "file_path": inside, "edits": [{"file_path": outside, "new_string": "x"}]}))
+        self.assert_card(p, self.edit(inside, rawInput={"file_path": inside, "edits": "x"}))
+        # A parent step or a home shorthand with no slash in it.
+        self.assert_card(p, self.edit(inside, rawInput={"file_path": inside, "target": ".."}))
+        self.assert_card(p, self.edit(inside, rawInput={"file_path": inside, "target": "~"}))
+        # A location that names its file some other way.
+        self.assert_card(p, self.edit(inside, rawInput={"file_path": inside},
+                                      locations=[{"path": inside}, {"uri": "file://" + outside}]))
+        self.assert_card(p, self.edit(inside, rawInput={"file_path": inside},
+                                      locations=[{"path": inside, "uri": "file://" + outside}]))
+        # The shapes the lanes really send still pass (docs/ux-10x-phase0.md).
+        self.assertEqual(self.ask(p, self.edit(inside, rawInput={
+            "file_path": inside, "edits": [{"old_string": "a/b", "new_string": "c", "replace_all": False}]})),
+            "auto")
+        self.assertEqual(self.ask(p, self.edit(inside, locations=[{"path": inside, "line": 3}],
+                                                rawInput={"file_path": inside, "variant": "SearchReplace",
+                                                          "old_string": "a", "new_string": "b",
+                                                          "replace_all": False})), "auto")
+
     def test_T_SNP_8_other_kinds_raise_a_card(self):
         p = self.rae()
         inside = os.path.join(self.root(p), "a.txt")
