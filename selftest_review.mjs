@@ -331,17 +331,8 @@ eq(wtRailCards([rp('a', 'working', s4), rp('b', 'needs-you', s4), rp('c', 'idle'
 eq(wtRailCards([rp('a', 'your-turn', { ...s4, files: 0 }), rp('b', 'your-turn', null),
                 rp('c', 'your-turn', s4, 'trashed'), { id: 'd', _disp: 'your-turn', pending: [] }], {}), [],
    'T-UI-12 no card without changes, a summary, an active branch or a worktree');
-// Blocked counts pending permissions and open questions (docs/ux-10x-plan.md
-// A1), never review cards: a branch with unreviewed changes adds nothing.
-check(/railFold\(items, blockedCount\(panes\), quiet, !!solo\)/.test(fn('render')),
-      'T-UI-12 render passes blockedCount as blocked');
-{
-  const blockedCount = load('blockedCount');
-  const wt = { phase: 'active', summary: { files: 3, digest: 'd1' } };
-  check(blockedCount([{ pending: [], worktree: wt }]) === 0 &&
-        blockedCount([{ pending: ['r'], worktree: wt }]) === 1,
-        'T-UI-12 blocked never counts review cards');
-}
+check(/railFold\(items, panes\.reduce\(\(a, p\) => a \+ p\.pending\.length, 0\), quiet\)/.test(fn('render')),
+      'T-UI-12 blocked still counts only pending permissions, never review cards');
 /* On a phone the rail is an overlay: review cards count, but do not pop it open. */
 const railOpens = load('railOpens');
 check(railOpens(1, 0, true, null) && railOpens(1, 1, false, null), 'a card opens a folded rail on a wide screen');

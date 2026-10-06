@@ -108,10 +108,6 @@ class TheCoreNeverImportsFullCorral(unittest.TestCase):
             for name in filenames:
                 if name == "LICENSE":
                     continue
-                # A git worktree's `.git` is a file pointing at the main
-                # checkout by absolute path: local, never shipped.
-                if name == ".git":
-                    continue
                 f = Path(dirpath) / name
                 try:
                     text = f.read_text(encoding="utf-8")
@@ -1791,11 +1787,7 @@ class EveryUiCallHasADefinition(unittest.TestCase):
     # Each confirmed by hand to be "word(" inside a string, not an undefined
     # call.
     KNOWN_LOCAL_FALSE_POSITIVES = {"approval", "close", "earlier", "match",
-                                   "minimize",
-                                   # seenPanes' box lookup parameter and
-                                   # askPreamble's Promise executor argument,
-                                   # both checked by hand.
-                                   "rectOf", "resolve"}
+                                   "minimize"}
 
     def test_every_bare_call_has_a_matching_definition(self):
         import re
@@ -3246,12 +3238,6 @@ class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
         """T-UI-1..14: the New row, the pill, parseUnified, the review dialog."""
         _run_node_selftest(self, "selftest_review.mjs",
                            "the own-branch row, pill and review dialog")
-
-    def test_the_needs_you_rail_covers_every_kind_of_waiting(self):
-        """T-INB-1..9: questions and paused panes in the rail, the phone's
-        solo view, seen means on screen, the cross-feed dialog."""
-        _run_node_selftest(self, "selftest_inbox.mjs",
-                           "the Needs-you rail, solo view and cross-feed dialog")
 
 
 class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
