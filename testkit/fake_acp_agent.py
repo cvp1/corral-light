@@ -30,6 +30,14 @@ Prompt verbs (the text of the prompt):
     reset-hard <rev>  -> git reset -q --hard <rev>
     pwd               -> answers with os.getcwd()
     perm-always       -> like perm, but also offers an allow_always option
+    permjson <json>   -> asks one session/request_permission built from a JSON
+                         object {kind, title, locations, rawInput, content,
+                         options}; any key left out is left out of the
+                         request (options default to allow_once/reject_once).
+                         `pad: n` sets rawInput.new_string to n bytes (an
+                         oversize request without an oversize prompt);
+                         `delay: s` waits s seconds before asking.
+                         Reports the answer; never runs anything
     tool-edit <path>, tool-read <path>
                       -> reports a tool_call of that kind at <path>, then waits
                          3 s (a cancel ends the turn early)
@@ -190,6 +198,27 @@ def prompt(rid, params):
                   "options": [{"optionId": "always", "name": "Always allow", "kind": "allow_always"},
                               {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
                               {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]}})
+        ev.wait()
+        chunk(sid, "permission: " + json.dumps(_answers[pid].get("result")))
+    elif words[:1] == ["permjson"]:
+        spec = json.loads(text.split(None, 1)[1])
+        _next[0] += 1
+        pid = _next[0]
+        ev = threading.Event()
+        _answers[pid] = {"ev": ev}
+        tc = {"toolCallId": "tj%d" % pid}
+        for k in ("kind", "title", "locations", "rawInput", "content"):
+            if k in spec:
+                tc[k] = spec[k]
+        if spec.get("pad"):
+            tc["rawInput"] = dict(tc.get("rawInput") or {}, new_string="x" * int(spec["pad"]))
+        if spec.get("delay"):
+            time.sleep(float(spec["delay"]))
+        opts = spec.get("options") or [
+            {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+            {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]
+        send({"jsonrpc": "2.0", "id": pid, "method": "session/request_permission",
+              "params": {"sessionId": sid, "toolCall": tc, "options": opts}})
         ev.wait()
         chunk(sid, "permission: " + json.dumps(_answers[pid].get("result")))
     elif text == "die":

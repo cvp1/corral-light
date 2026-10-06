@@ -782,6 +782,7 @@ class Handler(BaseHTTPRequestHandler):
                                       posture, (b.get("model") or "").strip() or None,
                                       effort, role=role, role_sha=role_sha,
                                       worktree=b.get("worktree") is True,
+                                      review_at_end=b.get("reviewAtEnd") is True,
                                       title=(b.get("title") or "").strip()[:80] or None,
                                       # Bulk spawners: minimized until it needs you.
                                       background=b.get("background") is True)

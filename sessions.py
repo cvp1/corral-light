@@ -68,6 +68,20 @@ TURN_VIAS = _core.TURN_VIAS
 # unknown, so the transcript never claims "you" for an answer it cannot place.
 ANSWER_VIAS = ("wall", "terminal", "script")
 
+
+def perm_digest(req):
+    """(bytes, sha256) of a permission request's displayed body, exactly as the
+    core's _on_permission computes them for a card (test: T-SNP-1)."""
+    tc = req.get("toolCall") or {}
+    body = {"rawInput": tc.get("rawInput"),
+            "content": tc.get("content") or [],
+            "locations": tc.get("locations") or []}
+    try:
+        blob = json.dumps(body, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        blob = repr(body)
+    return len(blob), hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
+
 MAX_ROSTER = MAX_PANES * 5      # cap on all panes, live or detached
 MAX_PROMPT = 200_000
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
@@ -770,8 +784,14 @@ class Pane(_core.PaneBase):
     """One conversation: an agent process + its event history."""
 
     # worktree_id: the registry entry (worktrees.py) this pane owns, or None.
-    META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id",)
+    # review_at_end: in-tree edits are allowed once by the hub and the grant moves
+    # to the review (docs/ux-10x-plan.md Part B). reviewed_digest: the summary
+    # digest the operator last opened in review, so the blocking card clears
+    # on every device at once.
+    META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id", "review_at_end", "reviewed_digest")
     worktree_id = None
+    review_at_end = False
+    reviewed_digest = None
 
 
 
@@ -863,6 +883,8 @@ class Pane(_core.PaneBase):
         p.role_sha = meta.get("role_sha")
         p.role_delivery = meta.get("role_delivery")
         p.worktree_id = meta.get("worktree_id")
+        p.review_at_end = bool(meta.get("review_at_end")) and bool(p.worktree_id)
+        p.reviewed_digest = meta.get("reviewed_digest")
         # No process of its own yet.
         p.pid = p.pgid = p.pid_start = None
         p._init_runtime()
@@ -1801,7 +1823,9 @@ class Pane(_core.PaneBase):
                 "baseSha": e.get("base_sha"), "phase": e.get("phase"),
                 "blocked": self.worktree_blocked, "held": self.held,
                 "summary": self.worktree_summary,
-                "published": e.get("published"), "lastCommit": e.get("last_commit")}
+                "published": e.get("published"), "lastCommit": e.get("last_commit"),
+                "reviewAtEnd": bool(self.review_at_end),
+                "reviewedDigest": self.reviewed_digest}
 
     def release_hold(self, drain):
         """End a review action's hold. `drain`: run what queued meanwhile (after
@@ -1829,13 +1853,107 @@ class Pane(_core.PaneBase):
     def _on_permission(self, req):
         """Worktree panes never offer "allow always": Phase 0 showed Claude saves
         such rules to the MAIN checkout's .claude/settings.local.json, so one
-        worktree's approval would widen every later session there."""
+        worktree's approval would widen every later session there.
+
+        "Review at the end" (Part B): an edit whose every path is provably inside
+        the worktree is allowed once here, recorded as `permission_auto`, and
+        the grant moves to the review of the frozen diff. Anything in doubt
+        raises today's card unchanged."""
         if self.worktree_id:
             opts = req.get("options") or []
             kept = [o for o in opts if str(o.get("kind", "")) != "allow_always"]
             if kept and len(kept) != len(opts):
                 req = dict(req, options=kept)
+            if self.review_at_end and self._auto_allow(req):
+                return None
         return super()._on_permission(req)
+
+    # rawInput keys that name the file a write tool touches (Part B, §2.2).
+    PATH_KEYS = ("file_path", "path", "notebook_path", "old_path", "new_path", "destination")
+    # rawInput keys seen to carry the edit's text, never a path (Claude and
+    # Grok, docs/ux-10x-phase0.md). Code often contains "/", so these are not
+    # held to the path-like rule; every other key is.
+    CONTENT_KEYS = ("old_string", "new_string", "replace_all", "content", "variant", "edits")
+
+    def _in_tree_write(self, req):
+        """The paths of a write request when every one of them resolves inside
+        this pane's worktree and outside any git admin dir, else None. Fails
+        closed: no path, an unknown kind, an unknown path-like key, a path
+        that is not a string, or any doubt at all -> None."""
+        tc = req.get("toolCall") or {}
+        if tc.get("kind") not in self.WRITE_KINDS:
+            return None
+        e = self.mgr.worktree_entry(self)
+        if not e or e.get("phase") != "active":
+            return None
+        raw_paths = []
+        for loc in tc.get("locations") or []:
+            if not isinstance(loc, dict):
+                return None
+            if "path" in loc:
+                raw_paths.append(loc["path"])
+        for item in tc.get("content") or []:
+            if isinstance(item, dict) and item.get("type") == "diff":
+                raw_paths.append(item.get("path"))
+        ri = tc.get("rawInput")
+        if ri is not None and not isinstance(ri, dict):
+            return None
+        for k, v in (ri or {}).items():
+            if k in self.PATH_KEYS:
+                raw_paths.append(v)
+            elif k in self.CONTENT_KEYS:
+                continue
+            elif "/" in json.dumps(v, default=str):
+                return None                          # an unrecognised path-like key
+        if not raw_paths:
+            return None
+        root = os.path.realpath(e["path"])
+        admin = os.path.realpath(Path(e["common_dir"]) / "worktrees" / e["admin_name"])
+        base = os.path.realpath(self.cwd)
+        out = []
+        for raw in raw_paths:
+            if not isinstance(raw, str) or not raw or "\0" in raw:
+                return None
+            real = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(base, raw))
+            if not real.startswith(root + os.sep):
+                return None                          # outside, or the root itself
+            if real == admin or real.startswith(admin + os.sep):
+                return None
+            if ".git" in Path(os.path.relpath(real, root)).parts:
+                return None                          # the .git file, or a nested repo
+            if raw not in out:
+                out.append(raw)
+        return out
+
+    def _auto_allow(self, req):
+        """Answer an in-tree write allow-once and record it. True when answered;
+        False sends the request to the operator's card as today."""
+        try:
+            if self.question or getattr(self, "_gate_hold", False) or self.held:
+                return False
+            paths = self._in_tree_write(req)
+            if not paths:
+                return False
+            opt = next((o for o in req.get("options") or []
+                        if str(o.get("kind", "")) == "allow_once"), None)
+            if not opt or not opt.get("optionId"):
+                return False
+            size, digest = perm_digest(req)
+            if size > _core.MAX_PERM_BYTES:
+                return False                         # oversize: refuse-only, on a card
+            if not self.client or not self.client.answer_permission(req.get("requestId"),
+                                                                    opt["optionId"]):
+                return False
+        except Exception as err:                     # noqa: BLE001 — fail closed, loudly
+            print(f"corral-light: review-at-end check failed on pane {self.id}: {err!r}",
+                  file=sys.stderr, flush=True)
+            return False
+        tc = req.get("toolCall") or {}
+        self.emit("permission_auto", {
+            "requestId": req.get("requestId"), "title": tc.get("title"),
+            "kind": tc.get("kind"), "paths": paths[:8], "digest": digest,
+            "bytes": size, "optionId": opt["optionId"], "optionKind": "allow_once"})
+        return True
 
     def answer(self, request_id, option_id, digest=None, via=None):
         req = self.pending.get(request_id)
@@ -2295,7 +2413,7 @@ class Manager(_core.ManagerBase):
 
     def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None,
                role=None, role_sha=None, worktree=False, title=None,
-               background=False):
+               background=False, review_at_end=False):
         """`background`: a bulk spawner's pane (rig, panel, eval, schedule)
         starts minimized and restores itself when it needs the operator."""
         if agent.startswith("host:"):
@@ -2321,6 +2439,9 @@ class Manager(_core.ManagerBase):
             raise ValueError("that folder belongs to another pane's own branch; "
                              "open or resume that pane instead")
         pr = None
+        if review_at_end and not worktree:
+            raise ValueError("Review at the end needs an own branch: without one "
+                             "every edit is approved on its card, as today")
         if worktree:
             why = worktree_refusal(agent)
             if why:
@@ -2355,6 +2476,7 @@ class Manager(_core.ManagerBase):
                     self.panes.pop(pane.id, None)  # no worktree, no pane
                 raise
             pane.worktree_id = e["id"]
+            pane.review_at_end = bool(review_at_end)
             pane.cwd = str(_wt.agent_cwd(e))
             pane.title = Pane._default_title(agent, cwd)   # the repo's name, not the slug
             pane._preamble_due = True
@@ -2771,6 +2893,12 @@ class Manager(_core.ManagerBase):
             snap = _wt.snapshot(e, tmp_dir=p.dir)
             snap["diff"] = _wt.diff(e, snap["tree"])
             snap["summary"] = p.worktree_summary = _wt.summary(e)
+            # Opening review is what clears the blocking card, on every device.
+            digest = (snap["summary"] or {}).get("digest")
+            if digest and digest != p.reviewed_digest:
+                p.reviewed_digest = digest
+                p.save_meta()
+                p.emit("worktree", {"reviewed": digest}, activity=False)
             return _wt.fit_review(snap)       # the encoded response fits its cap
         return self._worktree_action(pane_id, go, drain_after=True)
 

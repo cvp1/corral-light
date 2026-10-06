@@ -1,12 +1,12 @@
 #!/usr/bin/python3
 """T-ISO-1: the own-branch suites touch nothing of the user's.
 
-Runs test_worktrees, test_worktree_routes and test_worktrees_cli in a child
-process with HOME and TMPDIR pointed at a fresh temp dir and the state
-variables removed. Every git call logs its working directory (worktrees._run,
-active only under CORRAL_WT_TEST=1 with CORRAL_WT_ISO_LOG set); any outside the
-temp dir fails the run, and so does any change to the real worktree root or
-registry, listed before and after.
+Runs test_worktrees, test_worktree_routes, test_worktrees_cli and
+test_review_at_end in a child process with HOME and TMPDIR pointed at a fresh
+temp dir and the state variables removed. Every git call logs its working
+directory (worktrees._run, active only under CORRAL_WT_TEST=1 with
+CORRAL_WT_ISO_LOG set); any outside the temp dir fails the run, and so does
+any change to the real worktree root or registry, listed before and after.
 
 Collected by test_corral_light.py. Run alone: python3 -m unittest test_worktrees_iso -v
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 from testkit.scratch import tmpdir
 
 ROOT = Path(__file__).resolve().parent
-SUITES = ("test_worktrees", "test_worktree_routes", "test_worktrees_cli")
+SUITES = ("test_worktrees", "test_worktree_routes", "test_worktrees_cli", "test_review_at_end")
 
 
 def listing(d):

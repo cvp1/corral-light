@@ -332,7 +332,8 @@ eq(wtRailCards([rp('a', 'your-turn', { ...s4, files: 0 }), rp('b', 'your-turn', 
                 rp('c', 'your-turn', s4, 'trashed'), { id: 'd', _disp: 'your-turn', pending: [] }], {}), [],
    'T-UI-12 no card without changes, a summary, an active branch or a worktree');
 // Blocked counts pending permissions and open questions (docs/ux-10x-plan.md
-// A1), never review cards: a branch with unreviewed changes adds nothing.
+// A1), never an ordinary review card: a branch with unreviewed changes adds
+// nothing. ("Review at the end" panes are the exception, T-SNP-16 below.)
 check(/railFold\(items, blockedCount\(panes\), quiet, !!solo\)/.test(fn('render')),
       'T-UI-12 render passes blockedCount as blocked');
 {
@@ -350,6 +351,56 @@ check(railOpens(2, 1, true, null), 'anything else in the rail still opens it on 
 check(!railOpens(3, 0, false, true) && railOpens(0, 0, true, false), 'a hand-fold or hand-open wins');
 check(/railOpens\(/.test(fn('railFold')), 'railFold decides through railOpens');
 check(/wtRailCards\(panes, wtSeen\(\)\)/.test(fn('render')), 'render builds the review cards');
+
+/* ── T-SNP-16 (browser): "Review at the end" makes the review card block ─── */
+{
+  const disp = { displayState: p => p._disp };
+  const cards = load('wtRailCards', [], disp);
+  const due = load('wtReviewDue', ['wtRailCards'], disp);
+  const blocked = load('blockedCount', ['wtReviewDue', 'wtRailCards'], disp);
+  const rae = (reviewed, extra = {}) => ({ id: 'r', _disp: 'your-turn', pending: [],
+    worktree: { ...wt, summary: s4, reviewAtEnd: true, reviewedDigest: reviewed, ...extra } });
+  eq(cards([rae(null)], {}).length, 1, 'T-SNP-16 unreviewed changes: a card');
+  eq(cards([rae('d1')], {}).length, 0, 'T-SNP-16 the hub says reviewed: no card');
+  eq(cards([rae(null)], { r: 'd1' }).length, 1,
+     'T-SNP-16 this browser\'s "Not now" cannot hide a review-at-end card');
+  eq(cards([rae('d0')], {}).length, 1, 'T-SNP-16 changed since the review: a card again');
+  check(due(rae(null)) && !due(rae('d1')) && !due(rp('a', 'your-turn', s4)),
+        'T-SNP-16 only a review-at-end pane with unreviewed changes is due');
+  eq(blocked([rae(null)]), 1, 'T-SNP-16 a due review counts as blocked');
+  eq(blocked([rae('d1'), rp('a', 'your-turn', s4)]), 0,
+     'T-SNP-16 a reviewed one, or an ordinary card, does not');
+  eq(blocked([{ ...rae(null), _disp: 'needs-you', pending: ['p1'] }]), 1,
+     'T-SNP-16 a pending card first: the permission counts, the review waits for the turn');
+  const r = fn('render');
+  check(/if \(!due\)[\s\S]*Not now/.test(r), 'T-SNP-16 no "Not now" on a blocking review card');
+  check(/if \(!due\) quiet\+\+/.test(r), 'T-SNP-16 a blocking review card is not quiet');
+  check(/wtReviewDue\(p\)/.test(fn('setTitle')), 'T-SNP-16 the tab title counts a due review');
+}
+
+/* "Review at the end" in the New dialog: only with an own branch. */
+{
+  const vis = { ...wtRowModel(repo, null, false), cwd: '~/aios', agent: 'claude' };
+  eq(wtSubmit(vis, true, '~/aios', 'claude', true), { worktree: true, reviewAtEnd: true },
+     'the option rides on a checked own branch');
+  eq(wtSubmit(vis, false, '~/aios', 'claude', true), {}, 'never without an own branch');
+  eq(wtSubmit({ show: false, cwd: '~/aios', agent: 'claude' }, true, '~/aios', 'claude', true), {},
+     'never on a hidden row');
+  check(/id="rae-check"[^>]*class="[^"]*hide|class="[^"]*hide[^"]*" id="rae-check"/.test(html),
+        'the option starts hidden');
+  check(/#f-wt'\)\.onchange = paintRae/.test(src), 'ticking Own branch shows the option');
+}
+
+/* The transcript names every write the hub allowed. */
+{
+  const autoAllowedText = load('autoAllowedText', ['homeTilde']);
+  const p = { worktree: { path: '/wt/repo-1/abc' } };
+  eq(autoAllowedText(p, { kind: 'edit', paths: ['/wt/repo-1/abc/calc/ops.py', 'rel.txt'],
+                          digest: '0123456789abcdef' }),
+     'allowed in-branch edit: calc/ops.py, rel.txt · 01234567', 'permission_auto line');
+  check(/case 'permission_auto'/.test(fn('renderLog')), 'renderLog shows permission_auto');
+  check(/d\.reviewed/.test(src), 'a reviewed event updates the pane');
+}
 
 /* ── T-UI-13: `r` outside text fields only ──────────────────────────────── */
 const reviewKey = load('reviewKey', ['isTypingTarget']);

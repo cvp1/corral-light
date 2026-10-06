@@ -856,6 +856,15 @@ function renderLog(p) {
             p.deadCause === 'auth') line.appendChild(signInButton('banner', p.id));
         break;
       }
+      // "Review at the end": an in-branch edit the hub allowed once. Always
+      // shown, so the transcript names every write that skipped a card.
+      case 'permission_auto': {
+        flush();
+        const row = log.appendChild(el('div', 'sys auto', autoAllowedText(p, d)));
+        row.title = `allowed once by the hub: every path is inside this pane's own branch\n` +
+                    `the approval is the review of the whole change\ndigest ${d.digest || '?'}`;
+        break;
+      }
       // Quiet unless you asked for detail.
       case 'permission_answered':
         if (detailed) { flush(); log.appendChild(el('div', 'sys', answeredBy(d))); }
@@ -909,6 +918,16 @@ function workingTick() {
 /* Who answered a permission card, in words. The hub records the answering
  * client's own label (`via`); only the wall and the operator's terminal are
  * "you". A script's answer, or one recorded before labels existed, never is. */
+/* One line for a hub-allowed in-branch edit: paths relative to the branch. */
+function autoAllowedText(p, d) {
+  const root = String((p.worktree && p.worktree.path) || '').replace(/\/+$/, '');
+  const rel = x => root && String(x).startsWith(root + '/') ? String(x).slice(root.length + 1)
+                                                             : homeTilde(x);
+  const paths = (d.paths || []).map(rel);
+  return `allowed in-branch ${d.kind || 'edit'}: ${paths.join(', ') || '?'} · ` +
+         String(d.digest || '').slice(0, 8);
+}
+
 function answeredBy(d) {
   const opt = `“${d.optionId}”`;
   if (d.via === 'wall') return `you chose ${opt}`;
@@ -1425,6 +1444,7 @@ function openPaneMenu(p, at) {
  * this block parses HTML (T-UI-8). */
 const WT_KEY = 'corral.ownBranch';         // repo top -> the checkbox, last time
 const WT_SEEN_KEY = 'corral.wtSeen';       // pane id -> summary digest last reviewed
+const RAE_KEY = 'corral.reviewAtEnd';      // repo top -> "Review at the end", last time
 function shortSha(s) { return String(s || '').slice(0, 7); }
 function homeTilde(s) {                   // anywhere in the text: warnings embed paths
   return String(s || '').replace(/(^|[\s'"(])\/(?:home|Users)\/[^/\s'"]+/g, '$1~');
@@ -1442,6 +1462,12 @@ function wtRemember(top, on) {
   const m = wtStore(WT_KEY);
   if (on) m[top] = true; else delete m[top];
   localStorage.setItem(WT_KEY, JSON.stringify(m));
+}
+function raeRemembered(top) { return wtStore(RAE_KEY)[top] === true; }
+function raeRemember(top, on) {
+  const m = wtStore(RAE_KEY);
+  if (on) m[top] = true; else delete m[top];
+  localStorage.setItem(RAE_KEY, JSON.stringify(m));
 }
 function wtSeen() { return wtStore(WT_SEEN_KEY); }
 function wtMarkSeen(id, summary) {
@@ -1468,12 +1494,13 @@ function wtRowModel(probe, laneRefusal, remembered) {
 
 /* The body's `worktree` key: sent only when the box is checked AND visible,
  * and only for the folder and lane the probe answered about. */
-function wtSubmit(model, checked, cwd, agent) {
+function wtSubmit(model, checked, cwd, agent, rae) {
   if (!checked || !model || !model.show || !model.checkbox) return {};
   if (model.cwd !== cwd || model.agent !== agent)
     return { error: 'the folder or lane changed after it was checked for an own branch; ' +
                     'open New again' };
-  return { worktree: true };
+  // "Review at the end" rides only on an own branch (the hub refuses it alone).
+  return rae ? { worktree: true, reviewAtEnd: true } : { worktree: true };
 }
 
 const WTP = { t: null, seq: 0 };
@@ -1496,6 +1523,7 @@ async function wtProbe(dlg) {
   const m = wtRowModel(pr, agent in lanes ? lanes[agent] : 'unknown lane',
                        !!(pr && pr.top && wtRemembered(pr.top)));
   m.cwd = cwd; m.agent = agent;
+  m.rae = !!(pr && pr.top && raeRemembered(pr.top));
   dlg._wt = m;
   paintWtRow(m);
 }
@@ -1505,11 +1533,22 @@ function paintWtRow(m) {
   row.classList.toggle('hide', !m.show);
   $('#wt-check').classList.toggle('hide', !m.checkbox);
   $('#f-wt').checked = !!m.checked;
+  $('#f-rae').checked = !!m.rae;
+  paintRae();
   $('#wt-cut').textContent = m.cut || '';
   const hint = $('#wthint');
   hint.textContent = m.refusal ? 'Own branch unavailable: ' + m.refusal
                                : (m.warnings || []).join(' ');
   hint.classList.toggle('err', !!m.refusal);
+}
+
+/* "Review at the end" shows only under a ticked, visible Own branch box. */
+function paintRae() {
+  const row = $('#rae-check');
+  if (!row) return;
+  const on = !$('#wtrow').classList.contains('hide') &&
+             !$('#wt-check').classList.contains('hide') && $('#f-wt').checked;
+  row.classList.toggle('hide', !on);
 }
 
 /* The header pill: `⎇ fix-login · 4 files +120 −8`. */
@@ -1545,13 +1584,20 @@ function paneDir(p) {
   return String((w && w.repo) || p.cwd || '').split('/').pop();
 }
 
-/* A worktree pane whose turn it is, with changes the user has not reviewed. */
+/* A worktree pane whose turn it is, with changes the user has not reviewed.
+ * With "Review at the end" the hub keeps what was reviewed (so every device
+ * agrees) and the card blocks: the approval for in-branch edits moved here. */
 function wtRailCards(panes, seen) {
   return panes.filter(p => {
     const w = p.worktree, s = w && w.summary;
+    const last = w && w.reviewAtEnd ? w.reviewedDigest : seen[p.id];
     return !!(w && w.phase === 'active' && s && s.files > 0 &&
-              displayState(p) === 'your-turn' && s.digest !== seen[p.id]);
+              displayState(p) === 'your-turn' && s.digest !== last);
   });
+}
+/* A review that blocks: a "Review at the end" pane with unreviewed changes. */
+function wtReviewDue(p) {
+  return !!(p.worktree && p.worktree.reviewAtEnd && wtRailCards([p], {}).length);
 }
 
 /* `r` opens review: no modifier, not in a text field, not over a dialog. */
@@ -2515,7 +2561,8 @@ function setTitle(panes) {
   let need = 0, turn = 0;
   for (const p of panes) {
     const d = displayState(p);
-    if (d === 'needs-you') need++;
+    // A due "Review at the end" review is the approval, so it needs you.
+    if (d === 'needs-you' || (p.worktree && p.worktree.reviewAtEnd && wtReviewDue(p))) need++;
     else if (d === 'your-turn') turn++;
   }
   document.title = need ? `${need} need you · Corral`
@@ -2895,22 +2942,30 @@ function render() {
     c.appendChild(acts);
     n.appendChild(c); items++;
   }
-  // Own branches with changes not yet reviewed. Never blocking: `blocked`
-  // below counts pending permissions only.
+  // Own branches with changes not yet reviewed. Quiet, except on a "Review at
+  // the end" pane: its edits ran without cards, so this card is the approval
+  // and blocks (counted by blockedCount), with no Not now.
   let quiet = 0;
   for (const p of wtRailCards(panes, wtSeen())) {
-    const c = el('div', 'ncard wt');
+    const due = !!p.worktree.reviewAtEnd;
+    const c = el('div', 'ncard wt' + (due ? ' due' : ''));
     c.appendChild(el('div', 't', `${p.title || p.label} — ready to review`));
     c.appendChild(el('div', 'm', wtPillModel(p.worktree).text));
+    if (due) c.appendChild(el('div', 'm',
+      'its in-branch edits ran without cards; approve or discard the whole change here'));
     const acts = el('div', 'facts');
     const go = el('button', 'fbtn', 'Review');
     go.onclick = () => openReview(p);
-    const later = el('button', 'fbtn', 'Not now');
-    later.title = 'hide this card until the branch changes again';
-    later.onclick = () => { wtMarkSeen(p.id, p.worktree.summary); render(); };
-    acts.append(go, later);
+    acts.append(go);
+    if (!due) {
+      const later = el('button', 'fbtn', 'Not now');
+      later.title = 'hide this card until the branch changes again';
+      later.onclick = () => { wtMarkSeen(p.id, p.worktree.summary); render(); };
+      acts.append(later);
+    }
     c.appendChild(acts);
-    n.appendChild(c); items++; quiet++;
+    n.appendChild(c); items++;
+    if (!due) quiet++;
   }
   // Paused panes: a quiet list under the cards, one Resume each (no Resume-all:
   // waking many at once can stampede new cards). Never blocking.
@@ -2957,7 +3012,8 @@ function railExtras(panes) {
  * questions. Drives the hot count on the folded strip and the phone's pop-open. */
 function blockedCount(panes) {
   return panes.reduce((a, p) => a + (p.pending || []).length +
-                                 (p.question && p.question.text ? 1 : 0), 0);
+                                 (p.question && p.question.text ? 1 : 0) +
+                                 (p.worktree && p.worktree.reviewAtEnd && wtReviewDue(p) ? 1 : 0), 0);
 }
 /* The pane shown alone on a phone, or null: only at phone width and only while
  * the pane exists. */
@@ -3270,6 +3326,7 @@ function connect() {
     // Own branch: a turn's summary, and the actions that change the entry.
     if (ev.kind === 'worktree' && p.worktree) {
       if (d.summary) p.worktree.summary = d.summary;
+      if (d.reviewed) p.worktree.reviewedDigest = d.reviewed;
       if (d.commit || d.published || d.discarded) refresh().catch(() => {});
     }
     scheduleRender();
@@ -3626,6 +3683,7 @@ function wireDialog() {
     dlg._wt = { show: false };
     paintWtRow(dlg._wt);
     $('#f-cwd').oninput = () => wtProbeSoon(dlg, 300);
+    $('#f-wt').onchange = paintRae;
     wtProbeSoon(dlg, 0);
     fillHost();
     fillCfg();
@@ -3652,8 +3710,12 @@ function wireDialog() {
     // "none".
     if (posture) common.posture = posture;
     // Own branch: only when checked, visible, and probed for this folder and lane.
-    const wtPick = wtSubmit(dlg._wt, $('#f-wt').checked, cwd, common.agent);
-    if (dlg._wt && dlg._wt.checkbox && dlg._wt.cwd === cwd) wtRemember(dlg._wt.top, $('#f-wt').checked);
+    const raeOn = !$('#rae-check').classList.contains('hide') && $('#f-rae').checked;
+    const wtPick = wtSubmit(dlg._wt, $('#f-wt').checked, cwd, common.agent, raeOn);
+    if (dlg._wt && dlg._wt.checkbox && dlg._wt.cwd === cwd) {
+      wtRemember(dlg._wt.top, $('#f-wt').checked);
+      if ($('#f-wt').checked) raeRemember(dlg._wt.top, $('#f-rae').checked);
+    }
     if (wtPick.error) { toast(wtPick.error, true); return; }
     if ($('#f-quick').checked) {
       const a = S.agents.find(x => x.key === common.agent) || {};
