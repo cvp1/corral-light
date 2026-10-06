@@ -1797,6 +1797,20 @@ class LifecycleBasics(LifecycleCase):
         self.say(q, "pwd")
         self.assertIn(os.path.realpath(self.entry(q)["path"]), self.texts(q))
 
+    def test_T_LIF_9b_after_a_restart_the_change_summary_is_recounted(self):
+        p = self.pane()
+        self.say(p, "write a.txt before restart")
+        self.assertTrue(wait_for(lambda: (p.worktree_summary or {}).get("files")))
+        meta = wt.json.loads((p.dir / "meta.json").read_text())
+        self.mgr.panes[p.id].pause()
+        q = self.sessions.Pane.from_meta(meta, self.mgr)
+        self.assertIsNone(q.worktree_summary)          # memory only, lost with the hub
+        self.mgr.panes[p.id] = q
+        self.mgr._worktree_restore()
+        self.mgr._wt_reconcile_thread.join(10)
+        self.assertTrue(wait_for(lambda: (q.worktree_summary or {}).get("files")),
+                        "no review card after a restart until the next turn ends")
+
     def test_T_LIF_10_a_missing_worktree_at_restart_refuses_resume_with_the_reason(self):
         p = self.pane()
         meta = wt.json.loads((p.dir / "meta.json").read_text())

@@ -2828,6 +2828,11 @@ class Manager(_core.ManagerBase):
                     print(f"corral-light: worktrees: {n['note']}", file=sys.stderr, flush=True)
             for p in by_id.values():
                 p.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(p))
+                # The summary lives in memory only and is otherwise rebuilt
+                # at a turn's end: recount now, so unreviewed changes show
+                # their review card after a restart (panel, round two).
+                if not p.worktree_blocked:
+                    self.worktree_turn_ended(p)
         t = threading.Thread(target=run, daemon=True, name="worktree-reconcile")
         self._wt_reconcile_thread = t
         t.start()
