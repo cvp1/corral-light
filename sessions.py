@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -26,6 +27,7 @@ import ledger
 import mcp
 import worktrees as _wt
 import challenge as _chl
+import review_sandbox as _sbx
 
 ROOT = Path(__file__).resolve().parent
 # Separate from the full Corral's state dir so two hubs never share panes or keys.
@@ -791,13 +793,19 @@ class Pane(_core.PaneBase):
     # on every device at once.
     # challenges: the blind challenges of this pane's branch (Part C), newest
     # first. challenge_of: on a reviewer pane, the author pane it reviews.
+    # review_tree: on a reviewer pane, the frozen read-only tree it reviews
+    # (its cwd); review_sandboxed: it runs in the reviewer sandbox, and must
+    # never start again without it.
     META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id", "review_at_end", "reviewed_digest",
-                                            "challenges", "challenge_of")
+                                            "challenges", "challenge_of", "review_tree",
+                                            "review_sandboxed")
     worktree_id = None
     review_at_end = False
     reviewed_digest = None
     challenges = ()
     challenge_of = None
+    review_tree = None
+    review_sandboxed = False
 
 
 
@@ -892,6 +900,8 @@ class Pane(_core.PaneBase):
         p.review_at_end = bool(meta.get("review_at_end")) and bool(p.worktree_id)
         p.reviewed_digest = meta.get("reviewed_digest")
         p.challenge_of = meta.get("challenge_of")
+        p.review_tree = meta.get("review_tree")
+        p.review_sandboxed = bool(meta.get("review_sandboxed"))
         p.challenges = []
         for c in (meta.get("challenges") or [])[:_chl.MAX_CHALLENGES]:
             if not isinstance(c, dict):
@@ -1054,8 +1064,8 @@ class Pane(_core.PaneBase):
                 gen = self._generation
             self.error = None
             self.dead_cause = self.dead_login = None
-            self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
-                                        strip_env=strip_prefixes(),
+            argv, env, strip = self._launch(spec, env)
+            self.client = acp.AcpClient(argv, self.cwd, env=env, strip_env=strip,
                                         **self._bind(gen))
             self._record_pid()
             self.client.initialize()
@@ -1372,8 +1382,8 @@ class Pane(_core.PaneBase):
             spec = AGENTS[self.agent]
             env = spawn_env(spec, self._config_dir(), self.posture)
             env["CORRAL_PANE_ID"] = self.id      # tools can tell which pane they run in
-            self.client = acp.AcpClient(spec["argv"], self.cwd, env=env,
-                                        strip_env=strip_prefixes(),
+            argv, env, strip = self._launch(spec, env)
+            self.client = acp.AcpClient(argv, self.cwd, env=env, strip_env=strip,
                                         **self._bind(self._generation))
             self._record_pid()
             info = self.client.initialize()
@@ -1857,6 +1867,49 @@ class Pane(_core.PaneBase):
             return None
         return super()._native_mcp()
 
+    def _launch(self, spec, env):
+        """(argv, env, strip_env) for this pane's agent process. A reviewer
+        started sandboxed runs in the reviewer sandbox on every spawn, resume
+        included, and refuses to start without it (review_sandbox.py)."""
+        strip = tuple(strip_prefixes())
+        if not (self.challenge_of and self.review_sandboxed):
+            return spec["argv"], env, strip
+        ok, why = _sbx.available()
+        if not ok:
+            raise acp.AgentError(f"the reviewer sandbox is unavailable: {why}")
+        if not self.review_tree or not os.path.isdir(self.review_tree):
+            raise acp.AgentError("the frozen tree this reviewer read is gone")
+        argv, env = _sbx.wrap(spec["argv"], env, lane=self.agent, cwd=self.cwd,
+                              state=STATE, pane_dir=self.dir, tree_dir=self.review_tree)
+        return argv, env, strip + _sbx.DROP_ENV
+
+    def _decline_for_reviewer(self, req):
+        """A blind reviewer has no reason to write, run or fetch anything: the
+        hub declines every permission it asks for, once, and records it on the
+        challenge (a reviewer asking is a sign the diff tried to steer it).
+        False (a card, as today) only when the agent offers no way to decline."""
+        opt = next((o for o in req.get("options") or []
+                    if str(o.get("kind", "")) == "reject_once"), None) or next(
+            (o for o in req.get("options") or []
+             if str(o.get("kind", "")).startswith("reject")), None)
+        if not opt or not opt.get("optionId") or not self.client:
+            return False
+        if not self.client.answer_permission(req.get("requestId"), opt["optionId"]):
+            return False
+        tc = req.get("toolCall") or {}
+        size, digest = perm_digest(req)
+        self.emit("permission_auto", {
+            "requestId": req.get("requestId"), "title": tc.get("title"),
+            "kind": tc.get("kind"), "paths": [], "digest": digest, "bytes": size,
+            "optionId": opt["optionId"], "optionKind": str(opt.get("kind")),
+            "why": "a blind reviewer is read-only"})
+        try:
+            self.mgr._challenge_declined(self, tc)
+        except Exception as err:                     # noqa: BLE001 — the decline stands
+            print(f"corral-light: could not record a reviewer's declined action: {err!r}",
+                  file=sys.stderr, flush=True)
+        return True
+
     def release_hold(self, drain):
         """End a review action's hold. `drain`: run what queued meanwhile (after
         Commit or Publish); otherwise keep it visible as not sent (Discard, failure)."""
@@ -1888,7 +1941,12 @@ class Pane(_core.PaneBase):
         "Review at the end" (Part B): an edit whose every path is provably inside
         the worktree is allowed once here, recorded as `permission_auto`, and
         the grant moves to the review of the frozen diff. Anything in doubt
-        raises today's card unchanged."""
+        raises today's card unchanged.
+
+        A blind reviewer (Part C) is declined outright: see
+        `_decline_for_reviewer`."""
+        if self.challenge_of and self._decline_for_reviewer(req):
+            return None
         if self.worktree_id:
             opts = req.get("options") or []
             kept = [o for o in opts if str(o.get("kind", "")) != "allow_always"]
@@ -2458,7 +2516,8 @@ class Manager(_core.ManagerBase):
 
     def create(self, agent, cwd, posture=DEFAULT_POSTURE, model=None, effort=None,
                role=None, role_sha=None, worktree=False, title=None,
-               background=False, review_at_end=False, challenge_of=None):
+               background=False, review_at_end=False, challenge_of=None,
+               review_tree=None, review_sandboxed=False):
         """`background`: a bulk spawner's pane (rig, panel, eval, schedule)
         starts minimized and restores itself when it needs the operator."""
         if agent.startswith("host:"):
@@ -2515,6 +2574,8 @@ class Manager(_core.ManagerBase):
             # A blind reviewer: set before start() so its first session/new
             # carries no seat tools (Pane._native_mcp).
             pane.challenge_of = challenge_of
+            pane.review_tree = review_tree
+            pane.review_sandboxed = bool(review_sandboxed)
             self.panes[pane.id] = pane
         if worktree:
             try:
@@ -2940,19 +3001,14 @@ class Manager(_core.ManagerBase):
             out.append(row)
         return out
 
-    def worktree_snapshot(self, pane_id, mark_reviewed=True):
-        """Open review: snapshot (a tree OID) plus its diff. `mark_reviewed`:
-        False for a challenge's own freeze, which the operator has not seen."""
+    def worktree_snapshot(self, pane_id):
+        """Open review: snapshot (a tree OID) plus its diff. Opening grants
+        nothing: the blocking card clears only on Mark reviewed or Commit,
+        each bound to the tree the operator saw."""
         def go(p, e):
             snap = _wt.snapshot(e, tmp_dir=p.dir)
             snap["diff"] = _wt.diff(e, snap["tree"])
             snap["summary"] = p.worktree_summary = _wt.summary(e)
-            # Opening review is what clears the blocking card, on every device.
-            digest = (snap["summary"] or {}).get("digest")
-            if mark_reviewed and digest and digest != p.reviewed_digest:
-                p.reviewed_digest = digest
-                p.save_meta()
-                p.emit("worktree", {"reviewed": digest}, activity=False)
             return _wt.fit_review(snap)       # the encoded response fits its cap
         return self._worktree_action(pane_id, go, drain_after=True)
 
@@ -2961,9 +3017,39 @@ class Manager(_core.ManagerBase):
             r = _wt.commit_tree(e, tree, index_id, message, expect_head=head,
                                 registry=self.worktree_registry(), tmp_dir=p.dir)
             p.worktree_summary = _wt.summary(self.worktree_entry(p))
-            p.emit("worktree", {"summary": p.worktree_summary, "commit": r["commit"]},
-                   activity=False)
+            ev = {"summary": p.worktree_summary, "commit": r["commit"]}
+            # commit_tree refused unless the live tree is the one reviewed, so
+            # committing it is the review: the blocking card clears.
+            if p.review_at_end:
+                ev["reviewed"] = self._set_reviewed(p, p.worktree_summary)
+            p.emit("worktree", ev, activity=False)
             return r
+        return self._worktree_action(pane_id, go, drain_after=True)
+
+    def _set_reviewed(self, p, summary):
+        digest = (summary or {}).get("digest")
+        if digest and digest != p.reviewed_digest:
+            p.reviewed_digest = digest
+            p.save_meta()
+        return p.reviewed_digest
+
+    def worktree_mark_reviewed(self, pane_id, tree):
+        """Mark reviewed (Part B): the operator read the diff of `tree` and
+        lets the pane carry on. Refused unless the branch still freezes to
+        exactly that tree, so a change made after the dialog opened is never
+        approved unseen."""
+        def go(p, e):
+            if not p.review_at_end:
+                raise _wt.Refused("mode", "this pane does not use Review at the end")
+            snap = _wt.snapshot(e, tmp_dir=p.dir)
+            if snap["tree"] != tree:
+                raise _wt.Refused("changed", "the branch changed after this review "
+                                             "opened; review the new diff")
+            p.worktree_summary = _wt.summary(e)
+            digest = self._set_reviewed(p, p.worktree_summary)
+            p.emit("worktree", {"summary": p.worktree_summary, "reviewed": digest},
+                   activity=False)
+            return {"reviewed": digest, "tree": tree}
         return self._worktree_action(pane_id, go, drain_after=True)
 
     def worktree_publish(self, pane_id, oid, tree, remote, push_url, pr=None):
@@ -3003,6 +3089,7 @@ class Manager(_core.ManagerBase):
             raise _wt.Refused("lane", f"the reviewer must be another vendor; both are {mine}")
         if spec.get("unavailable"):
             raise _wt.Refused("lane", f"{spec['label']}: {spec['unavailable']}")
+        self._challenge_sandbox()              # refuse early, before any reservation
         lock = self.__dict__.setdefault("_chl_lock", threading.Lock())
         starting = self.__dict__.setdefault("_chl_starting", set())
         # Check and reserve in one hold: two quick clicks must not both pass
@@ -3018,41 +3105,151 @@ class Manager(_core.ManagerBase):
             with lock:
                 starting.discard(p.id)
 
+    # The reviewer's own lane, at its most read-only (vendor-enforced, set
+    # and read back before the prompt goes). Claude and Grok get the same
+    # from posture "strict"; the sandbox is the layer under all of them.
+    REVIEWER_CONFIG = {"codex": {"mode": "read-only"}, "gemini": {"mode": "default"}}
+    UNSANDBOXED_ENV = "CORRAL_CHALLENGE_UNSANDBOXED"
+    MAX_EXPORT_BYTES = 2 << 30         # of the frozen tree a reviewer reads
+
+    def _challenge_sandbox(self):
+        """True when the reviewer runs sandboxed; False only when the host
+        cannot sandbox and the operator opted out in the environment;
+        otherwise a refusal naming why."""
+        ok, why = _sbx.available()
+        if ok:
+            return True
+        if os.environ.get(self.UNSANDBOXED_ENV) == "1":
+            return False
+        raise _wt.Refused("sandbox", f"{why}. A blind reviewer reads a diff nobody has "
+                                     f"vetted, so it only runs sandboxed; on a host that "
+                                     f"cannot, set {self.UNSANDBOXED_ENV}=1 to accept that")
+
     def _challenge_start(self, p, pane_id, lane, spec, criteria, lock):
-        snap = self.worktree_snapshot(pane_id, mark_reviewed=False)
+        sandboxed = self._challenge_sandbox()
+        snap = self.worktree_snapshot(pane_id)
         e = self.worktree_entry(p) or {}
         base = (e.get("base_ref") or "")[len("refs/heads/"):] or None
         prompt, partial, omitted = _chl.build_prompt(criteria, base, snap.get("diff"))
-        cwd = Path(e.get("repo_top") or p.cwd)
-        if e.get("subdir"):
-            cwd = cwd / e["subdir"]
         branch = (e.get("branch") or "")[len("refs/heads/"):] or "branch"
         rec = {"id": uuid.uuid4().hex[:12], "tree": snap.get("tree"),
                "digest": (snap.get("summary") or {}).get("digest"), "lane": lane,
                "laneLabel": spec.get("label"), "model": None, "reviewerPane": None,
                "state": "running", "verdict": None, "findings": [], "raw": "",
                "partial": partial, "omitted": omitted[:200], "criteria": criteria[:_chl.MAX_CRITERIA],
-               "at": _core._now(), "error": None}
+               "at": _core._now(), "error": None, "sandboxed": sandboxed, "declined": []}
         with lock:
-            p.challenges = ([rec] + [c for c in p.challenges or ()])[:_chl.MAX_CHALLENGES]
+            kept = ([rec] + [c for c in p.challenges or ()])[:_chl.MAX_CHALLENGES]
+            gone = [c for c in p.challenges or () if c not in kept]
+            p.challenges = kept
+        for c in gone:
+            self._challenge_drop_tree(p, c["id"])
+        r = None
         try:
-            # challenge_of goes in before start(): the agent's MCP servers are
-            # fixed at session/new, so setting it afterwards leaves seat tools.
+            # The reviewer reads the frozen tree, not the live checkout: it is
+            # what the findings are about, and it is nobody's working copy.
+            tree_dir = self._challenge_export(p, e, rec["id"], rec["tree"])
+            cwd = tree_dir / e["subdir"] if e.get("subdir") else tree_dir
+            if not cwd.is_dir():
+                cwd = tree_dir
+            # Reviewer fields go in before start(): MCP servers are fixed at
+            # session/new, and the sandbox wraps the very first spawn.
             r = self.create(lane, str(cwd), posture="strict", background=True,
-                            challenge_of=p.id)
+                            challenge_of=p.id, review_tree=str(tree_dir),
+                            review_sandboxed=sandboxed)
             r.title, r.title_locked = f"challenge · {branch}"[:80], True
             r.save_meta()
             rec["reviewerPane"], rec["model"] = r.id, r.model
             if r.state == "dead":
                 raise acp.AgentError(r.error or "the reviewer's agent did not start")
+            for cid, want in self.REVIEWER_CONFIG.get(lane, {}).items():
+                try:
+                    got = (r.set_config(cid, want) or {}).get("value")
+                except (ValueError, acp.AgentError) as err:
+                    got = f"refused: {err}"
+                if got != want:
+                    raise acp.AgentError(f"{spec.get('label')} would not switch {cid} to "
+                                         f"{want!r} (it reads {got!r}); no prompt was sent")
             r.send(prompt, via="challenge")
         except Exception as err:                 # noqa: BLE001 — recorded, never raised past here
-            self._challenge_set(p, rec["id"], state="failed", error=str(err)[:400])
+            if r is not None:
+                try:
+                    self.close(r.id)             # no prompt went: nothing to keep
+                except Exception:                # noqa: BLE001
+                    pass
+            self._challenge_set(p, rec["id"], state="failed", error=str(err)[:400],
+                                reviewerPane=rec["reviewerPane"], model=rec["model"])
             return dict(rec)
-        self._challenge_set(p, rec["id"])
+        self._challenge_set(p, rec["id"], reviewerPane=r.id, model=r.model)
         threading.Thread(target=self._challenge_watch, args=(p, rec["id"], r),
                          daemon=True, name=f"challenge-{rec['id']}").start()
         return dict(rec)
+
+    def _challenge_export(self, p, e, cid, tree):
+        """Write `tree` out as a read-only directory under the author pane's
+        dir and return it. Streams `git archive`; members that would land
+        outside it (absolute or escaping links) are skipped; over
+        MAX_EXPORT_BYTES is refused."""
+        import tarfile
+        dest = p.dir / "challenges" / cid / "tree"
+        dest.mkdir(parents=True, exist_ok=False)
+        total = 0
+
+        def keep(member, path):
+            nonlocal total
+            try:
+                m = tarfile.data_filter(member, path)
+            except tarfile.FilterError:
+                return None                      # a link out of the tree: left out
+            total += m.size or 0
+            if total > self.MAX_EXPORT_BYTES:
+                raise _wt.Refused("size", "this branch's tree is too big to hand a "
+                                          "reviewer a copy")
+            return m
+        proc = subprocess.Popen(["git", "--git-dir", str(e["common_dir"]), "archive",
+                                 "--format=tar", tree], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        try:
+            with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
+                tf.extractall(dest, filter=keep)
+        finally:
+            proc.stdout.close()
+            err = proc.stderr.read().decode("utf-8", "replace")
+            proc.stderr.close()
+            rc = proc.wait()
+        if rc != 0:
+            raise acp.AgentError(f"could not export the frozen tree: {err.strip()[:200]}")
+        for root, dirs, files in os.walk(dest):  # read-only, the layer under the sandbox
+            for f in files:
+                fp = os.path.join(root, f)
+                if not os.path.islink(fp):
+                    os.chmod(fp, os.stat(fp).st_mode & 0o555)
+            os.chmod(root, 0o555)
+        return dest
+
+    def _challenge_drop_tree(self, p, cid):
+        """Remove a challenge's frozen tree (it is read-only on purpose)."""
+        d = p.dir / "challenges" / cid
+        if not d.exists():
+            return
+        for root, dirs, _files in os.walk(d):
+            os.chmod(root, 0o755)
+        shutil.rmtree(d, ignore_errors=True)
+
+    def _challenge_declined(self, r, tool_call):
+        """Record on the author's challenge what its reviewer tried to do."""
+        p = self.panes.get(r.challenge_of)
+        if not p:
+            return
+        lock = self.__dict__.setdefault("_chl_lock", threading.Lock())
+        with lock:
+            c = next((c for c in p.challenges or () if c.get("reviewerPane") == r.id), None)
+            if not c:
+                return
+            row = {"title": str(tool_call.get("title") or "")[:200],
+                   "kind": str(tool_call.get("kind") or "")[:40], "at": _core._now()}
+            declined = (list(c.get("declined") or []) + [row])[-20:]
+        self._challenge_set(p, c["id"], declined=declined)
 
     def _challenge_set(self, p, cid, **fields):
         with self._chl_lock:

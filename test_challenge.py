@@ -8,6 +8,7 @@ same fake ACP process under another lane key, answering per FAKE_ACP_REVIEW
     python3 -m unittest test_challenge -v   (also collected by test_corral_light.py)
 """
 import http.client
+import os
 import json
 import threading
 import time
@@ -26,14 +27,27 @@ from test_worktrees import LifecycleCase                          # noqa: E402
 
 class ChallengeCase(LifecycleCase):
 
+    # The fake reviewer leaves files for these tests to read, which the
+    # sandbox would (rightly) hide; Sandboxed below runs the real one.
+    SANDBOX = False
+
     def setUp(self):
         super().setUp()
         self.reviewer_mode("json")
+        if not self.SANDBOX:
+            p = mock.patch.object(self.sessions._sbx, "available",
+                                  lambda refresh=False: (False, "off in this test"))
+            p.start()
+            self.addCleanup(p.stop)
+            e = mock.patch.dict(os.environ, {self.mgr.UNSANDBOXED_ENV: "1"})
+            e.start()
+            self.addCleanup(e.stop)
 
-    def reviewer_mode(self, mode, **extra):
+    def reviewer_mode(self, mode, env=None, **extra):
         spec = self.sessions.AGENTS["fake"]
         self.sessions.AGENTS["fake2"] = dict(spec, label="Fake Two", **extra,
-                                             env=dict(spec["env"], FAKE_ACP_REVIEW=mode))
+                                             env=dict(spec["env"], FAKE_ACP_REVIEW=mode,
+                                                      **(env or {})))
         self.addCleanup(self.sessions.AGENTS.pop, "fake2", None)
 
     def author(self):
@@ -129,7 +143,14 @@ class TheRun(ChallengeCase):
         self.assertIsNone(r.seat)
         with mock.patch.object(self.sessions._core, "PEER_HUB_URL", "http://127.0.0.1:1"):
             self.assertIsNone(r._native_mcp())
-        self.assertEqual(Path(r.cwd).resolve(), self.repo.resolve())
+        # It reads the frozen tree, read-only, not the live checkout.
+        self.assertNotEqual(Path(r.cwd).resolve(), self.repo.resolve())
+        self.assertEqual(Path(r.cwd), Path(r.review_tree))
+        self.assertEqual((Path(r.cwd) / "a.txt").read_text().strip(), "changed by the author")
+        with self.assertRaises(OSError):
+            (Path(r.cwd) / "a.txt").write_text("x")
+        self.assertFalse(r.review_sandboxed)            # this case opts out
+        self.assertFalse(p.challenges[0]["sandboxed"])
         self.assertTrue(r.minimized)
         self.assertTrue(r.title.startswith("challenge · "))
         self.assertTrue(wait_for(lambda: r.snapshot()["display"] == "idle"),
@@ -350,6 +371,90 @@ class ThePrompt(unittest.TestCase):
         self.assertEqual(len(out["findings"]), chl.MAX_FINDINGS)
         self.assertIsNone(out["findings"][0]["line"])
         self.assertEqual(len(out["findings"][0]["claim"]), chl.FIELD_CAP)
+
+
+class ReviewerModes(ChallengeCase):
+
+    def test_a_lane_that_will_not_go_read_only_gets_no_prompt(self):
+        p = self.author()
+        with mock.patch.dict(self.mgr.REVIEWER_CONFIG, {"fake2": {"mode": "read-only"}}):
+            c = self.start(p)
+        self.assertEqual(c["state"], "failed")
+        self.assertIn("no prompt was sent", c["error"])
+        self.assertFalse((Path(self.agent_dir) / "review-prompt.txt").exists())
+        r = self.mgr.panes.get(c["reviewerPane"])
+        self.assertTrue(r is None or r.state not in ("ready", "busy", "starting"),
+                        r and r.state)                  # closed, not left running
+
+    def test_without_the_sandbox_the_hub_still_declines_every_ask(self):
+        self.reviewer_mode("probe", env={"FAKE_ACP_PROBE": "{}"})
+        p = self.author()
+        c = self.settled(p, self.start(p)["id"])
+        got = {f["file"]: f["claim"] for f in c["findings"]}
+        self.assertIn("deny", got["permission"])
+        self.assertEqual(len(c["declined"]), 1)
+
+
+@unittest.skipUnless(__import__("review_sandbox").available()[0],
+                     "this host cannot build the reviewer sandbox")
+class Sandboxed(ChallengeCase):
+    """The real bubblewrap sandbox around a real (fake-lane) reviewer."""
+    SANDBOX = True
+
+    def test_the_reviewer_cannot_write_reach_the_hub_or_keep_a_grant(self):
+        state = Path(self.sessions.STATE)
+        (state / "session.key").write_text("secret")
+        probe = {"tree": "{cwd}/a.txt", "live": str(self.repo / "pwned.txt"),
+                 "pane": str(state / "panes" / "{pane}" / "probe.txt"),
+                 "read:key": str(state / "session.key"),
+                 "read:tree": "{cwd}/a.txt"}
+        self.reviewer_mode("probe", env={"FAKE_ACP_PROBE": json.dumps(probe)})
+        p = self.author()
+        c = self.settled(p, self.start(p)["id"], timeout=40)
+        self.assertEqual(c["state"], "done", c)
+        self.assertTrue(c["sandboxed"])
+        got = {f["file"]: f["claim"] for f in c["findings"]}
+        self.assertEqual(got["tree"], "closed")           # the frozen tree is read-only
+        self.assertEqual(got["read:tree"], "open")        # and readable
+        self.assertEqual(got["read:key"], "closed")       # the hub's key is hidden
+        self.assertEqual(got["pane"], "open")             # its own pane dir works
+        self.assertFalse((self.repo / "pwned.txt").exists())
+        r = self.mgr.panes[c["reviewerPane"]]
+        self.assertTrue((r.dir / "probe.txt").exists())
+        self.assertEqual(got["cwd"], r.review_tree)
+        self.assertEqual(got["env"], "unset")             # no ssh agent socket
+        # Its request to edit was declined by the hub, and shown.
+        self.assertIn("deny", got["permission"])
+        self.assertEqual([d["kind"] for d in c["declined"]], ["edit"])
+        self.assertEqual([e["data"]["optionKind"] for e in self.events(r, "permission_auto")],
+                         ["reject_once"])
+        self.assertEqual(self.events(r, "permission"), [])   # no card for anyone to answer
+
+    def test_a_sandboxed_reviewer_never_starts_without_it(self):
+        p = self.author()
+        c = self.settled(p, self.start(p)["id"], timeout=40)
+        r = self.mgr.panes[c["reviewerPane"]]
+        self.assertTrue(r.review_sandboxed)
+        r.pause()
+        with mock.patch.object(self.sessions._sbx, "available",
+                               lambda refresh=False: (False, "gone")):
+            try:
+                r.resume()
+                why = r.error
+            except Exception as e:                     # noqa: BLE001
+                why = str(e)
+        self.assertIn("sandbox", str(why))
+        self.assertNotIn(r.state, ("ready", "busy"))
+
+    def test_no_sandbox_and_no_opt_out_refuses(self):
+        p = self.author()
+        with mock.patch.object(self.sessions._sbx, "available",
+                               lambda refresh=False: (False, "no bwrap")), \
+                mock.patch.dict(os.environ, {self.mgr.UNSANDBOXED_ENV: ""}):
+            with self.assertRaises(wt.Refused) as cm:
+                self.start(p)
+        self.assertEqual(cm.exception.reason, "sandbox")
+        self.assertEqual(list(p.challenges), [])
 
 
 class TheRoute(ChallengeCase):

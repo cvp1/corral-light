@@ -246,6 +246,12 @@ snapshot, and every action applies to exactly what you saw:
 An own branch keeps agents from colliding; it is not a sandbox. An agent
 with a shell can still write anywhere you can.
 
+Tick **Review at the end** as well and the agent stops asking about each
+edit inside its branch; you review the whole diff once instead, and **Mark
+reviewed** or **Commit** is the approval. In the review, **Challenge this
+change** asks another vendor's model, sandboxed and blind to the author's
+reasoning, to find where it breaks.
+
 ### 5. Put two agents to work together
 
 Open a pane's **⋯** menu and choose **Give it a seat…** to name it, such as `@author`,
@@ -686,6 +692,62 @@ is the guard there.
 Worktrees live in `~/.local/share/corral-light/worktrees` (beside the
 registry, never inside the repository). `CORRAL_LIGHT_WORKTREES` moves them;
 it must be on disk, not tmpfs.
+
+### Review at the end: one approval for the whole change
+
+Tick **Review at the end** under **Own branch** and edits the agent makes
+inside its branch stop raising a card each. The hub allows an edit once by
+itself only when every path the request names resolves inside the
+worktree, outside its git admin folder; anything in doubt (no path, a path
+outside, a path hidden in a field it does not recognise, an oversize
+request, an open question) raises the card as before. Shell commands, web
+fetches and every other kind still ask. Each edit the hub allowed is a line
+in the transcript, with the digest a card would have shown.
+
+The approval moves to the review. When the agent finishes a turn with
+changes you have not reviewed, a **blocking** card sits in the rail and the
+tab title until you act. It does not age away, survive a peer's turn by
+going quiet, or vanish across a hub restart. Opening the review grants
+nothing. Two things do, and both name the exact files on screen:
+
+- **Mark reviewed** lets the agent carry on. If anything changed after the
+  review opened, it is refused and the review refreshes.
+- **Commit** commits exactly what you saw, which is also the review.
+
+### Challenge this change: a blind review from another vendor
+
+In the review, **Challenge this change** asks a model from a different
+vendor than the author's to find concrete ways the change fails. You write
+the acceptance criteria; it sees those, the base branch name and the frozen
+diff, never the author's conversation. Its findings appear beside the diff,
+pinned to their lines, labelled as untrusted advice. They approve nothing
+and Commit never waits for them. One runs at a time per branch; the last
+five are kept, and one about an older version of the branch is shown as
+stale, listed rather than pinned to today's lines.
+
+The reviewer reads a diff nobody has vetted, so it is treated as hostile:
+
+- It reads a **frozen, read-only copy** of the reviewed version, not your
+  checkout.
+- It runs in a **bubblewrap sandbox**: the filesystem is read-only, home
+  writes are thrown away when it exits, and this hub's keys, your SSH, GPG,
+  cloud and browser secrets, and every other assistant's login are hidden.
+  Desktop, agent and container sockets are gone; it has its own process
+  space. The network stays, because its vendor needs it.
+- Its lane runs in its **most read-only mode**: Codex read-only, Gemini
+  asking before edits and shell, Claude and Grok strict. A lane that will
+  not switch gets no prompt.
+- The hub **declines every permission it asks for**, without a card. A
+  reviewer asking to write or run anything is listed on the challenge as a
+  warning: the diff may be trying to steer reviewers.
+- It has no seat tools, so it cannot message other panes or ask you things.
+
+A host that cannot build the sandbox (no `bwrap`, user namespaces off, or
+macOS) refuses challenges and says why. Setting
+`CORRAL_CHALLENGE_UNSANDBOXED=1` runs them with every layer except the
+sandbox, and each such challenge says **not sandboxed**. What remains
+possible even sandboxed: the reviewer can read files outside the hidden set
+and send them to its own vendor, as any pane on that lane can.
 
 ## Security
 

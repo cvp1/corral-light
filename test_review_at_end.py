@@ -301,15 +301,19 @@ class TheFlag(RaeCase):
                                               if "summary" in (e["data"] or {})]) > n))
         return p.worktree_view()
 
-    def test_T_SNP_16_a_changed_tree_stays_unreviewed_until_review_opens(self):
+    def test_T_SNP_16_a_changed_tree_stays_unreviewed_until_marked_reviewed(self):
         p = self.rae()
         v = self.summary_after(p, "write notes.txt one")
         self.assertTrue(v["reviewAtEnd"])
         self.assertGreater(v["summary"]["files"], 0)
         self.assertNotEqual(v["reviewedDigest"], v["summary"]["digest"])
+        # Opening review grants nothing.
         snap = self.mgr.worktree_snapshot(p.id)
+        self.assertIsNone(p.worktree_view()["reviewedDigest"])
+        r = self.mgr.worktree_mark_reviewed(p.id, snap["tree"])
         v = p.worktree_view()
-        self.assertEqual(v["reviewedDigest"], snap["summary"]["digest"])
+        self.assertEqual(v["reviewedDigest"], v["summary"]["digest"])
+        self.assertEqual(r["reviewed"], v["reviewedDigest"])
         self.assertTrue(any((e["data"] or {}).get("reviewed") == v["reviewedDigest"]
                             for e in self.events(p, "worktree")))
         # Persisted: the card stays cleared after a restart.
@@ -317,6 +321,29 @@ class TheFlag(RaeCase):
         self.assertEqual(meta["reviewed_digest"], v["reviewedDigest"])
         v2 = self.summary_after(p, "write notes.txt two")
         self.assertNotEqual(v2["reviewedDigest"], v2["summary"]["digest"])
+
+    def test_mark_reviewed_is_bound_to_the_tree_the_operator_saw(self):
+        p = self.rae()
+        self.summary_after(p, "write notes.txt one")
+        seen = self.mgr.worktree_snapshot(p.id)
+        self.summary_after(p, "write notes.txt changed after the dialog opened")
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_mark_reviewed(p.id, seen["tree"])
+        self.assertEqual(cm.exception.reason, "changed")
+        self.assertIsNone(p.worktree_view()["reviewedDigest"])
+        # Not a Review-at-the-end pane: nothing to mark.
+        q = self.pane()
+        self.say(q, "write a.txt x")
+        with self.assertRaises(wt.Refused):
+            self.mgr.worktree_mark_reviewed(q.id, self.mgr.worktree_snapshot(q.id)["tree"])
+
+    def test_commit_is_the_review(self):
+        p = self.rae()
+        self.summary_after(p, "write notes.txt one")
+        snap = self.mgr.worktree_snapshot(p.id)
+        self.mgr.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "m")
+        v = p.worktree_view()
+        self.assertEqual(v["reviewedDigest"], v["summary"]["digest"])
 
     def test_T_SNP_17_commit_after_auto_allowed_edits_writes_the_reviewed_tree(self):
         p = self.rae()

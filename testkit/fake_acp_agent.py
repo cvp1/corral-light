@@ -45,7 +45,8 @@ Prompt verbs (the text of the prompt):
                       -> saves the prompt to $FAKE_ACP_DIR/review-prompt.txt,
                          then answers per $FAKE_ACP_REVIEW: `json` (findings,
                          after a decoy block), `broken` (bad json), `none` (no
-                         block), `slow` (waits for a cancel), `die`
+                         block), `slow` (waits for a cancel), `die`, `probe`
+                         (tries the sandbox's walls, asks to edit, reports)
     anything else     -> "echo: <text>"
     (file verbs refuse any path containing "..")
 
@@ -216,7 +217,45 @@ def prompt(rid, params):
             _cancel.wait(60)
             send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
             return
-        if mode == "json":
+        if mode == "probe":
+            # The reviewer sandbox, seen from inside: try each way out and
+            # report what happened as findings (FAKE_ACP_PROBE: JSON of
+            # {name: path} to write, plus "read:<name>": path to read).
+            spec = json.loads(os.environ.get("FAKE_ACP_PROBE") or "{}")
+            out = []
+            for name, path in spec.items():
+                path = path.format(pane=os.environ.get("CORRAL_PANE_ID", ""), cwd=os.getcwd())
+                try:
+                    if name.startswith("read:"):
+                        Path(path).read_bytes()
+                    else:
+                        Path(path).write_text("probe")
+                    out.append({"file": name, "line": 1, "severity": "low", "claim": "open",
+                                "evidence": path})
+                except OSError as e:
+                    out.append({"file": name, "line": 1, "severity": "low", "claim": "closed",
+                                "evidence": type(e).__name__})
+            out.append({"file": "cwd", "line": 1, "severity": "low", "claim": os.getcwd(),
+                        "evidence": ",".join(sorted(os.listdir(".")))[:200]})
+            out.append({"file": "env", "line": 1, "severity": "low",
+                        "claim": os.environ.get("SSH_AUTH_SOCK", "unset"),
+                        "evidence": os.environ.get("CORRAL_REVIEW_SANDBOX", "0")})
+            # Then ask to write, as an injected reviewer would.
+            _next[0] += 1
+            pid = _next[0]
+            ev = threading.Event()
+            _answers[pid] = {"ev": ev}
+            send({"jsonrpc": "2.0", "id": pid, "method": "session/request_permission",
+                  "params": {"sessionId": sid, "toolCall": {
+                      "toolCallId": "tp", "title": "Edit README.md", "kind": "edit",
+                      "rawInput": {"file_path": "README.md", "new_string": "pwned"}},
+                      "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                                  {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]}})
+            ev.wait(30)
+            out.append({"file": "permission", "line": 1, "severity": "low",
+                        "claim": json.dumps(_answers[pid].get("result")), "evidence": ""})
+            chunk(sid, "```json\n" + json.dumps({"verdict": "amend", "findings": out}) + "\n```\n")
+        elif mode == "json":
             chunk(sid, "An example first:\n```json\n{\"verdict\": \"accept\", \"findings\": []}\n```\n"
                        "Real answer:\n```json\n" + json.dumps({
                            "verdict": "amend", "findings": [

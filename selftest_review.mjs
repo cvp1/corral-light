@@ -242,6 +242,24 @@ ra = reviewActions(done, { message: '', remote: 0, busy: false });
 check(!ra.commit.ok && /nothing to commit/.test(ra.commit.why), 'nothing to commit says so');
 check(ra.publish.ok && ra.copy.ok, 'a committed branch can be pushed and merged');
 ra = reviewActions({ ...snap, head_tree: snap.tree }, { message: 'm', remote: 0, busy: false });
+{
+  const s3 = { ...snap, summary: { files: 2, digest: 'd9' } };
+  check(!reviewActions(s3, { message: '', remote: 0, busy: false }).reviewed.ok,
+        'Mark reviewed: not on a pane that approves each edit');
+  check(reviewActions(s3, { message: '', remote: 0, busy: false, reviewAtEnd: true }).reviewed.ok,
+        'Mark reviewed: offered for unreviewed review-at-end changes');
+  check(!reviewActions(s3, { message: '', remote: 0, busy: false, reviewAtEnd: true,
+                             reviewedDigest: 'd9' }).reviewed.ok, 'Mark reviewed: not twice');
+  check(!reviewActions({ ...s3, summary: { files: 0 } }, { reviewAtEnd: true, message: '', remote: 0 }).reviewed.ok,
+        'Mark reviewed: nothing to review');
+  check(!reviewActions(s3, { busy: true, reviewAtEnd: true, message: '', remote: 0 }).reviewed.ok &&
+        !reviewActions(null, { reviewAtEnd: true }).reviewed.ok, 'Mark reviewed: not while busy or loading');
+  const rb = load('reviewedBody');
+  eq(JSON.stringify(rb('p1', s3)), JSON.stringify({ pane: 'p1', tree: s3.tree }),
+     'Mark reviewed posts the tree on screen');
+  check(/worktree\/reviewed/.test(fn('wireReview')), 'the dialog posts to the reviewed route');
+  check(!/reviewed/.test(fn('openReview')), 'opening review grants nothing');
+}
 check(!ra.publish.ok && /no commits/.test(ra.publish.why), 'an empty branch has nothing to push');
 ra = reviewActions({ ...done, remotes: [] }, { message: '', remote: 0, busy: false });
 check(!ra.publish.ok && /no remote/.test(ra.publish.why), 'no remote says so');
@@ -418,6 +436,16 @@ check(/wtRailCards\(panes, wtSeen\(\)\)/.test(fn('render')), 'render builds the 
      'T-CHL-1 the picker never offers the author\'s lane, a down lane or a shell');
 
   const challengeModel = load('challengeModel');
+  {
+    const m = challengeModel({ state: 'done', findings: [], sandboxed: true,
+                               declined: [{ title: 'Edit README.md', kind: 'edit' }] }, null);
+    eq(m.declined, ['Edit README.md'], 'a reviewer\'s declined request is listed');
+    check(/sandboxed/.test(m.where) && !/not/.test(m.where), 'a sandboxed challenge says so');
+    check(/not sandboxed/.test(challengeModel({ state: 'done', sandboxed: false }, null).where),
+          'an unsandboxed challenge says so');
+    eq(challengeModel({ state: 'failed' }, null).where, '', 'an older record claims nothing');
+    check(/declined[\s\S]*steer/.test(fn('challengeNode')), 'declined requests are shown as a warning');
+  }
   const base = { lane: 'grok', laneLabel: 'Grok', model: 'grok-4', tree: 't1', criteria: 'c',
                  findings: [{}, {}], verdict: 'amend', state: 'done', partial: false, omitted: [] };
   eq(challengeModel(base, 't1').head, 'Grok · grok-4 — amend · 2 findings', 'T-CHL-5 head line');

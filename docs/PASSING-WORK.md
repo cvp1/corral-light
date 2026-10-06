@@ -140,6 +140,27 @@ holds the login.
 
 ---
 
+## Challenge this change — a blind review before you commit
+
+**When.** An agent on its own branch says it is done, and you want a second
+vendor to try to break the change before it goes anywhere. Strongest with
+**Review at the end**, where this review replaces a card per edit.
+
+**How.** Open the review (`r`), write the acceptance criteria the change must
+meet, pick a reviewer lane from another vendor, and press **Start**. The
+reviewer gets the criteria, the base branch name and the frozen diff, never
+the author's reasoning, and reads a read-only copy of the changed version in
+a sandbox. Findings land beside the diff, on their lines.
+
+**What you gain.** Disagreement you did not have to arrange: a model that
+does not share the author's blind spots, working from the code alone. When
+it asks to act, the hub declines and tells you, which is itself a finding
+about the diff.
+
+**What it costs.** One reviewer turn on that vendor's subscription. It
+approves nothing: **Mark reviewed** or **Commit** is still your call, and
+neither waits for it.
+
 ## The panel recipe
 
 The verbs compose into one routine that replaces "open three tabs and paste":

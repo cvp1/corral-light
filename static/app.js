@@ -1656,11 +1656,11 @@ function reviewActions(snap, o) {
   const yes = { ok: true, why: '' };
   if (!snap) {
     const w = no('waiting for the snapshot');
-    return { commit: w, publish: w, discard: w, copy: w, refresh: yes };
+    return { commit: w, publish: w, discard: w, copy: w, refresh: yes, reviewed: w };
   }
   if (o.busy) {
     const w = no('another action is running');
-    return { commit: w, publish: w, discard: w, copy: w, refresh: w };
+    return { commit: w, publish: w, discard: w, copy: w, refresh: w, reviewed: w };
   }
   const uncommitted = snap.tree !== snap.head_tree;
   const ahead = snap.head !== snap.base_sha;
@@ -1685,7 +1685,15 @@ function reviewActions(snap, o) {
                 : urls.length !== 1 ? no(`${remote.name} has ${urls.length} push URLs; publishing needs exactly one`)
                 : yes;
   const copy = ahead ? yes : no('nothing to merge yet: commit first');
-  return { commit, publish, discard: yes, copy, refresh: yes };
+  // "Review at the end": reading the diff is not the grant; this is, and it
+  // is bound to the tree on screen (the hub refuses if the files moved).
+  const sum = snap.summary || {};
+  const reviewed = !o.reviewAtEnd ? no('this pane approves each edit on its card')
+                 : !sum.files ? no('nothing to review: no changes against the base')
+                 : o.reviewedDigest && o.reviewedDigest === sum.digest ? no('already reviewed')
+                 : { ok: true, why: '', note: 'Lets the agent carry on. Covers exactly the ' +
+                     'files shown; anything it changes later needs a new review.' };
+  return { commit, publish, discard: yes, copy, refresh: yes, reviewed };
 }
 
 /* Request bodies, from the snapshot on screen: the server refuses if the
@@ -1698,6 +1706,7 @@ function publishBody(pane, snap, remote, pr) {
            push_url: remote.pushUrls[0], pr: pr || null };
 }
 function discardBody(pane, snap) { return { pane, tree: snap.tree }; }
+function reviewedBody(pane, snap) { return { pane, tree: snap.tree }; }
 function mergeCommand(w) { return `git -C ${shq(w.repo)} merge --no-ff ${shq(w.branch)}`; }
 
 /* Run one action: busy while it runs; a 409 re-freezes the snapshot and keeps
@@ -1814,7 +1823,13 @@ function challengeModel(ch, tree) {
     : ch.state === 'unparsed' ? 'answered, but not in the asked-for form: its words are below'
     : ch.state === 'timed_out' ? 'timed out' : 'failed';
   const left = (ch.omitted || []).join(', ');
-  return { stale, bad: ch.state === 'failed' || ch.state === 'timed_out',
+  // How contained the reviewer was, and what it asked to do anyway: a
+  // reviewer asking to write or run is a sign the diff tried to steer it.
+  const where = ch.sandboxed === false
+    ? 'not sandboxed: this host opted out; read-only modes and declines still applied'
+    : ch.sandboxed === true ? 'sandboxed, read-only' : '';     // older records: unknown
+  const declined = (ch.declined || []).map(d => d.title || d.kind || 'an action');
+  return { stale, bad: ch.state === 'failed' || ch.state === 'timed_out', where, declined,
            head: `${who} — ${state}` + (stale ? ' · stale: the branch changed since' : ''),
            note: [ch.error, ch.partial ? 'partial: ' + (left ? `left out ${left}`
                                                              : 'the diff was cut at its size limit')
@@ -1874,6 +1889,12 @@ function challengeNode(ch, tree, unplaced) {
   c.appendChild(el('div', 'ch', m.head));
   c.appendChild(el('div', 'cu', `criteria: ${ch.criteria || ''}`));
   if (m.note) c.appendChild(el('div', 'cu', m.note));
+  if (m.where) c.appendChild(el('div', 'cu' + (ch.sandboxed === false ? ' warn' : ''), m.where));
+  if (m.declined.length)
+    c.appendChild(el('div', 'fnd warn', `declined ${m.declined.length} request` +
+                     `${m.declined.length === 1 ? '' : 's'} by the reviewer to act: ` +
+                     m.declined.slice(0, 5).join('; ') +
+                     ' — the diff may be trying to steer reviewers'));
   if (ch.state === 'done' || ch.state === 'unparsed')
     c.appendChild(el('div', 'cu', `untrusted output from ${ch.laneLabel || ch.lane}; ` +
                                   'advice only, it approves nothing'));
@@ -2051,10 +2072,12 @@ function paintReview() {
   $('#rev-prtitlerow').classList.toggle('hide', !prOn);
   $('#rev-publish').textContent = prOn ? 'Push & open PR' : 'Push';
   const ra = reviewActions(snap, { message: $('#rev-msg').value, busy: R.busy || R.loading,
-                                   remote: +$('#rev-remote').value || 0 });
+                                   remote: +$('#rev-remote').value || 0,
+                                   reviewAtEnd: !!w.reviewAtEnd, reviewedDigest: w.reviewedDigest });
+  $('#rev-reviewed').classList.toggle('hide', !w.reviewAtEnd);
   for (const [id, k] of [['#rev-commit', 'commit'], ['#rev-publish', 'publish'],
                          ['#rev-discard', 'discard'], ['#rev-copy', 'copy'],
-                         ['#rev-refresh', 'refresh']]) {
+                         ['#rev-refresh', 'refresh'], ['#rev-reviewed', 'reviewed']]) {
     $(id).disabled = !ra[k].ok;
     $(id).title = ra[k].ok ? ra[k].note || '' : ra[k].why;
   }
@@ -2091,6 +2114,15 @@ function wireReview() {
                               : `committed ${shortSha(r.commit)}` };
       $('#rev-msg').value = '';
       await loadReview();
+    });
+  $('#rev-reviewed').onclick = () => run(
+    () => api('/api/session/worktree/reviewed', reviewedBody(R.pane, R.snap)),
+    async r => {
+      const p = S.panes.get(R.pane);
+      if (p && p.worktree) p.worktree.reviewedDigest = r.reviewed;
+      dlg.close();
+      toast('reviewed: the agent carries on');
+      await refresh();
     });
   $('#rev-publish').onclick = () => {
     const remote = ((R.snap && R.snap.remotes) || [])[+$('#rev-remote').value || 0];
