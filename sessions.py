@@ -25,6 +25,7 @@ import claude_auth
 import ledger
 import mcp
 import worktrees as _wt
+import challenge as _chl
 
 ROOT = Path(__file__).resolve().parent
 # Separate from the full Corral's state dir so two hubs never share panes or keys.
@@ -788,10 +789,15 @@ class Pane(_core.PaneBase):
     # to the review (docs/ux-10x-plan.md Part B). reviewed_digest: the summary
     # digest the operator last opened in review, so the blocking card clears
     # on every device at once.
-    META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id", "review_at_end", "reviewed_digest")
+    # challenges: the blind challenges of this pane's branch (Part C), newest
+    # first. challenge_of: on a reviewer pane, the author pane it reviews.
+    META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id", "review_at_end", "reviewed_digest",
+                                            "challenges", "challenge_of")
     worktree_id = None
     review_at_end = False
     reviewed_digest = None
+    challenges = ()
+    challenge_of = None
 
 
 
@@ -885,6 +891,16 @@ class Pane(_core.PaneBase):
         p.worktree_id = meta.get("worktree_id")
         p.review_at_end = bool(meta.get("review_at_end")) and bool(p.worktree_id)
         p.reviewed_digest = meta.get("reviewed_digest")
+        p.challenge_of = meta.get("challenge_of")
+        p.challenges = []
+        for c in (meta.get("challenges") or [])[:_chl.MAX_CHALLENGES]:
+            if not isinstance(c, dict):
+                continue
+            if c.get("state") == "running":     # its watcher died with the old hub
+                c = dict(c, state="failed",
+                         error="the hub restarted while the reviewer worked; its pane "
+                               "may still hold the answer")
+            p.challenges.append(c)
         # No process of its own yet.
         p.pid = p.pgid = p.pid_start = None
         p._init_runtime()
@@ -1825,7 +1841,21 @@ class Pane(_core.PaneBase):
                 "summary": self.worktree_summary,
                 "published": e.get("published"), "lastCommit": e.get("last_commit"),
                 "reviewAtEnd": bool(self.review_at_end),
-                "reviewedDigest": self.reviewed_digest}
+                "reviewedDigest": self.reviewed_digest,
+                "challenges": self.challenge_view()}
+
+    def challenge_view(self):
+        """The challenges, newest first, each marked stale once the branch has
+        changed since it was frozen (C6)."""
+        now = (self.worktree_summary or {}).get("digest")
+        return [dict(c, stale=bool(now and c.get("digest") and c["digest"] != now))
+                for c in list(self.challenges or ())]
+
+    def _native_mcp(self):
+        """A blind reviewer gets no seat tools: it must not message other panes."""
+        if self.challenge_of:
+            return None
+        return super()._native_mcp()
 
     def release_hold(self, drain):
         """End a review action's hold. `drain`: run what queued meanwhile (after
@@ -2887,15 +2917,16 @@ class Manager(_core.ManagerBase):
             out.append(row)
         return out
 
-    def worktree_snapshot(self, pane_id):
-        """Open review: snapshot (a tree OID) plus its diff."""
+    def worktree_snapshot(self, pane_id, mark_reviewed=True):
+        """Open review: snapshot (a tree OID) plus its diff. `mark_reviewed`:
+        False for a challenge's own freeze, which the operator has not seen."""
         def go(p, e):
             snap = _wt.snapshot(e, tmp_dir=p.dir)
             snap["diff"] = _wt.diff(e, snap["tree"])
             snap["summary"] = p.worktree_summary = _wt.summary(e)
             # Opening review is what clears the blocking card, on every device.
             digest = (snap["summary"] or {}).get("digest")
-            if digest and digest != p.reviewed_digest:
+            if mark_reviewed and digest and digest != p.reviewed_digest:
                 p.reviewed_digest = digest
                 p.save_meta()
                 p.emit("worktree", {"reviewed": digest}, activity=False)
@@ -2922,6 +2953,114 @@ class Manager(_core.ManagerBase):
             p.emit("worktree", {"published": r}, activity=False)
             return r
         return self._worktree_action(pane_id, go, drain_after=True)
+
+    # ── the blind challenge (10x UX Part C) ─────────────────────────────────
+    CHALLENGE_TIMEOUT_S = 900          # C7: then `timed_out`, the reviewer left open
+    CHALLENGE_POLL_S = 0.25
+
+    def worktree_challenge(self, pane_id, lane, criteria):
+        """Start a blind challenge of `pane_id`'s branch on `lane` (C1-C3).
+        -> the challenge record. Never grants anything; Commit never waits."""
+        p = self.get(pane_id)
+        if not p.worktree_id:
+            raise ValueError("this pane is not on its own branch")
+        criteria = str(criteria or "").strip()
+        if not criteria:
+            raise _wt.Refused("criteria", "write the acceptance criteria the change must meet")
+        lane = str(lane or "")
+        spec = AGENTS.get(lane)
+        if not spec or lane.startswith("host:"):
+            raise _wt.Refused("lane", f"{lane or 'no lane'}: not a lane that can review")
+        if lane == p.agent:
+            raise _wt.Refused("lane", "the reviewer must be a different lane from the "
+                                      "author's: a challenge from the same model shares its blind spots")
+        import port as port_mod
+        mine, theirs = port_mod.vendor_of(p.agent), port_mod.vendor_of(lane)
+        if mine == theirs and mine != "unknown":
+            raise _wt.Refused("lane", f"the reviewer must be another vendor; both are {mine}")
+        if spec.get("unavailable"):
+            raise _wt.Refused("lane", f"{spec['label']}: {spec['unavailable']}")
+        lock = self.__dict__.setdefault("_chl_lock", threading.Lock())
+        with lock:
+            if any(c.get("state") == "running" for c in p.challenges or ()):
+                raise _wt.Refused("busy", "a challenge of this branch is already running")
+        snap = self.worktree_snapshot(pane_id, mark_reviewed=False)
+        e = self.worktree_entry(p) or {}
+        base = (e.get("base_ref") or "")[len("refs/heads/"):] or None
+        prompt, partial, omitted = _chl.build_prompt(criteria, base, snap.get("diff"))
+        cwd = Path(e.get("repo_top") or p.cwd)
+        if e.get("subdir"):
+            cwd = cwd / e["subdir"]
+        branch = (e.get("branch") or "")[len("refs/heads/"):] or "branch"
+        rec = {"id": uuid.uuid4().hex[:12], "tree": snap.get("tree"),
+               "digest": (snap.get("summary") or {}).get("digest"), "lane": lane,
+               "laneLabel": spec.get("label"), "model": None, "reviewerPane": None,
+               "state": "running", "verdict": None, "findings": [], "raw": "",
+               "partial": partial, "omitted": omitted[:200], "criteria": criteria[:_chl.MAX_CRITERIA],
+               "at": _core._now(), "error": None}
+        with lock:
+            p.challenges = ([rec] + [c for c in p.challenges or ()])[:_chl.MAX_CHALLENGES]
+        try:
+            r = self.create(lane, str(cwd), posture="strict", background=True)
+            r.challenge_of = p.id
+            r.title, r.title_locked = f"challenge · {branch}"[:80], True
+            r.save_meta()
+            rec["reviewerPane"], rec["model"] = r.id, r.model
+            if r.state == "dead":
+                raise acp.AgentError(r.error or "the reviewer's agent did not start")
+            r.send(prompt, via="challenge")
+        except Exception as err:                 # noqa: BLE001 — recorded, never raised past here
+            self._challenge_set(p, rec["id"], state="failed", error=str(err)[:400])
+            return dict(rec)
+        self._challenge_set(p, rec["id"])
+        threading.Thread(target=self._challenge_watch, args=(p, rec["id"], r),
+                         daemon=True, name=f"challenge-{rec['id']}").start()
+        return dict(rec)
+
+    def _challenge_set(self, p, cid, **fields):
+        with self._chl_lock:
+            for c in p.challenges or ():
+                if c["id"] == cid:
+                    c.update(fields)
+                    out = dict(c)
+                    break
+            else:
+                return None
+        p.save_meta()
+        p.emit("worktree", {"challenge": {"id": cid, "state": out["state"]}}, activity=False)
+        return out
+
+    def _challenge_watch(self, p, cid, r):
+        """Wait for the reviewer's turn to end, its death, or the timeout (C7)."""
+        deadline = time.monotonic() + self.CHALLENGE_TIMEOUT_S
+        while True:
+            if self.panes.get(r.id) is not r:
+                self._challenge_set(p, cid, state="failed", error="the reviewer pane was closed")
+                return
+            if r.state == "dead":
+                self._challenge_set(p, cid, state="failed",
+                                    error=r.error or "the reviewer's agent stopped")
+                return
+            if r.state == "detached":
+                self._challenge_set(p, cid, state="failed", error="the reviewer pane was paused")
+                return
+            text, complete = r.last_answer()
+            if complete and r.state not in ("busy", "starting", "needs-you"):
+                parsed = _chl.parse_answer(text)
+                raw = text[:_chl.MAX_RAW]
+                if parsed is None:
+                    self._challenge_set(p, cid, state="unparsed", raw=raw, findings=[],
+                                        model=r.model)
+                else:
+                    self._challenge_set(p, cid, state="done", raw=raw, model=r.model,
+                                        verdict=parsed["verdict"], findings=parsed["findings"])
+                return
+            if time.monotonic() > deadline:
+                self._challenge_set(p, cid, state="timed_out",
+                                    error=f"no answer within {int(self.CHALLENGE_TIMEOUT_S // 60)} "
+                                          f"minutes; the reviewer pane is left open")
+                return
+            time.sleep(self.CHALLENGE_POLL_S)
 
     def worktree_discard(self, pane_id, tree):
         """Preflight, then stop the agent (cancel, then end its process group),

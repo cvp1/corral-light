@@ -375,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"probe": pr, "laneRefusals": lanes})
 
     def _worktree_post(self, action, b):
-        """Snapshot / commit / publish / discard. A refusal is 409 with a reason."""
+        """Snapshot / commit / publish / discard / challenge. A refusal is 409 with a reason."""
         pane = b.get("pane", "")
         try:
             if action == "snapshot":
@@ -390,6 +390,9 @@ class Handler(BaseHTTPRequestHandler):
                                          str(b.get("remote") or ""), str(b.get("push_url") or ""), pr)
             elif action == "discard":
                 r = MGR.worktree_discard(pane, _oid(b.get("tree")))
+            elif action == "challenge":
+                r = {"challenge": MGR.worktree_challenge(pane, str(b.get("lane") or ""),
+                                                         str(b.get("criteria") or ""))}
             else:
                 return self._json({"error": "not found"}, 404)
         except worktrees.Refused as e:
@@ -942,7 +945,8 @@ class Handler(BaseHTTPRequestHandler):
 
 # Spelled out, so the front end's route check can see each one.
 WORKTREE_POSTS = ("/api/session/worktree/snapshot", "/api/session/worktree/commit",
-                  "/api/session/worktree/publish", "/api/session/worktree/discard")
+                  "/api/session/worktree/publish", "/api/session/worktree/discard",
+                  "/api/session/worktree/challenge")
 
 _OID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 

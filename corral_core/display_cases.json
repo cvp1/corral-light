@@ -69,6 +69,9 @@
     {"why": "a rig's opening prompt ended: `rig up` sent it, not the human at the glass",
      "pane": {"state": "ready", "turn_via": "rig", "idle_s": 0}, "want": "idle"},
 
+    {"why": "a blind reviewer's turn ended: the hub sent the challenge prompt, and its findings land in the author's review, not here",
+     "pane": {"state": "ready", "turn_via": "challenge", "idle_s": 0}, "want": "idle"},
+
     {"why": "a scripted consult turn is still the human's side of the wall: your-turn",
      "pane": {"state": "ready", "turn_via": "consult", "idle_s": 0}, "want": "your-turn"},
 

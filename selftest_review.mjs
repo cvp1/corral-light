@@ -402,6 +402,58 @@ check(/wtRailCards\(panes, wtSeen\(\)\)/.test(fn('render')), 'render builds the 
   check(/d\.reviewed/.test(src), 'a reviewed event updates the pane');
 }
 
+/* ── Part C: the blind challenge in the review dialog (T-CHL-*) ───────────── */
+{
+  const chlLanes = load('chlLanes');
+  const agents = [{ key: 'claude', label: 'Claude Code', available: true },
+                  { key: 'grok', label: 'Grok', available: true },
+                  { key: 'gemini', label: 'Gemini', available: false },
+                  { key: 'host:box', label: 'SSH', available: true }];
+  eq(chlLanes(agents, 'claude').map(a => a.key), ['grok'],
+     'T-CHL-1 the picker never offers the author\'s lane, a down lane or a shell');
+
+  const challengeModel = load('challengeModel');
+  const base = { lane: 'grok', laneLabel: 'Grok', model: 'grok-4', tree: 't1', criteria: 'c',
+                 findings: [{}, {}], verdict: 'amend', state: 'done', partial: false, omitted: [] };
+  eq(challengeModel(base, 't1').head, 'Grok · grok-4 — amend · 2 findings', 'T-CHL-5 head line');
+  check(challengeModel(base, 't2').stale && /stale/.test(challengeModel(base, 't2').head),
+        'T-CHL-9 a challenge of another tree is stale');
+  check(challengeModel({ ...base, stale: true }, 't1').stale, 'T-CHL-9 the hub\'s stale mark counts');
+  check(/not in the asked-for form/.test(challengeModel({ ...base, state: 'unparsed' }, 't1').head),
+        'T-CHL-6 unparsed says so');
+  check(challengeModel({ ...base, state: 'timed_out' }, 't1').bad &&
+        challengeModel({ ...base, state: 'failed', error: 'died' }, 't1').note === 'died',
+        'T-CHL-7/8 timeout and failure show, with the cause');
+  check(/left out big\.py/.test(challengeModel({ ...base, partial: true, omitted: ['big.py'] }, 't1').note),
+        'T-CHL-11 partial names what was left out');
+
+  const anchorFindings = load('anchorFindings', ['findingPath']);
+  const { at, loose } = anchorFindings([
+    { file: 'b/src/x.py', line: 3, claim: 'a' }, { file: 'src/x.py', line: 3, claim: 'b' },
+    { file: 'y.py', line: null, claim: 'c' }, { claim: 'd' }, null]);
+  eq([...at.keys()], ['src/x.py\u00003'], 'T-CHL-5 anchored by file and line, prefixes stripped');
+  eq(at.get('src/x.py\u00003').length, 2, 'two findings on one line both kept');
+  eq(loose.map(f => f.claim), ['c', 'd'], 'the rest list at the top');
+  const findingText = load('findingText', ['findingPath']);
+  eq(findingText({ file: './a.py', line: 2, severity: 'high', claim: 'x', evidence: 'y' }),
+     'a.py:2 · high: x — y', 'finding text');
+
+  // Untrusted output is text, never markup: the new builders use el() and
+  // textContent only.
+  for (const name of ['challengeNode', 'markFindings', 'paintChallenge'])
+    check(!/innerHTML|insertAdjacentHTML|outerHTML/.test(fn(name)), `${name} builds no HTML`);
+  check(/untrusted/.test(fn('challengeNode')) && /approves nothing/.test(fn('challengeNode')),
+        'C5 each challenge is labelled untrusted and advisory');
+  check(/Challenge again/.test(fn('challengeNode')) && /m\.stale \|\| m\.bad/.test(fn('challengeNode')),
+        'C6 a stale or failed challenge offers Challenge again');
+  check(/running/.test(fn('paintChallenge')) && /start\.disabled/.test(fn('paintChallenge')),
+        'one challenge at a time: Start is off while one runs');
+  check(!/challenge/.test(fn('reviewActions')), 'T-CHL-10 Commit never depends on a challenge');
+  check(/dataset\.new/.test(fn('diffNodes')), 'diff rows carry their new line number');
+  check(/d\.challenge/.test(src), 'a challenge event repaints');
+  check(/'\/api\/session\/worktree\/challenge'/.test(fn('startChallenge')), 'Start posts the route');
+}
+
 /* ── T-UI-13: `r` outside text fields only ──────────────────────────────── */
 const reviewKey = load('reviewKey', ['isTypingTarget']);
 const k = (key, extra = {}) => ({ key, metaKey: false, ctrlKey: false, altKey: false,

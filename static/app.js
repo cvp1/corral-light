@@ -1783,10 +1783,149 @@ function diffNodes(f) {
       }
       row.append(el('span', 'ln', l.old == null ? '' : String(l.old)),
                  el('span', 'ln', l.new == null ? '' : String(l.new)), t);
+      if (l.new != null) row.dataset.new = String(l.new);   // a challenge finding's anchor
       box.appendChild(row);
     }
   }
   return box;
+}
+
+/* ── the blind challenge (10x UX Part C) ─────────────────────────────────
+ * A different vendor's model reviews the frozen diff against the operator's
+ * criteria, blind to the author. Its findings are untrusted model output:
+ * shown as text, never markup, and never a grant. */
+
+/* Reviewer lanes: every runnable lane but the author's (SSH shells excluded).
+ * The hub refuses a same-vendor pick, with its reason. */
+function chlLanes(agents, authorLane) {
+  return (agents || []).filter(a => a && a.key && a.key !== authorLane &&
+                                    !String(a.key).startsWith('host:') && a.available !== false);
+}
+/* One challenge's head line, state and staleness against the tree on screen. */
+function challengeModel(ch, tree) {
+  const stale = !!ch.stale || !!(tree && ch.tree && ch.tree !== tree);
+  const who = [ch.laneLabel || ch.lane, ch.model].filter(Boolean).join(' · ');
+  const n = (ch.findings || []).length;
+  const state = ch.state === 'running' ? 'reviewing…'
+    : ch.state === 'done' ? `${ch.verdict || 'no verdict'} · ${n} finding${n === 1 ? '' : 's'}`
+    : ch.state === 'unparsed' ? 'answered, but not in the asked-for form: its words are below'
+    : ch.state === 'timed_out' ? 'timed out' : 'failed';
+  const left = (ch.omitted || []).join(', ');
+  return { stale, bad: ch.state === 'failed' || ch.state === 'timed_out',
+           head: `${who} — ${state}` + (stale ? ' · stale: the branch changed since' : ''),
+           note: [ch.error, ch.partial ? 'partial: ' + (left ? `left out ${left}`
+                                                             : 'the diff was cut at its size limit')
+                                       : ''].filter(Boolean).join(' · ') };
+}
+/* A finding's file as the diff names it: no ./, a/ or b/ prefix. */
+function findingPath(f) { return String(f || '').replace(/^\.\//, '').replace(/^[ab]\//, ''); }
+/* Findings anchored at a file and line (`path\0line` -> findings), and the rest. */
+function anchorFindings(findings) {
+  const at = new Map(), loose = [];
+  for (const f of findings || []) {
+    if (!f) continue;
+    if (f.file && Number.isInteger(f.line) && f.line > 0) {
+      const k = findingPath(f.file) + '\0' + f.line;
+      if (!at.has(k)) at.set(k, []);
+      at.get(k).push(f);
+    } else loose.push(f);
+  }
+  return { at, loose };
+}
+function findingText(f) {
+  const where = f.file ? findingPath(f.file) + (f.line ? ':' + f.line : '') + ' · ' : '';
+  return `${where}${f.severity || 'unknown'}: ${f.claim || ''}` + (f.evidence ? ` — ${f.evidence}` : '');
+}
+/* Put the newest done challenge's anchored findings under their diff lines.
+ * -> the findings that found no line on screen. */
+function markFindings(diff, ch, stale) {
+  for (const n of [...diff.querySelectorAll('.rfind')]) n.remove();
+  if (!ch || ch.state !== 'done') return [];
+  const { at, loose } = anchorFindings(ch.findings);
+  const placed = new Set();
+  for (const box of diff.children) {
+    const path = box.dataset && box.dataset.path;
+    if (!path) continue;
+    for (const row of [...box.querySelectorAll('.rl[data-new]')]) {
+      const k = path + '\0' + row.dataset.new;
+      if (!at.has(k) || placed.has(k)) continue;
+      placed.add(k);
+      let after = row;
+      for (const f of at.get(k)) {
+        const m = el('div', 'rfind ' + (f.severity || '') + (stale ? ' stale' : ''));
+        m.append(el('span', null, findingText(f)),
+                 el('span', 'cu', ` · ${ch.laneLabel || ch.lane}, untrusted`));
+        after.after(m);
+        after = m;
+      }
+    }
+  }
+  return [...loose, ...[...at].filter(([k]) => !placed.has(k)).flatMap(([, fs]) => fs)];
+}
+function challengeNode(ch, tree, unplaced) {
+  const m = challengeModel(ch, tree);
+  const c = el('div', 'chl' + (m.stale ? ' stale' : '') + (m.bad ? ' bad' : ''));
+  c.appendChild(el('div', 'ch', m.head));
+  c.appendChild(el('div', 'cu', `criteria: ${ch.criteria || ''}`));
+  if (m.note) c.appendChild(el('div', 'cu', m.note));
+  if (ch.state === 'done' || ch.state === 'unparsed')
+    c.appendChild(el('div', 'cu', `untrusted output from ${ch.laneLabel || ch.lane}; ` +
+                                  'advice only, it approves nothing'));
+  for (const f of unplaced || []) c.appendChild(el('div', 'fnd', findingText(f)));
+  if (ch.state === 'unparsed' && ch.raw) c.appendChild(el('pre', null, ch.raw));
+  const acts = el('div', 'facts');
+  if (m.stale || m.bad) {
+    const again = el('button', 'fbtn', 'Challenge again');
+    again.type = 'button';
+    again.onclick = () => startChallenge(ch.lane, ch.criteria);
+    acts.appendChild(again);
+  }
+  const rp = ch.reviewerPane && S.panes.get(ch.reviewerPane);
+  if (rp) {
+    const open = el('button', 'fbtn', 'Open the reviewer');
+    open.type = 'button';
+    open.onclick = () => { $('#revdlg').close(); openFromRail(rp); };
+    acts.appendChild(open);
+  }
+  if (acts.children.length) c.appendChild(acts);
+  return c;
+}
+function paintChallenge(p, snap) {
+  const out = $('#chl-out');
+  if (!out) return;
+  const list = (p && p.worktree && p.worktree.challenges) || [];
+  const tree = snap && snap.tree;
+  const sel = $('#chl-lane'), lanes = chlLanes(S.agents, p && p.agent);
+  const sig = lanes.map(a => a.key).join(',');
+  if (sel.dataset.sig !== sig) {
+    const keep = sel.value;
+    sel.replaceChildren(...lanes.map(a => { const o = el('option', null, a.label); o.value = a.key; return o; }));
+    sel.dataset.sig = sig;
+    if (lanes.some(a => a.key === keep)) sel.value = keep;
+  }
+  const running = list.some(c => c.state === 'running');
+  const start = $('#chl-start');
+  start.disabled = R.busy || R.loading || !snap || running || !lanes.length;
+  start.title = running ? 'a challenge of this branch is already running'
+              : !lanes.length ? 'no other lane is available to review' : '';
+  $('#chl-sum').textContent = list[0] ? '· ' + challengeModel(list[0], tree).head : '';
+  const newest = list[0];
+  const unplaced = markFindings($('#rev-diff'), newest, newest && challengeModel(newest, tree).stale);
+  out.replaceChildren(...list.map((ch, i) => challengeNode(ch, tree, i === 0 ? unplaced
+                                                                            : ch.findings)));
+}
+async function startChallenge(lane, criteria) {
+  criteria = String(criteria || '').trim();
+  if (!criteria) return toast('write the acceptance criteria first: the reviewer checks the change against them', true);
+  if (!lane) return toast('pick a reviewer', true);
+  $('#rev-chl').open = true;
+  try {
+    await api('/api/session/worktree/challenge', { pane: R.pane, lane, criteria });
+    await refresh();
+  } catch (e) {
+    toast((e.body && e.body.error) || e.message, true);
+  }
+  paintReview();
 }
 
 /* The review dialog. R.snap is what is on screen; every action posts from it. */
@@ -1820,6 +1959,9 @@ async function openReview(p) {
   $('#rev-filter').value = '';
   $('#rev-pr').checked = false;
   $('#rev-prtitle').value = p.title || '';
+  // Criteria are remembered per pane: the newest challenge's, if any.
+  const last = (p.worktree.challenges || [])[0];
+  $('#chl-criteria').value = (last && last.criteria) || '';
   if (!dlg.open) dlg.showModal();
   await loadReview();
 }
@@ -1914,6 +2056,7 @@ function paintReview() {
     ? [!ra.commit.ok && `Commit: ${ra.commit.why}.`, !ra.publish.ok && `Push: ${ra.publish.why}.`]
         .filter(Boolean).join(' ')
     : '';
+  paintChallenge(p, snap);
 }
 
 function wireReview() {
@@ -1932,6 +2075,7 @@ function wireReview() {
   $('#rev-filter').oninput = applyReviewFilter;
   $('#rev-remote').onchange = paintReview;
   $('#rev-pr').onchange = paintReview;
+  $('#chl-start').onclick = () => startChallenge($('#chl-lane').value, $('#chl-criteria').value);
   $('#rev-refresh').onclick = () => { R.reason = ''; R.done = null; loadReview(); };
   $('#rev-commit').onclick = () => run(
     () => api('/api/session/worktree/commit',
@@ -2465,7 +2609,7 @@ const DISPLAY_LABEL = {
 
 /* Turn origins that are not the human's (mirrors the core's AGENT_ORIGIN_VIAS);
  * a `ready` pane whose last turn came this way is `idle`. */
-const AGENT_ORIGIN_VIAS = ['peer', 'rig'];
+const AGENT_ORIGIN_VIAS = ['peer', 'rig', 'challenge'];
 const ASK_PREVIEW_CHARS = 80;           // the roster line; the banner shows it all
 
 /* ask_human: the agent's open question as the pane's banner, labelled as the
@@ -3327,6 +3471,11 @@ function connect() {
     if (ev.kind === 'worktree' && p.worktree) {
       if (d.summary) p.worktree.summary = d.summary;
       if (d.reviewed) p.worktree.reviewedDigest = d.reviewed;
+      // A challenge changed state: pull the record, repaint an open review of it.
+      if (d.challenge) refresh().then(() => {
+        const dlg = $('#revdlg');
+        if (dlg && dlg.open && R.pane === p.id) paintReview();
+      }).catch(() => {});
       if (d.commit || d.published || d.discarded) refresh().catch(() => {});
     }
     scheduleRender();

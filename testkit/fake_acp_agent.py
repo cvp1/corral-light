@@ -41,6 +41,11 @@ Prompt verbs (the text of the prompt):
     tool-edit <path>, tool-read <path>
                       -> reports a tool_call of that kind at <path>, then waits
                          3 s (a cancel ends the turn early)
+    a blind-challenge prompt ("You are reviewing a change you did not write")
+                      -> saves the prompt to $FAKE_ACP_DIR/review-prompt.txt,
+                         then answers per $FAKE_ACP_REVIEW: `json` (findings,
+                         after a decoy block), `broken` (bad json), `none` (no
+                         block), `slow` (waits for a cancel), `die`
     anything else     -> "echo: <text>"
     (file verbs refuse any path containing "..")
 
@@ -200,6 +205,29 @@ def prompt(rid, params):
                               {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]}})
         ev.wait()
         chunk(sid, "permission: " + json.dumps(_answers[pid].get("result")))
+    elif text.startswith("You are reviewing a change you did not write"):
+        (DIR / "review-prompt.txt").write_text(text)
+        mode = os.environ.get("FAKE_ACP_REVIEW", "json")
+        if mode == "die":
+            os._exit(3)
+        if mode == "slow":
+            chunk(sid, "reading")
+            _cancel.clear()
+            _cancel.wait(60)
+            send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
+            return
+        if mode == "json":
+            chunk(sid, "An example first:\n```json\n{\"verdict\": \"accept\", \"findings\": []}\n```\n"
+                       "Real answer:\n```json\n" + json.dumps({
+                           "verdict": "amend", "findings": [
+                               {"file": "a.txt", "line": 1, "severity": "high",
+                                "claim": "drops the base line", "evidence": "line 1 replaced"},
+                               {"file": "b.txt", "line": "x", "severity": "odd",
+                                "claim": "no line", "evidence": ""}]}) + "\n```\n")
+        elif mode == "broken":
+            chunk(sid, "```json\n{\"verdict\": \"amend\", \"findings\": [\n```")
+        else:
+            chunk(sid, "Looks fine to me, no findings.")
     elif words[:1] == ["permjson"]:
         spec = json.loads(text.split(None, 1)[1])
         _next[0] += 1

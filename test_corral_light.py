@@ -3870,6 +3870,8 @@ from test_worktrees_cli import (TheList, TheRestore, ThePurge, TheResolve,  # no
                                 TheDoctor, TheDispatch)
 # 10x UX Part B: "Review at the end", the sealed-snapshot permission policy.
 from test_review_at_end import ThePolicy, TheFlag, TheCreateRoute  # noqa: F401,E402
+# 10x UX Part C: the blind challenge.
+from test_challenge import Refusals, TheRun, ThePrompt, TheRoute as ChallengeRoute  # noqa: F401,E402
 # T-ISO-1: the own-branch suites, rerun with HOME and TMPDIR in a temp dir.
 from test_worktrees_iso import Isolation as WorktreeIsolation  # noqa: F401,E402
 

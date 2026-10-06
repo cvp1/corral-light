@@ -272,6 +272,20 @@
       </div>
       <div id="rev-diff" class="revdiff"></div>
     </div>
+    <!-- The blind challenge (10x UX Part C): advisory, never a grant. -->
+    <details id="rev-chl" class="revchl">
+      <summary>Challenge this change <span id="chl-sum" class="chlsum"></span></summary>
+      <p class="hint">Another vendor's model reads your acceptance criteria and this frozen
+        diff, without the author's reasoning, and names concrete failure cases. Its findings
+        are advice from a model: they cannot approve or block anything.</p>
+      <div class="chlform">
+        <label>Reviewer<select id="chl-lane"></select></label>
+        <label class="grow">Acceptance criteria<textarea id="chl-criteria" rows="2"
+               spellcheck="true" placeholder="what this change must do, and must not break"></textarea></label>
+        <button type="button" class="btn" id="chl-start">Start challenge</button>
+      </div>
+      <div id="chl-out" class="chlout"></div>
+    </details>
     <label>Commit message<input id="rev-msg" autocomplete="off"
            placeholder="what this change does"></label>
     <div class="revpub">

@@ -184,12 +184,14 @@ POSTURES = {
 QUOTE_CHARS = 12_000           # of one pane's last answer quoted into another
 
 # Client-declared origin label for a scripted send (a label, not a control);
-# any other value is refused. `rig` is a rig's hand-written opening prompt.
-TURN_VIAS = ("consult", "cli", "rig")
+# any other value is refused. `rig` is a rig's hand-written opening prompt;
+# `challenge` is the hub's prompt to a blind reviewer (Corral Light's
+# "Challenge this change").
+TURN_VIAS = ("consult", "cli", "rig", "challenge")
 
 # Turns the human did not start: when one ends the pane shows `idle`, not
 # `your-turn`, and it never answers an open ask_human question.
-AGENT_ORIGIN_VIAS = ("peer", "rig")
+AGENT_ORIGIN_VIAS = ("peer", "rig", "challenge")
 
 # ask_human: one open question per pane from its agent to the human.
 MAX_ASK_CHARS = _seat_mcp.MAX_ASK_CHARS
