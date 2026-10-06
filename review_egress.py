@@ -25,6 +25,7 @@ import threading
 SHIM_PORT = 18443                   # on the sandbox's own loopback
 PORTS = (443,)
 MAX_HEADER = 8192
+MAX_CONNECTIONS = 32               # per reviewer: a flood costs it, not the hub
 
 # Each lane's vendor domains (suffix match). A lane reaching anything else
 # is refused, and the refusal is shown on the challenge.
@@ -113,6 +114,7 @@ class Egress:
         os.chmod(self.path, 0o600)
         self.sock.listen(64)
         self.closed = False
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         threading.Thread(target=self._serve, daemon=True, name="review-egress").start()
 
     def close(self):
@@ -132,7 +134,16 @@ class Egress:
                 c, _ = self.sock.accept()
             except OSError:
                 return
-            threading.Thread(target=self._one, args=(c,), daemon=True).start()
+            if not self._slots.acquire(blocking=False):
+                c.close()                     # over its share: refused, nothing spawned
+                continue
+            threading.Thread(target=self._held, args=(c,), daemon=True).start()
+
+    def _held(self, c):
+        try:
+            self._one(c)
+        finally:
+            self._slots.release()
 
     def _one(self, c):
         try:

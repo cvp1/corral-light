@@ -77,6 +77,7 @@ def lane_logins(home=None):
 
 
 _AVAILABLE = None
+_FAILED_AT = 0.0
 
 
 def _jwt_exp(token):
@@ -127,16 +128,31 @@ def login_seconds_left(lane, home=None, now=None):
     return exp - now
 
 
+FAIL_TTL_S = 60          # a failed probe is retried after this; a pass is kept
+
+
 def available(refresh=False):
-    """(ok, why): can this host run a reviewer sandbox? Checked once with a
-    real `bwrap ... true` using the same namespaces and overlay as a spawn."""
-    global _AVAILABLE
+    """(ok, why): can this host run a reviewer sandbox? A real spawn of
+    wrap()'s own shape. A pass is kept for the hub's life; a failure is
+    tried twice and kept only FAIL_TTL_S, so a moment of load never leaves
+    a long-running hub refusing every challenge."""
+    global _AVAILABLE, _FAILED_AT
+    import time
     if _AVAILABLE is not None and not refresh:
-        return _AVAILABLE
+        if _AVAILABLE[0] or time.monotonic() - _FAILED_AT < FAIL_TTL_S:
+            return _AVAILABLE
+    for _attempt in range(2):
+        _AVAILABLE = _probe()
+        if _AVAILABLE[0]:
+            return _AVAILABLE
+    _FAILED_AT = time.monotonic()
+    return _AVAILABLE
+
+
+def _probe():
     exe = shutil.which(BWRAP)
     if not exe:
-        _AVAILABLE = (False, "bubblewrap (bwrap) is not installed on this host")
-        return _AVAILABLE
+        return (False, "bubblewrap (bwrap) is not installed on this host")
     import tempfile
     home = str(Path.home())
     with tempfile.TemporaryDirectory(prefix="corral-sbx-") as t:
@@ -151,22 +167,18 @@ def available(refresh=False):
         res = _probe_run(argv)
         wrote = os.path.exists(os.path.join(pane, "x"))
     if isinstance(res, str):
-        _AVAILABLE = (False, res)
-        return _AVAILABLE
+        return (False, res)
     if res.returncode != 0 or not wrote:
         why = (res.stderr or "").strip().splitlines()[-1:] or [f"exit {res.returncode}"]
-        _AVAILABLE = (False, f"bubblewrap cannot build the sandbox here: {why[0][:200]}")
-        return _AVAILABLE
+        return (False, f"bubblewrap cannot build the sandbox here: {why[0][:200]}")
     if Path(home, ".cache/.corral-sandbox-probe").exists():   # the overlay leaked
-        _AVAILABLE = (False, "the sandbox's home overlay wrote through to the real home")
-        return _AVAILABLE
-    _AVAILABLE = (True, "")
-    return _AVAILABLE
+        return (False, "the sandbox's home overlay wrote through to the real home")
+    return (True, "")
 
 
 def _probe_run(argv):
     try:
-        return subprocess.run(argv, capture_output=True, timeout=20, text=True)
+        return subprocess.run(argv, capture_output=True, timeout=45, text=True)
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"bubblewrap did not run: {e}"
 

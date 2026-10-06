@@ -145,6 +145,31 @@ class TheArgv(unittest.TestCase):
         self.assertNotIn("--bind " + str(self.home / ".grok"), s)
 
 
+class Availability(unittest.TestCase):
+
+    def setUp(self):
+        old = (rs._AVAILABLE, rs._FAILED_AT)
+        self.addCleanup(lambda: setattr(rs, "_AVAILABLE", old[0]) or setattr(rs, "_FAILED_AT", old[1]))
+
+    def test_a_failure_is_tried_twice_and_kept_briefly_a_pass_for_good(self):
+        calls = []
+        with mock.patch.object(rs, "_probe", lambda: calls.append(1) or (False, "busy")):
+            self.assertEqual(rs.available(refresh=True), (False, "busy"))
+            self.assertEqual(len(calls), 2)
+            rs.available()
+            self.assertEqual(len(calls), 2)               # within the TTL
+            with mock.patch.object(rs, "FAIL_TTL_S", 0):
+                rs.available()
+            self.assertEqual(len(calls), 4)               # after it, tried again
+        with mock.patch.object(rs, "_probe", lambda: calls.append(1) or (True, "")):
+            self.assertTrue(rs.available(refresh=True)[0])
+        n = len(calls)
+        with mock.patch.object(rs, "_probe", lambda: calls.append(1) or (False, "x")), \
+                mock.patch.object(rs, "FAIL_TTL_S", 0):
+            self.assertTrue(rs.available()[0])            # a pass is kept
+        self.assertEqual(len(calls), n)
+
+
 class TheProxy(unittest.TestCase):
     """The Egress proxy over its unix socket: refusals answer 403 and are
     recorded; nothing but CONNECT to an allowed host on 443 gets through."""
@@ -179,6 +204,23 @@ class TheProxy(unittest.TestCase):
     def test_an_allowed_name_that_resolves_privately_is_refused(self):
         with mock.patch.object(eg, "public_addresses", lambda host, port: None):
             self.assertIn("403", self.ask("CONNECT api.anthropic.com:443 HTTP/1.1"))
+
+    def test_a_flood_is_capped_per_reviewer(self):
+        held = []
+        for _ in range(eg.MAX_CONNECTIONS):
+            c = socket.socket(socket.AF_UNIX)
+            c.connect(self.proxy.path)
+            held.append(c)                      # each holds a slot, sending nothing
+        self.addCleanup(lambda: [c.close() for c in held])
+        time.sleep(0.2)
+        extra = socket.socket(socket.AF_UNIX)
+        extra.settimeout(5)
+        extra.connect(self.proxy.path)
+        self.assertEqual(extra.recv(10), b"")    # closed at once
+        extra.close()
+        for c in held:
+            c.close()
+        self.assertTrue(wait(lambda: self.ask("CONNECT example.com:443 HTTP/1.1").startswith("HTTP")))
 
     def test_closing_removes_the_socket(self):
         self.proxy.close()

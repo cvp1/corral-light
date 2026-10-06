@@ -3880,7 +3880,8 @@ from test_challenge import (Refusals, TheRun, ThePrompt, ReviewerModes,  # noqa:
                             Sandboxed as ChallengeSandboxed, TheRoute as ChallengeRoute)
 # The reviewer sandbox: egress policy, sign-in lifetimes, the proxy.
 from test_review_sandbox import (EgressPolicy, SignInLifetime, TheGate,  # noqa: F401,E402
-                                 TheArgv as SandboxArgv, TheProxy as EgressProxy)
+                                 TheArgv as SandboxArgv, TheProxy as EgressProxy,
+                                 Availability as SandboxAvailability)
 # T-ISO-1: the own-branch suites, rerun with HOME and TMPDIR in a temp dir.
 from test_worktrees_iso import Isolation as WorktreeIsolation  # noqa: F401,E402
 

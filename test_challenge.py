@@ -395,11 +395,25 @@ class ReviewerModes(ChallengeCase):
         self.assertEqual(len(c["declined"]), 1)
 
 
-@unittest.skipUnless(__import__("review_sandbox").available()[0],
-                     "this host cannot build the reviewer sandbox")
+@unittest.skipUnless(__import__("shutil").which("bwrap")
+                     and os.environ.get("CORRAL_TEST_NO_SANDBOX") != "1",
+                     "bubblewrap is not installed (or CORRAL_TEST_NO_SANDBOX=1)")
 class Sandboxed(ChallengeCase):
-    """The real bubblewrap sandbox around a real (fake-lane) reviewer."""
+    """The real bubblewrap sandbox around a real (fake-lane) reviewer. Where
+    bwrap is installed these fail, never skip, if the sandbox cannot be built:
+    a silent skip would hide exactly the regression they exist to catch."""
     SANDBOX = True
+
+    def setUp(self):
+        ok, why = self.sessions_sandbox().available(refresh=True)
+        self.assertTrue(ok, f"bwrap is installed but the sandbox cannot be built: {why} "
+                            f"(set CORRAL_TEST_NO_SANDBOX=1 on a host that cannot)")
+        super().setUp()
+
+    @staticmethod
+    def sessions_sandbox():
+        import review_sandbox
+        return review_sandbox
 
     def test_the_reviewer_cannot_write_reach_the_hub_or_keep_a_grant(self):
         state = Path(self.sessions.STATE)
