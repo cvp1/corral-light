@@ -62,6 +62,12 @@ _CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
 _QueuedText = _core.QueuedText
 TURN_VIAS = _core.TURN_VIAS
 
+# Who answered a permission card, as the client declares it (a label, not a
+# control, like TURN_VIAS): the wall, the operator's terminal (`corral-light
+# ok|no`), or a script such as lane_matrix. Any other value is recorded as
+# unknown, so the transcript never claims "you" for an answer it cannot place.
+ANSWER_VIAS = ("wall", "terminal", "script")
+
 MAX_ROSTER = MAX_PANES * 5      # cap on all panes, live or detached
 MAX_PROMPT = 200_000
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
@@ -1831,7 +1837,7 @@ class Pane(_core.PaneBase):
                 req = dict(req, options=kept)
         return super()._on_permission(req)
 
-    def answer(self, request_id, option_id, digest=None):
+    def answer(self, request_id, option_id, digest=None, via=None):
         req = self.pending.get(request_id)
         if not req:
             raise ValueError("no such pending permission (already answered?)")
@@ -1877,7 +1883,8 @@ class Pane(_core.PaneBase):
         self.emit("permission_answered", {"requestId": request_id,
                                           "optionId": option_id, "kind": kind,
                                           "digest": rec.get("digest"),
-                                          "delivered": ok})
+                                          "delivered": ok,
+                                          "via": via if via in ANSWER_VIAS else None})
         return ok
 
 

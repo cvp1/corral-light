@@ -1961,6 +1961,45 @@ class RefusalIsNeverGatedOnTheDigest(unittest.TestCase):
         self.assertIn("Reload", str(cm.exception))
 
 
+class AnAnswerSaysWhoGaveIt(unittest.TestCase):
+    """The transcript must not claim the operator chose what a script chose:
+    every answer records the answering client's label, and only a known label
+    is kept."""
+
+    def _answer(self, **kw):
+        p = PermissionDigestIsConsent._pane(PermissionDigestIsConsent())
+        got = []
+        p.emit = lambda kind, data, **k: got.append((kind, data))
+        p.answer("r1", "reject_once", **kw)
+        return [d for k, d in got if k == "permission_answered"][0]
+
+    def test_each_known_label_is_recorded(self):
+        import sessions
+        for via in sessions.ANSWER_VIAS:
+            self.assertEqual(self._answer(via=via)["via"], via)
+
+    def test_no_label_is_recorded_as_unknown(self):
+        self.assertIsNone(self._answer()["via"])
+
+    def test_an_unknown_label_is_recorded_as_unknown(self):
+        self.assertIsNone(self._answer(via="operator")["via"])
+
+    def test_the_browser_never_claims_an_answer_it_cannot_place(self):
+        _run_node_selftest(self, "selftest_answered.mjs",
+                           "who answered a permission, in the browser")
+
+    def test_the_hub_forwards_the_label(self):
+        hub = (ROOT / "hub.py").read_text(encoding="utf-8")
+        self.assertIn('via=b.get("via")', hub.split("/api/session/permission", 1)[1][:400])
+
+    def test_each_client_declares_itself(self):
+        js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(js.count("digest: d.digest, via: 'wall'"), 2,
+                         "card click and composer 1-9/Esc must both say wall")
+        self.assertIn('"via": "terminal"', (ROOT / "cli.py").read_text(encoding="utf-8"))
+        self.assertIn('"via": "script"', (ROOT / "lane_matrix.py").read_text(encoding="utf-8"))
+
+
 class ARequestIdIsNotUniqueInATranscript(unittest.TestCase):
     """A requestId is only unique among in-flight requests; stale cards in a
     transcript may share it.

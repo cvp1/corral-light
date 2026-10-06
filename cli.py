@@ -252,7 +252,8 @@ class Cli:
         r = self.post("/api/session/permission",
                       {"pane": pid, "requestId": card["requestId"],
                        "optionId": o["optionId"],
-                       "digest": card.get("digest") if grant else ""})
+                       "digest": card.get("digest") if grant else "",
+                       "via": "terminal"})
         return o, r
 
     def take_cards(self, pid):

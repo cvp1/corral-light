@@ -85,7 +85,8 @@ def turn(hub, pid, text, budget=TURN_BUDGET_S):
                 if reject:
                     hub.post("/api/session/permission",
                              {"pane": pid, "requestId": card["requestId"],
-                              "optionId": reject["optionId"], "digest": ""})
+                              "optionId": reject["optionId"], "digest": "",
+                              "via": "script"})
         if p.get("state") == "dead":
             out["why"] = f"dead: {p.get('error')}"
             return out

@@ -841,7 +841,8 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/session/permission":
                 pane = MGR.get(b.get("pane", ""))
                 ok = pane.answer(b.get("requestId", ""), b.get("optionId", ""),
-                                 digest=(b.get("digest") or ""))
+                                 digest=(b.get("digest") or ""),
+                                 via=b.get("via"))
                 return self._json({"ok": True, "delivered": ok})
             if p == "/api/session/resume":
                 pane = MGR.resume(b.get("pane", ""))

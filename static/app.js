@@ -858,7 +858,7 @@ function renderLog(p) {
       }
       // Quiet unless you asked for detail.
       case 'permission_answered':
-        if (detailed) { flush(); log.appendChild(el('div', 'sys', `you chose \u201c${d.optionId}\u201d`)); }
+        if (detailed) { flush(); log.appendChild(el('div', 'sys', answeredBy(d))); }
         break;
       case 'closed':
         if (detailed) { flush(); log.appendChild(el('div', 'sys', 'closed')); }
@@ -904,6 +904,17 @@ function workingTick() {
     const t = w.querySelector('.wtext');
     if (t) t.textContent = workingLabel(w.dataset.t0);
   }
+}
+
+/* Who answered a permission card, in words. The hub records the answering
+ * client's own label (`via`); only the wall and the operator's terminal are
+ * "you". A script's answer, or one recorded before labels existed, never is. */
+function answeredBy(d) {
+  const opt = `“${d.optionId}”`;
+  if (d.via === 'wall') return `you chose ${opt}`;
+  if (d.via === 'terminal') return `you chose ${opt} in the terminal`;
+  if (d.via === 'script') return `a script chose ${opt}, not you`;
+  return `${opt} was chosen, but who answered was not recorded`;
 }
 
 // The permission card: shows exactly what is being approved. `live` is passed in
@@ -980,7 +991,7 @@ function permCard(p, d, outcome, live) {
       const reason = (outcome.data || {}).reason || 'expired';
       c.appendChild(el('div', 'why expired', `expired, unanswered — ${reason}`));
     } else if (outcome && outcome.kind === 'permission_answered') {
-      c.appendChild(el('div', 'why', `you chose “${outcome.data.optionId}”`));
+      c.appendChild(el('div', 'why', answeredBy(outcome.data)));
     } else {
       c.appendChild(el('div', 'why', 'answered'));
     }
@@ -999,7 +1010,7 @@ function permCard(p, d, outcome, live) {
       try {
         await api('/api/session/permission',
                   { pane: p.id, requestId: d.requestId, optionId: o.optionId,
-                    digest: d.digest });
+                    digest: d.digest, via: 'wall' });
       } catch (e) { toast(e.message, true); }
     };
     opts.appendChild(b);
@@ -2267,7 +2278,7 @@ function composer(p, kind) {
       const answer = o => {
         api('/api/session/permission',
             { pane: p.id, requestId: d.requestId, optionId: o.optionId,
-              digest: d.digest })
+              digest: d.digest, via: 'wall' })
           .catch(err => toast(err.message, true));
       };
       if (d && /^[1-9]$/.test(e.key)) {
