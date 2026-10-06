@@ -1844,6 +1844,9 @@ function findingText(f) {
 function markFindings(diff, ch, stale) {
   for (const n of [...diff.querySelectorAll('.rfind')]) n.remove();
   if (!ch || ch.state !== 'done') return [];
+  // A stale challenge's line numbers belong to an older tree: placed on
+  // today's diff they would sit under unrelated lines. List them instead.
+  if (stale) return (ch.findings || []).filter(Boolean);
   const { at, loose } = anchorFindings(ch.findings);
   const placed = new Set();
   for (const box of diff.children) {

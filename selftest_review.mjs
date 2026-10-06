@@ -449,6 +449,8 @@ check(/wtRailCards\(panes, wtSeen\(\)\)/.test(fn('render')), 'render builds the 
     check(!/innerHTML|insertAdjacentHTML|outerHTML/.test(fn(name)), `${name} builds no HTML`);
   check(/untrusted/.test(fn('challengeNode')) && /approves nothing/.test(fn('challengeNode')),
         'C5 each challenge is labelled untrusted and advisory');
+  check(/if \(stale\) return/.test(fn('markFindings')),
+        'T-CHL-9 a stale challenge is listed, never anchored to today\'s lines');
   check(/Challenge again/.test(fn('challengeNode')) && /m\.stale \|\| m\.bad/.test(fn('challengeNode')),
         'C6 a stale or failed challenge offers Challenge again');
   check(/running/.test(fn('paintChallenge')) && /start\.disabled/.test(fn('paintChallenge')),
