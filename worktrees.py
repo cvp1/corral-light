@@ -997,8 +997,11 @@ def summary(entry):
     for path in sorted(paths):
         try:
             st = os.lstat(os.path.join(p, path))
-            h.update(f"{path}\0{st.st_size}\0{st.st_mtime_ns}\0{st.st_ino}\n".encode(
-                "utf-8", "surrogateescape"))
+            # ctime too: no user-space call can set it, so a rewrite that
+            # keeps the size and line counts and restores the mtime still
+            # reads as new (a cleared review card must not survive it).
+            h.update(f"{path}\0{st.st_size}\0{st.st_mtime_ns}\0{st.st_ctime_ns}\0"
+                     f"{st.st_ino}\n".encode("utf-8", "surrogateescape"))
         except OSError:
             h.update(f"{path}\0gone\n".encode("utf-8", "surrogateescape"))
     return {"files": files + len(untracked), "added": added, "deleted": deleted,

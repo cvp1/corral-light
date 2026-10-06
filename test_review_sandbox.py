@@ -109,7 +109,8 @@ class TheArgv(unittest.TestCase):
 
     def wrap(self, **kw):
         return rs.wrap(["lane"], {"CORRAL_POSTURE": "strict", "SSH_AUTH_SOCK": "/x"},
-                       lane="grok", cwd="/t", state=self.state, rw_dirs=[self.rw],
+                       lane="grok", cwd="/t", state=self.state, ro_dirs=[self.rw],
+                       scratch_dirs=[self.state / "panes" / "p1" / "config"],
                        tree_dir="/t", home=self.home,
                        base_env={"PATH": "/bin", "GH_TOKEN": "x", "LC_ALL": "C"}, **kw)
 
@@ -134,6 +135,11 @@ class TheArgv(unittest.TestCase):
         back = argv.index(str(self.rw))
         self.assertLess(hide, back)
         self.assertNotIn(str(self.state / "panes" / "p1"), argv)   # never the pane dir itself
+        s = " ".join(argv)
+        self.assertIn(f"--ro-bind {self.rw} {self.rw}", s)       # the socket dir: read-only
+        cfg = self.state / "panes" / "p1" / "config"
+        self.assertIn(f"--overlay-src {cfg} --tmp-overlay {cfg}", s)
+        self.assertNotIn(" --bind ", s)                            # nothing persists
 
     def test_secrets_and_other_lanes_logins_are_hidden_own_login_is_not_writable(self):
         argv, _ = self.wrap()

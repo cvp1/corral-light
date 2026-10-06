@@ -14,6 +14,7 @@ from a JSON spec and reports the answer. Nothing here answers a real card.
 import http.client
 import json
 import os
+import time
 import sys
 import threading
 import unittest
@@ -336,6 +337,33 @@ class TheFlag(RaeCase):
         self.say(q, "write a.txt x")
         with self.assertRaises(wt.Refused):
             self.mgr.worktree_mark_reviewed(q.id, self.mgr.worktree_snapshot(q.id)["tree"])
+
+    def test_a_write_during_the_grant_is_never_covered(self):
+        p = self.rae()
+        self.summary_after(p, "write notes.txt one")
+        seen = self.mgr.worktree_snapshot(p.id)
+        real = wt.snapshot
+
+        def racing(e, tmp_dir=None):           # another process writes mid-grant
+            out = real(e, tmp_dir=tmp_dir)
+            Path(e["path"], "notes.txt").write_text("changed while granting")
+            return out
+        with mock.patch.object(wt, "snapshot", racing):
+            with self.assertRaises(wt.Refused):
+                self.mgr.worktree_mark_reviewed(p.id, seen["tree"])
+        self.assertIsNone(p.worktree_view()["reviewedDigest"])
+
+    def test_a_restored_mtime_still_reads_as_changed(self):
+        p = self.rae()
+        self.summary_after(p, "write notes.txt aaaa")
+        f = Path(self.root(p), "notes.txt")
+        e = self.mgr.worktree_entry(p)
+        d1 = wt.summary(e)["digest"]
+        st = f.stat()
+        time.sleep(0.02)
+        f.write_text(f.read_text().replace("aaaa", "bbbb"))   # same size, same line counts
+        os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))     # and the old mtime
+        self.assertNotEqual(wt.summary(e)["digest"], d1)
 
     def test_commit_is_the_review(self):
         p = self.rae()

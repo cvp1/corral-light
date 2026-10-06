@@ -163,15 +163,15 @@ def _probe():
                         f"touch {home}/.cache/.corral-sandbox-probe 2>/dev/null; "
                         f"! touch {tree}/x 2>/dev/null && touch {pane}/x"],
                        {}, lane="none", cwd=tree, state=os.path.join(t, "state"),
-                       rw_dirs=[pane], tree_dir=tree)
+                       scratch_dirs=[pane], tree_dir=tree)
         res = _probe_run(argv)
-        wrote = os.path.exists(os.path.join(pane, "x"))
+        leaked = os.path.exists(os.path.join(pane, "x"))
     if isinstance(res, str):
         return (False, res)
-    if res.returncode != 0 or not wrote:
+    if res.returncode != 0:
         why = (res.stderr or "").strip().splitlines()[-1:] or [f"exit {res.returncode}"]
         return (False, f"bubblewrap cannot build the sandbox here: {why[0][:200]}")
-    if Path(home, ".cache/.corral-sandbox-probe").exists():   # the overlay leaked
+    if leaked or Path(home, ".cache/.corral-sandbox-probe").exists():   # an overlay leaked
         return (False, "the sandbox's home overlay wrote through to the real home")
     return (True, "")
 
@@ -183,14 +183,16 @@ def _probe_run(argv):
         return f"bubblewrap did not run: {e}"
 
 
-def wrap(argv, env, *, lane, cwd, state, rw_dirs, tree_dir, home=None, egress=None,
-         base_env=None):
+def wrap(argv, env, *, lane, cwd, state, tree_dir, ro_dirs=(), scratch_dirs=(),
+         home=None, egress=None, base_env=None):
     """-> (argv, env) running `argv` inside the reviewer sandbox.
 
-    `state`: this hub's state dir (hidden). `rw_dirs`: the only dirs under
-    it the reviewer may write (its lane config, its egress socket's dir);
-    never the pane dir itself, whose metadata says it is a sandboxed
-    reviewer. `env`: the lane's own spawn environment; with `base_env`
+    `state`: this hub's state dir (hidden); of it the reviewer sees only
+    `ro_dirs` (read-only: its egress socket's dir; connecting to a socket
+    needs no write) and `scratch_dirs` (its lane config, behind a throwaway
+    overlay). Nothing the reviewer writes persists anywhere on the host, so
+    nothing the hub later reads or writes can have been planted by it: no
+    symlink, no meta.json edit. `env`: the lane's own spawn environment; with `base_env`
     (default os.environ) filtered to KEEP_ENV, it is the whole environment
     inside (bubblewrap clears the rest).
     `tree_dir`: the frozen tree (read-only; also the cwd). Paths keep their
@@ -233,8 +235,10 @@ def wrap(argv, env, *, lane, cwd, state, rw_dirs, tree_dir, home=None, egress=No
     state = str(state)
     if os.path.isdir(state):
         a += ["--tmpfs", state]
-    for d in rw_dirs:
-        a += ["--bind", str(d), str(d)]
+    for d in ro_dirs:
+        a += ["--ro-bind", str(d), str(d)]
+    for d in scratch_dirs:
+        a += ["--overlay-src", str(d), "--tmp-overlay", str(d)]
     a += ["--ro-bind", str(tree_dir), str(tree_dir)]
     base = os.environ if base_env is None else base_env
     inside = {k: v for k, v in base.items()

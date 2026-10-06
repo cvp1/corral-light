@@ -284,7 +284,11 @@ design left open. Both are now decided and built.
 to clear the blocking card, before the operator had read anything, and the
 digest it recorded is stat-based. Now the card clears only on Mark reviewed
 or Commit. Both name the tree OID on screen, a content hash, and the hub
-re-freezes the branch and refuses if it differs. Commit already refused a
+re-freezes the branch and refuses if it differs. The digest it records is
+taken on both sides of that freeze and must match, so a write by any
+process mid-grant is never covered; and it includes each file's ctime,
+which no user-space call can set, so a rewrite that restores the mtime
+still brings the card back. Commit already refused a
 moved tree; it now also records the review. One click either way, and an
 edit made while the dialog was open is never approved unseen.
 
@@ -301,8 +305,11 @@ enough on its own for the case it covers:
    read-only; each top-level home directory behind a throwaway overlay, so
    the vendor CLI's own state writes work and vanish; this hub's state
    hidden (session key, panes, worktrees, and the reviewer's own pane dir
-   and meta.json), with only its lane config dir and its egress socket's
-   dir bound back, plus the frozen tree read-only; SSH, GPG, cloud,
+   and meta.json), with only its egress socket's dir bound back read-only
+   (connecting needs no write) and its lane config dir behind a throwaway
+   overlay, plus the frozen tree read-only. Nothing the reviewer writes
+   persists anywhere on the host, so nothing the hub later reads or writes
+   (config seeding, meta.json) can have been planted by it; SSH, GPG, cloud,
    browser, sync, password-manager, X authority and keyvault secrets and
    every other lane's login hidden; `/run` replaced; private `/tmp`; its
    own pid **and network** namespaces (no host loopback service, no
@@ -364,7 +371,11 @@ services and abstract sockets unreachable. A second panel (Codex, Grok;
 Gemini declined to review security) found the shared network, the
 writable meta.json, the inherited environment, allowable cards and modes
 lost on resume; all five are fixed above, each with a test that fails
-without its fix. Claude through the proxy is verified up to its API but
+without its fix. A third round (Codex; Grok's arm stopped on a card it
+raised, left for the operator) found the writable Claude config dir as a
+symlink plant for host-side reseeding, unbounded proxy threads, a race in
+the grant, and a forgeable stat digest; all four are fixed above, each
+with a test that fails without its fix. Claude through the proxy is verified up to its API but
 not through a full challenge: this host's shared Claude sign-in was
 signed out mid-session (see the hand-off note in §8).
 

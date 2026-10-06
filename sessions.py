@@ -1919,13 +1919,14 @@ class Pane(_core.PaneBase):
             self._egress = eg = _egress.Egress(
                 self.dir / "egress" / "s.sock", self.agent,
                 on_host=lambda host, ok: self.mgr._challenge_egress(self, host, ok))
-        # Writable inside: the lane's own config and the egress socket's dir.
-        # Never the pane dir: its meta.json is what marks it a sandboxed reviewer.
-        rw = [self.dir / "egress"]
-        if env.get("CLAUDE_CONFIG_DIR"):
-            rw.append(Path(env["CLAUDE_CONFIG_DIR"]))
+        # Of this hub's state the reviewer sees only its egress socket's dir
+        # (read-only) and its lane config (a throwaway overlay). Never the pane
+        # dir, whose meta.json marks it a sandboxed reviewer, and nothing it
+        # writes outlives it, so the hub never reads back what it planted.
+        scratch = [Path(env["CLAUDE_CONFIG_DIR"])] if env.get("CLAUDE_CONFIG_DIR") else []
         argv, env = _sbx.wrap(spec["argv"], env, lane=self.agent, cwd=self.cwd,
-                              state=STATE, rw_dirs=rw, tree_dir=self.review_tree,
+                              state=STATE, tree_dir=self.review_tree,
+                              ro_dirs=[self.dir / "egress"], scratch_dirs=scratch,
                               egress=eg.path)
         return argv, env, strip + _sbx.DROP_ENV
 
@@ -3090,12 +3091,29 @@ class Manager(_core.ManagerBase):
             p.worktree_summary = _wt.summary(self.worktree_entry(p))
             ev = {"summary": p.worktree_summary, "commit": r["commit"]}
             # commit_tree refused unless the live tree is the one reviewed, so
-            # committing it is the review: the blocking card clears.
+            # committing it is the review and the blocking card clears; unless
+            # a file moved since, which leaves the card up.
             if p.review_at_end:
-                ev["reviewed"] = self._set_reviewed(p, p.worktree_summary)
+                still = self._stable_summary(p, self.worktree_entry(p), tree)
+                if still:
+                    p.worktree_summary = ev["summary"] = still
+                    ev["reviewed"] = self._set_reviewed(p, still)
             p.emit("worktree", ev, activity=False)
             return r
         return self._worktree_action(pane_id, go, drain_after=True)
+
+    @staticmethod
+    def _stable_summary(p, e, tree):
+        """The summary to record as reviewed, or None: a digest taken on both
+        sides of a fresh freeze, equal, around a tree that is still `tree`.
+        Anything that moved in between (the agent, another process) makes it
+        None, so a review never covers content nobody saw."""
+        before = _wt.summary(e)
+        snap = _wt.snapshot(e, tmp_dir=p.dir)
+        after = _wt.summary(e)
+        if snap["tree"] != tree or not before or not after:
+            return None
+        return after if before.get("digest") == after.get("digest") else None
 
     def _set_reviewed(self, p, summary):
         digest = (summary or {}).get("digest")
@@ -3112,12 +3130,12 @@ class Manager(_core.ManagerBase):
         def go(p, e):
             if not p.review_at_end:
                 raise _wt.Refused("mode", "this pane does not use Review at the end")
-            snap = _wt.snapshot(e, tmp_dir=p.dir)
-            if snap["tree"] != tree:
+            after = self._stable_summary(p, e, tree)
+            if not after:
                 raise _wt.Refused("changed", "the branch changed after this review "
                                              "opened; review the new diff")
-            p.worktree_summary = _wt.summary(e)
-            digest = self._set_reviewed(p, p.worktree_summary)
+            p.worktree_summary = after
+            digest = self._set_reviewed(p, after)
             p.emit("worktree", {"summary": p.worktree_summary, "reviewed": digest},
                    activity=False)
             return {"reviewed": digest, "tree": tree}
