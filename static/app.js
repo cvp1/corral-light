@@ -14,7 +14,7 @@ function loadDetail() {
   }
 }
 const S = { panes: new Map(), agents: [], focus: null, es: null, railShut: null,
-            detail: new Set(loadDetail()) };
+            solo: null, detail: new Set(loadDetail()) };
 const saveDetail = () =>
   localStorage.setItem('corral.detail', JSON.stringify([...S.detail]));
 
@@ -2690,10 +2690,14 @@ function render() {
   }
   }
 
-  // grid
+  // grid. On a phone, an opened pane shows alone (client-side only: nothing
+  // is minimized, so fan-out membership is untouched).
   const g = $('#grid');
-  const shown = panes.filter(p => !p.minimized);
-  const mins = panes.filter(p => p.minimized);
+  const narrow = isNarrow();
+  if (!narrow || (S.solo && !S.panes.has(S.solo))) S.solo = null;
+  const solo = soloPane(panes, S.solo, narrow);
+  const shown = solo ? panes.filter(p => p.id === solo) : panes.filter(p => !p.minimized);
+  const mins = solo ? [] : panes.filter(p => p.minimized);
   g.className = 'grid' + (shown.length === 1 ? ' one' : '');
 
   // Clear only the disposable children (minbar, empty state); panes reconcile by identity.
@@ -2724,6 +2728,15 @@ function render() {
     }
     g.insertBefore(bar, g.firstChild);          // above the panes, which stay put
   }
+  if (solo) {
+    const bar = el('div', 'solobar');
+    const back = el('button', 'fbtn', '‹ Needs you');
+    back.type = 'button';
+    back.title = 'back to the Needs-you list and the whole wall';
+    back.onclick = () => { S.solo = null; render(); };
+    bar.appendChild(back);
+    g.insertBefore(bar, g.firstChild);
+  }
 
   // Reconcile panes by id: drop gone panes, update the rest in place, and move a
   // node only when its position changed (moving blurs focus). Minimized panes
@@ -2736,7 +2749,7 @@ function render() {
   }
   // A retired pane must not leave its find highlights registered page-wide.
   if (FIND.pane && !PANES.has(FIND.pane)) { FIND.pane = null; clearFindPaint(); }
-  let prev = mins.length ? g.querySelector(':scope > .minbar') : null;
+  let prev = g.querySelector(':scope > .minbar, :scope > .solobar');
   for (const p of shown) {
     let rec = PANES.get(p.id);
     if (!rec) { PANES.set(p.id, rec = buildPane(p)); }
@@ -2823,16 +2836,16 @@ function render() {
           'this request is older than the kept transcript — open the pane'));
       }
       const go = el('button', 'fbtn',
-                    p.minimized ? 'Restore the pane' : 'Open the pane');
-      go.onclick = async () => {
-        if (p.minimized) await setMin(p, false);
-        focusPane(p.id);
-      };
+                    p.minimized && !narrow ? 'Restore the pane' : 'Open the pane');
+      go.onclick = () => openFromRail(p);
       const acts = el('div', 'facts'); acts.appendChild(go);
       c.appendChild(acts);
       n.appendChild(c); items++;
     }
   }
+  // Open ask_human questions: blocking, like a permission, with the full text.
+  const { asked, paused } = railExtras(panes);
+  for (const p of asked) { n.appendChild(questionCard(p, narrow)); items++; }
   // A pane that died on its own stays until dismissed; closed panes never appear.
   for (const p of panes) {
     if (p.state !== 'dead') continue;
@@ -2888,6 +2901,12 @@ function render() {
     c.appendChild(acts);
     n.appendChild(c); items++; quiet++;
   }
+  // Paused panes: a quiet list under the cards, one Resume each (no Resume-all:
+  // waking many at once can stampede new cards). Never blocking.
+  if (paused.length) {
+    n.appendChild(el('div', 'lab rpaused', `Paused · ${paused.length}`));
+    for (const p of paused) { n.appendChild(pausedRow(p)); items++; quiet++; }
+  }
   if (!items) n.appendChild(el('div', 'calm', 'Nothing. Quiet is the steady state.'));
   const mobilePane = $('#mobile-pane');
   if (mobilePane) {
@@ -2909,7 +2928,88 @@ function render() {
       if (panes.some(p => p.id === selected)) mobilePane.value = selected;
     }
   }
-  railFold(items, panes.reduce((a, p) => a + p.pending.length, 0), quiet);
+  railFold(items, blockedCount(panes), quiet, !!solo);
+}
+
+/* ── the rail's pure parts (selftest_inbox.mjs) ─────────────────────────── */
+function isNarrow() {
+  return !!(window.matchMedia && window.matchMedia('(max-width: 820px)').matches);
+}
+/* Panes with an open question (blocking cards), and paused panes without one
+ * (the quiet list). A paused pane that asked shows once, as its question. */
+function railExtras(panes) {
+  const q = p => !!(p.question && p.question.text);
+  return { asked: panes.filter(q),
+           paused: panes.filter(p => p.state === 'detached' && !q(p)) };
+}
+/* Everything that blocks an agent on the human: pending permissions and open
+ * questions. Drives the hot count on the folded strip and the phone's pop-open. */
+function blockedCount(panes) {
+  return panes.reduce((a, p) => a + (p.pending || []).length +
+                                 (p.question && p.question.text ? 1 : 0), 0);
+}
+/* The pane shown alone on a phone, or null: only at phone width and only while
+ * the pane exists. */
+function soloPane(panes, solo, narrow) {
+  return narrow && solo && panes.some(p => p.id === solo) ? solo : null;
+}
+/* Ids of panes a human can actually see: drawn in the grid, overlapping the
+ * viewport, not minimized (unless shown alone), and not under the phone's
+ * full-width rail. `rectOf(id)` is the pane's box or null when not drawn. */
+function seenPanes(panes, rectOf, vh, covered, solo) {
+  if (covered) return [];
+  return panes.filter(p => {
+    if (p.minimized && p.id !== solo) return false;
+    const r = rectOf(p.id);
+    return !!(r && r.height > 0 && r.bottom > 0 && r.top < vh);
+  }).map(p => p.id);
+}
+
+/* A rail card's question: the agent's words, in full, as text. A hop-limit stop
+ * is the hub's words and says so. */
+function questionCard(p, narrow) {
+  const q = p.question, hub = q.source === 'hop-limit';
+  const c = el('div', 'ncard q' + (hub ? ' hub' : ''));
+  c.appendChild(el('div', 't', `${p.title || p.label} — ` +
+                               (hub ? 'Corral paused this loop' : 'asks you')));
+  c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)}` +
+                               (p.minimized ? ' · minimized' : '') +
+                               (p.state === 'detached' ? ' · paused' : '')));
+  c.appendChild(el('div', 'qtext', q.text));
+  const acts = el('div', 'facts');
+  const go = el('button', 'fbtn', hub ? 'Open the pane' : 'Answer in pane');
+  go.type = 'button';
+  go.title = hub ? 'send the pane any message to let the loop continue'
+                 : 'open the pane with its message box ready';
+  go.onclick = () => answerInPane(p, narrow);
+  acts.appendChild(go);
+  c.appendChild(acts);
+  return c;
+}
+/* One paused pane in the rail's quiet list: its name opens it, Resume wakes it. */
+function pausedRow(p) {
+  const row = el('div', 'prow');
+  const t = el('div', 'pt', p.title || p.label);
+  t.title = 'saved, not running: resume to pick it up, or open it';
+  t.onclick = () => focusPane(p.id);
+  const rb = el('button', 'fbtn', 'Resume');
+  rb.type = 'button';
+  rb.onclick = async () => { rb.disabled = true; rb.textContent = 'resuming…';
+                             await resumePane(p); };
+  row.append(t, rb);
+  return row;
+}
+/* Open a pane from the rail. On a phone the solo view shows it even when
+ * minimized, so nothing is restored; on a wide screen a minimized pane is. */
+async function openFromRail(p, narrow = isNarrow()) {
+  if (p.minimized && !narrow) await setMin(p, false);
+  focusPane(p.id);
+}
+async function answerInPane(p, narrow = isNarrow()) {
+  await openFromRail(p, narrow);
+  requestAnimationFrame(() =>
+    document.querySelector(`[data-pane="${p.id}"] .composer textarea`)
+      ?.focus({ preventScroll: true }));
 }
 
 // Minimize/restore, shared by the roster row, pane header, minbar chip and rail.
@@ -2927,13 +3027,15 @@ async function setMin(p, flag) {
 /* Whether the rail shows: a hand-fold wins; otherwise open when it holds
  * something. On a narrow screen the rail covers the pane, so review cards
  * (`quiet`, never blocking) count but do not pop it open there. */
-function railOpens(items, quiet, narrow, shut) {
+function railOpens(items, quiet, narrow, shut, solo = false) {
+  // A pane open alone on a phone folds the rail for that view, never stickily.
+  if (narrow && solo) return false;
   if (shut !== null) return !shut;
   return (narrow ? items - quiet : items) > 0;
 }
-function railFold(items, blocked, quiet = 0) {
-  const narrow = !!(window.matchMedia && window.matchMedia('(max-width: 820px)').matches);
-  const open = railOpens(items, quiet, narrow, S.railShut);
+function railFold(items, blocked, quiet = 0, solo = false) {
+  const narrow = isNarrow();
+  const open = railOpens(items, quiet, narrow, S.railShut, solo);
   $('#app').classList.toggle('railshut', !open);
   $('#rrail').classList.toggle('shut', !open);
   $('#railhead').textContent = `Needs you${items ? ' · ' + items : ''} ▾`;
@@ -2957,7 +3059,12 @@ function wireRail() {
     render();
   };
   $('#railhead').onclick = () => set(true);
-  $('#railtab').onclick = () => set(false);
+  // From a phone's solo view the strip goes back to the list: leave the solo
+  // view, and undo a hand-fold so the list actually shows.
+  $('#railtab').onclick = () => {
+    if (S.solo && isNarrow()) { S.solo = null; return set(S.railShut === true ? false : S.railShut); }
+    set(false);
+  };
 }
 
 /* ── data ────────────────────────────────────────────────────────────── */
@@ -2977,7 +3084,16 @@ function markSeen() {
     // One POST for every pane that moved, not one per pane per tick.
     const seen = {};
     let any = false;
-    for (const p of S.panes.values()) {
+    // Only panes on screen: an off-screen pane keeps its notifications.
+    const panes = [...S.panes.values()];
+    const rail = $('#rrail');
+    const covered = isNarrow() && !!rail && !rail.classList.contains('shut');
+    const vis = new Set(seenPanes(panes,
+      id => document.querySelector(`#grid > .pane[data-pane="${id}"]`)
+              ?.getBoundingClientRect() || null,
+      window.innerHeight, covered, S.solo));
+    for (const p of panes) {
+      if (!vis.has(p.id)) continue;
       const seq = p.seq || 0;
       if (seq > (SEEN.get(p.id) || 0)) {
         SEEN.set(p.id, seq);
@@ -3918,22 +4034,50 @@ const CROSSFEED_DEFAULT = 'Round two. Below are the other arms\' answers to the 
 
 /* Round two of a panel: each composable pane gets every other's last answer under
  * an editable preamble, sent as its own user turn. */
+/* Who takes part in a cross-feed and who is left out, with why. Pure. */
+function crossfeedPlan(every, composable) {
+  const asked = p => (p.events || []).some(e => e.kind === 'user');
+  const name = p => p.title || p.label;
+  const ok = new Set(composable.map(p => p.id));
+  const panes = composable.filter(asked);
+  const out = composable.filter(p => !asked(p)).map(p => `${name(p)} (never asked)`);
+  for (const p of every) {
+    if (ok.has(p.id) || String(p.agent || '').startsWith('host:')) continue;
+    const why = p.state === 'dead' ? 'stopped' : p.state === 'detached' ? 'paused'
+              : p.minimized ? 'minimized' : 'not available';
+    out.push(`${name(p)} (${why})`);
+  }
+  return { panes, out };
+}
+
+/* The cross-feed confirmation: who takes part, who is left out, and the
+ * editable preamble. Resolves to the preamble, or null on Cancel or Escape. */
+function askPreamble(panes, out) {
+  const d = $('#xfdlg');
+  $('#xf-title').textContent = `Cross-feed ${panes.length} panes`;
+  $('#xf-who').textContent = 'Taking part: ' + panes.map(p => p.title || p.label).join(', ');
+  const o = $('#xf-out');
+  o.textContent = out.length ? 'Left out: ' + out.join(', ') : '';
+  o.hidden = !out.length;
+  const ta = $('#xf-text');
+  ta.value = CROSSFEED_DEFAULT;
+  return new Promise(resolve => {
+    d.addEventListener('close', () => resolve(d.returnValue === 'ok' ? ta.value : null),
+                       { once: true });
+    d.returnValue = '';
+    d.showModal();
+  });
+}
+
 async function crossfeed() {
-  // Only panes that have been asked something take part; the rest are named in
-  // the confirmation.
-  const all = composablePanes();
-  const asked = (p) => (p.events || []).some(e => e.kind === 'user');
-  const panes = all.filter(asked);
-  const idle = all.filter(p => !asked(p)).map(p => p.title || p.label);
+  // Only live, on-screen panes that have been asked something take part; the
+  // dialog names the rest and why.
+  const { panes, out } = crossfeedPlan([...S.panes.values()], composablePanes());
   if (panes.length < 2) {
     return toast('cross-feed needs two or more panes that have been asked something'
-      + (idle.length ? ` — never asked: ${idle.join(', ')}` : ''), true);
+      + (out.length ? ` — left out: ${out.join(', ')}` : ''), true);
   }
-  const text = window.prompt(
-    `Cross-feed ${panes.length} panes: ${panes.map(p => p.title || p.label).join(', ')}.`
-    + (idle.length ? `\nLeaving out, never asked: ${idle.join(', ')}.` : '')
-    + `\nPreamble each arm gets above the others' answers:`,
-    CROSSFEED_DEFAULT);
+  const text = await askPreamble(panes, out);
   if (text === null) return;
   try {
     const r = await api('/api/session/crossfeed', { panes: panes.map(p => p.id), text });
@@ -4053,6 +4197,7 @@ function wireMobileActions() {
  * Open a conversation: mark it focused and scroll it into view. */
 function focusPane(id) {
   S.focus = id;
+  if (isNarrow()) S.solo = id;          // a phone shows the opened pane alone
   render();
   requestAnimationFrame(() =>
     document.querySelector(`[data-pane="${id}"]`)
@@ -4093,6 +4238,10 @@ async function start() {
     markSeen();
   });
   window.addEventListener('focus', markSeen);
+  // Scrolling brings panes on screen; that is when they become seen.
+  $('#grid').addEventListener('scroll', markSeen, { passive: true });
+  window.addEventListener('scroll', markSeen, { passive: true });
+  window.addEventListener('resize', markSeen);
 }
 
 (async function boot() {

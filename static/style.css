@@ -1273,3 +1273,26 @@ dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh 
 .pmenu .mi .mk{font-family:var(--mono);font-size:10.5px;color:var(--faint);
   border:1px solid var(--line);border-radius:4px;padding:0 5px;line-height:16px}
 .pmenu .msep{height:1px;background:var(--line);margin:5px 6px}
+
+/* ── Needs you: questions, paused panes, the phone's solo view ─────────────
+ * docs/ux-10x-plan.md Part A. */
+.ncard.q{border-left-color:var(--gold)}
+.ncard.q.hub{border-left-style:dashed}
+.ncard .qtext{white-space:pre-wrap;word-break:break-word;font-size:12.5px;color:var(--ink);
+  margin:7px 0 2px;max-height:220px;overflow:auto}
+.needs .lab.rpaused{margin-top:12px}
+.needs .prow{display:flex;align-items:center;gap:8px;padding:4px 6px 4px 8px;font-size:12.5px;
+  color:var(--dim)}
+.needs .prow .pt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  cursor:pointer}
+.needs .prow .pt:hover{color:var(--ink)}
+.solobar{grid-column:1/-1;display:flex;align-items:center;gap:8px}
+.grid.one:has(> .solobar){grid-template-rows:auto minmax(0,1fr)}
+#xf-text{font:inherit;font-size:12.5px;min-height:96px;resize:vertical;background:var(--ground);
+  color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+#xf-text:focus{outline:none;border-color:var(--ember)}
+@media(max-width:820px){
+  /* Open, the rail is the phone's home screen: full width, above the header
+     controls it used to collide with. Folded, it is still the 34px strip. */
+  .rail.right:not(.shut){width:100%;z-index:56;box-shadow:none}
+}
