@@ -160,6 +160,21 @@
   </form>
 </dialog>
 
+<!-- Cross-feed: who takes part, who is left out, and the preamble each arm gets. -->
+<dialog id="xfdlg">
+  <form method="dialog" class="dlg">
+    <h2 id="xf-title">Cross-feed</h2>
+    <p class="hint" id="xf-who"></p>
+    <p class="hint" id="xf-out"></p>
+    <label>Preamble each arm gets above the others' answers
+      <textarea id="xf-text" rows="5"></textarea></label>
+    <menu>
+      <button value="cancel" class="btn">Cancel</button>
+      <button value="ok" class="btn go" id="xf-go">Send</button>
+    </menu>
+  </form>
+</dialog>
+
 <!-- Port: carry this conversation's transcript to another lane. Send is bound to the preview's sha. -->
 <dialog id="portdlg">
   <form method="dialog" class="dlg">
