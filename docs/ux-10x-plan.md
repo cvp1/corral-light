@@ -300,25 +300,44 @@ enough on its own for the case it covers:
 2. *The OS sandbox* (`review_sandbox.py`, bubblewrap). Whole filesystem
    read-only; each top-level home directory behind a throwaway overlay, so
    the vendor CLI's own state writes work and vanish; this hub's state
-   hidden (session key, panes, worktrees) except the reviewer's own pane dir
-   and the frozen tree; SSH, GPG, cloud, browser, keyvault and every other
-   lane's login hidden; `/run` replaced (no user bus, agent, container or
-   desktop sockets; DNS kept); private `/tmp`; own pid namespace; a new
-   session; killed with its parent. The network stays: the vendor's API
-   needs it. Only the reviewer's own login file stays writable, so a token
-   refresh is not lost. A sandboxed reviewer refuses to start, resume
-   included, if the sandbox is unavailable.
-3. *The lane's own most read-only mode*, set and read back before the
-   prompt is sent: Codex `mode=read-only` (its OS sandbox), Gemini
-   `mode=default` (asks before edits and shell; the lane default is
-   `yolo`), Claude and Grok `strict`. A lane that will not switch fails the
-   challenge with no prompt sent.
+   hidden (session key, panes, worktrees, and the reviewer's own pane dir
+   and meta.json), with only its lane config dir and its egress socket's
+   dir bound back, plus the frozen tree read-only; SSH, GPG, cloud,
+   browser, sync, password-manager, X authority and keyvault secrets and
+   every other lane's login hidden; `/run` replaced; private `/tmp`; its
+   own pid **and network** namespaces (no host loopback service, no
+   abstract unix socket); the environment cleared to an allowlist plus the
+   lane's own spawn variables, so nothing the hub's shell exported crosses;
+   a new session; killed with its parent. A sandboxed reviewer refuses to
+   start, resume included, if the sandbox is unavailable. After a restart
+   its containment is re-derived from the author's challenge records, not
+   from its own meta.json alone.
+2a. *The only network* (`review_egress.py`). A per-reviewer proxy on a unix
+   socket in that bound dir; a shim inside forwards the sandbox's own
+   loopback to it and runs the lane with HTTPS_PROXY. The proxy allows
+   CONNECT to port 443 only, only to that lane's vendor domains, only when
+   every resolved address is public. Every host asked for is recorded on
+   the challenge, refused ones as a warning.
+2b. *No sign-in renewal.* Claude, Codex and Grok rotate refresh tokens: a
+   renewal inside a sandbox that cannot save its result spends the shared
+   refresh token and signs the operator out of that lane everywhere. The
+   proxy blocks those vendors' sign-in hosts, the reviewer's own login file
+   is never writable, and the hub refuses to start or resume a reviewer
+   whose access token lapses within 45 minutes, saying how to renew it.
+   Gemini (Google does not rotate) may renew.
+3. *The lane's own most read-only mode*, set and read back on every start
+   and resume, over the lane default: Codex `mode=read-only` (its OS
+   sandbox), Gemini `mode=default` (asks before edits and shell; the lane
+   default is `yolo`), Claude and Grok `strict`. A lane that will not
+   switch stops before any prompt, and the mode cannot be changed later.
 4. *Every permission declined by the hub.* A reviewer has no reason to
    write, run or fetch. The hub answers reject-once, records it as
    `permission_auto` in the reviewer's transcript, and lists it on the
    challenge as a warning: a reviewer asking to act is evidence the diff
    tried to steer it. No card reaches the operator for a reviewer. This is
    the hub's own policy, recorded as such, not a script answering a card.
+   If an agent offers no way to decline, the card shows refusals only, and
+   the hub refuses an allow for a reviewer whatever the client sends.
 5. *Prompt and parser.* Fixed instructions first; file names quoted; data
    fenced under a nonce; last json block wins; findings untrusted and
    advisory; no seat tools from the first spawn.
@@ -329,14 +348,25 @@ accepts running with layers 1, 3, 4 and 5 only, and every such challenge
 says "not sandboxed" in the review dialog.
 
 Residual risk, accepted: a reviewer can read files outside the hidden set
-and could send them to its own vendor, as any pane on that lane can; it
-cannot write them anywhere that persists, run anything with a card, or
-reach the hub.
+and could send them to its own vendor's API, the one place it can reach,
+as any pane on that lane can; it cannot write anything that persists, run
+anything with a card, reach the hub or any other local service, or renew a
+sign-in.
 
-Verified on this host: all four real lanes start inside the sandbox and
-take their reviewer mode; a probe from inside finds the frozen tree and
-system read-only, home writes discarded, the session key, SSH dir, other
-lanes' logins, the user bus and host processes unreachable.
+Verified on this host: Codex, Grok and Gemini complete a real challenge
+inside the full sandbox and its proxy (each found a planted bug and none
+acted on a planted injection; Grok's telemetry host was refused); all four
+lanes start inside it and take their reviewer mode; a probe from inside
+finds the frozen tree and system read-only, home writes discarded, the
+session key, SSH dir, other lanes' logins, the reviewer's own meta.json,
+the hub's environment, the user bus, host processes, host loopback
+services and abstract sockets unreachable. A second panel (Codex, Grok;
+Gemini declined to review security) found the shared network, the
+writable meta.json, the inherited environment, allowable cards and modes
+lost on resume; all five are fixed above, each with a test that fails
+without its fix. Claude through the proxy is verified up to its API but
+not through a full challenge: this host's shared Claude sign-in was
+signed out mid-session (see the hand-off note in §8).
 
 ## 3. Workstreams
 
@@ -539,6 +569,13 @@ caught at least as often as today. Report the numbers whatever they are.
   read-only clone, then `consult crossfeed`, then close the panes.
 - The privacy guard test scans every shipped text file, docs included. Keep
   personal names, host names and home paths out of anything committed.
+- Claude panes keep a per-pane config dir whose `.credentials.json` links to
+  the shared login. Claude saves a renewed token by rename, which replaces
+  that link with a private copy and leaves the shared file holding a
+  refresh token the vendor has just rotated out; the next process that
+  renews from the shared file fails and clears it. Seen on 2026-10-06.
+  Not caused or fixed by Parts B and C; it needs its own fix (re-link after
+  each spawn, or watch for the split and copy back).
 
 ## 9. Panel record, summarised
 

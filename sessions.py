@@ -28,6 +28,7 @@ import mcp
 import worktrees as _wt
 import challenge as _chl
 import review_sandbox as _sbx
+import review_egress as _egress
 
 ROOT = Path(__file__).resolve().parent
 # Separate from the full Corral's state dir so two hubs never share panes or keys.
@@ -70,6 +71,26 @@ TURN_VIAS = _core.TURN_VIAS
 # ok|no`), or a script such as lane_matrix. Any other value is recorded as
 # unknown, so the transcript never claims "you" for an answer it cannot place.
 ANSWER_VIAS = ("wall", "terminal", "script")
+
+
+# A reviewer's lane at its most read-only (vendor-enforced, set and read back
+# on every start and resume). Claude and Grok get the same from posture
+# "strict"; the sandbox is the layer under all of them.
+REVIEWER_CONFIG = {"codex": {"mode": "read-only"}, "gemini": {"mode": "default"}}
+
+
+def review_login_refusal(lane, label, min_s):
+    """Why a sandboxed reviewer on `lane` must not start now, or None. Its
+    sign-in is never renewed inside the sandbox, so it has to last."""
+    left = _sbx.login_seconds_left(lane)
+    if left is None or left >= min_s:
+        return None
+    state = (f"{label} is signed out" if left <= 0
+             else f"{label}'s sign-in lapses in {int(left // 60)} minutes")
+    return (f"{state}. A sandboxed reviewer never renews a "
+            f"sign-in (this vendor rotates them, and a renewal it could not save "
+            f"would sign you out everywhere). Use {label} in any pane, which renews "
+            f"it, then start the challenge again")
 
 
 def perm_digest(req):
@@ -1087,6 +1108,7 @@ class Pane(_core.PaneBase):
             self._absorb_config((r or {}).get("configOptions") or [])
             # session/load returns the agent's defaults; re-impose posture, model, effort.
             self._apply_wants()
+            self._apply_reviewer_modes()     # a reviewer's read-only mode, every time
             self.state = "ready"
             self.emit("resumed", {"model": self.model, "effort": self.effort,
                                   "config": self.config,
@@ -1365,8 +1387,11 @@ class Pane(_core.PaneBase):
         cause = "auth" if claude_auth.is_auth_error(reason) else None
         self._flush_text()              # its last words land before `dead`
         self._flush_thought()
-        # Reason first, then state: anyone who sees `dead` also sees why.
-        self.error = claude_auth.explain(reason)
+        # Reason first, then state: anyone who sees `dead` also sees why. An
+        # exit with no reason of its own (the reap after a failed start) keeps
+        # the reason already given.
+        if reason or not (self.state == "dead" and self.error):
+            self.error = claude_auth.explain(reason)
         self.dead_cause = cause
         self.dead_login = (claude_auth.status().get("refreshExpiresAt")
                            if cause else None)
@@ -1402,6 +1427,7 @@ class Pane(_core.PaneBase):
                     self.model = model
                     self.mgr.remember_catalog(self.agent, self.config)
             self._apply_wants()
+            self._apply_reviewer_modes()     # a reviewer's read-only mode, every time
             self.state = "ready"
             self.emit("ready", {
                 "agent": self.agent, "cwd": self.cwd, "posture": self.posture,
@@ -1539,6 +1565,9 @@ class Pane(_core.PaneBase):
         # `mode` is the lane's own approval-mode option, validated like the rest.
         if config_id not in ("model", "effort", "fast", "mode"):
             raise ValueError(f"{config_id!r} is not settable from here")
+        held = REVIEWER_CONFIG.get(self.agent, {}).get(config_id) if self.challenge_of else None
+        if held is not None and value != held:
+            raise ValueError(f"a blind reviewer stays at {config_id}={held}")
         # No advertised options (e.g. Grok's null configOptions) is a refusal.
         cfg = self.config.get(config_id) or {}
         allowed = {o["value"] for o in cfg.get("options", [])}
@@ -1879,9 +1908,42 @@ class Pane(_core.PaneBase):
             raise acp.AgentError(f"the reviewer sandbox is unavailable: {why}")
         if not self.review_tree or not os.path.isdir(self.review_tree):
             raise acp.AgentError("the frozen tree this reviewer read is gone")
+        why = review_login_refusal(self.agent, spec.get("label") or self.agent,
+                                   Manager.REVIEW_LOGIN_MIN_S)
+        if why:
+            raise acp.AgentError(why)
+        # Its only network: this pane's egress proxy, on a socket in its dir.
+        eg = getattr(self, "_egress", None)
+        if eg is None or eg.closed:
+            (self.dir / "egress").mkdir(mode=0o700, exist_ok=True)
+            self._egress = eg = _egress.Egress(
+                self.dir / "egress" / "s.sock", self.agent,
+                on_host=lambda host, ok: self.mgr._challenge_egress(self, host, ok))
+        # Writable inside: the lane's own config and the egress socket's dir.
+        # Never the pane dir: its meta.json is what marks it a sandboxed reviewer.
+        rw = [self.dir / "egress"]
+        if env.get("CLAUDE_CONFIG_DIR"):
+            rw.append(Path(env["CLAUDE_CONFIG_DIR"]))
         argv, env = _sbx.wrap(spec["argv"], env, lane=self.agent, cwd=self.cwd,
-                              state=STATE, pane_dir=self.dir, tree_dir=self.review_tree)
+                              state=STATE, rw_dirs=rw, tree_dir=self.review_tree,
+                              egress=eg.path)
         return argv, env, strip + _sbx.DROP_ENV
+
+    def _apply_reviewer_modes(self):
+        """On every start and resume of a reviewer: its lane's most read-only
+        mode, read back, over whatever lane default was just applied. A lane
+        that will not switch stops the pane before any prompt."""
+        if not self.challenge_of:
+            return
+        for cid, want in REVIEWER_CONFIG.get(self.agent, {}).items():
+            try:
+                got = (self.set_config(cid, want) or {}).get("value")
+            except (ValueError, acp.AgentError) as err:
+                got = f"refused: {err}"
+            if got != want:
+                raise acp.AgentError(f"{AGENTS[self.agent].get('label', self.agent)} would "
+                                     f"not switch {cid} to {want!r} (it reads {got!r}); "
+                                     f"no prompt was sent")
 
     def _decline_for_reviewer(self, req):
         """A blind reviewer has no reason to write, run or fetch anything: the
@@ -1945,8 +2007,13 @@ class Pane(_core.PaneBase):
 
         A blind reviewer (Part C) is declined outright: see
         `_decline_for_reviewer`."""
-        if self.challenge_of and self._decline_for_reviewer(req):
-            return None
+        if self.challenge_of:
+            if self._decline_for_reviewer(req):
+                return None
+            # The agent offered no way to decline: the card offers refusals
+            # only, and answer() refuses an allow for a reviewer regardless.
+            req = dict(req, options=[o for o in req.get("options") or []
+                                     if str(o.get("kind", "")).startswith("reject")])
         if self.worktree_id:
             opts = req.get("options") or []
             kept = [o for o in opts if str(o.get("kind", "")) != "allow_always"]
@@ -2070,6 +2137,9 @@ class Pane(_core.PaneBase):
         rec = req.get("_gate") or {}
         kind = next((str(o.get("kind", "")) for o in req.get("options") or []
                      if o.get("optionId") == option_id), "")
+        if self.challenge_of and not kind.startswith("reject"):
+            raise ValueError("a blind reviewer is read-only: its requests can only "
+                             "be refused")
         # The digest binds an approval to the bytes shown. It gates granting only:
         # refusing must always work, even from a stale client. Which option refuses
         # comes from the agent's declared `kind`, never from the client.
@@ -2708,6 +2778,7 @@ class Manager(_core.ManagerBase):
         self._peer_queue_orphans()
         self.not_restored = skipped + unreadable   # said out loud, not dropped
         self._worktree_restore()
+        self._reviewer_restore()
 
     def _reserve_live(self, pane):
         """Refuse to attach a process when MAX_PANES live ones exist; marks the
@@ -3089,7 +3160,8 @@ class Manager(_core.ManagerBase):
             raise _wt.Refused("lane", f"the reviewer must be another vendor; both are {mine}")
         if spec.get("unavailable"):
             raise _wt.Refused("lane", f"{spec['label']}: {spec['unavailable']}")
-        self._challenge_sandbox()              # refuse early, before any reservation
+        if self._challenge_sandbox():          # refuse early, before any reservation
+            self._challenge_login(lane, spec)
         lock = self.__dict__.setdefault("_chl_lock", threading.Lock())
         starting = self.__dict__.setdefault("_chl_starting", set())
         # Check and reserve in one hold: two quick clicks must not both pass
@@ -3108,8 +3180,11 @@ class Manager(_core.ManagerBase):
     # The reviewer's own lane, at its most read-only (vendor-enforced, set
     # and read back before the prompt goes). Claude and Grok get the same
     # from posture "strict"; the sandbox is the layer under all of them.
-    REVIEWER_CONFIG = {"codex": {"mode": "read-only"}, "gemini": {"mode": "default"}}
+    REVIEWER_CONFIG = REVIEWER_CONFIG
     UNSANDBOXED_ENV = "CORRAL_CHALLENGE_UNSANDBOXED"
+    # A sandboxed reviewer never renews its sign-in (review_egress.LANE_DENY):
+    # the token must outlive the challenge, with room to spare.
+    REVIEW_LOGIN_MIN_S = 45 * 60
     MAX_EXPORT_BYTES = 2 << 30         # of the frozen tree a reviewer reads
 
     def _challenge_sandbox(self):
@@ -3125,8 +3200,16 @@ class Manager(_core.ManagerBase):
                                      f"vetted, so it only runs sandboxed; on a host that "
                                      f"cannot, set {self.UNSANDBOXED_ENV}=1 to accept that")
 
+    def _challenge_login(self, lane, spec):
+        """Refuse a sandboxed reviewer whose sign-in would lapse mid-review."""
+        why = review_login_refusal(lane, spec.get("label") or lane, self.REVIEW_LOGIN_MIN_S)
+        if why:
+            raise _wt.Refused("login", why)
+
     def _challenge_start(self, p, pane_id, lane, spec, criteria, lock):
         sandboxed = self._challenge_sandbox()
+        if sandboxed:
+            self._challenge_login(lane, spec)
         snap = self.worktree_snapshot(pane_id)
         e = self.worktree_entry(p) or {}
         base = (e.get("base_ref") or "")[len("refs/heads/"):] or None
@@ -3162,14 +3245,6 @@ class Manager(_core.ManagerBase):
             rec["reviewerPane"], rec["model"] = r.id, r.model
             if r.state == "dead":
                 raise acp.AgentError(r.error or "the reviewer's agent did not start")
-            for cid, want in self.REVIEWER_CONFIG.get(lane, {}).items():
-                try:
-                    got = (r.set_config(cid, want) or {}).get("value")
-                except (ValueError, acp.AgentError) as err:
-                    got = f"refused: {err}"
-                if got != want:
-                    raise acp.AgentError(f"{spec.get('label')} would not switch {cid} to "
-                                         f"{want!r} (it reads {got!r}); no prompt was sent")
             r.send(prompt, via="challenge")
         except Exception as err:                 # noqa: BLE001 — recorded, never raised past here
             if r is not None:
@@ -3235,6 +3310,43 @@ class Manager(_core.ManagerBase):
         for root, dirs, _files in os.walk(d):
             os.chmod(root, 0o755)
         shutil.rmtree(d, ignore_errors=True)
+
+    def close(self, pane_id, by=None):
+        p = super().close(pane_id, by=by)
+        eg = getattr(p, "_egress", None)
+        if eg is not None:
+            eg.close()                       # a closed reviewer keeps no way out
+        return p
+
+    def _challenge_egress(self, r, host, allowed):
+        """Record on the author's challenge each host its reviewer reached
+        for: allowed ones as a list, refused ones as a warning."""
+        p = self.panes.get(r.challenge_of)
+        if not p:
+            return
+        lock = self.__dict__.setdefault("_chl_lock", threading.Lock())
+        key = "egress" if allowed else "egressRefused"
+        with lock:
+            c = next((c for c in p.challenges or () if c.get("reviewerPane") == r.id), None)
+            if not c or host in (c.get(key) or []):
+                return
+            hosts = (list(c.get(key) or []) + [str(host)[:200]])[-20:]
+        self._challenge_set(p, c["id"], **{key: hosts})
+
+    def _reviewer_restore(self):
+        """After restore(): a reviewer's containment comes from its author's
+        challenge records too, never from its own meta.json alone (which an
+        unsandboxed reviewer could reach). Marks only; never loosens."""
+        for p in list(self.panes.values()):
+            for c in p.challenges or ():
+                r = self.panes.get(c.get("reviewerPane") or "")
+                if r is None:
+                    continue
+                r.challenge_of = p.id
+                if c.get("sandboxed"):
+                    r.review_sandboxed = True
+                if not r.review_tree:
+                    r.review_tree = str(p.dir / "challenges" / c["id"] / "tree")
 
     def _challenge_declined(self, r, tool_call):
         """Record on the author's challenge what its reviewer tried to do."""

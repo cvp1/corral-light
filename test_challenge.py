@@ -403,12 +403,28 @@ class Sandboxed(ChallengeCase):
 
     def test_the_reviewer_cannot_write_reach_the_hub_or_keep_a_grant(self):
         state = Path(self.sessions.STATE)
+        state.mkdir(parents=True, exist_ok=True)
         (state / "session.key").write_text("secret")
-        probe = {"tree": "{cwd}/a.txt", "live": str(self.repo / "pwned.txt"),
+        import socket
+        tcp = socket.create_server(("127.0.0.1", 0))           # a host loopback service
+        self.addCleanup(tcp.close)
+        abstract = socket.socket(socket.AF_UNIX)
+        abstract.bind(b"\0corral-test-" + os.urandom(4).hex().encode())
+        abstract.listen(1)
+        self.addCleanup(abstract.close)
+        probe = {"connect:host": f"127.0.0.1:{tcp.getsockname()[1]}",
+                 "abstract:host": abstract.getsockname()[1:].decode(),
+                 "tree": "{cwd}/a.txt", "live": str(self.repo / "pwned.txt"),
+                 "read:meta": str(state / "panes" / "{pane}" / "meta.json"),
                  "pane": str(state / "panes" / "{pane}" / "probe.txt"),
+                 "meta": str(state / "panes" / "{pane}" / "meta.json"),
+                 "env:GH_TOKEN": "GH_TOKEN",
                  "read:key": str(state / "session.key"),
                  "read:tree": "{cwd}/a.txt"}
         self.reviewer_mode("probe", env={"FAKE_ACP_PROBE": json.dumps(probe)})
+        leak = mock.patch.dict(os.environ, {"GH_TOKEN": "hub-secret"})   # in the hub's env
+        leak.start()
+        self.addCleanup(leak.stop)
         p = self.author()
         c = self.settled(p, self.start(p)["id"], timeout=40)
         self.assertEqual(c["state"], "done", c)
@@ -417,10 +433,19 @@ class Sandboxed(ChallengeCase):
         self.assertEqual(got["tree"], "closed")           # the frozen tree is read-only
         self.assertEqual(got["read:tree"], "open")        # and readable
         self.assertEqual(got["read:key"], "closed")       # the hub's key is hidden
-        self.assertEqual(got["pane"], "open")             # its own pane dir works
+        # Its pane dir, whose meta.json marks it a sandboxed reviewer, is out
+        # of reach: the real one cannot be read, and writes land in a
+        # throwaway scaffold, so it cannot write itself out of the sandbox.
+        self.assertEqual(got["read:meta"], "closed")
+        self.assertEqual(got["env:GH_TOKEN"], "closed")   # the hub's env stays out
+        self.assertEqual(got["connect:host"], "closed")   # no host loopback service
+        self.assertEqual(got["abstract:host"], "closed")  # no abstract unix socket
         self.assertFalse((self.repo / "pwned.txt").exists())
         r = self.mgr.panes[c["reviewerPane"]]
-        self.assertTrue((r.dir / "probe.txt").exists())
+        self.assertFalse((r.dir / "probe.txt").exists())
+        meta = json.loads((r.dir / "meta.json").read_text())
+        self.assertTrue(meta["review_sandboxed"])
+        self.assertEqual(meta["challenge_of"], p.id)
         self.assertEqual(got["cwd"], r.review_tree)
         self.assertEqual(got["env"], "unset")             # no ssh agent socket
         # Its request to edit was declined by the hub, and shown.
@@ -445,6 +470,49 @@ class Sandboxed(ChallengeCase):
                 why = str(e)
         self.assertIn("sandbox", str(why))
         self.assertNotIn(r.state, ("ready", "busy"))
+
+    def test_a_tampered_reviewer_meta_is_restored_from_its_author(self):
+        p = self.author()
+        c = self.settled(p, self.start(p)["id"], timeout=40)
+        r = self.mgr.panes[c["reviewerPane"]]
+        r.pause()
+        meta = json.loads((r.dir / "meta.json").read_text())
+        meta.update(challenge_of=None, review_sandboxed=False)   # as a reviewer would wish
+        q = self.sessions.Pane.from_meta(meta, self.mgr)
+        self.assertFalse(q.review_sandboxed)
+        self.mgr.panes[r.id] = q
+        self.mgr._reviewer_restore()
+        self.assertEqual((q.challenge_of, q.review_sandboxed), (p.id, True))
+
+    def test_a_reviewer_card_can_only_be_refused(self):
+        p = self.author()
+        c = self.settled(p, self.start(p)["id"], timeout=40)
+        r = self.mgr.panes[c["reviewerPane"]]
+        req = {"requestId": "x1", "toolCall": {"kind": "execute", "title": "rm -rf"},
+               "options": [{"optionId": "go", "name": "Allow", "kind": "allow_once"}]}
+        with mock.patch.object(r, "_decline_for_reviewer", lambda req: False), \
+                mock.patch.object(self.sessions._core.PaneBase, "_on_permission",
+                                  lambda self, req: setattr(self, "_shown", req)):
+            r._on_permission(req)
+        self.assertEqual(r._shown["options"], [])           # no Allow on the card
+        r.pending["x2"] = dict(req, requestId="x2", _gate={"digest": "d"})
+        with self.assertRaises(ValueError) as cm:
+            r.answer("x2", "go", digest="d")
+        self.assertIn("only be refused", str(cm.exception))
+        with mock.patch.dict(self.sessions.REVIEWER_CONFIG, {"fake2": {"mode": "read-only"}}):
+            with self.assertRaises(ValueError) as cm:
+                r.set_config("mode", "yolo")                # and its mode stays put
+        self.assertIn("stays at mode=read-only", str(cm.exception))
+
+    def test_a_lapsing_sign_in_refuses_before_any_pane_exists(self):
+        p = self.author()
+        n = len(self.mgr.panes)
+        with mock.patch.object(self.sessions._sbx, "login_seconds_left", lambda lane: 120):
+            with self.assertRaises(wt.Refused) as cm:
+                self.start(p)
+        self.assertEqual(cm.exception.reason, "login")
+        self.assertIn("never renews", str(cm.exception))
+        self.assertEqual((len(self.mgr.panes), list(p.challenges)), (n, []))
 
     def test_no_sandbox_and_no_opt_out_refuses(self):
         p = self.author()

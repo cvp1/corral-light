@@ -731,15 +731,24 @@ The reviewer reads a diff nobody has vetted, so it is treated as hostile:
   checkout.
 - It runs in a **bubblewrap sandbox**: the filesystem is read-only, home
   writes are thrown away when it exits, and this hub's keys, your SSH, GPG,
-  cloud and browser secrets, and every other assistant's login are hidden.
-  Desktop, agent and container sockets are gone; it has its own process
-  space. The network stays, because its vendor needs it.
+  cloud, browser and sync secrets, and every other assistant's login are
+  hidden. Desktop, agent and container sockets are gone; it has its own
+  process space and environment.
+- Its **only network is its own vendor**: it has its own network namespace,
+  so nothing listening on your machine is reachable, and a proxy lets it
+  reach that vendor's API over HTTPS and nothing else. The hosts it used,
+  and any it was refused, are listed on the challenge.
+- It **never renews a sign-in**. Claude, Codex and Grok rotate them, and a
+  renewal the sandbox could not save would sign you out everywhere. If the
+  sign-in would lapse within 45 minutes, the challenge says so and asks you
+  to use that assistant once first.
 - Its lane runs in its **most read-only mode**: Codex read-only, Gemini
   asking before edits and shell, Claude and Grok strict. A lane that will
   not switch gets no prompt.
 - The hub **declines every permission it asks for**, without a card. A
   reviewer asking to write or run anything is listed on the challenge as a
-  warning: the diff may be trying to steer reviewers.
+  warning: the diff may be trying to steer reviewers. Its mode cannot be
+  loosened, and if a card ever does appear for it, it can only be refused.
 - It has no seat tools, so it cannot message other panes or ask you things.
 
 A host that cannot build the sandbox (no `bwrap`, user namespaces off, or
@@ -747,7 +756,7 @@ macOS) refuses challenges and says why. Setting
 `CORRAL_CHALLENGE_UNSANDBOXED=1` runs them with every layer except the
 sandbox, and each such challenge says **not sandboxed**. What remains
 possible even sandboxed: the reviewer can read files outside the hidden set
-and send them to its own vendor, as any pane on that lane can.
+and send them to its own vendor's API, as any pane on that lane can.
 
 ## Security
 

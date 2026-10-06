@@ -1829,7 +1829,10 @@ function challengeModel(ch, tree) {
     ? 'not sandboxed: this host opted out; read-only modes and declines still applied'
     : ch.sandboxed === true ? 'sandboxed, read-only' : '';     // older records: unknown
   const declined = (ch.declined || []).map(d => d.title || d.kind || 'an action');
-  return { stale, bad: ch.state === 'failed' || ch.state === 'timed_out', where, declined,
+  // The only network a sandboxed reviewer has: its vendor's API, by name.
+  const net = (ch.egress || []).length ? 'network: ' + ch.egress.join(', ') : '';
+  const refused = (ch.egressRefused || []).slice();
+  return { stale, bad: ch.state === 'failed' || ch.state === 'timed_out', where, declined, net, refused,
            head: `${who} — ${state}` + (stale ? ' · stale: the branch changed since' : ''),
            note: [ch.error, ch.partial ? 'partial: ' + (left ? `left out ${left}`
                                                              : 'the diff was cut at its size limit')
@@ -1890,6 +1893,10 @@ function challengeNode(ch, tree, unplaced) {
   c.appendChild(el('div', 'cu', `criteria: ${ch.criteria || ''}`));
   if (m.note) c.appendChild(el('div', 'cu', m.note));
   if (m.where) c.appendChild(el('div', 'cu' + (ch.sandboxed === false ? ' warn' : ''), m.where));
+  if (m.net) c.appendChild(el('div', 'cu', m.net));
+  if (m.refused.length)
+    c.appendChild(el('div', 'fnd warn', `blocked network requests to: ${m.refused.slice(0, 5).join(', ')}` +
+                     ' — only its vendor is reachable'));
   if (m.declined.length)
     c.appendChild(el('div', 'fnd warn', `declined ${m.declined.length} request` +
                      `${m.declined.length === 1 ? '' : 's'} by the reviewer to act: ` +

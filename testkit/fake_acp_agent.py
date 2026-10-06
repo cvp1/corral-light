@@ -226,7 +226,19 @@ def prompt(rid, params):
             for name, path in spec.items():
                 path = path.format(pane=os.environ.get("CORRAL_PANE_ID", ""), cwd=os.getcwd())
                 try:
-                    if name.startswith("read:"):
+                    if name.startswith("env:"):
+                        if path not in os.environ:
+                            raise OSError("unset")
+                    elif name.startswith("connect:"):
+                        import socket
+                        h, _, port = path.rpartition(":")
+                        socket.create_connection((h, int(port)), timeout=3).close()
+                    elif name.startswith("abstract:"):
+                        import socket
+                        u = socket.socket(socket.AF_UNIX)
+                        u.connect(b"\0" + path.encode())
+                        u.close()
+                    elif name.startswith("read:"):
                         Path(path).read_bytes()
                     else:
                         Path(path).write_text("probe")

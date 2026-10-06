@@ -444,6 +444,10 @@ check(/wtRailCards\(panes, wtSeen\(\)\)/.test(fn('render')), 'render builds the 
     check(/not sandboxed/.test(challengeModel({ state: 'done', sandboxed: false }, null).where),
           'an unsandboxed challenge says so');
     eq(challengeModel({ state: 'failed' }, null).where, '', 'an older record claims nothing');
+    const n = challengeModel({ state: 'done', egress: ['api.x.ai'], egressRefused: ['evil.example'] }, null);
+    eq(n.net, 'network: api.x.ai', 'the hosts a reviewer reached are listed');
+    eq(n.refused, ['evil.example'], 'blocked hosts are kept');
+    check(/blocked network requests/.test(fn('challengeNode')), 'blocked hosts are shown as a warning');
     check(/declined[\s\S]*steer/.test(fn('challengeNode')), 'declined requests are shown as a warning');
   }
   const base = { lane: 'grok', laneLabel: 'Grok', model: 'grok-4', tree: 't1', criteria: 'c',
