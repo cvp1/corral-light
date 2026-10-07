@@ -94,6 +94,30 @@ def main():
         time.sleep(60)
     elif mode == "isolation":
         print(isolation(args))
+    elif mode == "demo":
+        # Synthetic figures only, for screenshots of the module dialog.
+        print(snap([
+            {"type": "tiles", "items": [
+                {"label": "Committed", "value": "$220 / mo", "kind": "declared",
+                 "note": "typed in setup", "level": "info"},
+                {"label": "Claude weekly", "value": "7% used", "kind": "vendor",
+                 "note": "resets Tue 11:59", "level": "ok"},
+                {"label": "Codex 5 h", "value": "82% used", "kind": "vendor",
+                 "note": "resets in 1 h 10 m", "level": "warn"},
+                {"label": "Grok, this month", "value": "$4.12", "kind": "vendor",
+                 "note": "computed by the Grok CLI", "level": "info"}]},
+            {"type": "meter", "label": "Codex 5 h window", "pct": 82, "kind": "vendor",
+             "level": "warn", "note": "resets in 1 h 10 m"},
+            {"type": "table", "title": "By lane, this month",
+             "columns": ["Lane", "Plan", "Tokens", "API-equivalent list cost", "Source"],
+             "rows": [["Claude", "Max", "41.2 M", "$311", "transcripts"],
+                      ["Codex", "Plus", "6.3 M", "$38", "rollouts"],
+                      ["Grok", "SuperGrok", "1.1 M", "$4.12", "vendor"],
+                      ["Gemini", "-", "9.0 M", "$12", "local records"]]},
+            {"type": "note", "text": "List costs are estimates at API prices, not bills."},
+            {"type": "link", "label": "How these figures are made",
+             "url": "https://example.com/finops"}],
+            progress={"phase": "backfill", "done_pct": 64, "note": "reading history"}))
     elif mode == "hostile":
         print(snap([{"type": "note", "text": "<script>alert(1)</script>"},
                     {"type": "link", "label": "x", "url": "javascript:alert(1)"},
