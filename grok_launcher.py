@@ -55,6 +55,15 @@ def auth_present() -> bool:
     return usable_credential(GROK_HOME / "auth.json")
 
 
+def login_facts() -> dict:
+    """Sanitized login facts for the module feed. The CLI keeps its auth mode
+    in auth.json beside the tokens, so it is not read: the mode is reported
+    as "present" (a stat), never parsed out of the token file."""
+    present = (GROK_HOME / "auth.json").is_file()
+    return {"present": present, "auth_mode": "present" if present else None,
+            "fingerprint": None, "source": "stat"}
+
+
 def login_command(grok: str | None = None) -> str:
     return f"{grok or 'grok'} login"
 

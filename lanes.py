@@ -133,10 +133,24 @@ def stage_npm(root, lane, version, run=_run):
         adapter = scratch / "node_modules" / ".bin" / NPM[lane]["bin"]
         if not adapter.exists():
             raise Red(f"staged tree has no {adapter.name}")
+        if lane == "claude":
+            _patch_claude(scratch, pkg, version)
     except BaseException:
         shutil.rmtree(scratch, ignore_errors=True)
         raise
     return scratch, {NPM[lane]["env"]: str(adapter)}
+
+
+def _patch_claude(spike, pkg, version):
+    """Apply the pinned adapter patches (adapter_patches.py) to a tree, and
+    refuse one that still drops early rate-limit notices: with no patch for
+    its version, Light's quota capture would silently stop."""
+    import adapter_patches
+    adapter_patches.apply(spike)
+    if adapter_patches.drops_early_rate_limits(spike):
+        raise Red(f"{pkg}@{version} still drops rate-limit notices sent before "
+                  f"the turn's first usage, and adapter_patches.py has no patch "
+                  f"for it; port the patch (docs/finops-module-plan.md §4.6) first")
 
 
 def check_one_pin(old_path, new_path, pkg, version):
@@ -389,6 +403,9 @@ def update(lane, root=ROOT, version=None, release=None, run=_run, probe_fn=probe
         rec["latest"] = version or npm_latest(lane, run)
         if rec["installed"] == rec["latest"]:
             rec["outcome"], rec["why"] = "current", "installed is latest"
+            if lane == "claude":         # re-check the pinned patch on the live tree
+                import adapter_patches
+                rec["patches"] = adapter_patches.apply(root / "spike")
             return rec
         scratch, overrides = stage_npm(root, lane, rec["latest"], run)
         rec["probe"] = probe_fn(root, lane, overrides)

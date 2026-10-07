@@ -29,6 +29,9 @@ Prompt verbs (the text of the prompt):
     checkout <branch> -> git checkout -q -b <branch>
     reset-hard <rev>  -> git reset -q --hard <rev>
     pwd               -> answers with os.getcwd()
+    replay <name>     -> sends each line of $FAKE_ACP_REPLAY/<name>.jsonl (one
+                         recorded ACP `update` object per line) as a
+                         session/update, then says "replayed <n>"
     perm-always       -> like perm, but also offers an allow_always option
     permjson <json>   -> asks one session/request_permission built from a JSON
                          object {kind, title, locations, rawInput, content,
@@ -300,6 +303,16 @@ def prompt(rid, params):
               "params": {"sessionId": sid, "toolCall": tc, "options": opts}})
         ev.wait()
         chunk(sid, "permission: " + json.dumps(_answers[pid].get("result")))
+    elif len(words) == 2 and words[0] == "replay" and ".." not in words[1] \
+            and "/" not in words[1]:
+        src = Path(os.environ.get("FAKE_ACP_REPLAY", "")) / (words[1] + ".jsonl")
+        n = 0
+        for line in src.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                send({"jsonrpc": "2.0", "method": "session/update",
+                      "params": {"sessionId": sid, "update": json.loads(line)}})
+                n += 1
+        chunk(sid, f"replayed {n}")
     elif text == "die":
         chunk(sid, "dying")
         os._exit(3)

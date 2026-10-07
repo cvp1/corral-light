@@ -3739,6 +3739,336 @@ function wireRigDialog() {
   if (b) b.onclick = () => { const n = $('#newdlg'); if (n && n.open) n.close(); openRigs(); };
 }
 
+/* ── Modules ─────────────────────────────────────────────────────────────
+ * A module's view is typed blocks (docs/finops-module-plan.md §4.5), rendered
+ * here with createElement and textContent only. The hub validated the snapshot;
+ * this side checks again and trusts nothing: a module string never reaches a
+ * class name, a style, an attribute name or markup. Kind and level reach the
+ * page only through the fixed tables below. Pure down to openModule (Node
+ * selftest: selftest_modules.mjs). */
+
+/* A module value as display text: strings and numbers only, capped. */
+function modText(v, max) {
+  let s = typeof v === 'string' ? v
+    : (typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean' ? String(v) : '';
+  if (s.length > max) s = s.slice(0, max) + '…';
+  return s;
+}
+
+/* kind -> [fixed class, the word shown]. Anything else is unknown. */
+function modKindClass(kind) {
+  const K = new Map([['billed', 'mk-billed'], ['vendor', 'mk-vendor'],
+    ['declared', 'mk-declared'], ['list', 'mk-list'], ['estimate', 'mk-estimate'],
+    ['unknown', 'mk-unknown']]);
+  return K.has(kind) ? [K.get(kind), kind] : ['mk-unknown', 'unknown'];
+}
+
+/* level -> fixed class. Anything else is info. */
+function modLevelClass(level) {
+  const L = new Map([['ok', 'ml-ok'], ['info', 'ml-info'], ['warn', 'ml-warn'], ['bad', 'ml-bad']]);
+  return L.has(level) ? L.get(level) : 'ml-info';
+}
+
+/* A finite number clamped to 0..100; anything else is 0. */
+function modClampPct(p) {
+  if (typeof p !== 'number' || !Number.isFinite(p)) return 0;
+  return Math.min(100, Math.max(0, p));
+}
+
+/* The href a link block may carry, or null to show it as text. Only a URL
+ * written as https://host with no userinfo: `https:alert(1)` parses to a host
+ * of "alert(1)", so the literal "https://" prefix is required too, and
+ * whitespace, control characters and backslashes are refused before parsing. */
+function modSafeLink(url) {
+  if (typeof url !== 'string' || url.length > 2048) return null;
+  if (!/^https:\/\//i.test(url) || /[\s\\\u0000-\u001f\u007f]/.test(url)) return null;
+  const authority = url.slice(8).split(/[/?#]/, 1)[0];
+  if (!authority || authority.includes('@')) return null;
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:' || !u.hostname || u.username || u.password) return null;
+  return u.href;
+}
+
+/* "12 more rows not shown" from a block's or snapshot's `dropped`/`truncated`. */
+function modDroppedLines(d) {
+  const out = [];
+  if (!d || typeof d !== 'object') return out;
+  for (const k of ['blocks', 'items', 'rows', 'columns']) {
+    const n = d[k];
+    if (typeof n === 'number' && Number.isInteger(n) && n > 0) {
+      out.push(`${n} more ${n === 1 ? k.slice(0, -1) : k} not shown`);
+    }
+  }
+  return out;
+}
+
+/* One block. Bounds repeat the hub's (§4.5) so a client never trusts them. */
+function modBlock(b) {
+  const LABEL = 200, CELL = 500, TILES = 24, ROWS = 200, COLS = 12;
+  const lines = (node, d) => {
+    for (const t of modDroppedLines(d)) node.appendChild(el('div', 'modline', t));
+  };
+  if (!b || typeof b !== 'object' || Array.isArray(b)) {
+    return el('div', 'modunsupported', 'unsupported block');
+  }
+  const extra = {};
+  const add = (k, n) => {
+    const had = b.dropped && typeof b.dropped === 'object' ? b.dropped[k] : 0;
+    if (n > 0) extra[k] = n + (Number.isInteger(had) && had > 0 ? had : 0);
+  };
+  if (b.type === 'tiles') {
+    const box = el('div', 'modblock');
+    const grid = el('div', 'modtiles');
+    const items = Array.isArray(b.items) ? b.items : [];
+    for (const it of items.slice(0, TILES)) {
+      const t = it && typeof it === 'object' ? it : {};
+      const [kc, kw] = modKindClass(t.kind);
+      const tile = el('div', 'modtile ' + kc + ' ' + modLevelClass(t.level));
+      tile.appendChild(el('span', 'modlabel', modText(t.label, LABEL)));
+      tile.appendChild(el('span', 'modvalue', modText(t.value, CELL)));
+      tile.appendChild(el('span', 'modkind', kw));
+      const note = modText(t.note, CELL);
+      if (note) tile.appendChild(el('span', 'modnote', note));
+      const fresh = modText(t.fresh_at, LABEL);
+      if (fresh) tile.appendChild(el('span', 'modnote', 'as of ' + fresh));
+      grid.appendChild(tile);
+    }
+    box.appendChild(grid);
+    add('items', items.length - TILES);
+    lines(box, Object.assign({}, b.dropped, extra));
+    return box;
+  }
+  if (b.type === 'meter') {
+    const [kc, kw] = modKindClass(b.kind);
+    const box = el('div', 'modblock modmeter ' + kc);
+    box.appendChild(el('span', 'modlabel', modText(b.label, LABEL)));
+    const pct = modClampPct(b.pct);
+    const bar = el('div', 'modbar');
+    const m = document.createElement('meter');
+    m.min = 0; m.max = 100; m.value = pct;
+    bar.appendChild(m);
+    bar.appendChild(el('span', 'modpct', `${Math.round(pct)}%`));
+    bar.appendChild(el('span', 'modkind', kw));
+    box.appendChild(bar);
+    const note = modText(b.note, CELL);
+    if (note) box.appendChild(el('span', 'modnote', note));
+    lines(box, b.dropped);
+    return box;
+  }
+  if (b.type === 'table') {
+    const box = el('div', 'modblock modtable');
+    const title = modText(b.title, LABEL);
+    if (title) box.appendChild(el('div', 'modtitle', title));
+    const cols = Array.isArray(b.columns) ? b.columns : [];
+    const rows = Array.isArray(b.rows) ? b.rows : [];
+    const width = Math.min(COLS, Math.max(cols.length,
+      ...rows.slice(0, ROWS).map(r => (Array.isArray(r) ? r.length : 0)), 0));
+    const table = document.createElement('table');
+    if (cols.length) {
+      const tr = document.createElement('tr');
+      for (const c of cols.slice(0, COLS)) tr.appendChild(el('th', '', modText(c, LABEL)));
+      const thead = document.createElement('thead');
+      thead.appendChild(tr);
+      table.appendChild(thead);
+    }
+    const tbody = document.createElement('tbody');
+    for (const r of rows.slice(0, ROWS)) {
+      const tr = document.createElement('tr');
+      const cells = Array.isArray(r) ? r : [];
+      for (let i = 0; i < width; i++) tr.appendChild(el('td', '', modText(cells[i], CELL)));
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    box.appendChild(table);
+    const wide = Math.max(cols.length,
+      ...rows.slice(0, ROWS).map(r => (Array.isArray(r) ? r.length : 0)), 0);
+    add('rows', rows.length - ROWS);
+    add('columns', wide - COLS);
+    lines(box, Object.assign({}, b.dropped, extra));
+    return box;
+  }
+  if (b.type === 'note') {
+    const box = el('div', 'modblock');
+    box.appendChild(el('p', 'modnote', modText(b.text, CELL)));
+    lines(box, b.dropped);
+    return box;
+  }
+  if (b.type === 'link') {
+    const box = el('div', 'modblock');
+    const href = modSafeLink(b.url);
+    const label = modText(b.label, LABEL);
+    if (href) {
+      const a = el('a', 'modlink', label || href);
+      a.href = href;
+      a.rel = 'noopener noreferrer';
+      a.target = '_blank';
+      box.appendChild(a);
+    } else {
+      // Not a link: the label and the address, both as text.
+      const url = modText(b.url, CELL);
+      box.appendChild(el('span', 'modlink', label && url ? `${label}: ${url}` : label || url));
+    }
+    lines(box, b.dropped);
+    return box;
+  }
+  const was = b.type === 'unsupported' ? b.was : b.type;
+  const name = modText(was, 60);
+  return el('div', 'modunsupported', name ? `unsupported block: ${name}` : 'unsupported block');
+}
+
+/* The blocks of a snapshot's view, in order, at most 50. */
+function renderModuleView(view) {
+  const BLOCKS = 50;
+  const box = el('div', 'modview');
+  const blocks = Array.isArray(view) ? view : [];
+  for (const b of blocks.slice(0, BLOCKS)) box.appendChild(modBlock(b));
+  if (blocks.length > BLOCKS) {
+    for (const t of modDroppedLines({ blocks: blocks.length - BLOCKS })) {
+      box.appendChild(el('div', 'modline', t));
+    }
+  }
+  return box;
+}
+
+/* A whole snapshot: its error, its progress, its view, and what the hub cut. */
+function renderModuleSnapshot(snap) {
+  const box = el('div', 'modview');
+  if (!snap || typeof snap !== 'object') {
+    box.appendChild(el('div', 'modline', 'No snapshot yet: the module has not reported.'));
+    return box;
+  }
+  const err = modText(snap.error, 500);
+  if (err) box.appendChild(el('div', 'modline bad', 'error: ' + err));
+  else if (snap.ok === false) box.appendChild(el('div', 'modline bad', 'the last run failed'));
+  const p = snap.progress;
+  if (p && typeof p === 'object') {
+    const parts = [modText(p.phase, 200) || 'working'];
+    if (typeof p.done_pct === 'number' && Number.isFinite(p.done_pct)) {
+      parts.push(`${Math.round(modClampPct(p.done_pct))}%`);
+    }
+    const note = modText(p.note, 500);
+    if (note) parts.push(note);
+    box.appendChild(el('div', 'modline warn', parts.join(' · ')));
+  }
+  const gen = modText(snap.generated_at, 200);
+  if (gen) box.appendChild(el('div', 'modline', 'generated ' + gen));
+  box.appendChild(renderModuleView(snap.view));
+  for (const t of modDroppedLines(snap.truncated)) box.appendChild(el('div', 'modline warn', t));
+  return box;
+}
+
+/* The badges above a module's view: unsandboxed, disabled, failing, its state. */
+function moduleFace(m) {
+  const out = [];
+  if (!m || typeof m !== 'object') return out;
+  if (m.sandboxed === false) out.push(el('span', 'modbadge warn', 'unsandboxed'));
+  const state = modText(m.state, 40);
+  if (m.enabled === false || state === 'disabled') {
+    out.push(el('span', 'modbadge', 'disabled'));
+  } else if (state === 'failing') {
+    const why = modText(m.error, 500);
+    out.push(el('span', 'modbadge bad', why ? 'failing: ' + why : 'failing'));
+  } else if (state === 'unacknowledged') {
+    out.push(el('span', 'modbadge warn', 'not run: unsandboxed, awaiting acknowledgement'));
+  } else if (state === 'never-run') {
+    out.push(el('span', 'modbadge', 'not run yet'));
+  } else if (state === 'running') {
+    out.push(el('span', 'modbadge', 'running'));
+  } else if (state === 'ok') {
+    out.push(el('span', 'modbadge ok', 'ok'));
+  } else if (state) {
+    out.push(el('span', 'modbadge', state));
+  }
+  return out;
+}
+
+/* "last run 7 Oct, 18:00" from an ISO time, or the honest absence. */
+function moduleWhen(iso) {
+  if (typeof iso !== 'string' || !iso) return 'never run';
+  const t = new Date(iso);
+  return Number.isNaN(t.getTime()) ? 'last run: unknown time' : 'last run ' + t.toLocaleString();
+}
+
+// The open module dialog. The ⌘K list lives in PAL.modules.
+const MOD = { open: null, timer: null };
+
+/* The enabled modules as ⌘K rows' plain strings. An older hub has no
+ * /api/modules: the list is empty and nothing is said. True when it changed. */
+async function loadModules() {
+  const before = (PAL.modules || []).map(m => m.name + '\t' + m.title).join('\n');
+  let d;
+  try { d = await api('/api/modules'); } catch { d = {}; }
+  PAL.modules = (Array.isArray(d.modules) ? d.modules : [])
+    .filter(m => m && typeof m.name === 'string' && m.name && m.enabled === true)
+    .slice(0, 50)
+    .map(m => ({ name: modText(m.name, 64), title: modText(m.title, 200) || modText(m.name, 64),
+                 summary: modText(m.summary, 200) }));
+  return PAL.modules.map(m => m.name + '\t' + m.title).join('\n') !== before;
+}
+
+async function renderModule(name) {
+  if (MOD.open !== name) return;
+  let m;
+  try { m = await api('/api/module/' + encodeURIComponent(name)); }
+  catch (e) {
+    if (MOD.open !== name) return;
+    $('#mod-error').textContent = e.status === 404 ? 'This module is not installed or not enabled.' : e.message;
+    return;
+  }
+  if (MOD.open !== name) return;
+  $('#mod-title').textContent = modText(m.title, 200) || name;
+  $('#mod-face').replaceChildren(...moduleFace(m));
+  $('#mod-when').textContent = moduleWhen(m.last_run_at);
+  $('#mod-view').replaceChildren(renderModuleSnapshot(m.snapshot));
+}
+
+function openModule(name) {
+  MOD.open = name;
+  clearTimeout(MOD.timer);
+  const known = (PAL.modules || []).find(m => m.name === name);
+  $('#mod-title').textContent = (known && known.title) || name;
+  $('#mod-face').replaceChildren();
+  $('#mod-when').textContent = '';
+  $('#mod-error').textContent = '';
+  $('#mod-view').replaceChildren(el('div', 'modline', 'Loading…'));
+  $('#mod-refresh').disabled = false;
+  $('#moddlg').showModal();
+  renderModule(name);
+}
+
+async function refreshModule() {
+  const name = MOD.open;
+  if (!name) return;
+  const btn = $('#mod-refresh');
+  btn.disabled = true;
+  try {
+    await api('/api/module/' + encodeURIComponent(name) + '/refresh', {});
+    $('#mod-error').textContent = '';
+    $('#mod-when').textContent = 'refresh queued…';
+    clearTimeout(MOD.timer);
+    // The run takes a moment; look again, then once more for a slow one.
+    MOD.timer = setTimeout(async () => {
+      await renderModule(name);
+      MOD.timer = setTimeout(() => renderModule(name), 4000);
+    }, 1500);
+  } catch (e) {
+    $('#mod-error').textContent = e.status === 429
+      ? (e.message && !/^429 /.test(e.message) ? e.message : 'A run is already queued; try again shortly.')
+      : e.message;
+  } finally {
+    setTimeout(() => { if (MOD.open === name) btn.disabled = false; }, 1500);
+  }
+}
+
+function wireModuleDialog() {
+  const dlg = $('#moddlg');
+  if (!dlg) return;
+  $('#mod-refresh').onclick = refreshModule;
+  dlg.addEventListener('close', () => { MOD.open = null; clearTimeout(MOD.timer); });
+  loadModules();
+}
+
 /* ── new-conversation dialog ─────────────────────────────────────────── */
 // Posture descriptions, matching the agent's own configOptions wording.
 const HINTS = {
@@ -4096,7 +4426,7 @@ async function openPort(src) {
  * Light's navigation: one ranked list of open panes, closed conversations and
  * notes. A note hit attaches to a composer (Enter: focused pane; ⇧Enter: new
  * pane in its directory) and is never sent. */
-const PAL = { sel: 0, rows: [], t: null, seq: 0, status: null };
+const PAL = { sel: 0, rows: [], t: null, seq: 0, status: null, modules: [] };
 
 function openPalette() {
   const q = $('#pal-q');
@@ -4106,6 +4436,10 @@ function openPalette() {
   requestAnimationFrame(() => q.focus());
   // Fetched once per open, to explain an empty result.
   api('/api/content/status').then(s => { PAL.status = s; }).catch(() => {});
+  // Modules may have been added or disabled since start; repaint only on a change.
+  loadModules().then(changed => {
+    if (changed && $('#palette').open) paletteResults(q.value);
+  });
 }
 
 /* Which pane an attach lands in: the focused pane, else the only usable one.
@@ -4137,6 +4471,15 @@ function paletteResults(query) {
   // The Rigs verb, matched by its label.
   const rigsRow = { kind: 'rigs', label: 'Rigs · save or bring up your seats', sub: 'rigs' };
   if (!needle || rigsRow.label.toLowerCase().includes(needle)) rows.push(rigsRow);
+  // One row per enabled module; its title and summary are text, matched as text.
+  // PAL.modules is filled by loadModules() with plain strings.
+  for (const m of PAL.modules || []) {
+    if (!needle || m.title.toLowerCase().includes(needle) || m.name.toLowerCase().includes(needle)
+        || m.summary.toLowerCase().includes(needle)) {
+      rows.push({ kind: 'module', label: m.title, name: m.name, sub: 'module',
+                  snippet: m.summary });
+    }
+  }
 
   for (const [id, p] of S.panes || []) {
     const label = p.title || p.label;
@@ -4211,6 +4554,8 @@ function renderPalette(rows, needle, contentError) {
     if (r.kind === 'content') {
       row.appendChild(el('span', 'palhint',
         r.pane ? '↵ attach · ⇧↵ new pane' : '↵ new pane here'));
+    } else if (r.kind === 'module') {
+      row.appendChild(el('span', 'palhint', '↵ open'));
     } else if (r.kind === 'pane') {
       // Offer quote only when there is another pane for the words to go to.
       const t = attachTarget();
@@ -4229,6 +4574,7 @@ async function activatePalette(row, newPane) {
   $('#palette').close();
   if (row.kind === 'action') return $('#new').click();
   if (row.kind === 'rigs') return openRigs();
+  if (row.kind === 'module') return openModule(row.name);
   if (row.kind === 'said') {
     // A hit in a closed conversation reopens it (detached, as Archive does).
     if (!S.panes.has(row.paneId)) {
@@ -4523,6 +4869,7 @@ async function start() {
   wireThemes();
   wireDialog();
   wireRigDialog();
+  wireModuleDialog();
   wireRail();
   wireCopySelect();
   wirePalette();

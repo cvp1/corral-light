@@ -164,6 +164,22 @@
   </form>
 </dialog>
 
+<!-- A module's view: typed blocks from its last snapshot, rendered as text
+     (docs/finops-module-plan.md §4.5). No module markup or script reaches here. -->
+<dialog id="moddlg">
+  <form method="dialog" class="dlg mod">
+    <h2 id="mod-title">Module</h2>
+    <div id="mod-face" class="modface"></div>
+    <p class="hint" id="mod-when"></p>
+    <div id="mod-view" class="modbody"></div>
+    <p class="hint err" id="mod-error"></p>
+    <menu>
+      <button type="button" class="btn" id="mod-refresh">Refresh</button>
+      <button value="cancel" class="btn">Close</button>
+    </menu>
+  </form>
+</dialog>
+
 <!-- Cross-feed: who takes part, who is left out, and the preamble each arm gets. -->
 <dialog id="xfdlg">
   <form method="dialog" class="dlg">

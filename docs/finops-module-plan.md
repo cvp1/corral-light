@@ -246,7 +246,7 @@ Rules, each refused at install with the reason:
 |---|---|
 | Module generations | `<state>/modules/<name>/<commit>/`, with `current` naming the active one |
 | Pins | `~/.config/corral-light/modules.json`: source, commit, tree digest, enabled, `unsandboxed_ack` |
-| Operator config | `~/.config/corral-light/modules/<name>.toml`, in the subset tomlmini reads |
+| Operator config | `~/.config/corral-light/modules/<name>/config.toml`, in the subset tomlmini reads. A folder, not a file, so the module's own `setup` can replace it atomically from inside its sandbox: the CLI gets that folder writable, the collector gets it read-only (Phase 1) |
 | Module data | `<state>/module-data/<name>/`, the only writable dir |
 | Feed | `<state>/module-feed/v1/`, written by the hub, read-only to modules |
 | First-party index | `modules/index.json` in Light's repo |

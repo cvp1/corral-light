@@ -208,14 +208,19 @@ class StructuralIndependence(unittest.TestCase):
         text = (ROOT / "hub.py").read_text(encoding="utf-8")
         import re
         routes = set(re.findall(r'p == "(/[^"]*)"', text))
-        allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/")
+        # /api/module/: installed modules' snapshots and refresh, added
+        # 2026-10-07 for the module seam (docs/finops-module-plan.md §4.6).
+        # A module never adds a route; these serve every module the same way.
+        allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/", "/api/module/")
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
                          "/manifest.json", "/api/state", "/api/stream",
                          "/api/search",
                          # The lane list alone, for consult (PERF-REVIEW-2026-10-04 item 2).
                          "/api/lanes",
                          # Starts the vendor's login for the Live tab's Claude lane; exact path only.
-                         "/api/claude/login"}
+                         "/api/claude/login",
+                         # The installed modules' list (module seam, 2026-10-07).
+                         "/api/modules"}
         for r in routes:
             if r in allowed_exact or r.startswith(allowed_prefixes):
                 continue
@@ -3539,6 +3544,14 @@ class AnAgentsQuestionRendersAsTheAgentAsking(unittest.TestCase):
         _run_node_selftest(self, "selftest_ask.mjs", "the ask_human banner and reducer")
 
 
+class ModuleViewsInTheBrowser(unittest.TestCase):
+    """The module seam's page side: every block renders as text, links are
+    https with a host only, enums map to fixed classes (selftest_modules.mjs)."""
+
+    def test_the_browser_side(self):
+        _run_node_selftest(self, "selftest_modules.mjs", "module views, links and the module dialog")
+
+
 class PairingByKeyInTheBrowser(unittest.TestCase):
     """DESIGN-6 S8, T8.1-T8.4: Touch your key only under all three
     conditions, base64url, the localhost link on 127.0.0.1, one fallback on
@@ -3882,6 +3895,19 @@ from test_challenge import (Refusals, TheRun, ThePrompt, ReviewerModes,  # noqa:
 from test_review_sandbox import (EgressPolicy, SignInLifetime, TheGate,  # noqa: F401,E402
                                  TheArgv as SandboxArgv, TheProxy as EgressProxy,
                                  Availability as SandboxAvailability)
+# The module seam (docs/finops-module-plan.md §4, §8.1).
+from test_modules import (TheManifest, InstallAndPin, Tamper, UpdateAndRollback,  # noqa: F401,E402
+                          TheRunner as ModuleRunner, Isolation as ModuleIsolation,
+                          Unsandboxed as ModuleUnsandboxed, TheSnapshot as ModuleSnapshot,
+                          TheRoutes as ModuleRoutes, TheDispatch as ModuleDispatch)
+# The module feed, Claude quota capture, the adapter patch, login facts.
+from test_module_feed import (FeedFiles, QuotaCapture, TurnEndCarriesQuota,  # noqa: F401,E402
+                              AdapterPatch, LoginFacts)
+# Core-run vendor reports (grok usage) in their own sandbox.
+from test_vendor_reports import (SandboxedRuns as GrokReportRuns,  # noqa: F401,E402
+                                 BinaryCheck as GrokBinaryCheck,
+                                 SandboxUnavailable as GrokReportUnavailable,
+                                 Reduce as GrokReportReduce)
 # T-ISO-1: the own-branch suites, rerun with HOME and TMPDIR in a temp dir.
 from test_worktrees_iso import Isolation as WorktreeIsolation  # noqa: F401,E402
 

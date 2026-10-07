@@ -50,6 +50,92 @@ def auth_present() -> bool:
     return usable_credential(CODEX_HOME / "auth.json")
 
 
+# ── login facts for the module feed (docs/finops-module-plan.md §4.4) ──────
+# From the newest rollout only: session_meta.creator_account_id names the
+# account, token_count.rate_limits.plan_type the plan. auth.json is never
+# opened here (its existence is a stat).
+ROLLOUT_TAIL_BYTES = 256 * 1024
+_ENUM_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+
+
+def _enum(v):
+    return v if isinstance(v, str) and 0 < len(v) <= 64 and set(v) <= _ENUM_OK else None
+
+
+def newest_rollout(home: Path | None = None) -> Path | None:
+    """The most recently written rollout under CODEX_HOME/sessions."""
+    root = Path(home or CODEX_HOME) / "sessions"
+    best, best_m = None, -1.0
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            if not (name.startswith("rollout-") and name.endswith(".jsonl")):
+                continue
+            p = Path(dirpath) / name
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if m > best_m:
+                best, best_m = p, m
+    return best
+
+
+def _rollout_account_and_plan(path: Path):
+    """(creator_account_id, plan_type) out of one rollout; either may be None.
+    Only these two fields are kept from what is parsed."""
+    import json
+    account = plan = None
+    try:
+        with path.open("rb") as fh:
+            for _ in range(5):                    # session_meta is the header
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and d.get("type") == "session_meta":
+                    p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
+                    a = p.get("creator_account_id")
+                    account = a if isinstance(a, str) and a.strip() else None
+                    break
+            size = path.stat().st_size
+            fh.seek(max(0, size - ROLLOUT_TAIL_BYTES))
+            tail = fh.read()
+    except OSError:
+        return account, plan
+    for line in reversed(tail.split(b"\n")):
+        if b'"token_count"' not in line or b'"plan_type"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        p = d.get("payload") if isinstance(d, dict) else None
+        rl = p.get("rate_limits") if isinstance(p, dict) else None
+        if isinstance(rl, dict) and _enum(rl.get("plan_type")):
+            plan = rl["plan_type"]
+            break
+    return account, plan
+
+
+def login_facts(hasher=None, home: Path | None = None) -> dict:
+    """{"present", "plan", "fingerprint", "source"}: never a token or raw id."""
+    home = Path(home or CODEX_HOME)
+    out = {"present": (home / "auth.json").is_file(), "plan": None,
+           "fingerprint": None, "source": "rollout"}
+    newest = newest_rollout(home)
+    if newest is None:
+        out["source"] = None
+        return out
+    account, plan = _rollout_account_and_plan(newest)
+    out["plan"] = plan
+    if hasher is not None and account:
+        out["fingerprint"] = hasher(account)
+    return out
+
+
 def login_command() -> str:
     """The exact shell line to paste, including creating CODEX_HOME (codex
     refuses to start when it does not exist)."""

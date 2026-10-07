@@ -111,6 +111,71 @@ def expiry(platform=None):
     return ts
 
 
+# ── login facts for the module feed (docs/finops-module-plan.md §4.4) ──────
+
+_ENUM_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _enum(v):
+    """A vendor enum string (plan, tier) or None; anything else is dropped."""
+    return v if isinstance(v, str) and _ENUM_RE.match(v) else None
+
+
+def _account_file():
+    """The CLI's config document: inside CLAUDE_CONFIG_DIR when that is set,
+    else ~/.claude.json."""
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(env) / ".claude.json" if env else Path.home() / ".claude.json"
+
+
+def _account_id():
+    """oauthAccount.accountUuid: stable across token refreshes, not a secret.
+    Only a hasher ever sees it."""
+    try:
+        doc = json.loads(_account_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
+    uid = acct.get("accountUuid") if isinstance(acct, dict) else None
+    return uid if isinstance(uid, str) and uid.strip() else None
+
+
+def login_facts(hasher=None, platform=None):
+    """{"present", "plan", "tier", "fingerprint", "source"}: sanitized facts.
+
+    `plan` is the credential's subscriptionType, `tier` its rateLimitTier,
+    both only as short enum strings. `fingerprint` is hasher(account id) or
+    None. Never a token, never a raw id.
+    """
+    platform = platform or sys.platform
+    out = {"present": None, "plan": None, "tier": None, "fingerprint": None,
+           "source": None}
+    if platform == "darwin":
+        # TODO(macOS): the plan and tier live in the Keychain item; reading
+        # them means a `security` call whose output holds the token. Not done:
+        # they stay unknown here (docs/finops-phase0.md, "not measured").
+        out["source"] = "keychain-unread"
+    else:
+        out["source"] = "file"
+        raw = _read_file()
+        try:
+            doc = json.loads(raw) if raw else None
+        except ValueError:
+            doc = None
+        o = doc.get("claudeAiOauth") if isinstance(doc, dict) else None
+        if not isinstance(o, dict):
+            out["present"] = False
+        else:
+            out["present"] = any(isinstance(o.get(k), str) and o[k].strip()
+                                 for k in ("accessToken", "refreshToken"))
+            out["plan"] = _enum(o.get("subscriptionType"))
+            out["tier"] = _enum(o.get("rateLimitTier"))
+    if hasher is not None:
+        acct = _account_id()
+        out["fingerprint"] = hasher(acct) if acct else None
+    return out
+
+
 def _iso(s):
     return (datetime.fromtimestamp(s, timezone.utc)
             .isoformat(timespec="seconds").replace("+00:00", "Z")) if s else None

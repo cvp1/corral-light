@@ -1,0 +1,59 @@
+{
+ "_note": "Claude SDK rate_limit_info shapes. phase0 is the notice observed in Phase 0 (docs/finops-phase0.md); the others use the SDK's SDKRateLimitInfo fields.",
+ "phase0": {
+  "status": "allowed",
+  "resetsAt": 1791403800,
+  "rateLimitType": "five_hour",
+  "overageStatus": "rejected",
+  "overageDisabledReason": "org_level_disabled",
+  "isUsingOverage": false,
+  "unifiedWindows": {
+   "five_hour": {
+    "utilization": 0.16,
+    "resetsAt": 1791403800
+   },
+   "seven_day": {
+    "utilization": 0.07,
+    "resetsAt": 1791918000
+   }
+  }
+ },
+ "phase0_later": {
+  "status": "allowed",
+  "resetsAt": 1791403800,
+  "rateLimitType": "five_hour",
+  "overageStatus": "rejected",
+  "overageDisabledReason": "org_level_disabled",
+  "isUsingOverage": false,
+  "unifiedWindows": {
+   "five_hour": {
+    "utilization": 0.21,
+    "resetsAt": 1791403800
+   },
+   "seven_day": {
+    "utilization": 0.08,
+    "resetsAt": 1791918000
+   }
+  }
+ },
+ "opus_overage": {
+  "status": "allowed_warning",
+  "resetsAt": 1791918000,
+  "rateLimitType": "seven_day_opus",
+  "utilization": 0.83,
+  "surpassedThreshold": 0.75,
+  "overageStatus": "allowed",
+  "overageResetsAt": 1792000000,
+  "isUsingOverage": true,
+  "overageInUse": true
+ },
+ "no_type": {
+  "status": "allowed",
+  "resetsAt": 1791403800000,
+  "utilization": 0.5
+ },
+ "no_resets": {
+  "status": "rejected",
+  "rateLimitType": "seven_day"
+ }
+}

@@ -546,6 +546,8 @@ EOF
   [ -x "$CL/spike/node_modules/.bin/claude-agent-acp" ] || die "claude-agent-acp did not install" "see $LOG"
   [ -x "$CL/spike/node_modules/.bin/codex-acp" ] || die "codex-acp did not install" "see $LOG"
   [ -x "$CL/spike/node_modules/.bin/codex" ] || die "the bundled codex CLI did not install" "see $LOG"
+  # Pinned adapter patches (adapter_patches.py): Claude quota notices reach Light.
+  python3 "$CL/adapter_patches.py" apply "$CL/spike" || warn "the Claude adapter patch did not apply — Claude quota will not reach modules (see $LOG)"
   ok "adapters installed"
 
   # ── 6. assistants' own programs ───────────────────────────────────────────

@@ -1203,6 +1203,52 @@ body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 .rigrow.bad .pill{color:var(--rust);border-color:var(--rust)}
 .dlg label.inline{flex-direction:row;align-items:center;gap:6px}
 
+/* Modules (docs/finops-module-plan.md §4.5): every class here is fixed; a
+   module's kind and level reach the page only through app.js's lookup tables. */
+dialog#moddlg{max-width:none;width:min(880px,96vw)}
+.dlg.mod .hint{min-height:0}
+.modface{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.modbadge{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;
+  border:1px solid var(--line2);border-radius:999px;padding:1px 7px;color:var(--dim)}
+.modbadge.bad{color:var(--rust);border-color:var(--rust)}
+.modbadge.warn{color:var(--gold);border-color:var(--gold)}
+.modbadge.ok{color:var(--sage)}
+.modbody{max-height:min(640px,calc(100vh - 220px));overflow:auto}
+.modview{display:flex;flex-direction:column;gap:12px;margin:8px 0;font-size:13px}
+.modline{font-size:12px;color:var(--faint)}
+.modline.bad{color:var(--rust)}
+.modline.warn{color:var(--gold)}
+.modtiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px}
+.modtile{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border:1px solid var(--line);
+  border-left:3px solid var(--line2);border-radius:8px;background:var(--raise);min-width:0}
+.modtile .modlabel,.modmeter .modlabel{font-size:11.5px;color:var(--dim)}
+.modtile .modvalue{font-size:16px;font-family:var(--mono);overflow-wrap:anywhere}
+.modtile .modnote,.modmeter .modnote{font-size:11.5px;color:var(--faint);overflow-wrap:anywhere}
+.modkind{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint)}
+.modtile.ml-ok{border-left-color:var(--sage)}
+.modtile.ml-info{border-left-color:var(--line2)}
+.modtile.ml-warn{border-left-color:var(--gold)}
+.modtile.ml-bad{border-left-color:var(--rust)}
+.mk-billed .modkind{color:var(--sage)}
+.mk-vendor .modkind{color:var(--dusk)}
+.mk-declared .modkind{color:var(--ink)}
+.mk-list .modkind,.mk-estimate .modkind{color:var(--gold)}
+.mk-unknown .modkind{color:var(--faint)}
+.modmeter{display:flex;flex-direction:column;gap:3px}
+.modmeter .modbar{display:flex;align-items:center;gap:8px}
+.modmeter meter{flex:1;min-width:0;height:10px}
+.modmeter .modpct{font-family:var(--mono);font-size:12px}
+.modtable{display:flex;flex-direction:column;gap:4px;overflow-x:auto}
+.modtable .modtitle{font-size:12px;color:var(--dim)}
+.modtable table{border-collapse:collapse;font-size:12.5px}
+.modtable th,.modtable td{text-align:left;padding:3px 10px 3px 0;border-bottom:1px solid var(--line);
+  vertical-align:top;overflow-wrap:anywhere}
+.modtable th{color:var(--dim);font-weight:600}
+.modnote{margin:0;overflow-wrap:anywhere}
+.modlink{overflow-wrap:anywhere}
+a.modlink{color:var(--dusk)}
+.modunsupported{font-size:12px;color:var(--faint);font-style:italic}
+
 /* ── own branches (docs/worktree-review-plan.md §2.5) ───────────────────── */
 .wtrow{display:flex;flex-direction:column;gap:4px}
 .wtrow .wtcut{font-family:var(--mono);font-size:11.5px;color:var(--faint)}

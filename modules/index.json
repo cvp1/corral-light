@@ -1,0 +1,9 @@
+{
+  "schema": "corral-light.module-index/1",
+  "modules": {
+    "finops": {
+      "url": "https://github.com/cvp1/corral-light-finops",
+      "summary": "What your lanes cost, and how much quota is left"
+    }
+  }
+}

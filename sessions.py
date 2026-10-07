@@ -29,6 +29,7 @@ import worktrees as _wt
 import challenge as _chl
 import review_sandbox as _sbx
 import review_egress as _egress
+import module_feed as _feed
 
 ROOT = Path(__file__).resolve().parent
 # Separate from the full Corral's state dir so two hubs never share panes or keys.
@@ -875,6 +876,9 @@ class Pane(_core.PaneBase):
         self.pending = {}                 # requestId -> the permission payload
         self.client = None
         self.usage = {}
+        # Vendor quota windows seen by this pane: {window: observation}
+        # (module_feed.quota_windows); merged per window, never computed.
+        self.quota = {}
         self.config = {}          # {id: {value, label, options}} straight from ACP
         # Local skills until the agent advertises its own commands.
         self.commands = _skill_commands(getattr(self, "agent", "claude"))
@@ -1291,6 +1295,7 @@ class Pane(_core.PaneBase):
         else:
             lg.mark(tid, "completed", stopReason="cleared")
             self.emit("turn_end", {"stopReason": "cleared", "usage": self.usage,
+                                   "quota": getattr(self, "quota", None) or {},
                                    "turn": tid, "queued": 0})
         self.save_meta()
         return tid
@@ -1402,7 +1407,7 @@ class Pane(_core.PaneBase):
         elif kind == "plan":
             self.emit("plan", {"entries": (data.get("entries") or [])[:20]})
         elif kind == "usage_update":
-            self.usage = data
+            self._on_usage_update(data)
         elif kind == "agent_exit":
             # A deliberate kill (pause) reports its exit asynchronously; ignore it.
             if self._expect_exit:
@@ -1416,6 +1421,38 @@ class Pane(_core.PaneBase):
                 self.emit("closed", {"reason": data.get("reason")})
             else:
                 self._dead(data.get("reason"))
+
+    def _on_usage_update(self, data):
+        """Merge one ACP `usage_update` into `usage`; never replace it.
+
+        A Claude rate-limit notice (`_meta["_claude/rateLimit"]`) is split off
+        into the per-window `quota` store and handed to the module feed at once
+        (an interrupted turn or a hub restart keeps it). The rest is merged key
+        by key, so a notice cannot erase `cost` and a later plain update cannot
+        erase a window. `used` may be absent (the patched adapter sends a notice
+        before the turn's first usage). Nothing is computed or rescaled.
+        """
+        if not isinstance(data, dict):
+            return
+        meta = data.get("_meta") if isinstance(data.get("_meta"), dict) else {}
+        rate = meta.get("_claude/rateLimit")
+        merged = dict(self.usage or {})
+        for k, v in data.items():
+            if k != "_meta":
+                merged[k] = v
+        rest = {k: v for k, v in meta.items() if k != "_claude/rateLimit"}
+        if rest:
+            old = merged.get("_meta") if isinstance(merged.get("_meta"), dict) else {}
+            merged["_meta"] = dict(old, **rest)
+        self.usage = merged
+        if isinstance(rate, dict) and not getattr(self, "_replaying", False):
+            windows = _feed.quota_windows(rate)
+            self.quota = dict(getattr(self, "quota", None) or {}, **windows)
+            try:
+                _feed.note_quota(self, windows)
+            except Exception as e:                  # noqa: BLE001 — never kills the reader
+                print(f"corral-light: quota not written to the module feed: "
+                      f"{type(e).__name__}", file=sys.stderr, flush=True)
 
     def _dead(self, reason):
         """Record that the agent stopped on its own.
@@ -1807,6 +1844,7 @@ class Pane(_core.PaneBase):
             self._flush_thought()       # a turn ending on a thought still shows it
             self.emit("turn_end", {"stopReason": (r or {}).get("stopReason"),
                                    "usage": self.usage, "turn": tid,
+                                   "quota": getattr(self, "quota", None) or {},
                                    "queued": len(self._queue)})
             if self.state != "dead":
                 self.state = "needs-you" if self.pending else (

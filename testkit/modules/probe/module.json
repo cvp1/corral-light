@@ -1,0 +1,14 @@
+{
+  "schema": "corral-light.manifest/1",
+  "name": "probe",
+  "title": "Probe",
+  "version": "0.1.0",
+  "core_api": 1,
+  "summary": "Test fixture: a collector whose behaviour the test chooses",
+  "collector": {"script": "collector.py", "args": ["snapshot"],
+                "every_s": 60, "budget_s": 5, "timeout_s": 5},
+  "cli": {"script": "cli.py"},
+  "doctor": {"script": "cli.py", "args": ["doctor"]},
+  "reads": ["light-feed"],
+  "network": "none"
+}

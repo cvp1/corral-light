@@ -29,6 +29,7 @@ if sys.version_info < (3, 9):
 import auth
 import claude_auth
 import claude_login
+import modules
 import notify
 import sessions
 import worktrees
@@ -185,6 +186,12 @@ def _observe_once():
     # The Claude login: warn before it lapses, revive panes after sign-in.
     try:
         MGR.auth_sweep()
+    except Exception:                              # noqa: BLE001
+        _TICK["errors"] += 1
+    # The module feed (docs/finops-module-plan.md §4.4): cheap when nothing changed.
+    try:
+        import module_feed
+        module_feed.tick(MGR)
     except Exception:                              # noqa: BLE001
         _TICK["errors"] += 1
 
@@ -514,7 +521,8 @@ class Handler(BaseHTTPRequestHandler):
                                "not_restored": getattr(MGR, "not_restored", 0),
                                "started_at": int(STARTED_AT),
                                "code": CODE_FINGERPRINT,
-                               "code_stale": _code_stat() != CODE_STAT})
+                               "code_stale": _code_stat() != CODE_STAT,
+                               **_module_counts()})
 
         if self._edge_refused():
             return
@@ -674,6 +682,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(out)
         if p == "/api/stream":
             return self._stream()
+        # Modules (docs/finops-module-plan.md §4): the list, and one module's
+        # validated snapshot. Errors and paths only past the pairing check.
+        if p == "/api/modules":
+            pins = modules.load_pins()
+            return self._json({"modules": [modules.summary(n, pins[n]) for n in sorted(pins)]})
+        if p.startswith("/api/module/"):
+            name = _module_name(p[len("/api/module/"):])
+            d = modules.detail(name) if name else None
+            if not d or not d["enabled"]:
+                return self._json({"error": "no such module"}, 404)
+            return self._json(d)
         return self._json({"error": "not found"}, 404)
 
     def _static(self, rel):
@@ -936,6 +955,15 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/session/close":
                 MGR.close(b.get("pane", ""))
                 return self._json({"ok": True})
+            if p.startswith("/api/module/") and p.endswith("/refresh"):
+                name = _module_name(p[len("/api/module/"):-len("/refresh")])
+                if not name or not modules.RUNNER:
+                    return self._json({"error": "no such module"}, 404)
+                ok, why = modules.RUNNER.refresh(name)
+                if not ok and why == "no such enabled module":
+                    return self._json({"error": "no such module"}, 404)
+                return self._json({"queued": ok, "why": why} if ok else {"error": why},
+                                  200 if ok else 429)
             if p == "/api/session/forget":
                 try:
                     forgot = MGR.forget(b.get("pane", ""), keep_branch=b.get("keep_branch") is True)
@@ -947,6 +975,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(e)}, 400)
         except Exception as e:                      # noqa: BLE001
             return self._json({"error": f"{type(e).__name__}: {e}"[:300]}, 500)
+
+
+def _module_name(raw):
+    """A module name from a route, or None: never a path."""
+    return raw if modules.NAME_RE.match(raw or "") and raw not in modules.CORE_VERBS else None
+
+
+def _module_counts():
+    """/health: how many modules, how many failing. Numbers only."""
+    try:
+        return modules.counts()
+    except Exception:                              # noqa: BLE001
+        return {}
+
+
+REPORTS_EVERY_S = 120
+
+
+def _reports_loop():
+    """Reports the core runs for modules (§4.2), on their own thread so a
+    slow vendor binary never holds a collector. Scratch homes stay outside
+    the feed."""
+    time.sleep(20)
+    while True:
+        try:
+            wanted = set()
+            for name, pin in modules.load_pins().items():
+                if pin.get("enabled"):
+                    m = modules._read_json(modules.module_dir(name) / str(pin.get("commit"))
+                                           / "module.json", {}) or {}
+                    wanted.update(m.get("vendor_reports") or ())
+            if "grok-usage" in wanted:
+                import vendor_reports
+                scratch = modules.STATE / "module-scratch"
+                scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+                vendor_reports.refresh_grok(modules.feed_dir() / "vendor" / "grok-usage",
+                                            scratch_dir=scratch)
+        except Exception:                          # noqa: BLE001
+            _TICK["errors"] += 1
+        time.sleep(REPORTS_EVERY_S)
 
 
 # Spelled out, so the front end's route check can see each one.
@@ -1028,6 +1096,9 @@ def serve(bind=BIND, port=PORT):
     threading.Thread(target=_notify_loop, daemon=True).start()
     sessions.AVAIL.start()             # lane availability, off the request path
     MGR.schedule.start()
+    # Module collectors, each a time-boxed sandboxed subprocess (§4.1 M1).
+    modules.RUNNER = modules.Runner().start()
+    threading.Thread(target=_reports_loop, name="module-reports", daemon=True).start()
     # Where a pane's seat-tools child dials this hub: loopback when bound to
     # all interfaces, else the bound address.
     sessions._core.PEER_HUB_URL = (

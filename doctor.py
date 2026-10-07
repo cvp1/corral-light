@@ -215,6 +215,34 @@ def container_report(run_report=RUN_REPORT, root=None):
     return out
 
 
+def module_lines(pins=None):
+    """Per installed module: pinned commit, verified, sandboxed or
+    acknowledged, last run, last error (docs/finops-module-plan.md §4.6)."""
+    import modules
+    import module_sandbox
+    pins = modules.load_pins() if pins is None else pins
+    if not pins:
+        return []
+    sandboxed, why = module_sandbox.available()
+    out = ["", "Modules" + ("" if sandboxed else f" (no sandbox here: {why})")]
+    for name in sorted(pins):
+        pin = pins[name]
+        try:
+            if pin.get("enabled"):
+                modules.verify(name)
+            verified = "verified" if pin.get("enabled") else "disabled"
+        except modules.ModuleError as e:
+            verified = str(e)
+        s = modules.summary(name, modules.load_pins().get(name) or pin)
+        face = "sandboxed" if sandboxed else (
+            "UNSANDBOXED (acknowledged)" if pin.get("unsandboxed_ack") else "not acknowledged")
+        mark = "  ok  " if s["state"] == "ok" else "  --  "
+        out.append(f"{mark}{name} {str(pin.get('commit', ''))[:12]} — {verified}, {face}, "
+                   f"last run {s.get('last_run_at') or 'never'}"
+                   + (f"; {s['error']}" if s.get("error") else ""))
+    return out
+
+
 def report(root=None, agents=None):
     """The lines `doctor` prints. Returns a list of strings so a test can read
     them; main() is the only thing that writes to stdout."""
@@ -239,6 +267,7 @@ def report(root=None, agents=None):
         out.append("")
         out.append("  !   " + n)
     out.extend(worktree_lines())
+    out.extend(module_lines())
     out += container_report(root=root)
     return out
 
