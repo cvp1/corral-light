@@ -109,6 +109,10 @@ class Base(unittest.TestCase):
     def install(self, src=None, **kw):
         src = src or self.make_repo()
         kw.setdefault("confirm", "probe")
+        # A host with no sandbox (CI has no bubblewrap) installs only with the
+        # typed acknowledgement; the same tests then cover the unsandboxed path.
+        if not module_sandbox.available()[0]:
+            kw.setdefault("ack_unsandboxed", "unsandboxed")
         return modules.add(str(src), out=quiet, **kw)
 
     def set_mode(self, mode, *args):
@@ -288,7 +292,7 @@ class InstallAndPin(Base):
         cwd = os.getcwd()
         os.chdir(self.tmp)
         try:
-            self.assertEqual(modules.add("probe", confirm="probe", out=quiet), "probe")
+            self.assertEqual(self.install("probe"), "probe")
         finally:
             os.chdir(cwd)
 
