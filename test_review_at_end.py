@@ -38,6 +38,7 @@ ALWAYS = [{"optionId": "always", "name": "Always", "kind": "allow_always"},
 class RaeCase(LifecycleCase):
 
     def rae(self, **kw):
+        kw.setdefault("posture", "strict")
         return self.pane(review_at_end=True, **kw)
 
     def root(self, p):
@@ -316,6 +317,28 @@ class TheFlag(RaeCase):
             self.assertFalse(self.sessions.Pane.from_meta(meta, self.mgr).review_at_end)
         self.assertTrue(self.sessions.Pane.from_meta(meta, self.mgr).review_at_end)
 
+    def test_T_SNP_19d_it_needs_the_strict_posture(self):
+        # Panel finding (ship gate): under `auto` Grok runs --always-approve,
+        # so "shell commands still ask" would be false.
+        for posture in ("auto", "edits"):
+            with self.assertRaises(ValueError) as cm:
+                self.pane(review_at_end=True, posture=posture)
+            self.assertIn("strict", str(cm.exception))
+        self.assertEqual(self.reg.all(), [])
+        p = self.rae()
+        meta = json.loads((p.dir / "meta.json").read_text())
+        self.assertFalse(self.sessions.Pane.from_meta(dict(meta, posture="auto"),
+                                                      self.mgr).review_at_end)
+
+    def test_T_SNP_19e_the_lanes_own_mode_cannot_be_loosened(self):
+        p = self.rae()
+        p.config["mode"] = {"value": "default", "options": [
+            {"value": v} for v in ("default", "plan", "acceptEdits", "bypassPermissions")]}
+        for v in ("acceptEdits", "bypassPermissions"):
+            with self.assertRaises(ValueError) as cm:
+                p.set_config("mode", v)
+            self.assertIn("Review at the end", str(cm.exception))
+
     def test_T_SNP_15b_resume_keeps_auto_allowing(self):
         p = self.rae()
         p.pause()
@@ -340,7 +363,7 @@ class TheFlag(RaeCase):
         # Opening review grants nothing.
         snap = self.mgr.worktree_snapshot(p.id)
         self.assertIsNone(p.worktree_view()["reviewedDigest"])
-        r = self.mgr.worktree_mark_reviewed(p.id, snap["tree"])
+        r = self.mgr.worktree_mark_reviewed(p.id, snap["tree"], snap["reviewDigest"])
         v = p.worktree_view()
         self.assertEqual(v["reviewedDigest"], v["summary"]["digest"])
         self.assertEqual(r["reviewed"], v["reviewedDigest"])
@@ -358,14 +381,15 @@ class TheFlag(RaeCase):
         seen = self.mgr.worktree_snapshot(p.id)
         self.summary_after(p, "write notes.txt changed after the dialog opened")
         with self.assertRaises(wt.Refused) as cm:
-            self.mgr.worktree_mark_reviewed(p.id, seen["tree"])
+            self.mgr.worktree_mark_reviewed(p.id, seen["tree"], seen["reviewDigest"])
         self.assertEqual(cm.exception.reason, "changed")
         self.assertIsNone(p.worktree_view()["reviewedDigest"])
         # Not a Review-at-the-end pane: nothing to mark.
         q = self.pane()
         self.say(q, "write a.txt x")
         with self.assertRaises(wt.Refused):
-            self.mgr.worktree_mark_reviewed(q.id, self.mgr.worktree_snapshot(q.id)["tree"])
+            qs = self.mgr.worktree_snapshot(q.id)
+            self.mgr.worktree_mark_reviewed(q.id, qs["tree"], qs["reviewDigest"])
 
     def test_a_write_during_the_grant_is_never_covered(self):
         p = self.rae()
@@ -379,7 +403,7 @@ class TheFlag(RaeCase):
             return out
         with mock.patch.object(wt, "snapshot", racing):
             with self.assertRaises(wt.Refused):
-                self.mgr.worktree_mark_reviewed(p.id, seen["tree"])
+                self.mgr.worktree_mark_reviewed(p.id, seen["tree"], seen["reviewDigest"])
         self.assertIsNone(p.worktree_view()["reviewedDigest"])
 
     def test_a_restored_mtime_still_reads_as_changed(self):
@@ -398,9 +422,40 @@ class TheFlag(RaeCase):
         p = self.rae()
         self.summary_after(p, "write notes.txt one")
         snap = self.mgr.worktree_snapshot(p.id)
-        self.mgr.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "m")
+        self.mgr.worktree_commit(p.id, snap["tree"], snap["head"], snap["index_id"], "m",
+                                 snap["reviewDigest"])
         v = p.worktree_view()
         self.assertEqual(v["reviewedDigest"], v["summary"]["digest"])
+
+    def test_a_change_outside_the_tree_after_the_dialog_opened_is_never_covered(self):
+        # Panel finding (ship gate): an untracked file too big for the tree
+        # changes no tree OID, so the grant must bind the digest on screen.
+        p = self.rae()
+        big = Path(self.root(p), "big.bin")
+        big.write_bytes(b"a" * (wt.SNAP_UNTRACKED_MAX + 1))
+        self.summary_after(p, "write notes.txt one")
+        seen = self.mgr.worktree_snapshot(p.id)
+        self.assertIn("big.bin", json.dumps(seen.get("too_big") or seen))
+        self.assertTrue(seen["reviewDigest"])
+        time.sleep(0.02)
+        big.write_bytes(b"b" * (wt.SNAP_UNTRACKED_MAX + 1))    # same size, new bytes
+        self.assertEqual(self.mgr.worktree_snapshot(p.id)["tree"], seen["tree"])
+        with self.assertRaises(wt.Refused) as cm:
+            self.mgr.worktree_mark_reviewed(p.id, seen["tree"], seen["reviewDigest"])
+        self.assertEqual(cm.exception.reason, "changed")
+        self.mgr.worktree_commit(p.id, seen["tree"], seen["head"], seen["index_id"], "m",
+                                 seen["reviewDigest"])
+        self.assertIsNone(p.worktree_view()["reviewedDigest"], "Commit must not clear it")
+
+    def test_no_digest_no_grant(self):
+        p = self.rae()
+        self.summary_after(p, "write notes.txt one")
+        seen = self.mgr.worktree_snapshot(p.id)
+        for shown in (None, "", "0" * 16):
+            with self.assertRaises(wt.Refused):
+                self.mgr.worktree_mark_reviewed(p.id, seen["tree"], shown)
+        self.mgr.worktree_commit(p.id, seen["tree"], seen["head"], seen["index_id"], "m")
+        self.assertIsNone(p.worktree_view()["reviewedDigest"])
 
     def test_T_SNP_17_commit_after_auto_allowed_edits_writes_the_reviewed_tree(self):
         p = self.rae()
@@ -477,6 +532,11 @@ class TheCreateRoute(RaeCase):
         st, out = self.req("POST", "/api/session/new",
                            {"agent": "fake", "cwd": str(self.repo), "worktree": True,
                             "reviewAtEnd": True})
+        self.assertNotEqual(st, 200, out)                 # the default posture is auto
+        self.assertIn("strict", out.get("error", ""))
+        st, out = self.req("POST", "/api/session/new",
+                           {"agent": "fake", "cwd": str(self.repo), "worktree": True,
+                            "reviewAtEnd": True, "posture": "strict"})
         self.assertEqual(st, 200, out)
         self.assertTrue(out["pane"]["worktree"]["reviewAtEnd"])
         st, out = self.req("POST", "/api/session/new",

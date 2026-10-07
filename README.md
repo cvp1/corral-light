@@ -699,7 +699,10 @@ Tick **Review at the end** under **Own branch** and edits the agent makes
 inside its branch stop raising a card each. It is offered on the Claude and
 Grok lanes only. Codex runs its edits and shell commands without asking in
 its own agent mode, so the hub has no request to allow or card, and the
-option is not shown for it. The hub allows an edit once by
+option is not shown for it. It runs under the **Strict** posture only:
+ticking it moves the posture to Strict, and while it is on the lane's own
+mode cannot be loosened, because under Auto Grok approves every tool call
+itself and shell commands would no longer ask. The hub allows an edit once by
 itself only when every path the request names resolves inside the
 worktree, outside its git admin folder; anything in doubt (no path, a path
 outside, a path hidden in a field it does not recognise, an oversize
@@ -714,7 +717,8 @@ going quiet, or vanish across a hub restart. Opening the review grants
 nothing. Two things do, and both name the exact files on screen:
 
 - **Mark reviewed** lets the agent carry on. If anything changed after the
-  review opened, it is refused and the review refreshes.
+  review opened, it is refused and the review refreshes. That includes an
+  untracked file too big to show, which the review lists by name.
 - **Commit** commits exactly what you saw, which is also the review.
 
 ### Challenge this change: a blind review from another vendor

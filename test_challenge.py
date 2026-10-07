@@ -283,7 +283,7 @@ class TheRun(ChallengeCase):
         self.assertEqual([c["id"] for c in p.challenges], list(reversed(ids))[:5])
 
     def test_a_challenge_does_not_count_as_the_operators_review(self):
-        p = self.pane(review_at_end=True)
+        p = self.pane(review_at_end=True, posture="strict")
         self.say(p, "write a.txt changed")
         self.assertTrue(wait_for(lambda: (p.worktree_summary or {}).get("files")))
         self.settled(p, self.start(p)["id"])

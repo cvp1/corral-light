@@ -86,6 +86,16 @@ check(/m\.raeRefusal = agent in raes \? raes\[agent\] : 'unknown lane'/.test(src
 check(/if \(!on\) \$\('#f-rae'\)\.checked = false;/.test(src),
       'T-SNP-19 a hidden option is never sent ticked');
 
+/* T-SNP-19d: Review at the end goes with Strict. */
+const raePosture = load('raePosture', []);
+const raeAfterPosture = load('raeAfterPosture', []);
+eq(raePosture(true, 'auto').posture, 'strict', 'T-SNP-19d ticking it moves the posture to Strict');
+eq(raePosture(false, 'auto').posture, 'auto', 'T-SNP-19d unticked, the posture is left alone');
+check(!raeAfterPosture(true, 'auto') && !raeAfterPosture(true, 'edits') &&
+      raeAfterPosture(true, 'strict'), 'T-SNP-19d leaving Strict unticks it');
+check(/REVIEW_AT_END_POSTURE = "strict"/.test(readFileSync(new URL('./sessions.py', import.meta.url), 'utf8')),
+      'T-SNP-19d the browser and the hub agree on the posture');
+
 /* T-UI-2: remembered per repo top. */
 const store = new Map();
 const localStorage = { getItem: k => store.has(k) ? store.get(k) : null,
@@ -223,8 +233,11 @@ const snap = { tree: 't'.repeat(40), head: 'h'.repeat(40), head_tree: 'b'.repeat
                base_sha: 'h'.repeat(40), index_id: 'i'.repeat(64),
                remotes: [{ name: 'origin', pushUrls: ['git@github.com:u/aios.git'], githubRepo: 'u/aios' }] };
 eq(load('commitBody')('p1', snap, 'feat: x'),
-   { pane: 'p1', tree: snap.tree, head: snap.head, index_id: snap.index_id, message: 'feat: x' },
+   { pane: 'p1', tree: snap.tree, head: snap.head, index_id: snap.index_id, message: 'feat: x',
+     digest: '' },
    'T-UI-9 commit posts the tree and head it rendered');
+eq(load('commitBody')('p1', { ...snap, reviewDigest: 'd1' }, 'm').digest, 'd1',
+   'commit posts the digest its review was frozen at');
 const done = { ...snap, head: 'c'.repeat(40), head_tree: snap.tree };
 eq(load('publishBody')('p1', done, done.remotes[0], null),
    { pane: 'p1', oid: done.head, tree: done.tree, remote: 'origin',
@@ -268,8 +281,9 @@ ra = reviewActions({ ...snap, head_tree: snap.tree }, { message: 'm', remote: 0,
   check(!reviewActions(s3, { busy: true, reviewAtEnd: true, message: '', remote: 0 }).reviewed.ok &&
         !reviewActions(null, { reviewAtEnd: true }).reviewed.ok, 'Mark reviewed: not while busy or loading');
   const rb = load('reviewedBody');
-  eq(JSON.stringify(rb('p1', s3)), JSON.stringify({ pane: 'p1', tree: s3.tree }),
-     'Mark reviewed posts the tree on screen');
+  eq(JSON.stringify(rb('p1', { ...s3, reviewDigest: 'd9' })),
+     JSON.stringify({ pane: 'p1', tree: s3.tree, digest: 'd9' }),
+     'Mark reviewed posts the tree and the digest on screen');
   check(/worktree\/reviewed/.test(fn('wireReview')), 'the dialog posts to the reviewed route');
   check(!/reviewed/.test(fn('openReview')), 'opening review grants nothing');
 }

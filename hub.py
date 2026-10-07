@@ -385,7 +385,8 @@ class Handler(BaseHTTPRequestHandler):
                 r["remotes"] = MGR.worktree_remotes(pane)
             elif action == "commit":
                 r = MGR.worktree_commit(pane, _oid(b.get("tree")), _oid(b.get("head")),
-                                        str(b.get("index_id") or ""), str(b.get("message") or ""))
+                                        str(b.get("index_id") or ""), str(b.get("message") or ""),
+                                        shown=str(b.get("digest") or "")[:64] or None)
             elif action == "publish":
                 pr = b.get("pr") if isinstance(b.get("pr"), dict) else None
                 r = MGR.worktree_publish(pane, _oid(b.get("oid")), _oid(b.get("tree")),
@@ -393,7 +394,8 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "discard":
                 r = MGR.worktree_discard(pane, _oid(b.get("tree")))
             elif action == "reviewed":
-                r = MGR.worktree_mark_reviewed(pane, _oid(b.get("tree")))
+                r = MGR.worktree_mark_reviewed(pane, _oid(b.get("tree")),
+                                               shown=str(b.get("digest") or "")[:64] or None)
             elif action == "challenge":
                 r = {"challenge": MGR.worktree_challenge(pane, str(b.get("lane") or ""),
                                                          str(b.get("criteria") or ""))}

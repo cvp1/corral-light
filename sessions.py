@@ -140,6 +140,12 @@ def worktree_lanes():
 # to allow or card; offering the option there would promise what it cannot
 # do. Override with CORRAL_LIGHT_REVIEW_AT_END_LANES=a,b.
 REVIEW_AT_END_LANES = ("claude", "grok")
+# ...and only on the posture the matrix passed on. Under `auto` Grok runs with
+# --always-approve and Claude's classifier approves shell commands itself, so
+# "shell commands still ask" would be false. While it is on, the lane's own
+# mode may only be one of these (Claude's `default` and `plan` both ask).
+REVIEW_AT_END_POSTURE = "strict"
+REVIEW_AT_END_MODES = ("default", "plan")
 
 
 def review_at_end_lanes():
@@ -949,7 +955,8 @@ class Pane(_core.PaneBase):
         p.worktree_id = meta.get("worktree_id")
         # Never loosens on restore: a lane that lost the option keeps its cards.
         p.review_at_end = bool(meta.get("review_at_end")) and bool(p.worktree_id) \
-            and review_at_end_refusal(p.agent) is None
+            and review_at_end_refusal(p.agent) is None \
+            and p.posture == REVIEW_AT_END_POSTURE
         p.reviewed_digest = meta.get("reviewed_digest")
         p.challenge_of = meta.get("challenge_of")
         p.review_tree = meta.get("review_tree")
@@ -1599,6 +1606,9 @@ class Pane(_core.PaneBase):
         held = REVIEWER_CONFIG.get(self.agent, {}).get(config_id) if self.challenge_of else None
         if held is not None and value != held:
             raise ValueError(f"a blind reviewer stays at {config_id}={held}")
+        if self.review_at_end and config_id == "mode" and value not in REVIEW_AT_END_MODES:
+            raise ValueError(f"Review at the end keeps the lane asking before shell "
+                             f"commands: mode stays one of {list(REVIEW_AT_END_MODES)}")
         # No advertised options (e.g. Grok's null configOptions) is a refusal.
         cfg = self.config.get(config_id) or {}
         allowed = {o["value"] for o in cfg.get("options", [])}
@@ -2655,6 +2665,10 @@ class Manager(_core.ManagerBase):
             why = review_at_end_refusal(agent) if review_at_end else None
             if why:
                 raise ValueError(why)
+            if review_at_end and posture != REVIEW_AT_END_POSTURE:
+                raise ValueError(
+                    f"Review at the end needs the {REVIEW_AT_END_POSTURE} posture: "
+                    f"under {posture!r} the lane runs shell commands without a card")
             pr = _wt.probe(cwd)
             if pr["refusals"]:
                 raise ValueError(pr["refusals"][0])
@@ -3112,14 +3126,30 @@ class Manager(_core.ManagerBase):
         nothing: the blocking card clears only on Mark reviewed or Commit,
         each bound to the tree the operator saw."""
         def go(p, e):
+            # The digest on both sides of the freeze is what this review
+            # shows; Mark reviewed and Commit must hand it back. It covers what
+            # the tree OID cannot (untracked files too big to add).
+            before = _wt.summary(e)
             snap = _wt.snapshot(e, tmp_dir=p.dir)
             snap["diff"] = _wt.diff(e, snap["tree"])
             snap["summary"] = p.worktree_summary = _wt.summary(e)
+            same = before and snap["summary"] and \
+                before.get("digest") == snap["summary"].get("digest")
+            snap["reviewDigest"] = snap["summary"].get("digest") if same else None
             return _wt.fit_review(snap)       # the encoded response fits its cap
         return self._worktree_action(pane_id, go, drain_after=True)
 
-    def worktree_commit(self, pane_id, tree, head, index_id, message):
+    def worktree_commit(self, pane_id, tree, head, index_id, message, shown=None):
         def go(p, e):
+            # Commit is the review only if the branch is still what the
+            # dialog showed: its digest just before committing, and the files
+            # too big for the tree (which commit_tree cannot see) unchanged
+            # across the commit.
+            pre_ok, big_pre = False, None
+            if getattr(p, "review_at_end", False) and shown:
+                pre = _wt.summary(e)
+                pre_ok = bool(pre) and pre.get("digest") == shown
+                big_pre = self._too_big_stats(e, pre)
             r = _wt.commit_tree(e, tree, index_id, message, expect_head=head,
                                 registry=self.worktree_registry(), tmp_dir=p.dir)
             p.worktree_summary = _wt.summary(self.worktree_entry(p))
@@ -3128,8 +3158,9 @@ class Manager(_core.ManagerBase):
             # committing it is the review and the blocking card clears; unless
             # a file moved since, which leaves the card up.
             if p.review_at_end:
-                still = self._stable_summary(p, self.worktree_entry(p), tree)
-                if still:
+                e2 = self.worktree_entry(p)
+                still = self._stable_summary(p, e2, tree, None, bind=False) if pre_ok else None
+                if still and self._too_big_stats(e2, still) == big_pre:
                     p.worktree_summary = ev["summary"] = still
                     ev["reviewed"] = self._set_reviewed(p, still)
             p.emit("worktree", ev, activity=False)
@@ -3137,17 +3168,39 @@ class Manager(_core.ManagerBase):
         return self._worktree_action(pane_id, go, drain_after=True)
 
     @staticmethod
-    def _stable_summary(p, e, tree):
+    def _too_big_stats(e, summary):
+        """(path, size, mtime, ctime, inode) of each untracked file too big
+        for a snapshot tree: what a tree OID cannot vouch for."""
+        out = []
+        for u in (summary or {}).get("untracked") or ():
+            if (u.get("size") or 0) <= _wt.SNAP_UNTRACKED_MAX:
+                continue
+            try:
+                st = os.lstat(os.path.join(e["path"], u["path"]))
+                out.append((u["path"], st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino))
+            except OSError:
+                out.append((u["path"], None))
+        return sorted(out, key=str)
+
+    @staticmethod
+    def _stable_summary(p, e, tree, shown, bind=True):
         """The summary to record as reviewed, or None: a digest taken on both
-        sides of a fresh freeze, equal, around a tree that is still `tree`.
-        Anything that moved in between (the agent, another process) makes it
-        None, so a review never covers content nobody saw."""
+        sides of a fresh freeze, equal, around a tree that is still `tree`,
+        and equal to `shown`, the digest the review on screen was opened at.
+        Anything that moved in between (the agent, another process, a file
+        too big for the tree) makes it None, so a review never covers
+        content nobody saw. No `shown`, no grant (`bind=False` only for
+        Commit, which checks `shown` itself before the commit moves it)."""
+        if bind and not shown:
+            return None
         before = _wt.summary(e)
         snap = _wt.snapshot(e, tmp_dir=p.dir)
         after = _wt.summary(e)
         if snap["tree"] != tree or not before or not after:
             return None
-        return after if before.get("digest") == after.get("digest") else None
+        ok = before.get("digest") == after.get("digest") and \
+            (not bind or after.get("digest") == shown)
+        return after if ok else None
 
     def _set_reviewed(self, p, summary):
         digest = (summary or {}).get("digest")
@@ -3156,7 +3209,7 @@ class Manager(_core.ManagerBase):
             p.save_meta()
         return p.reviewed_digest
 
-    def worktree_mark_reviewed(self, pane_id, tree):
+    def worktree_mark_reviewed(self, pane_id, tree, shown=None):
         """Mark reviewed (Part B): the operator read the diff of `tree` and
         lets the pane carry on. Refused unless the branch still freezes to
         exactly that tree, so a change made after the dialog opened is never
@@ -3164,7 +3217,7 @@ class Manager(_core.ManagerBase):
         def go(p, e):
             if not p.review_at_end:
                 raise _wt.Refused("mode", "this pane does not use Review at the end")
-            after = self._stable_summary(p, e, tree)
+            after = self._stable_summary(p, e, tree, shown)
             if not after:
                 raise _wt.Refused("changed", "the branch changed after this review "
                                              "opened; review the new diff")

@@ -1550,6 +1550,23 @@ function paintWtRow(m) {
 function raeShown(rowVisible, boxVisible, ticked, raeRefusal) {
   return !!(rowVisible && boxVisible && ticked && !raeRefusal);
 }
+/* Review at the end runs only under Strict (the hub refuses it otherwise):
+ * ticking it moves the posture to Strict; leaving Strict unticks it. */
+function raePosture(raeTicked, posture) {
+  // 'strict' mirrors the hub's REVIEW_AT_END_POSTURE (sessions.py).
+  if (raeTicked && posture !== 'strict') return { posture: 'strict', rae: true };
+  return { posture, rae: !!raeTicked };
+}
+function raeAfterPosture(raeTicked, posture) { return !!raeTicked && posture === 'strict'; }
+function raeSyncPosture() {
+  const sel = $('#f-posture');
+  if (!sel || sel.disabled || !$('#f-rae').checked) return;
+  const r = raePosture(true, sel.value);
+  if (r.posture !== sel.value) {
+    sel.value = r.posture;
+    sel.dispatchEvent(new Event('change'));
+  }
+}
 function paintRae() {
   const row = $('#rae-check');
   if (!row) return;
@@ -1560,6 +1577,7 @@ function paintRae() {
                       m.raeRefusal);
   row.classList.toggle('hide', !on);
   if (!on) $('#f-rae').checked = false;
+  raeSyncPosture();
 }
 
 /* The header pill: `⎇ fix-login · 4 files +120 −8`. */
@@ -1709,15 +1727,20 @@ function reviewActions(snap, o) {
 
 /* Request bodies, from the snapshot on screen: the server refuses if the
  * files moved since (409 `changed`), so what is posted is what was shown. */
+// `digest` is the review's own (taken around its freeze): Commit and Mark
+// reviewed clear the Review-at-the-end card only if the branch still reads so.
 function commitBody(pane, snap, message) {
-  return { pane, tree: snap.tree, head: snap.head, index_id: snap.index_id, message };
+  return { pane, tree: snap.tree, head: snap.head, index_id: snap.index_id, message,
+           digest: snap.reviewDigest || '' };
 }
 function publishBody(pane, snap, remote, pr) {
   return { pane, oid: snap.head, tree: snap.tree, remote: remote.name,
            push_url: remote.pushUrls[0], pr: pr || null };
 }
 function discardBody(pane, snap) { return { pane, tree: snap.tree }; }
-function reviewedBody(pane, snap) { return { pane, tree: snap.tree }; }
+function reviewedBody(pane, snap) {
+  return { pane, tree: snap.tree, digest: snap.reviewDigest || '' };
+}
 function mergeCommand(w) { return `git -C ${shq(w.repo)} merge --no-ff ${shq(w.branch)}`; }
 
 /* Run one action: busy while it runs; a 409 re-freezes the snapshot and keeps
@@ -3889,6 +3912,7 @@ function wireDialog() {
     paintWtRow(dlg._wt);
     $('#f-cwd').oninput = () => wtProbeSoon(dlg, 300);
     $('#f-wt').onchange = paintRae;
+    $('#f-rae').onchange = raeSyncPosture;
     wtProbeSoon(dlg, 0);
     fillHost();
     fillCfg();
@@ -3898,7 +3922,10 @@ function wireDialog() {
     $('#quickhint').textContent = 'now: ' + quickLabel();
     dlg.showModal();
   };
-  $('#f-posture').onchange = e => { $('#posturehint').textContent = HINTS[e.target.value]; };
+  $('#f-posture').onchange = e => {
+    $('#posturehint').textContent = HINTS[e.target.value];
+    if (!raeAfterPosture($('#f-rae').checked, e.target.value)) $('#f-rae').checked = false;
+  };
   // With a Later time set, Start arms the conversation via schedule/add instead
   // of opening it.
   dlg.addEventListener('close', async () => {
