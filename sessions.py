@@ -136,10 +136,11 @@ def worktree_lanes():
 # "Review at the end" only where docs/ux-10x-plan.md section 5.3's lane matrix
 # passed on a strict own-branch pane: every in-tree edit reached the hub as a
 # request and every shell command raised a card. Codex's agent mode runs both
-# without asking (its posture is not mapped), so the hub never sees a request
-# to allow or card; offering the option there would promise what it cannot
-# do. Override with CORRAL_LIGHT_REVIEW_AT_END_LANES=a,b.
-REVIEW_AT_END_LANES = ("claude", "grok")
+# without asking (its posture is not mapped). Grok's strict default runs the
+# shell commands its own policy allows, writes such as `touch` included, with
+# no card. Offering the option there would promise what it cannot do.
+# Override with CORRAL_LIGHT_REVIEW_AT_END_LANES=a,b.
+REVIEW_AT_END_LANES = ("claude",)
 # ...and only on the posture the matrix passed on. Under `auto` Grok runs with
 # --always-approve and Claude's classifier approves shell commands itself, so
 # "shell commands still ask" would be false. While it is on, the lane's own
@@ -163,8 +164,8 @@ def review_at_end_refusal(agent):
         return why
     if agent not in review_at_end_lanes():
         return (f"Review at the end is not enabled for the {agent} lane: it runs "
-                f"edits and shell commands without asking, so the hub has nothing "
-                f"to allow or card")
+                f"some shell commands without asking, so they would never reach "
+                f"a card")
     return None
 
 
@@ -2122,7 +2123,7 @@ class Pane(_core.PaneBase):
         root = os.path.realpath(e["path"])
         admin = os.path.realpath(Path(e["common_dir"]) / "worktrees" / e["admin_name"])
         base = os.path.realpath(self.cwd)
-        out = []
+        out, rels = [], []
         for raw in raw_paths:
             if not isinstance(raw, str) or not raw or "\0" in raw:
                 return None
@@ -2135,6 +2136,16 @@ class Pane(_core.PaneBase):
                 return None                          # the .git file, or a nested repo
             if raw not in out:
                 out.append(raw)
+            rels.append(os.path.relpath(real, root))
+        # A path git ignores never shows in the review (summary, diff and
+        # snapshot all skip it), so allowing it here would approve bytes
+        # nobody sees: it goes to the card. Exit 1 is "none ignored"; any
+        # other answer, an error included, is doubt.
+        r = _wt.git(["check-ignore", "--stdin", "-z"], cwd=root, check=False,
+                    input=b"\0".join(x.encode("utf-8", "surrogateescape") for x in rels) + b"\0",
+                    optional_locks_off=True)
+        if r.rc != 1:
+            return None
         return out
 
     def _auto_allow(self, req):

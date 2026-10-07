@@ -116,16 +116,40 @@ def login_seconds_left(lane, home=None, now=None):
     elif lane == "codex":
         exp = _jwt_exp(((doc.get("tokens") or {}).get("access_token")) or "")
     elif lane == "grok":
+        seen = False
         for v in doc.values():
             if isinstance(v, dict) and v.get("key") and v.get("expires_at"):
-                try:
-                    t = datetime.fromisoformat(str(v["expires_at"]).replace("Z", "+00:00")[:32])
-                    exp = max(exp or 0, t.timestamp())
-                except ValueError:
-                    continue
+                seen = True
+                t = _iso_timestamp(v["expires_at"])
+                if t is not None:
+                    exp = max(exp or 0, t)
+        if seen and exp is None:
+            return 0.0                    # an expiry we cannot read: fail closed
     if exp is None:
         return None
     return exp - now
+
+
+def _iso_timestamp(value):
+    """POSIX seconds from an ISO-8601 time with any number of fractional
+    digits (Python reads at most six) and Z, an offset, or none (UTC).
+    None when it cannot be read."""
+    import re
+    from datetime import datetime, timezone
+    m = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:?\d\d)?",
+                     str(value).strip())
+    if not m:
+        return None
+    frac = (m.group(2) or "")[:7]
+    tz = m.group(3) or "+00:00"
+    tz = "+00:00" if tz == "Z" else tz
+    try:
+        t = datetime.fromisoformat(m.group(1) + frac + tz)
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t.timestamp()
 
 
 FAIL_TTL_S = 60          # a failed probe is retried after this; a pass is kept

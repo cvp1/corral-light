@@ -66,6 +66,24 @@ class SignInLifetime(unittest.TestCase):
         self.assertEqual(rs.login_seconds_left("grok", self.home, now), 3600)
         self.assertIsNone(rs.login_seconds_left("gemini", self.home, now))   # renews safely
 
+    def test_a_grok_expiry_with_any_fraction_or_offset_reads(self):
+        # Ship-gate panel: a 7- or 8-digit fraction used to be cut into a
+        # broken offset, parse as nothing, and let a lapsing sign-in through.
+        now = 1_800_000_000                                  # 2027-01-15T08:00:00Z
+        for stamp in ("2027-01-15T09:00:00Z", "2027-01-15T09:00:00.1234567Z",
+                      "2027-01-15T09:00:00.12345678Z", "2027-01-15T09:00:00.123456789Z",
+                      "2027-01-15T10:00:00.5+01:00", "2027-01-15T09:00:00"):
+            self.put(".grok/auth.json", {"x": {"key": "k", "expires_at": stamp}})
+            left = rs.login_seconds_left("grok", self.home, now)
+            self.assertIsNotNone(left, stamp)
+            self.assertAlmostEqual(left, 3600, delta=1, msg=stamp)
+
+    def test_an_unreadable_grok_expiry_fails_closed(self):
+        self.put(".grok/auth.json", {"x": {"key": "k", "expires_at": "next tuesday"}})
+        self.assertEqual(rs.login_seconds_left("grok", self.home, 1_800_000_000), 0.0)
+        self.put(".grok/auth.json", {"x": {"key": "k"}})      # says nothing: as before
+        self.assertIsNone(rs.login_seconds_left("grok", self.home, 1_800_000_000))
+
     def test_signed_out_or_unreadable_is_zero(self):
         self.put(".claude/.credentials.json",
                  {"claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0}})

@@ -118,6 +118,31 @@ class ThePolicy(RaeCase):
         p = self.rae()
         self.assertEqual(self.ask(p, self.edit("sub/new.txt")), "auto")
 
+    def test_T_SNP_2b_an_edit_git_ignores_raises_a_card(self):
+        # Ship-gate panel: an ignored path never shows in the review, so the
+        # hub must not approve it unseen. Tracked files git would otherwise
+        # ignore still show in the diff, so those stay automatic.
+        p = self.rae()
+        root = self.root(p)
+        Path(root, ".gitignore").write_text("secret.env\nbuild/\n")
+        self.assert_card(p, self.edit(os.path.join(root, "secret.env")))
+        self.assert_card(p, self.edit(os.path.join(root, "build", "out.txt")))
+        self.assert_card(p, self.edit(os.path.join(root, "a.txt"),
+                                      os.path.join(root, "secret.env")))
+        self.assertEqual(self.ask(p, self.edit(os.path.join(root, "a.txt"))), "auto")
+        self.assertEqual(self.ask(p, self.edit(os.path.join(root, ".gitignore"))), "auto")
+
+    def test_T_SNP_2c_a_failing_ignore_check_raises_a_card(self):
+        p = self.rae()
+        real = wt.git
+
+        def broken(args, cwd, **kw):
+            if args[:1] == ["check-ignore"]:
+                return wt.GitResult(128, b"", b"fatal", False)
+            return real(args, cwd, **kw)
+        with mock.patch.object(wt, "git", broken):
+            self.assert_card(p, self.edit(os.path.join(self.root(p), "a.txt")))
+
     def test_T_SNP_2_an_edit_outside_raises_a_card(self):
         p = self.rae()
         self.assert_card(p, self.edit(str(self.tmp / "elsewhere.txt")))
@@ -289,15 +314,15 @@ class TheFlag(RaeCase):
         self.assertFalse(self.sessions.Pane.from_meta(plain, self.mgr).review_at_end)
 
     def test_T_SNP_19_only_lanes_that_passed_the_matrix_offer_it(self):
-        # Plan 5.3 on real lanes: Claude and Grok passed; Codex ran its edits
-        # and its shell command without asking, so nothing reached the hub.
+        # Plan 5.3 on real lanes: Claude passed. Codex ran its edits and its
+        # shell command without asking; Grok strict ran `touch` with no card.
         with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": "",
                                           "CORRAL_LIGHT_REVIEW_AT_END_LANES": ""}):
             with mock.patch.object(self.sessions.sys, "platform", "linux"):
                 self.assertIsNone(self.sessions.review_at_end_refusal("claude"))
-                self.assertIsNone(self.sessions.review_at_end_refusal("grok"))
-                why = self.sessions.review_at_end_refusal("codex")
-                self.assertIn("without asking", why or "")
+                for lane in ("codex", "grok"):
+                    why = self.sessions.review_at_end_refusal(lane)
+                    self.assertIn("without asking", why or "", lane)
                 self.assertIsNone(self.sessions.worktree_refusal("codex"))
                 # No own branch, no review: the own-branch reason comes first.
                 self.assertEqual(self.sessions.review_at_end_refusal("gemini"),

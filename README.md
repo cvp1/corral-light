@@ -696,17 +696,19 @@ it must be on disk, not tmpfs.
 ### Review at the end: one approval for the whole change
 
 Tick **Review at the end** under **Own branch** and edits the agent makes
-inside its branch stop raising a card each. It is offered on the Claude and
-Grok lanes only. Codex runs its edits and shell commands without asking in
-its own agent mode, so the hub has no request to allow or card, and the
-option is not shown for it. It runs under the **Strict** posture only:
-ticking it moves the posture to Strict, and while it is on the lane's own
-mode cannot be loosened, because under Auto Grok approves every tool call
-itself and shell commands would no longer ask. The hub allows an edit once by
+inside its branch stop raising a card each. It is offered on the Claude
+lane only, because it relies on every shell command still asking. Codex
+runs its edits and shell commands without asking in its own agent mode,
+and Grok's own policy runs some shell commands, file writes included,
+without a card, so the option is not shown for either. It runs under the
+**Strict** posture only: ticking it moves the posture to Strict, and while
+it is on the lane's own mode cannot be loosened, because under Auto the
+lane approves shell commands itself. The hub allows an edit once by
 itself only when every path the request names resolves inside the
-worktree, outside its git admin folder; anything in doubt (no path, a path
-outside, a path hidden in a field it does not recognise, an oversize
-request, an open question) raises the card as before. Shell commands, web
+worktree, outside its git admin folder, and is not a path git ignores
+(the review would never show it); anything in doubt (no path, a path
+outside, an ignored path, a path hidden in a field it does not recognise,
+an oversize request, an open question) raises the card as before. Shell commands, web
 fetches and every other kind still ask. Each edit the hub allowed is a line
 in the transcript, with the digest a card would have shown.
 

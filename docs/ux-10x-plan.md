@@ -529,15 +529,25 @@ card; no card was answered by anyone.
 | Lane | Edits | Shell command | Writes outside the tree | Result |
 |---|---|---|---|---|
 | Claude | 3 allowed by the hub, all in the tree | carded | none | pass |
-| Grok | 3 allowed by the hub, all in the tree | carded | none | pass |
+| Grok | 3 allowed by the hub, all in the tree | carded | none | pass, then fail (below) |
 | Codex | ran with no request to the hub | ran with no card, twice | none | fail |
 
 Codex fails on its own approval mode, not on Part B: its `agent` mode
 auto-approves inside its workspace sandbox and Light's posture is not mapped
 onto it (as in the resilience lane matrix). Part B is therefore enabled for
-Claude and Grok only (`REVIEW_AT_END_LANES`); the hub refuses it for Codex
+Claude and Grok only (`REVIEW_AT_END_LANES`, later narrowed to Claude, below); the hub refuses it for Codex
 and the New dialog hides it. Claude and Codex on the `auto` posture raised
 no card at all, as expected: Part B matters on `strict`.
+
+The ship-gate panel (Codex and Grok, crossfed) then found that Grok's
+strict default leaves shell approval to Grok's own policy. A second probe
+confirmed it: asked to run `touch` in the tree, Grok ran it with no card,
+while Claude carded the same command. Part B is now Claude only. The panel's
+other findings, all fixed with tests: Part B needs the strict posture (and
+the lane's mode is held there), the grant binds the digest the review was
+opened at (an untracked file too big for the tree changes no tree OID), an
+edit to a path git ignores goes to a card (the review never shows it), and
+an unreadable Grok sign-in expiry fails closed.
 
 ### 5.4 The measurement that proves the 10x
 
