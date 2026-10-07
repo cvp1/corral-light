@@ -1,6 +1,6 @@
 # Corral Light modules, and FinOps as the first one
 
-> Status: PROPOSED, rev 3, 2026-10-07. Nothing built.
+> Status: PROPOSED, rev 5, 2026-10-07. Nothing built; Phase 0 done.
 > Rev 1 went cold to a three-vendor panel (Codex on gpt-6-astra, Grok,
 > Gemini): AMEND, AMEND, REJECT. All three found the same central defect:
 > rev 1 offered collectors "read-only" access to a state dir that holds the
@@ -23,6 +23,15 @@
 > and the adapter's dropped events are fixed at the adapter; quota
 > staleness is reworked; fetchers get exact host matching and a confined
 > secret directory.
+>
+> Rev 5 (same day) applies the Phase 0 measurements
+> (`docs/finops-phase0.md`) and decides the three open questions (§9).
+> Main changes: the Claude adapter patch is required, because the
+> rate-limit notice arrives before the first reply of every query;
+> Codex usage is read from per-response records keyed by `response_id`;
+> Grok forks are marked exactly by `forked_at`, so "may double-count" is
+> gone; Gemini records tokens per call, so it gets a token source in v1;
+> the core's Grok sandbox binds two files per session, not the folder.
 
 ## 0. The ask
 
@@ -75,18 +84,18 @@ Light's FinOps answers five personal questions:
 
 | Lane | Login and plan | Usage records | Quota | Light already records |
 |---|---|---|---|---|
-| Claude Code, Linux | credentials file fields `subscriptionType`, `rateLimitTier`; each Light pane's credential is a link to the shared file | JSONL transcripts in `~/.claude/projects/` AND in each pane's private config dir `<state>/panes/<id>/config/projects/` (Light links skills and plugins into pane dirs, not `projects`, so these are a second tree) | **vendor-reported, as change notices:** the Claude agent library emits `rate_limit_event` "when rate limit info changes": status `allowed`, `allowed_warning` or `rejected`; optional `rateLimitType` (`five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`, `overage`); optional `resetsAt` and `utilization`; sibling overage fields (`overageStatus`, `overageResetsAt`, `isUsingOverage`, and more). The scale and frequency of `utilization` are not stated in the type; Phase 0 measures them. Light's Claude adapter forwards each event as a `usage_update` carrying `_meta["_claude/rateLimit"]`, **but drops it when it arrives before the turn's first usage** | the latest ACP `usage_update` (`used`, `size`, `cost`) is kept in memory and written inside every `turn_end` event. **The rate-limit payload is lost:** the turn's final `usage_update` overwrites it before `turn_end`, so no record on this host holds one |
+| Claude Code, Linux | credentials file fields `subscriptionType`, `rateLimitTier`; each Light pane's credential is a link to the shared file | JSONL transcripts in `~/.claude/projects/` AND in each pane's private config dir `<state>/panes/<id>/config/projects/` (Light links skills and plugins into pane dirs, not `projects`, so these are a second tree) | **vendor-reported, as change notices:** the Claude agent library emits `rate_limit_event` "when rate limit info changes": status `allowed`, `allowed_warning` or `rejected`; optional `rateLimitType` (`five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet`, `seven_day_overage_included`, `overage`); optional `resetsAt` (epoch seconds) and `utilization` (**a fraction, 0 to 1**, measured); sibling overage fields (`overageStatus`, `overageResetsAt`, `isUsingOverage`, and more); and, outside the published type, `unifiedWindows` with both the five-hour and weekly windows in one notice. One notice arrives at the start of every query, **before the first assistant message** (measured). Light's Claude adapter forwards each event as a `usage_update` carrying `_meta["_claude/rateLimit"]`, **but drops it when it arrives before the turn's first usage, which is always the case on a fresh process** | the latest ACP `usage_update` (`used`, `size`, `cost`) is kept in memory and written inside every `turn_end` event. **The rate-limit payload is lost:** the turn's final `usage_update` overwrites it before `turn_end`, so no record on this host holds one |
 | Claude Code, macOS | the login is in the Keychain; no credentials file; Light does not give panes a private config dir | `~/.claude/projects/` only | same as Linux | same as Linux |
-| Codex | `auth.json` in Light's own `CODEX_HOME` (`~/.config/corral-light/codex-home` by default, from `CORRAL_CODEX_HOME`), separate from a desktop `~/.codex` | rollout JSONL under `CODEX_HOME/sessions/`; `token_count` events with cumulative and last-turn usage | **vendor-reported:** each `token_count` carries `rate_limits`: `plan_type`, 5 h and weekly `used_percent`, `resets_at`, credits. Codex's app server also has an official `account/rateLimits/read` call; Light's Codex adapter calls it only for `/status` and drops quota-update notifications, so the rollout files are the source | `usage_update` with `used`, `size`, no cost, inside `turn_end` |
-| Grok | `~/.grok/auth.json` | **vendor-reported cost:** `grok usage <session-id>` prints JSON with session and per-turn input, output, cached and reasoning tokens, model calls, and `costUsdTicks` (10¹⁰ ticks per USD), computed by xAI. Totals include history inherited by resume or fork. Grok's docs say to use this command, not the `usage.json` file it reads. Tested: the command works with only a copy of the session dir visible, no login | weekly pool: only inside Grok's interactive `/usage`; no command | none |
-| Gemini (Antigravity) | `~/.gemini/antigravity-acp/acp_token.json` | per-conversation SQLite; a `gen_metadata` table holds binary (protobuf) generation records with model and request ids; token fields not yet decoded | no supported interface | none; the lane runs Google's own ACP server, which emits no `usage_update` |
+| Codex | `auth.json` in Light's own `CODEX_HOME` (`~/.config/corral-light/codex-home` by default, from `CORRAL_CODEX_HOME`), separate from a desktop `~/.codex` | rollout JSONL under `CODEX_HOME/sessions/`; one `token_usage_record` per model response, keyed by `response_id` (their sum equals the cumulative total in every file measured); `token_count` events with cumulative and last-turn usage; `session_meta.creator_account_id` names the account. Resume appends to the same file and the cumulative total continues | **vendor-reported:** each `token_count` carries `rate_limits`: `plan_type`, 5 h and weekly `used_percent`, `resets_at`, credits. Codex's app server also has an official `account/rateLimits/read` call; Light's Codex adapter calls it only for `/status` and drops quota-update notifications, so the rollout files are the source | `usage_update` with `used`, `size`, no cost, inside `turn_end` |
+| Grok | `~/.grok/auth.json` | **vendor-reported cost:** `grok usage <session-id>` prints JSON with session and per-turn input, output, cached and reasoning tokens, model calls, and `costUsdTicks` (10¹⁰ ticks per USD), computed by xAI. A fork's report repeats the parent's turns with identical `turnNumber` and nanosecond `endedAt`; the fork's `summary.json` holds `parent_session_id` and `forked_at`, so inherited turns are exact. Resume appends turns and repeats nothing. Grok's docs say to use this command, not the `usage.json` file it reads. Tested: the command works in the collector sandbox with only that session's `usage.json` and `summary.json` bound, no login, no network, 160 ms | weekly pool: only inside Grok's interactive `/usage`; no command | none |
+| Gemini (Antigravity) | `~/.gemini/antigravity-acp/acp_token.json` | per-conversation SQLite; each model call's usage is a protobuf message in `steps.metadata` field 9 (uncached and cached input, output, thinking, visible output), with model id and timing in `gen_metadata`; undocumented, decoded in Phase 0. No request id: a call is (`cascade_id`, step index) | no supported interface | none; the lane runs Google's own ACP server, which emits no `usage_update` |
 | Ollama | none | none needed | none | none |
 
 Consequences:
 
 - Claude and Codex quota, and Grok cost, come from the vendor with no
   network and no new login.
-- Gemini starts as "credentials found, usage not reported".
+- Gemini has token counts (list-cost metric only); no cost, quota or plan.
 - A scanner that reads only `~/.claude/projects` misses Linux pane
   transcripts; one that reads both must dedupe.
 
@@ -104,9 +113,9 @@ covers) and kind.
 |---|---|---|
 | **Quota state** (per account, per window) | Codex rollout `rate_limits`; Claude rate-limit notices from the feed | `vendor` |
 | **Subscription commitment** (per account, per month) | the amount the operator typed; otherwise the `plans.toml` list price for the vendor-stated plan; otherwise null | `declared`, else `list` |
-| **Vendor-computed usage cost** (per session, per turn) | `grok usage` | `vendor`; a month total that includes resumed or forked sessions is marked "may double-count" until Phase 0 settles ancestry |
+| **Vendor-computed usage cost** (per session, per turn) | `grok usage`, counting only a fork's turns after `forked_at` | `vendor` |
 | **Billed spend** (per org account, per day) | vendor billing APIs (§6.7) | `billed` |
-| **API-equivalent list cost** (per account, per day) | local token counts priced from `prices.toml` | `list` |
+| **API-equivalent list cost** (per account, per day) | local token counts (Claude, Codex, Gemini) priced from `prices.toml` | `list` |
 
 Where two metrics describe the same tokens (Grok's vendor cost and a list
 estimate of the same turns), both may be shown, side by side and named;
@@ -212,16 +221,19 @@ Rules, each refused at install with the reason:
   2. runs `grok usage <id>` once per session in its own sandbox: the
      **resolved binary file only** (`~/.grok/bin/grok` is a symlink to a
      versioned file in the same folder as `auth.json`, so the folder is
-     never bound), `HOME` a private scratch dir holding a read-only bind of
-     that one session's dir and nothing else, no network, a 10 s timeout,
+     never bound), `HOME` a private scratch dir holding read-only binds
+     of that one session's `usage.json` and `summary.json` and nothing
+     else (the chat history beside them is never in view; Phase 0: the
+     command needs exactly these two), no network, a 10 s timeout,
      memory and process limits, killed by group;
   3. checks the output is one JSON object under 1 MiB with the expected
      keys, keeps only the numeric usage fields, session id, turn numbers
-     and timestamps, and records the binary's version beside them;
+     and timestamps, adds `parent_session_id` and `forked_at` from
+     `summary.json`, and records the binary's version beside them;
   4. writes the result to `module-feed/v1/vendor/grok-usage/<id>.json`.
   A failed or hung call marks that session stale and does not delay the
-  others or the collector. Tested on this host: the command answers with
-  only a copy of one session dir visible.
+  others or the collector. Tested on this host (Phase 0): the command
+  answers inside the collector profile with those two files bound.
 - `network` is `none` for the collector, always. Vendor billing APIs
   (§6.7) run in a second, separate entry, `fetcher`, declared with
   `"network": ["api.anthropic.com", ...]`: it gets egress to those exact
@@ -324,8 +336,8 @@ else.
 | `modules.py` (new) | manifest and pin checks, staging, generations, add, list, remove, enable, disable, update, rollback; the runner thread; snapshot validation |
 | `module_feed.py` (new) | writes `module-feed/v1` from the Manager's panes and the existing login checks |
 | `sessions.py` | on a `usage_update` that carries `_meta["_claude/rateLimit"]`, merge that payload into a per-window store on the pane and hand it to the feed at once; merge, never replace, the rest of `usage`, so a rate-limit update cannot erase `cost` and a later plain update cannot erase the window. Write both into `turn_end`. Nothing is computed |
-| Claude adapter (pinned in `spike/`) | forward `rate_limit_event` even before the turn's first usage. Today it is dropped when `lastAssistantTotalUsage` is null. Offered upstream first; until it lands, a small pinned patch applied at install and re-checked by `lanes update` |
-| `claude_auth.py`, `codex_launcher.py`, `grok_launcher.py` | sanitized login facts for the feed: Claude plan and tier (file on Linux, Keychain on macOS); Codex plan and account fingerprint; Grok auth mode. The fingerprint is a salted hash of a stable account id claim, never of a token, so a token refresh never looks like a new account. Today these files return only expiry and presence |
+| Claude adapter (pinned in `spike/`) | forward `rate_limit_event` even before the turn's first usage, as a `usage_update` with `used` omitted. Today it is dropped when `lastAssistantTotalUsage` is null, and Phase 0 showed the notice always arrives first, so without this patch Light never sees one. Offered upstream first; until it lands, a small pinned patch applied at install and re-checked by `lanes update`. `sessions.py` must then accept a `usage_update` without `used` |
+| `claude_auth.py`, `codex_launcher.py`, `grok_launcher.py` | sanitized login facts for the feed: Claude plan and tier (file on Linux, Keychain on macOS); Codex plan and account fingerprint (from `session_meta.creator_account_id` in the rollouts; `auth.json` is not opened); Grok auth mode. The fingerprint is a salted hash of a stable account id, never of a token, so a token refresh never looks like a new account. Today these files return only expiry and presence |
 | `vendor_reports.py` (new) | runs `grok usage` per §4.2 in its own sandbox profile |
 | `review_egress.py` | an exact-host mode for fetchers, with the lanes' sign-in deny lists always applied |
 | `review_sandbox.py` | factor out the bubblewrap builder so the collector can use an allowlist profile; the reviewer profile is unchanged |
@@ -476,7 +488,7 @@ deletes an account the operator wrote.
 |---|---|---|
 | **Committed** | subscription prices per month; the tile shows the typed total and, separately, "plus $N in unconfirmed list prices" | declared, list shown apart |
 | **Quota** | each vendor-reported window: Codex 5 h and weekly with used percent; Claude, every window type it reported, with status and reset time, and `utilization` only as the vendor sent it (no rescaling until Phase 0 establishes its scale). A window with no percent says "no percent reported", never 0% | vendor |
-| **Vendor-computed cost** | Grok's own computed cost for turns dated this month, labelled "computed by the Grok CLI", with "may double-count resumed sessions" when it applies | vendor |
+| **Vendor-computed cost** | Grok's own computed cost for turns dated this month, labelled "computed by the Grok CLI"; a fork's inherited turns are not counted again | vendor |
 | **API-equivalent list cost** | Claude and Codex usage priced at API list, per account, beside the plan's price, never added to it | list |
 | **Billed** | pay-per-call spend from vendor billing APIs, only when an opt-in fetcher account exists (§6.7) | billed |
 
@@ -503,10 +515,15 @@ tiles. While the first backfill runs, the dialog shows its progress.
   When the same `requestId` appears again (another home, a re-read file,
   a streamed revision), the record with the largest output token count
   wins and the daily facts are adjusted in the same transaction. Phase 0
-  checks that rule against real multi-record requests. `<synthetic>`
+  confirmed it: a request writes one record per content block, all with
+  the same usage except a growing output count, and the last is largest. `<synthetic>`
   model lines are skipped. Lines with no `requestId` are counted apart and
   priced, but marked "not deduplicated".
-- **Codex deltas.** Per session, the last cumulative total. A new event's
+- **Codex records.** Where a rollout has `token_usage_record` lines,
+  each is a fact keyed by `response_id`; a repeat is ignored, so no
+  delta arithmetic is needed. The delta rules below apply only to
+  rollouts without them.
+- **Codex deltas (older rollouts).** Per session, the last cumulative total. A new event's
   delta is the difference. A negative difference means the counter reset:
   that event's own total starts a new baseline. A session first seen
   mid-history takes its first total as a baseline, marked "history before
@@ -515,15 +532,20 @@ tiles. While the first backfill runs, the dialog shows its progress.
 - **Grok.** The module reads the core's `grok-usage` reports from the
   feed. It records per-turn facts keyed by session and turn, dated by
   the turn's own timestamp, and dollars as integer ticks, never floats.
-  Session totals are never summed. Because a resumed or forked session's
-  report includes inherited history, and Phase 0 has not yet found how
-  the vendor marks inherited turns, the module **does not guess**: it
-  counts every turn it is given and flags each session that looks
-  resumed or forked (its first turn predates the session's creation, or
-  its turn numbering does not start at one). A month total that includes
-  a flagged session carries "may double-count N resumed sessions".
-  Rev 3's match-on-timestamp-tokens-and-ticks rule is dropped: two real
-  turns can match.
+  Session totals are never summed. A forked session's report repeats its
+  parent's turns; the feed carries the fork's `forked_at`, and the module
+  counts only turns that ended after it. A resumed session (same id)
+  repeats nothing. Phase 0 measured both. No turns are matched across
+  sessions by value: two real turns can match.
+- **Gemini.** Usage per call from `steps.metadata` field 9, keyed by
+  (`cascade_id`, step index); model id from `gen_metadata` or the
+  step's alias. A canary (output equals thinking plus visible) runs on
+  every batch; a failure freezes the source as "format changed".
+- **Quota scale.** Claude `utilization` is a fraction and Codex
+  `used_percent` a percent; both are stored as integer basis points.
+  Claude's `unifiedWindows` is read when present, else the one
+  `rateLimitType` window. Reset times are epoch seconds after
+  normalisation; a value over 10¹¹ is milliseconds.
 - **Quota freshness.** One rule for every vendor, on normalized times:
   - a window whose reset time is past **now** shows "reset since last
     report" and no status;
@@ -625,10 +647,10 @@ changes each vendor CLI's configuration. It is listed for the panel.
 
 | Phase | Deliverable | Done when |
 |---|---|---|
-| **0. Measure** | Claude: how many records share a `requestId`, and which is final; whether `usage_update.cost` survives resume, compaction and `/clear`; plan fields from the macOS Keychain; how often `rate_limit_event` arrives, which window types this account sees, and the scale of `utilization` and when it is present; whether the experimental structured usage call in the Claude agent library could give percentages directly through the adapter. Codex: counter resets on resume and fork; where an account id lives that the core can hash without exposing the token; `rate_limits` against the Codex CLI's own status; whether Light's Codex adapter forwards quota updates between turns. Grok: how inherited turns appear after resume and fork; `grok usage` in the sandbox with only the sessions dir; its runtime cost per call. Gemini: decode `gen_metadata` for token fields, or confirm there are none. Scan timing on this host. A prototype collector sandbox profile, with a test that it cannot open `session.key` or reach the hub port. | a results doc; this plan updated where an answer changes it |
+| **0. Measure** | **Done 2026-10-07**: `docs/finops-phase0.md`. Not measured, with reasons there: macOS Keychain plan fields, Codex `rate_limits` against the CLI's status view at the same minute (kept as a §8.4 live check), Codex fork | a results doc; this plan updated where an answer changes it |
 | **1. Seam** | §4 and §5: modules, feed (with account-scoped quota and login facts), the rate-limit merge in `sessions.py`, the Claude adapter patch (offered upstream), the collector sandbox profile, core-run vendor reports, runner, routes, renderer, dialog, doctor, wrapper, index; tested with fixture modules in the test tree only | the seam tests in §8.1 pass; Light's suite passes with zero modules and with each fixture |
-| **2. FinOps v1** | automatic proposed accounts and one-step setup; Claude, Codex and Grok sources; ledger, prices and plans; Committed, Quota, Vendor-computed cost and API-equivalent list cost tiles; per-lane table, Sources, Most used this week; CLI | installed here with one command, accounts accepted in one step, prices typed once; §8.4 checks pass |
-| **3. Gemini and notices** | Gemini source if Phase 0 decoded usage; rail notices with bounds and expiry | the Gemini source passes the §8.2 source tests |
+| **2. FinOps v1** | automatic proposed accounts and one-step setup; Claude, Codex, Grok and Gemini sources; ledger, prices and plans; Committed, Quota, Vendor-computed cost and API-equivalent list cost tiles; per-lane table, Sources, Most used this week; CLI | installed here with one command, accounts accepted in one step, prices typed once; §8.4 checks pass |
+| **3. Notices** | rail notices with bounds and expiry | each notice expires and is bounded as §8.2 tests |
 | **4. Billing APIs and macOS** | opt-in fetchers for the four vendor billing APIs (§6.7); a macOS sandbox investigation | each fetcher tested against a local stub; the operator decides which to enable |
 
 Dropped: any use of the pane's Claude login to read quota. All three
@@ -731,8 +753,9 @@ All fixtures are synthetic.
   night of a month.
 - **Grok:** recorded `grok usage` reports become per-turn facts dated by
   turn; ticks stay integers end to end; two independent turns with the
-  same timestamp, tokens and ticks are both counted; a resumed session is
-  flagged and its month total says "may double-count"; a turn from last
+  same timestamp, tokens and ticks are both counted; a fork's turns at or
+  before `forked_at` are not counted, a resumed session's are counted
+  once; a turn from last
   month in this month's session lands in last month.
 - **Metrics stay apart:** a Grok vendor cost and a list estimate of the
   same turns are shown side by side and neither changes the other; a
@@ -790,17 +813,23 @@ palette, renders, shows backfill progress, survives a module failure, and
   after "Refresh now".
 - Uninstall leaves Light's suite green.
 
-## 9. Open questions for the operator
+## 9. Decisions (were open questions in rev 4)
 
-1. **Unsandboxed hosts.** Rev 2 lets macOS run a module after a typed
-   acknowledgement. The stricter choice is to refuse modules on macOS
-   until a sandbox exists. The author recommends the acknowledgement:
-   FinOps declares no network, and refusing would leave Mac users with
-   nothing.
-2. **Where the module repository lives.** The author recommends a public
-   repository beside Corral Light under the same owner, so the index can
-   point to it.
-3. **Running a vendor's binary inside the sandbox** (`grok usage`) versus
-   reading its undocumented `usage.json` directly. The author recommends
-   the binary: it is the interface the vendor documents, and the sandbox
-   shows it no login.
+Decided by the author in rev 5 under the operator's standing direction to
+make design calls rather than return them. Each can be reversed before
+Phase 1 without rework.
+
+1. **Unsandboxed hosts: run after a typed acknowledgement.** On macOS
+   and on Linux without bubblewrap, install shows "this module will run
+   unsandboxed as your user and can read anything you can" and runs it
+   only after the operator types `unsandboxed`; the pin records it and
+   the tile keeps an "unsandboxed" face. Refusing would leave Mac users
+   with nothing, and FinOps declares no network. Phase 4 investigates a
+   macOS sandbox; when one exists, the acknowledgement is no longer
+   offered for modules that fit it.
+2. **Module repository: public, beside Corral Light, same owner**, named
+   `corral-light-finops`, so the first-party index can point to it.
+   Creating it is an outward action and waits for the operator.
+3. **Grok: run the vendor's binary, not read `usage.json`.** It is the
+   interface the vendor documents. Phase 0 showed it needs only two
+   files per session, read-only, with no login and no network.
