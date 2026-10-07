@@ -1,0 +1,27 @@
+I'll review the built seam against the plan, starting with the sandbox, module runner, and the paths that can leak or escape.The sandbox and runner are the highest-risk surface. I'll read those next, then the feed, hub routes, and the page that renders snapshots.The runner and snapshot contract are in view. Next I’ll check the feed, quota merge, vendor-report sandbox, and how the page renders snapshot text.**FIX-FIRST.** A collector that is allowed to run unsandboxed can leave its timeout kill, and the feed stores the first prompt as the pane title.
+
+## Findings
+
+1. **High. PROVEN.** `modules.py:743` and `modules.py:760-805`. An unsandboxed collector is started with `start_new_session` and, on timeout, only `killpg` of that pid plus `proc.kill()`. A child that `fork`s and `setsid`s is in another process group, and there is no pid namespace on this path. Input: install with `unsandboxed` acknowledged, collector body as in `testkit/modules/probe/collector.py:87-94` (`Popen(..., start_new_session=True)` then sleep). `run_capped` returns "timeout" and the grandchild is still alive as the operator. Smallest fix: run that path in its own cgroup (or a pid namespace) and kill the cgroup on timeout. Bubblewrap's pid namespace is a separate path. `test_a_child_that_leaves_the_group_dies_too` never enters this one.
+
+2. **High. PROVEN.** `sessions.py:1714-1717`, `module_feed.py:473-474`. The first prompt becomes `pane.title` (the whole message when it is at most 42 characters, otherwise that prefix) and is saved on the pane. The feed copies `title` into `panes.json` for every open pane and every closed pane inside 35 days. Input: first message `sk-live-1234567890abcdef`. That string is in `module-feed/v1/panes.json`, readable by any module with `light-feed`. Smallest fix: publish the lane label, or the directory name, unless the operator renamed the pane (`title_locked`).
+
+3. **Medium. PROVEN.** `module_feed.py:253-257` (`sessions.py:1450` does the same on the pane). A newer observation replaces the whole window object. Fields the new notice omits are dropped. Input: the Phase 0 notice (`five_hour` utilization 0.16, `seven_day` 0.07), then `rate_limit_info.json` `no_resets` (`status: rejected`, `rateLimitType: seven_day`, no utilization). `quota.json` `seven_day.utilization` is gone. The window key remains, the vendor figure does not. Smallest fix: merge per field, and do not overwrite a stored `utilization`, `resetsAt`, or `status` with an absent or null value.
+
+4. **Medium. PROVEN.** `modules.py:1172-1176`, `modules.py:589-593`. `run_interactive` releases `_Lock` as soon as `Popen` returns, then `wait`s. Update, remove, and the collector only block while that lock is held. Input: `corral-light finops setup` still running, then two `module update`s. The first keeps the old commit as `previous`. The second `_prune` deletes it. The CLI is still executing that tree, and a collector can run in the same data directory at the same time. Smallest fix: hold the lock until `proc.wait()` returns, and kill the CLI's process group if update or remove needs the module.
+
+5. **Medium. PROVEN.** `modules.py:645-646`, then `modules.py:774`. `verify` hashes path contents, then `Popen` execs those paths. The hash and the exec are not the same open. A same-user writer that does not take `.{name}.lock` can replace `collector.py` after the digest matches and before `exec`. The new bytes run. The next verify disables the module only if the pin was left unchanged. A sandboxed collector cannot write its generation. The gap is any other process running as the operator. Smallest fix: hash with `O_NOFOLLOW` file descriptors and exec from those descriptors (or from a private copy made while they are open).
+
+6. **Low. PROVEN.** `modules.py:74` and `modules.py:346-347`. The install refuses `sitecustomize.py` and `usercustomize.py`. It accepts `sitecustomize.pyc` and `sitecustomize*.so`. CPython still imports `sitecustomize` under `python -I`, and `sys.path[0]` is the module root, so a sourceless `sitecustomize.pyc` runs before `collector.py`. It stays inside the sandbox. The digest covers the bytes. Smallest fix: refuse any file whose stem is `sitecustomize` or `usercustomize`.
+
+I did not find a path from snapshot strings to markup, a class, or a style. `validate_snapshot` rebuilds blocks, and `modSafeLink` / `textContent` in `static/app.js:3782-3910` check links again. Declared reads such as `claude-projects` still contain transcripts. That is the vocabulary in the plan.
+
+## Tests
+
+`test_no_prompt_and_no_token_ever_reaches_the_feed` (`test_module_feed.py:255`) still passes with finding 2. It writes the sentinel as a `user` event and never sets the pane title from that prompt.
+
+The missing test that matters most: an unsandboxed `run_capped` whose collector `fork`s and `setsid`s, asserting no cmdline marker remains in `/proc` after the call returns. The current escape test runs only under bubblewrap.
+
+## One change
+
+Kill the collector's whole descendant tree on timeout, including the unsandboxed path, with a cgroup or a pid namespace the child cannot leave.

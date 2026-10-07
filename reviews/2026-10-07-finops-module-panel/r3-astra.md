@@ -1,0 +1,26 @@
+I’ll review the two commits and the highest-risk paths, using only files in this clone and without executing tests or services.The main issues so far are in execution integrity and locking: `.git` is excluded from runtime verification, and interactive runs release the module lock before the process exits. I’m checking the feed and quota paths before finalizing the findings.**FIX-FIRST** — prompt text reaches the redacted feed through automatic titles, and runtime verification does not cover every executable file.
+
+1. **High — PROVEN — `module_feed.py:474`, `sessions.py:1715`.**  
+   Input: first prompt `SECRET-ACCOUNT-123` in a pane with its default title. `sessions.py` copies the first 42 characters into the title; the feed publishes that title verbatim. A module declaring only `light-feed` receives prompt text despite the feed’s stated contract. **Smallest fix:** omit titles from the feed until title provenance distinguishes prompt-derived text from approved public labels.
+
+2. **Medium — PROVEN — `modules.py:333`.**  
+   Input: add `.git/payload.py` beneath an installed generation whose pinned collector optionally loads that path. Verification ignores the entire top-level `.git` directory, while the sandbox mounts the whole generation, so the added code can execute with an unchanged digest. Symlinks and forbidden Python hooks beneath that directory also escape scanning. **Smallest fix:** reject `.git` entirely in installed generations; restrict any exclusion to pre-install checkout inspection.
+
+3. **Medium — PROVEN — `modules.py:645`, `modules.py:740`, `modules.py:774`.**  
+   Input: replace `collector.py` after the final digest check but before Python opens it. Execution uses the live pathname, and a read-only bind does not freeze changes made through the host filesystem. The replacement executes without matching the pin. The advisory lock excludes cooperating module commands, not an editor or another writer. This breaks the integrity promise without establishing a sandbox escape. **Smallest fix:** copy the generation into a private execution tree, verify that copy, and execute only the copy.
+
+4. **Medium — PROVEN — `modules.py:1172`.**  
+   Input: launch a long-running module CLI or doctor, then update or remove the module. The lock ends immediately after `Popen`; `proc.wait()` occurs outside it. Removal can delete files still needed by the process, and collectors can overlap a CLI modifying shared data/config. **Smallest fix:** retain the module lock through process termination, including interrupt handling.
+
+5. **Medium — PROVEN — `modules.py:184`, `modules.py:197`, `modules.py:599`.**  
+   Input: two CLI processes update pins for different modules concurrently. Both read the same `modules.json`, modify separate entries, and atomically replace the whole file; the last writer discards the other change. `_PINS_LOCK` is process-local, and the per-module file locks differ. A concurrent removal can consequently be undone by another writer’s stale dictionary. **Smallest fix:** use one interprocess pins lock around every read-modify-write transaction.
+
+6. **Medium — PROVEN — `modules.py:550`, `modules.py:557`, `modules.py:573`.**  
+   Input: two updates start from generation A, staging B and C before either acquires the lock. B installs first; C then installs using its stale A pin, records A as its predecessor, and prunes B. Rollback returns A rather than the immediately preceding B. Likewise, a rollback can act on a predecessor read before a competing update. **Smallest fix:** reread the pin inside the module lock and reject/restart an operation if its expected starting generation changed.
+
+7. **Medium — PROVEN — `modules.py:804`, `modules.py:808`, `modules.py:811`.**  
+   Input: on an explicitly acknowledged **unsandboxed** installation, a collector launches a child with `start_new_session=True`, inheriting stdout, then exceeds its timeout. Killing the original process group leaves the child alive. After timed thread joins, closing the buffered stream can also block behind the pump thread still reading that child’s pipe. **Smallest fix:** use deadline-driven nonblocking pipe reads and close descriptors without blocked reader threads; enforce descendant cleanup through an OS process container where supported, or explicitly narrow the unsandboxed timeout guarantee.
+
+**TESTS:** `test_no_prompt_and_no_token_ever_reaches_the_feed` (`test_module_feed.py:255`) still passes with finding 1 present: it puts the sentinel into events without exercising first-prompt title generation. The most important missing test sends a short secret sentinel through the real pane prompt/title path, builds the feed, and asserts that no feed file contains it. These findings are from static inspection; no tests or services were run.
+
+**Single change:** remove prompt-derived titles from the feed before merging, closing a confidentiality leak through an ordinary user action.
