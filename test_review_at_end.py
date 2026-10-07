@@ -287,6 +287,35 @@ class TheFlag(RaeCase):
         plain = dict(meta, worktree_id=None)
         self.assertFalse(self.sessions.Pane.from_meta(plain, self.mgr).review_at_end)
 
+    def test_T_SNP_19_only_lanes_that_passed_the_matrix_offer_it(self):
+        # Plan 5.3 on real lanes: Claude and Grok passed; Codex ran its edits
+        # and its shell command without asking, so nothing reached the hub.
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": "",
+                                          "CORRAL_LIGHT_REVIEW_AT_END_LANES": ""}):
+            with mock.patch.object(self.sessions.sys, "platform", "linux"):
+                self.assertIsNone(self.sessions.review_at_end_refusal("claude"))
+                self.assertIsNone(self.sessions.review_at_end_refusal("grok"))
+                why = self.sessions.review_at_end_refusal("codex")
+                self.assertIn("without asking", why or "")
+                self.assertIsNone(self.sessions.worktree_refusal("codex"))
+                # No own branch, no review: the own-branch reason comes first.
+                self.assertEqual(self.sessions.review_at_end_refusal("gemini"),
+                                 self.sessions.worktree_refusal("gemini"))
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_REVIEW_AT_END_LANES": "other"}):
+            with self.assertRaises(ValueError) as cm:
+                self.rae()
+            self.assertIn("Review at the end is not enabled", str(cm.exception))
+            self.assertEqual(self.reg.all(), [], "a refusal leaves no registry entry")
+            # A plain own branch on the same lane still opens.
+            self.assertFalse(self.pane().review_at_end)
+
+    def test_T_SNP_19b_a_lane_that_lost_the_option_restores_with_its_cards(self):
+        p = self.rae()
+        meta = json.loads((p.dir / "meta.json").read_text())
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_REVIEW_AT_END_LANES": "other"}):
+            self.assertFalse(self.sessions.Pane.from_meta(meta, self.mgr).review_at_end)
+        self.assertTrue(self.sessions.Pane.from_meta(meta, self.mgr).review_at_end)
+
     def test_T_SNP_15b_resume_keeps_auto_allowing(self):
         p = self.rae()
         p.pause()
@@ -424,6 +453,21 @@ class TheCreateRoute(RaeCase):
         out = json.loads(r.read() or b"{}")
         c.close()
         return r.status, out
+
+    def test_T_SNP_19c_the_probe_names_each_lanes_review_refusal(self):
+        c = http.client.HTTPConnection("127.0.0.1", self.srv.server_address[1], timeout=60)
+        c.request("GET", "/api/session/worktree/probe?cwd=" + str(self.repo),
+                  headers={"Cookie": self.cookie})
+        out = json.loads(c.getresponse().read())
+        c.close()
+        self.assertIsNone(out["raeRefusals"]["fake"])
+        self.assertIn("fake", out["laneRefusals"])
+        with mock.patch.dict(os.environ, {"CORRAL_LIGHT_REVIEW_AT_END_LANES": "other"}):
+            st, out = self.req("POST", "/api/session/new",
+                               {"agent": "fake", "cwd": str(self.repo), "worktree": True,
+                                "reviewAtEnd": True})
+        self.assertNotEqual(st, 200, out)
+        self.assertIn("Review at the end is not enabled", out.get("error", ""))
 
     def test_T_SNP_18b_the_new_route_carries_the_option(self):
         st, out = self.req("POST", "/api/session/new",

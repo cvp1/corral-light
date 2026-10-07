@@ -1523,7 +1523,10 @@ async function wtProbe(dlg) {
   const m = wtRowModel(pr, agent in lanes ? lanes[agent] : 'unknown lane',
                        !!(pr && pr.top && wtRemembered(pr.top)));
   m.cwd = cwd; m.agent = agent;
-  m.rae = !!(pr && pr.top && raeRemembered(pr.top));
+  // Review at the end is per lane (the hub refuses it where its matrix failed).
+  const raes = (d && d.raeRefusals) || {};
+  m.raeRefusal = agent in raes ? raes[agent] : 'unknown lane';
+  m.rae = !m.raeRefusal && !!(pr && pr.top && raeRemembered(pr.top));
   dlg._wt = m;
   paintWtRow(m);
 }
@@ -1542,13 +1545,21 @@ function paintWtRow(m) {
   hint.classList.toggle('err', !!m.refusal);
 }
 
-/* "Review at the end" shows only under a ticked, visible Own branch box. */
+/* "Review at the end" shows only under a ticked, visible Own branch box, and
+ * only for a lane the hub offers it on. */
+function raeShown(rowVisible, boxVisible, ticked, raeRefusal) {
+  return !!(rowVisible && boxVisible && ticked && !raeRefusal);
+}
 function paintRae() {
   const row = $('#rae-check');
   if (!row) return;
-  const on = !$('#wtrow').classList.contains('hide') &&
-             !$('#wt-check').classList.contains('hide') && $('#f-wt').checked;
+  const dlg = $('#newdlg');
+  const m = (dlg && dlg._wt) || {};
+  const on = raeShown(!$('#wtrow').classList.contains('hide'),
+                      !$('#wt-check').classList.contains('hide'), $('#f-wt').checked,
+                      m.raeRefusal);
   row.classList.toggle('hide', !on);
+  if (!on) $('#f-rae').checked = false;
 }
 
 /* The header pill: `⎇ fix-login · 4 files +120 −8`. */
@@ -3908,7 +3919,8 @@ function wireDialog() {
     const wtPick = wtSubmit(dlg._wt, $('#f-wt').checked, cwd, common.agent, raeOn);
     if (dlg._wt && dlg._wt.checkbox && dlg._wt.cwd === cwd) {
       wtRemember(dlg._wt.top, $('#f-wt').checked);
-      if ($('#f-wt').checked) raeRemember(dlg._wt.top, $('#f-rae').checked);
+      if ($('#f-wt').checked && !$('#rae-check').classList.contains('hide'))
+        raeRemember(dlg._wt.top, $('#f-rae').checked);
     }
     if (wtPick.error) { toast(wtPick.error, true); return; }
     if ($('#f-quick').checked) {

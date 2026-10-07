@@ -372,7 +372,8 @@ class Handler(BaseHTTPRequestHandler):
         pr = worktrees.probe(os.path.expanduser(cwd))
         pr.pop("common_dir", None)
         lanes = {a: sessions.worktree_refusal(a) for a in sessions.AGENTS}
-        return self._json({"probe": pr, "laneRefusals": lanes})
+        rae = {a: sessions.review_at_end_refusal(a) for a in sessions.AGENTS}
+        return self._json({"probe": pr, "laneRefusals": lanes, "raeRefusals": rae})
 
     def _worktree_post(self, action, b):
         """Snapshot / commit / publish / discard / challenge / reviewed. A refusal is

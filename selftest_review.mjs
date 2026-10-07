@@ -73,6 +73,19 @@ check(m.checkbox && m.warnings.length === 1 && m.warnings[0].includes('~/aios'),
 m = wtRowModel({ ...repo, detached: true, branch: null }, null, false);
 check(/detached/.test(m.cut), 'a detached HEAD says so');
 
+/* T-SNP-19: Review at the end shows only for a lane the hub offers it on. */
+const raeShown = load('raeShown', []);
+check(raeShown(true, true, true, null), 'T-SNP-19 an enabled lane under a ticked own branch shows it');
+check(!raeShown(true, true, true, 'Review at the end is not enabled for the codex lane'),
+      'T-SNP-19 a lane the hub refuses hides it');
+check(!raeShown(true, true, false, null), 'T-SNP-19 an unticked own branch hides it');
+check(!raeShown(false, true, true, null) && !raeShown(true, false, true, null),
+      'T-SNP-19 a hidden own-branch row or checkbox hides it');
+check(/m\.raeRefusal = agent in raes \? raes\[agent\] : 'unknown lane'/.test(src),
+      'T-SNP-19 an unknown lane is refused, not offered');
+check(/if \(!on\) \$\('#f-rae'\)\.checked = false;/.test(src),
+      'T-SNP-19 a hidden option is never sent ticked');
+
 /* T-UI-2: remembered per repo top. */
 const store = new Map();
 const localStorage = { getItem: k => store.has(k) ? store.get(k) : null,

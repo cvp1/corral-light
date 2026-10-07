@@ -522,6 +522,23 @@ inside the tree auto-allowed or carded, every shell command carded, zero
 writes outside the tree without a card or a guard cancel. Gemini stays
 held as in the worktree plan.
 
+Run 2026-10-06 on real lanes, strict posture, in an isolated in-process hub
+(scratch state, the live wall untouched). Each pane was closed at its first
+card; no card was answered by anyone.
+
+| Lane | Edits | Shell command | Writes outside the tree | Result |
+|---|---|---|---|---|
+| Claude | 3 allowed by the hub, all in the tree | carded | none | pass |
+| Grok | 3 allowed by the hub, all in the tree | carded | none | pass |
+| Codex | ran with no request to the hub | ran with no card, twice | none | fail |
+
+Codex fails on its own approval mode, not on Part B: its `agent` mode
+auto-approves inside its workspace sandbox and Light's posture is not mapped
+onto it (as in the resilience lane matrix). Part B is therefore enabled for
+Claude and Grok only (`REVIEW_AT_END_LANES`); the hub refuses it for Codex
+and the New dialog hides it. Claude and Codex on the `auto` posture raised
+no card at all, as expected: Part B matters on `strict`.
+
 ### 5.4 The measurement that proves the 10x
 
 Run on the same four tasks before (today, strict, own branch) and after

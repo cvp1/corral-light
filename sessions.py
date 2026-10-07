@@ -133,6 +133,35 @@ def worktree_lanes():
     return WORKTREE_LANES.get(sys.platform, ())
 
 
+# "Review at the end" only where docs/ux-10x-plan.md section 5.3's lane matrix
+# passed on a strict own-branch pane: every in-tree edit reached the hub as a
+# request and every shell command raised a card. Codex's agent mode runs both
+# without asking (its posture is not mapped), so the hub never sees a request
+# to allow or card; offering the option there would promise what it cannot
+# do. Override with CORRAL_LIGHT_REVIEW_AT_END_LANES=a,b.
+REVIEW_AT_END_LANES = ("claude", "grok")
+
+
+def review_at_end_lanes():
+    raw = os.environ.get("CORRAL_LIGHT_REVIEW_AT_END_LANES")
+    if raw:
+        return tuple(x.strip() for x in raw.split(",") if x.strip())
+    return REVIEW_AT_END_LANES
+
+
+def review_at_end_refusal(agent):
+    """Why `agent` cannot use "Review at the end", or None. The own-branch
+    refusal comes first: without an own branch there is nothing to review."""
+    why = worktree_refusal(agent)
+    if why:
+        return why
+    if agent not in review_at_end_lanes():
+        return (f"Review at the end is not enabled for the {agent} lane: it runs "
+                f"edits and shell commands without asking, so the hub has nothing "
+                f"to allow or card")
+    return None
+
+
 def worktree_refusal(agent):
     """Why `agent` cannot start on its own branch here, or None."""
     if os.environ.get("CORRAL_LIGHT_WORKTREES_ENABLED", "1") == "0":
@@ -918,7 +947,9 @@ class Pane(_core.PaneBase):
         p.role_sha = meta.get("role_sha")
         p.role_delivery = meta.get("role_delivery")
         p.worktree_id = meta.get("worktree_id")
-        p.review_at_end = bool(meta.get("review_at_end")) and bool(p.worktree_id)
+        # Never loosens on restore: a lane that lost the option keeps its cards.
+        p.review_at_end = bool(meta.get("review_at_end")) and bool(p.worktree_id) \
+            and review_at_end_refusal(p.agent) is None
         p.reviewed_digest = meta.get("reviewed_digest")
         p.challenge_of = meta.get("challenge_of")
         p.review_tree = meta.get("review_tree")
@@ -2619,6 +2650,9 @@ class Manager(_core.ManagerBase):
                              "every edit is approved on its card, as today")
         if worktree:
             why = worktree_refusal(agent)
+            if why:
+                raise ValueError(why)
+            why = review_at_end_refusal(agent) if review_at_end else None
             if why:
                 raise ValueError(why)
             pr = _wt.probe(cwd)

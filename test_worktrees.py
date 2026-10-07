@@ -1673,7 +1673,8 @@ class LifecycleCase(RegCase):
     def setUp(self):
         RegCase.setUp(self)
         FakeLaneCase.setUp(self)
-        self._lanes = mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": "fake"})
+        self._lanes = mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": "fake",
+                                                   "CORRAL_LIGHT_REVIEW_AT_END_LANES": "fake"})
         self._lanes.start()
         self.addCleanup(self._lanes.stop)
 

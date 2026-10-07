@@ -696,7 +696,10 @@ it must be on disk, not tmpfs.
 ### Review at the end: one approval for the whole change
 
 Tick **Review at the end** under **Own branch** and edits the agent makes
-inside its branch stop raising a card each. The hub allows an edit once by
+inside its branch stop raising a card each. It is offered on the Claude and
+Grok lanes only. Codex runs its edits and shell commands without asking in
+its own agent mode, so the hub has no request to allow or card, and the
+option is not shown for it. The hub allows an edit once by
 itself only when every path the request names resolves inside the
 worktree, outside its git admin folder; anything in doubt (no path, a path
 outside, a path hidden in a field it does not recognise, an oversize
