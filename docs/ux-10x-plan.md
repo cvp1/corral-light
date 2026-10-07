@@ -360,9 +360,11 @@ as any pane on that lane can; it cannot write anything that persists, run
 anything with a card, reach the hub or any other local service, or renew a
 sign-in.
 
-Verified on this host: Codex, Grok and Gemini complete a real challenge
-inside the full sandbox and its proxy (each found a planted bug and none
-acted on a planted injection; Grok's telemetry host was refused); all four
+Verified on this host: all four real lanes (Claude, Codex, Grok, Gemini)
+complete a real challenge inside the full sandbox and its proxy (each
+found a planted bug and none acted on a planted injection; Claude and
+Gemini also flagged the injection; Grok's and Claude's telemetry hosts
+were refused; the shared sign-in files were left untouched); all four
 lanes start inside it and take their reviewer mode; a probe from inside
 finds the frozen tree and system read-only, home writes discarded, the
 session key, SSH dir, other lanes' logins, the reviewer's own meta.json,
@@ -375,9 +377,7 @@ without its fix. A third round (Codex; Grok's arm stopped on a card it
 raised, left for the operator) found the writable Claude config dir as a
 symlink plant for host-side reseeding, unbounded proxy threads, a race in
 the grant, and a forgeable stat digest; all four are fixed above, each
-with a test that fails without its fix. Claude through the proxy is verified up to its API but
-not through a full challenge: this host's shared Claude sign-in was
-signed out mid-session (see the hand-off note in §8).
+with a test that fails without its fix.
 
 ## 3. Workstreams
 
