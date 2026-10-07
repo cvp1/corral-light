@@ -36,6 +36,28 @@ def quiet(*_a, **_k):
     pass
 
 
+def marked_pids(marker):
+    """Pids whose command line carries `marker`."""
+    out = []
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit():
+            continue
+        try:
+            if marker.encode() in (p / "cmdline").read_bytes():
+                out.append(int(p.name))
+        except OSError:
+            continue
+    return out
+
+
+def kill_marked(marker):
+    for pid in marked_pids(marker):
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
 class Base(unittest.TestCase):
     """A private state dir, config dir and home for each test."""
 
@@ -227,6 +249,21 @@ class InstallAndPin(Base):
         with self.assertRaises(modules.ModuleError):
             self.install(src2)
 
+    def test_compiled_site_hooks_are_refused(self):
+        # Round three, finding 10: the stem decides, not the suffix.
+        names = ("sitecustomize.pyc", "__pycache__/usercustomize.cpython-313.pyc",
+                 "lib/sitecustomize.cpython-313-x86_64-linux-gnu.so")
+        for i, fn in enumerate(names):
+            def put(s, fn=fn):
+                f = s / fn
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(b"\0")
+            src = self.make_repo(f"src-site{i}", mutate=put)
+            with self.assertRaises(modules.ModuleError, msg=fn) as cm:
+                self.install(src)
+            self.assertIn("refused", str(cm.exception), fn)
+        self.assertEqual(modules.load_pins(), {})
+
     def test_a_git_hook_never_runs(self):
         marker = self.tmp / "hook-ran"
         src = self.make_repo()
@@ -284,12 +321,50 @@ class Tamper(Base):
         self.change_a_byte()
         for entry in ("cli", "doctor"):
             with self.assertRaises(modules.ModuleError):
-                modules.build_run("probe", entry, interactive=True)
+                with modules.prepared("probe", entry, interactive=True):
+                    pass
 
     def test_a_new_file_is_caught(self):
         (self.gen / "extra.py").write_text("")
         with self.assertRaises(modules.ModuleError):
             modules.verify("probe")
+
+    def test_a_git_dir_that_appears_later_is_refused(self):
+        # Round three, finding 9: install removes .git; one that appears
+        # afterwards is a change on disk, not something to skip.
+        (self.gen / ".git").mkdir()
+        (self.gen / ".git" / "config").write_text("[core]\n")
+        with self.assertRaises(modules.ModuleError):
+            modules.verify("probe")
+        self.assertFalse(modules.load_pins()["probe"]["enabled"])
+
+    def test_a_swap_after_the_check_does_not_run(self):
+        # Round three, finding 3: what runs is the verified private copy,
+        # so a same-user writer swapping the generation after the digest
+        # changes nothing about this run.
+        real = modules.tree_digest
+        swapped = ('print(\'{"schema": "corral-light.module/1", "ok": true, '
+                   '"view": [{"type": "note", "text": "SWAPPED"}]}\')\n')
+
+        def digest_then_swap(root):
+            d = real(root)
+            (self.gen / "collector.py").write_text(swapped)
+            return d
+        with mock.patch.object(modules, "tree_digest", digest_then_swap):
+            st = modules.run_collector("probe")
+        self.assertEqual(st["state"], "ok", st)
+        self.assertNotIn("SWAPPED", json.dumps(modules.detail("probe")["snapshot"]))
+        left = [c.name for c in modules.module_dir("probe").iterdir()
+                if c.name.startswith(".run-")]
+        self.assertEqual(left, [], "the run copy was not deleted")
+
+    def test_the_code_sits_at_a_fixed_path_inside_the_sandbox(self):
+        if not module_sandbox.available()[0]:
+            self.skipTest("needs the sandbox")
+        with modules.prepared("probe", "collector") as (argv, _env, _cwd, sb):
+            self.assertTrue(sb)
+            self.assertIn(modules.SANDBOX_CODE + "/collector.py", argv)
+            self.assertNotIn(str(self.gen / "collector.py"), argv)
 
     def test_a_good_snapshot_survives_a_later_tamper(self):
         self.assertEqual(modules.run_collector("probe")["state"], "ok")
@@ -353,6 +428,26 @@ class UpdateAndRollback(Base):
         modules.verify("probe")
         self.assertEqual(modules.load_pins()["probe"]["commit"], self.first)
 
+    def test_a_racing_update_is_refused_not_overwritten(self):
+        # Round three, finding 8: the pin is read again under the lock.
+        second = self.new_commit("v2\n")
+        third = self.new_commit("v3\n")
+        raced = []
+
+        def out(*_a):
+            if not raced:                      # between staging and the lock
+                raced.append(1)
+                modules.update("probe", ref=third, out=quiet)
+        with self.assertRaises(modules.ModuleError) as cm:
+            modules.update("probe", ref=second, out=out)
+        self.assertIn("changed while", str(cm.exception))
+        pin = modules.load_pins()["probe"]
+        self.assertEqual(pin["commit"], third)
+        self.assertEqual(pin["previous"]["commit"], self.first)
+        modules.verify("probe")
+        modules.rollback("probe", out=quiet)
+        self.assertEqual(modules.load_pins()["probe"]["commit"], self.first)
+
     def test_update_waits_for_a_run_in_flight(self):
         self.set_mode("sleep")
         self.new_commit()
@@ -385,6 +480,69 @@ class UpdateAndRollback(Base):
         st = modules.run_collector("probe")
         t.join()
         self.assertIn("busy", st["error"])
+
+
+class Locks(Base):
+    def test_an_interactive_run_holds_the_lock_until_it_exits(self):
+        # Round three, finding 2.
+        self.install()
+        rc = {}
+        t = threading.Thread(target=lambda: rc.setdefault(
+            "rc", modules.run_interactive("probe", "cli", ["--sleep", "2"])))
+        t.start()
+        time.sleep(0.8)
+        try:
+            with self.assertRaises(modules.ModuleError, msg="the lock was free mid-run"):
+                with modules._Lock("probe", blocking=False):
+                    pass
+        finally:
+            t.join()
+        self.assertEqual(rc["rc"], 0)
+
+    def test_pin_writes_wait_for_another_process(self):
+        # Round three, finding 7: a CLI and the hub both rewrite modules.json.
+        self.install()
+        code = ("import sys, time\n"
+                f"sys.path.insert(0, {str(ROOT)!r})\n"
+                "import modules\n"
+                "with modules.pins_lock():\n"
+                "    mods = modules.load_pins()\n"
+                "    print('held', flush=True)\n"
+                "    time.sleep(1.5)\n"
+                "    mods['probe']['from_child'] = True\n"
+                "    modules.save_pins(mods)\n")
+        env = dict(os.environ, CORRAL_LIGHT_STATE=str(self.state),
+                   CORRAL_LIGHT_CONFIG_DIR=str(self.config))
+        child = subprocess.Popen([sys.executable, "-c", code], env=env,
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.wait)
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        modules.update_pin("probe", from_parent=True)
+        self.assertEqual(child.wait(timeout=10), 0)
+        child.stdout.close()
+        pin = modules.load_pins()["probe"]
+        self.assertTrue(pin.get("from_child"), "the other process's write was lost")
+        self.assertTrue(pin.get("from_parent"))
+
+
+class Limits(unittest.TestCase):
+    def test_the_child_side_only_calls_setrlimit(self):
+        # Round three, finding 11: preexec_fn runs after fork in a threaded
+        # hub; counting /proc there is unsafe. Count first, then fork.
+        import resource
+        import vendor_reports
+        for fn in (module_sandbox.limits_fn(), vendor_reports._limits_fn(7)):
+            calls = []
+            with mock.patch.object(module_sandbox.os, "listdir",
+                                   side_effect=AssertionError("listdir in the child")), \
+                    mock.patch("builtins.open",
+                               side_effect=AssertionError("open in the child")), \
+                    mock.patch.object(resource, "setrlimit",
+                                      lambda w, v: calls.append((w, v))):
+                fn()
+            nproc = [v for w, v in calls if w == resource.RLIMIT_NPROC]
+            self.assertTrue(nproc, calls)
+            self.assertGreater(nproc[0][0], module_sandbox.LIMITS["nproc"])
 
 
 class TheRunner(Base):
@@ -519,10 +677,10 @@ class Isolation(Base):
         self.assertNotIn("CORRAL_TEST_SECRET", info["env"])
 
     def test_the_cli_may_write_its_config_and_the_collector_may_not(self):
-        argv, env, cwd, _ = modules.build_run("probe", "cli", ["--write-config"],
-                                              interactive=True)
-        r = subprocess.run(argv, env=env or {}, cwd=cwd, capture_output=True, text=True,
-                           timeout=30)
+        with modules.prepared("probe", "cli", ["--write-config"],
+                              interactive=True) as (argv, env, cwd, _):
+            r = subprocess.run(argv, env=env or {}, cwd=cwd, capture_output=True,
+                               text=True, timeout=30)
         self.assertIn("wrote config", r.stdout, r.stderr)
         rows, _ = self.run_attempts([f"write {modules.config_dir('probe') / 'config.toml'}"])
         self.assertTrue(list(rows.values())[0].startswith("refused:"))
@@ -554,11 +712,33 @@ class Unsandboxed(Base):
         self.assertEqual(st["state"], "failing")
         self.assertIn("cannot sandbox", st["error"])
 
+    def test_a_timeout_returns_on_time_and_the_ack_names_survivors(self):
+        # Round three, finding 4: with no pid namespace a setsid child can
+        # outlive the run. The run must still end on its deadline, and the
+        # acknowledgement must say what this test shows.
+        self.no_sandbox()
+        said = []
+        modules.add(str(self.make_repo()), confirm="probe", ack_unsandboxed="unsandboxed",
+                    out=said.append)
+        self.assertIn(modules.UNSANDBOXED_SURVIVORS, "\n".join(said))
+        marker = f"corral-escape-{os.getpid()}-{time.time_ns()}"
+        self.addCleanup(kill_marked, marker)
+        self.set_mode("escape", marker)
+        t0 = time.monotonic()
+        st = modules.run_collector("probe")
+        took = time.monotonic() - t0
+        self.assertEqual(st["state"], "failing", st)
+        self.assertIn("timeout", st["error"])
+        self.assertLess(took, 5 + 3, "the run waited on a child that left the group")
+        self.assertTrue(marked_pids(marker),
+                        "an escaped child no longer survives: update UNSANDBOXED_SURVIVORS")
+
     def test_the_unsandboxed_environment_is_built_from_nothing(self):
         self.no_sandbox()
         self.install(ack_unsandboxed="unsandboxed")
         with mock.patch.dict(os.environ, {"CORRAL_TEST_SECRET": "x"}):
-            _argv, env, _cwd, sb = modules.build_run("probe", "collector")
+            with modules.prepared("probe", "collector") as (_argv, env, _cwd, sb):
+                pass
         self.assertFalse(sb)
         self.assertNotIn("CORRAL_TEST_SECRET", env)
         self.assertEqual(env["HOME"], str(modules.data_dir("probe")))

@@ -25,6 +25,7 @@ lane's login. Linux only; `available()` says whether this host can do it.
 Phase 0 prototype and measurements: spike/p0/sandbox/, docs/finops-phase0.md.
 """
 import os
+import resource
 import shutil
 import subprocess
 import sys
@@ -46,18 +47,22 @@ SANDBOX_PATH = "/usr/local/bin:/usr/bin:/bin"
 LIMITS = {"as_bytes": 2 << 30, "nproc": 128, "fsize_bytes": 1 << 30, "nofile": 1024}
 
 
-def _user_procs():
+def user_tasks():
+    """Tasks (threads) this uid runs now, or None when /proc cannot be read.
+    RLIMIT_NPROC counts them all, so the cap must sit above this count or
+    bwrap cannot even start. Call it in the parent, never after fork."""
     uid, n = os.getuid(), 0
     try:
-        for d in os.listdir("/proc"):
-            if d.isdigit():
-                try:
-                    if os.stat("/proc/" + d).st_uid == uid:
-                        n += len(os.listdir(f"/proc/{d}/task"))   # threads count too
-                except OSError:
-                    pass
+        pids = os.listdir("/proc")
     except OSError:
         return None
+    for d in pids:
+        if d.isdigit():
+            try:
+                if os.stat("/proc/" + d).st_uid == uid:
+                    n += len(os.listdir(f"/proc/{d}/task"))   # threads count too
+            except OSError:
+                pass
     return n
 
 
@@ -154,24 +159,36 @@ def build_argv(argv, *, read_only=(), feed_dir=None, data_dir, file_binds=(), en
     return a + [str(x) for x in argv]
 
 
-def set_limits():
-    """preexec_fn: resource limits for the child tree. POSIX only."""
-    import resource
-    procs = _user_procs()
-    pairs = ((resource.RLIMIT_AS, LIMITS["as_bytes"]),
-             (getattr(resource, "RLIMIT_NPROC", None) if procs is not None else None,
-              (procs or 0) + LIMITS["nproc"]),
-             (resource.RLIMIT_FSIZE, LIMITS["fsize_bytes"]),
-             (resource.RLIMIT_NOFILE, LIMITS["nofile"]))
-    for which, val in pairs:
+def limits_fn(tasks=None):
+    """-> a preexec_fn that sets the resource limits, soft and hard, for
+    the child tree. Everything that reads files or allocates is done here,
+    in the parent: Python documents preexec_fn as unsafe in a threaded
+    process (the hub), so the child only calls setrlimit. POSIX only.
+    tasks: the uid's current task count (default: counted now)."""
+    tasks = user_tasks() if tasks is None else tasks
+    nproc = getattr(resource, "RLIMIT_NPROC", None) if tasks is not None else None
+    plan = []
+    for which, val in ((resource.RLIMIT_AS, LIMITS["as_bytes"]),
+                       (nproc, (tasks or 0) + LIMITS["nproc"]),
+                       (resource.RLIMIT_FSIZE, LIMITS["fsize_bytes"]),
+                       (resource.RLIMIT_NOFILE, LIMITS["nofile"])):
         if which is None:
             continue
         try:
             _soft, hard = resource.getrlimit(which)
-            cap = val if hard == resource.RLIM_INFINITY else min(val, hard)
-            resource.setrlimit(which, (cap, cap))   # hard too: the child cannot raise it
         except (ValueError, OSError):
-            pass
+            continue
+        cap = val if hard == resource.RLIM_INFINITY else min(val, hard)
+        plan.append((which, (cap, cap)))     # hard too: the child cannot raise it
+    plan = tuple(plan)
+
+    def apply():
+        for which, pair in plan:
+            try:
+                resource.setrlimit(which, pair)
+            except (ValueError, OSError):
+                pass
+    return apply
 
 
 _AVAILABLE = None

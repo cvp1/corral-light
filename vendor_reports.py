@@ -24,7 +24,6 @@ A failed or hung call marks that session stale; the others go on.
 import json
 import os
 import re
-import resource
 import selectors
 import shutil
 import signal
@@ -152,50 +151,14 @@ def scan_sessions(ghome):
 # ---------------------------------------------------------------- running
 
 def _uid_tasks():
-    """Tasks (threads) this uid runs now. RLIMIT_NPROC counts them all,
-    so the cap must sit above this count or bwrap cannot even start."""
-    uid = os.getuid()
-    n = 0
-    try:
-        pids = os.listdir("/proc")
-    except OSError:
-        return 0
-    for p in pids:
-        if not p.isdigit():
-            continue
-        try:
-            with open(f"/proc/{p}/status", "rb") as f:
-                body = f.read(4096)
-        except OSError:
-            continue
-        m_uid = re.search(rb"\nUid:\s+(\d+)", body)
-        m_thr = re.search(rb"\nThreads:\s+(\d+)", body)
-        if m_uid and int(m_uid.group(1)) == uid:
-            n += int(m_thr.group(1)) if m_thr else 1
-    return n
+    """Tasks (threads) this uid runs now; see module_sandbox.user_tasks."""
+    return module_sandbox.user_tasks() or 0
 
 
 def _limits_fn(nproc_base):
-    lim = module_sandbox.LIMITS
-    nproc = nproc_base + lim["nproc"]
-
-    def apply():
-        # module_sandbox.set_limits sets soft limits; here soft and hard
-        # both, so the sandboxed tree cannot raise them back.
-        module_sandbox.set_limits()
-        for which, val in ((resource.RLIMIT_AS, lim["as_bytes"]),
-                           (getattr(resource, "RLIMIT_NPROC", None), nproc),
-                           (resource.RLIMIT_FSIZE, lim["fsize_bytes"]),
-                           (resource.RLIMIT_NOFILE, lim["nofile"])):
-            if which is None:
-                continue
-            try:
-                soft, hard = resource.getrlimit(which)
-                cap = val if hard == resource.RLIM_INFINITY else min(val, hard)
-                resource.setrlimit(which, (cap, cap))
-            except (ValueError, OSError):
-                pass
-    return apply
+    """The sandbox's limits, counted in the parent (the child only calls
+    setrlimit; preexec_fn is unsafe in a threaded process)."""
+    return module_sandbox.limits_fn(nproc_base)
 
 
 def _kill_group(p):

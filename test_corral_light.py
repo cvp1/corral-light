@@ -3899,10 +3899,12 @@ from test_review_sandbox import (EgressPolicy, SignInLifetime, TheGate,  # noqa:
 from test_modules import (TheManifest, InstallAndPin, Tamper, UpdateAndRollback,  # noqa: F401,E402
                           TheRunner as ModuleRunner, Isolation as ModuleIsolation,
                           Unsandboxed as ModuleUnsandboxed, TheSnapshot as ModuleSnapshot,
-                          TheRoutes as ModuleRoutes, TheDispatch as ModuleDispatch)
+                          TheRoutes as ModuleRoutes, TheDispatch as ModuleDispatch,
+                          Locks as ModuleLocks, Limits as ModuleLimits)
 # The module feed, Claude quota capture, the adapter patch, login facts.
 from test_module_feed import (FeedFiles, QuotaCapture, TurnEndCarriesQuota,  # noqa: F401,E402
-                              AdapterPatch, LoginFacts)
+                              AdapterPatch, LoginFacts, QuotaMerge,
+                              PaneTitles as FeedPaneTitles)
 # Core-run vendor reports (grok usage) in their own sandbox.
 from test_vendor_reports import (SandboxedRuns as GrokReportRuns,  # noqa: F401,E402
                                  BinaryCheck as GrokBinaryCheck,

@@ -73,3 +73,32 @@ no route from snapshot text to markup, class, style or link).
   is fair as far as it goes: a sandbox build failure also yields
   "stale". Adopted as a small strengthening (assert the ELF actually
   executed), not as a defect.
+
+## Applied (2026-10-07)
+
+All eleven, on `modules-seam`, each with a test that failed before the
+fix (findings 2, 3, 7 to 11 failed on behaviour; 1, 5, 6 on the feed
+output; 4 on the wording first, then on behaviour against the old
+reader-thread loop, which held a run for 60 s on an escaped child).
+
+| # | Fix | Test |
+|---|---|---|
+| 1 | The feed publishes a title only when the operator typed it (`title_named`, set by rename, kept in pane meta); otherwise the lane label. Stricter than the finding: a port copies and locks a prompt-derived title, so `title_locked` alone leaks | `PaneTitles` (real prompt path, live and meta-only, port-style lock, then a rename) |
+| 2 | `run_interactive` holds the module lock until `wait()` returns | `Locks.test_an_interactive_run_holds_the_lock_until_it_exits` |
+| 3 | Each run copies the generation into `.run-<random>`, verifies the copy, runs it (bound read-only at `/module` in the sandbox), deletes it; the collector path uses the copy's manifest, so there is one check | `Tamper.test_a_swap_after_the_check_does_not_run`, `test_the_code_sits_at_a_fixed_path_inside_the_sandbox` |
+| 4 | `run_capped` is one `selectors` loop on raw descriptors with one deadline; the group is killed before the leader is reaped. `module add` on an unsandboxed host says "processes it starts may outlive a timeout" | `Unsandboxed.test_a_timeout_returns_on_time_and_the_ack_names_survivors` |
+| 5 | Quota observations merge per field; a carried field records its own `observed_at` in `carried`. Applied to the feed and to the pane's own copy | `QuotaMerge.test_a_later_notice_without_a_figure_keeps_the_last_one_and_says_when` |
+| 6 | An odd window name keeps a sanitised form plus a short hash; only a missing name is `_unknown` | `QuotaMerge.test_unknown_window_names_keep_their_own_keys` |
+| 7 | `pins_lock()`: a lock file under the config dir around every pins read-modify-write | `Locks.test_pin_writes_wait_for_another_process` |
+| 8 | Update and rollback re-read the pin under the module lock and refuse if it moved | `UpdateAndRollback.test_a_racing_update_is_refused_not_overwritten` |
+| 9 | `scan_tree` refuses any `.git`, so runtime verification does too | `Tamper.test_a_git_dir_that_appears_later_is_refused` |
+| 10 | Refused by stem: `sitecustomize` or `usercustomize` in any form | `InstallAndPin.test_compiled_site_hooks_are_refused` |
+| 11 | `module_sandbox.limits_fn()` counts tasks and reads limits in the parent; the child only calls `setrlimit`. `vendor_reports` uses it | `Limits.test_the_child_side_only_calls_setrlimit` |
+
+Also adopted: the real-ELF vendor-report test now asserts the binary ran
+and exited 0 (stale for its output, not for a sandbox failure).
+
+Residual, by design: the run copy narrows finding 3 to a fresh random
+path that exists only for one run; a same-user process that finds it in
+that window can still change it, as it could ptrace the hub. The sandbox
+remains the boundary for the collector itself.

@@ -856,7 +856,7 @@ class Pane(_core.PaneBase):
     # never start again without it.
     META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id", "review_at_end", "reviewed_digest",
                                             "challenges", "challenge_of", "review_tree",
-                                            "review_sandboxed")
+                                            "review_sandboxed", "title_named")
     worktree_id = None
     review_at_end = False
     reviewed_digest = None
@@ -864,8 +864,14 @@ class Pane(_core.PaneBase):
     challenge_of = None
     review_tree = None
     review_sandboxed = False
+    # True only once the operator typed a name. title_locked is not enough:
+    # a port locks the title it copied, which may be the first prompt. The
+    # module feed publishes a title only when this is set.
+    title_named = False
 
-
+    def rename(self, title):
+        self.title_named = True           # before the base saves meta
+        return super().rename(title)
 
     def _init_runtime(self):
         """Initialise every non-persisted field; shared by all construction paths."""
@@ -930,6 +936,7 @@ class Pane(_core.PaneBase):
         p.posture = meta.get("posture", DEFAULT_POSTURE)
         p.mgr = mgr
         p.title_locked = bool(meta.get("title_locked"))
+        p.title_named = bool(meta.get("title_named"))
         stored_title = meta.get("title")
         # Migrate an un-renamed non-Claude title equal to the bare cwd name (an old
         # default-title collision).
@@ -1447,7 +1454,10 @@ class Pane(_core.PaneBase):
         self.usage = merged
         if isinstance(rate, dict) and not getattr(self, "_replaying", False):
             windows = _feed.quota_windows(rate)
-            self.quota = dict(getattr(self, "quota", None) or {}, **windows)
+            have = dict(getattr(self, "quota", None) or {})
+            for k, obs in windows.items():
+                have[k] = _feed.merge_window(have.get(k), obs)
+            self.quota = have
             try:
                 _feed.note_quota(self, windows)
             except Exception as e:                  # noqa: BLE001 — never kills the reader

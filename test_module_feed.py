@@ -373,6 +373,86 @@ class QuotaCapture(FeedCase):
         self.assertFalse((module_feed.feed_dir() / "quota.json").exists())
 
 
+class QuotaMerge(FeedCase):
+    """Round three, findings 5 and 6: per-field merge, distinct window keys."""
+
+    def note(self, info, at):
+        module_feed.note_quota(self.pane(), module_feed.quota_windows(info, observed_at=at))
+
+    def test_a_later_notice_without_a_figure_keeps_the_last_one_and_says_when(self):
+        self.note({"rateLimitType": "seven_day", "status": "allowed", "utilization": 0.07,
+                   "resetsAt": 1791403800}, 1000.0)
+        self.note({"rateLimitType": "seven_day", "status": "rejected"}, 2000.0)
+        w = self.windows()["seven_day"]
+        self.assertEqual(w["status"], "rejected")
+        self.assertEqual(w["observed_at"], 2000.0)
+        self.assertEqual(w["utilization"], 0.07)
+        self.assertEqual(w["resets_at_s"], 1791403800.0)
+        self.assertEqual(w["carried"], {"utilization": 1000.0, "resetsAt": 1000.0})
+        self.note({"rateLimitType": "seven_day", "status": "rejected"}, 3000.0)
+        self.assertEqual(self.windows()["seven_day"]["carried"]["utilization"], 1000.0,
+                         "a carried field keeps the time it was observed")
+        self.note({"rateLimitType": "seven_day", "status": "allowed", "utilization": 0.5},
+                  4000.0)
+        w = self.windows()["seven_day"]
+        self.assertEqual(w["utilization"], 0.5)
+        self.assertEqual(w["carried"], {"resetsAt": 1000.0})
+        self.note({"rateLimitType": "seven_day", "status": "allowed", "utilization": 0.6,
+                   "resetsAt": 1791500000}, 5000.0)
+        self.assertNotIn("carried", self.windows()["seven_day"])
+        # An older observation arriving late changes nothing.
+        self.note({"rateLimitType": "seven_day", "status": "rejected"}, 1500.0)
+        self.assertEqual(self.windows()["seven_day"]["status"], "allowed")
+
+    def test_unknown_window_names_keep_their_own_keys(self):
+        info = {"rateLimitType": "weekly limit", "status": "allowed", "utilization": 0.1,
+                "unifiedWindows": {"five hour!": {"utilization": 0.2},
+                                   "bad/name": {"utilization": 0.3}}}
+        ws = module_feed.quota_windows(info, observed_at=1.0)
+        self.assertEqual(len(ws), 3, sorted(ws))
+        self.assertNotIn("_unknown", ws)
+        for k in ws:
+            self.assertRegex(k, module_feed._KEY_RE)
+        self.assertEqual(set(ws), set(module_feed.quota_windows(info, observed_at=2.0)),
+                         "keys must be stable across notices")
+        self.assertEqual(set(module_feed.quota_windows({"status": "allowed"})), {"_unknown"})
+        long_a, long_b = "x" * 80 + " a", "x" * 80 + " b"
+        self.assertNotEqual(module_feed._window_key(long_a), module_feed._window_key(long_b))
+
+
+class PaneTitles(FeedCase):
+    """Round three, finding 1: a pane named after its first prompt must not
+    carry that prompt into the feed. Only a name the operator typed is
+    published; otherwise the lane's label."""
+
+    def test_a_title_from_the_first_prompt_never_reaches_the_feed(self):
+        import sessions
+        from test_resilience import FakeLaneCase, wait_for
+        lane = FakeLaneCase("run")
+        lane.setUp()
+        self.addCleanup(lane.doCleanups)
+        p = lane.mgr.create("fake", lane.agent_dir)
+        self.assertEqual(p.state, "ready", p.error)
+        p.send(SENTINEL_PROMPT + " with enough words to pass the cut")
+        self.assertTrue(wait_for(lambda: lane.turn_ends(p) >= 1))
+        self.assertIn("SENTINEL", p.title, "the real path did not name the pane")
+        # A port locks a title it copied; locked is not the same as typed.
+        p.title_locked = True
+        p.save_meta()
+
+        def row(mgr):
+            module_feed._pane_cache.clear()
+            with mock.patch.object(module_feed, "STATE_OVERRIDE", str(sessions.STATE)):
+                doc = module_feed.panes_doc(mgr)
+            self.assertNotIn("SENTINEL", json.dumps(doc))
+            return next(r for r in doc["panes"] if r["id"] == p.id)
+        self.assertEqual(row(lane.mgr)["title"], "Fake")
+        self.assertEqual(row(None)["title"], "Fake")          # from meta.json alone
+        p.rename("Budget review")
+        self.assertEqual(row(lane.mgr)["title"], "Budget review")
+        self.assertEqual(row(None)["title"], "Budget review")
+
+
 class TurnEndCarriesQuota(FeedCase):
     """End to end with a real process: the fake agent replays recorded
     adapter updates; the pane's turn_end carries the merged usage and the

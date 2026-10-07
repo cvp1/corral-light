@@ -1,8 +1,12 @@
-"""Fixture CLI: prints its argv and environment names; `doctor` says ok."""
+"""Fixture CLI: prints its argv and environment names; `doctor` says ok;
+`--sleep N` sleeps quietly (a long interactive run)."""
 import os
 import sys
+import time
 
-if sys.argv[1:] == ["doctor"]:
+if sys.argv[1:2] == ["--sleep"]:
+    time.sleep(float(sys.argv[2]))
+elif sys.argv[1:] == ["doctor"]:
     print("probe doctor: ok")
 else:
     print("probe cli:", " ".join(sys.argv[1:]))

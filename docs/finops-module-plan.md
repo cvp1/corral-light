@@ -261,11 +261,18 @@ every observer tick when something changed. Contents:
   `role`, origin (`consult`, `challenge`, `rig`, human), `challenge_of`,
   and `usage`: a list of `{turn, at, used, size, cost}` taken from that
   pane's `turn_end` events. No prompt text, no tool payloads, no paths
-  beyond `cwd`.
+  beyond `cwd`. `title` is published only when the operator typed it
+  (`title_named`, set by rename); otherwise it is the lane's label. An
+  untitled pane is named after its first prompt, and a port copies and
+  locks that name, so neither the title nor `title_locked` is safe alone.
 - `quota.json`: per **account** (by login fingerprint), per window type,
-  the newest quota observation from any pane. Every validated field the
-  vendor sent is kept: for Claude, `status`, `rateLimitType` (an unknown
-  or missing type is kept under its own key, never dropped), `resetsAt`,
+  the newest quota observation from any pane, merged per field: a newer
+  notice updates the fields it carries, and a vendor field it lacks keeps
+  its last value, with `carried: {field: observed_at}` saying when that
+  value was seen. Every validated field the
+  vendor sent is kept: for Claude, `status`, `rateLimitType` (a missing
+  type is keyed `_unknown`; any other odd name keeps a sanitised form of
+  itself plus a short hash, so two never share a key), `resetsAt`,
   `utilization` exactly as sent, and the overage fields. Each observation
   carries `observed_at` (hub clock) and `resets_at_s` (the reset
   normalized to epoch seconds, with the unit the vendor used recorded).
@@ -374,9 +381,14 @@ in the ⌘K palette. Removing it is `corral-light module remove finops`;
 
 ### 5.2 Running
 
-Each run: verify the active generation (§5.3), build the sandbox (or the
-acknowledged unsandboxed spawn), pass the allowlisted environment, run
-with a wall budget, read capped output, validate, cache. The environment
+Each run: copy the active generation into a private run tree and verify
+the copy (§5.3), build the sandbox (or the acknowledged unsandboxed
+spawn) with the copy bound read-only at `/module`, pass the allowlisted
+environment, run with a wall budget, read capped output in one
+deadline-driven loop, validate, cache, delete the copy. Resource limits
+are computed before the fork; the child only calls `setrlimit`.
+On an unsandboxed host a process that leaves the run's process group can
+outlive a timeout; `module add` says so there. The environment
 is built from nothing: `PATH`, `HOME`, `LANG`, `TZ`, plus
 `CORRAL_MODULE_API`, `CORRAL_MODULE_CONFIG`, `CORRAL_MODULE_DATA`,
 `CORRAL_MODULE_FEED`, and one variable per resolved `reads` entry (for
@@ -390,13 +402,20 @@ environment crosses.
 - Install only a commit whose working tree is clean and whose `HEAD`
   equals the pinned commit.
 - Refuse any symlink in the tree, any file outside the git index, and any
-  `.pth`, `sitecustomize.py` or `usercustomize.py` anywhere in it.
+  `.pth` or any file whose stem is `sitecustomize` or `usercustomize`
+  (source or compiled) anywhere in it.
 - Digest: SHA-256 over the sorted list of tracked paths, their modes and
-  their contents, `.git` excluded.
-- Verify before every execution path: collector, CLI, doctor. A mismatch
+  their contents. Install removes `.git`; a `.git` found later is refused.
+- Verify before every execution path: collector, CLI, doctor, on the
+  private copy that then runs, so a file swapped in the generation after
+  the check is not what runs. A mismatch
   disables the module, keeps its last snapshot marked "disabled: changed
   on disk", and says so in doctor.
-- Update, remove and run take one lock per module, so none overlaps.
+- Update, remove and run take one lock per module, so none overlaps; an
+  interactive CLI or doctor run holds it until its process exits. Update
+  and rollback re-read the pin under that lock and refuse if it moved.
+- Every read-modify-write of `modules.json` holds an interprocess lock
+  file, so the hub and a CLI never lose each other's writes.
 
 ## 6. The FinOps module (`corral-light-finops`)
 
@@ -555,7 +574,9 @@ tiles. While the first backfill runs, the dialog shows its progress.
   - an observation with no reset time is stale after the shortest window
     of its vendor;
   - a `rejected` status is never shown as current without a fresh
-    observation.
+    observation;
+  - a field listed in `carried` is as old as its own time there, not the
+    observation's `observed_at`.
   Quota belongs to an account, so a fingerprint change starts the new
   account's quota empty.
 - **Codex quota.** The newest `token_count.rate_limits` across the Codex
@@ -649,7 +670,7 @@ changes each vendor CLI's configuration. It is listed for the panel.
 |---|---|---|
 | **0. Measure** | **Done 2026-10-07**: `docs/finops-phase0.md`. Not measured, with reasons there: macOS Keychain plan fields, Codex `rate_limits` against the CLI's status view at the same minute (kept as a §8.4 live check), Codex fork | a results doc; this plan updated where an answer changes it |
 | **1. Seam** | §4 and §5: modules, feed (with account-scoped quota and login facts), the rate-limit merge in `sessions.py`, the Claude adapter patch (offered upstream), the collector sandbox profile, core-run vendor reports, runner, routes, renderer, dialog, doctor, wrapper, index; tested with fixture modules in the test tree only | the seam tests in §8.1 pass; Light's suite passes with zero modules and with each fixture |
-| | **Built 2026-10-07** on branch `modules-seam`: §4 and §5 as specified, except: the exact-host fetcher proxy moves to Phase 4 with the fetchers; Python 3.9 is checked by its grammar only (no 3.9 interpreter on the build host; CI runs 3.14); the Claude adapter patch is applied by `install.sh` and `lanes update`, not yet to a live install. Real-browser check and screenshots (synthetic fixture data) in `docs/img/module-dialog-*.png` | |
+| | **Built 2026-10-07** on branch `modules-seam`: §4 and §5 as specified, except: the exact-host fetcher proxy moves to Phase 4 with the fetchers; Python 3.9 is checked by its grammar only (no 3.9 interpreter on the build host; CI runs 3.14); the Claude adapter patch is applied by `install.sh` and `lanes update`, not yet to a live install. Real-browser check and screenshots (synthetic fixture data) in `docs/img/module-dialog-*.png`. Round-three review: all eleven findings applied with a failing-first test each (`reviews/2026-10-07-finops-module-panel/synthesis-r3-seam.md`) | |
 | **2. FinOps v1** | automatic proposed accounts and one-step setup; Claude, Codex, Grok and Gemini sources; ledger, prices and plans; Committed, Quota, Vendor-computed cost and API-equivalent list cost tiles; per-lane table, Sources, Most used this week; CLI | installed here with one command, accounts accepted in one step, prices typed once; §8.4 checks pass |
 | **3. Notices** | rail notices with bounds and expiry | each notice expires and is bounded as §8.2 tests |
 | **4. Billing APIs and macOS** | opt-in fetchers for the four vendor billing APIs (§6.7); a macOS sandbox investigation | each fetcher tested against a local stub; the operator decides which to enable |

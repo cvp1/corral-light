@@ -15,7 +15,8 @@ docs/finops-module-plan.md §4.4. The hub writes, under
 Public API: tick(mgr) from the hub's observer loop (cheap when nothing
 changed: per-file (size, mtime) caches, incremental reads, write only on a
 change); feed_dir(); note_quota(pane, windows) from sessions.py, with
-quota_windows(rate_limit_info) to split a Claude notice into windows.
+quota_windows(rate_limit_info) to split a Claude notice into windows and
+merge_window(old, new) to fold a newer observation in per field.
 Nothing here computes or rescales a vendor figure.
 """
 import hashlib
@@ -178,7 +179,15 @@ def _scalar_fields(d):
 
 
 def _window_key(v):
-    return v if isinstance(v, str) and _KEY_RE.match(v) else "_unknown"
+    """The vendor's window name when it is a plain key; a missing name is
+    "_unknown"; any other name keeps a sanitised form of itself plus a short
+    hash, so two odd names never share a window."""
+    if not isinstance(v, str) or not v:
+        return "_unknown"
+    if _KEY_RE.match(v):
+        return v
+    tag = hashlib.sha256(v.encode("utf-8", "replace")).hexdigest()[:8]
+    return "_" + re.sub(r"[^A-Za-z0-9_.:-]", "_", v)[:48] + "-" + tag
 
 
 def _reset(v):
@@ -238,6 +247,30 @@ def _load_quota():
     return _quota
 
 
+def merge_window(old, new):
+    """A newer notice updates the fields it carries; a vendor field it lacks
+    keeps the last value, and `carried` records when that value was
+    observed (round three, finding 5). Nothing is computed."""
+    if not isinstance(old, dict):
+        return new
+    out = dict(new)
+    carried = {}
+    old_carried = old.get("carried") if isinstance(old.get("carried"), dict) else {}
+    for f in NOTICE_FIELDS:
+        if f in new or f not in old:
+            continue
+        out[f] = old[f]
+        carried[f] = old_carried.get(f, old.get("observed_at"))
+        if f == "resetsAt":
+            out["resets_at_s"] = old.get("resets_at_s")
+            out["resets_at_unit"] = old.get("resets_at_unit")
+    if carried:
+        out["carried"] = carried
+    else:
+        out.pop("carried", None)
+    return out
+
+
 def note_quota(pane, windows, lane="claude"):
     """Called by sessions.py the moment a quota notice arrives. Keeps the
     newest observation per (account, window) and writes quota.json now."""
@@ -254,7 +287,7 @@ def note_quota(pane, windows, lane="claude"):
             old = ws.get(k)
             if isinstance(old, dict) and (old.get("observed_at") or 0) > obs["observed_at"]:
                 continue
-            ws[k] = dict(obs, pane=pid if isinstance(pid, str) else None)
+            ws[k] = merge_window(old, dict(obs, pane=pid if isinstance(pid, str) else None))
         _write("quota.json", {"schema": SCHEMA, "accounts": q["accounts"]}, force=True)
 
 
@@ -471,13 +504,30 @@ def _pane_row(d, live, now):
     challenge_of = s(m.get("challenge_of"), 64)
     origin = "challenge" if challenge_of else (via if via in ORIGINS else "human")
     return {"id": pid, "agent": s(m.get("agent"), 40), "model": s(model, 120),
-            "title": s(getattr(p, "title", None) if p is not None else m.get("title")),
+            "title": s(_published_title(p, m)),
             "created": s(m.get("created"), 40),
             "closed": _iso(mst.st_mtime) if closed else None,
             "acp_session": s(m.get("acp_session"), 120),
             "worktree_id": s(m.get("worktree_id"), 64),
             "role": s(m.get("role"), 80), "origin": origin,
             "challenge_of": challenge_of, "usage": usage, "segments": segments}
+
+
+def _lane_label(agent):
+    sess = sys.modules.get("sessions")
+    spec = (getattr(sess, "AGENTS", None) or {}).get(agent) if sess is not None else None
+    label = spec.get("label") if isinstance(spec, dict) else None
+    return label if isinstance(label, str) else (agent if isinstance(agent, str) else None)
+
+
+def _published_title(p, m):
+    """A title the operator typed, else the lane's label. An untitled pane
+    is named after its first prompt and a port copies that name, so neither
+    the title nor title_locked says the text is safe to publish."""
+    named = getattr(p, "title_named", False) if p is not None else m.get("title_named")
+    if named is True:
+        return getattr(p, "title", None) if p is not None else m.get("title")
+    return _lane_label(m.get("agent"))
 
 
 def panes_doc(mgr=None):

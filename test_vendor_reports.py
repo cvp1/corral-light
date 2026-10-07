@@ -272,6 +272,12 @@ class BinaryCheck(unittest.TestCase):
         self.assertEqual((r["ran"], r["failed"], r["stale"]), (1, 1, [s]))
         # GNU `true` answers --version; busybox's does not.
         self.assertTrue(r["version"] is None or "true" in r["version"])
+        # It really ran and exited 0: stale because its (empty) output is no
+        # report, not because the sandbox failed to build (round three).
+        with open(os.path.join(self.L.out, ".index.json")) as f:
+            why = json.load(f)[s]["why"]
+        self.assertNotIn(why, ("sandbox", "spawn", "timeout", "too large"))
+        self.assertFalse(why.startswith("exit "), why)
 
 
 class SandboxUnavailable(unittest.TestCase):

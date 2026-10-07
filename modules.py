@@ -23,6 +23,7 @@ after the operator typed `unsandboxed`, and says so on its tile.
 The digest is integrity, not security: it stops a half-finished update or
 a stray file from running.
 """
+import contextlib
 import errno
 import fcntl
 import hashlib
@@ -31,6 +32,7 @@ import math
 import os
 import re
 import secrets
+import selectors
 import shutil
 import signal
 import subprocess
@@ -71,7 +73,14 @@ ENTRY_KEYS = {"collector": {"script", "args", "every_s", "budget_s", "timeout_s"
               "doctor": {"script", "args"}}
 READS = ("claude-projects", "codex-sessions", "gemini-store", "light-feed")
 VENDOR_REPORTS = ("grok-usage",)
-FORBIDDEN_FILES = ("sitecustomize.py", "usercustomize.py")
+# Python runs these on its own, in any compiled form: refused by stem.
+FORBIDDEN_STEMS = ("sitecustomize", "usercustomize")
+# Inside the sandbox the run copy of the code sits here, read-only.
+SANDBOX_CODE = "/module"
+# What `module add` says on a host with no sandbox. A test pins it to the
+# behaviour: with no pid namespace, a child that calls setsid outlives a
+# timeout kill of the run's process group.
+UNSANDBOXED_SURVIVORS = "processes it starts may outlive a timeout"
 
 # Run caps (§4.5).
 STDOUT_CAP = 1 << 20
@@ -184,6 +193,22 @@ class _Lock:
 _PINS_LOCK = threading.Lock()
 
 
+@contextlib.contextmanager
+def pins_lock():
+    """Every read-modify-write of modules.json, across threads and across
+    processes (the hub disables on tamper while a CLI updates). Not
+    re-entrant."""
+    path = CONFIG / ".modules.json.lock"
+    with _PINS_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)                  # closing releases the flock
+
+
 def load_pins():
     d = _read_json(pins_path(), {})
     mods = d.get("modules") if isinstance(d, dict) else None
@@ -195,7 +220,7 @@ def save_pins(mods):
 
 
 def update_pin(name, **fields):
-    with _PINS_LOCK:
+    with pins_lock():
         mods = load_pins()
         pin = dict(mods.get(name) or {})
         pin.update(fields)
@@ -323,14 +348,17 @@ def read_manifest(root):
 # tree checks and the digest (§5.3)
 
 def scan_tree(root):
-    """-> sorted [(relpath, mode, sha256)] of every file under root except
-    `.git`. Raises on a symlink, a special file, a `.pth` or a site hook."""
+    """-> sorted [(relpath, mode, sha256)] of every file under root. Raises
+    on a symlink, a special file, a `.pth`, a site hook in any compiled form,
+    or any `.git` (install removes it; one that appears later is a change)."""
     root = Path(root)
     out = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         rel_dir = os.path.relpath(dirpath, root)
-        if rel_dir == ".":
-            dirnames[:] = [d for d in dirnames if d != ".git"]
+        for d in dirnames + filenames:
+            if d == ".git":
+                raise ModuleError(f"the module contains "
+                                  f"{os.path.normpath(os.path.join(rel_dir, d))}; refused")
         for d in dirnames:
             if os.path.islink(os.path.join(dirpath, d)):
                 raise ModuleError(f"the module contains a symlink: "
@@ -343,7 +371,7 @@ def scan_tree(root):
                 raise ModuleError(f"the module contains a symlink: {rel}")
             if not (st.st_mode & 0o170000 == 0o100000):
                 raise ModuleError(f"the module contains a special file: {rel}")
-            if fn.endswith(".pth") or fn in FORBIDDEN_FILES:
+            if fn.endswith(".pth") or fn.split(".", 1)[0] in FORBIDDEN_STEMS:
                 raise ModuleError(f"the module contains {rel}, which Python would run "
                                   f"on its own; refused")
             h = hashlib.sha256()
@@ -466,7 +494,8 @@ def describe(manifest, sandboxed, src, commit, digest):
         lines.append("Sandbox  yes: it sees only the above, its own files and its data dir")
     else:
         lines.append("Sandbox  NO: this module will run unsandboxed as your user and "
-                     "can read anything you can")
+                     "can read anything you can;")
+        lines.append(f"         {UNSANDBOXED_SURVIVORS}")
     return "\n".join(lines)
 
 
@@ -548,6 +577,7 @@ def update(name, *, ref=None, confirm=None, out=_say, ask=None):
             if typed != name:
                 raise ModuleError("not confirmed; the current generation stays active")
         with _Lock(name):                     # waits for an in-flight run
+            _unchanged_since(name, pin)
             base = module_dir(name)
             gen = base / commit
             if gen.exists():
@@ -569,12 +599,22 @@ def update(name, *, ref=None, confirm=None, out=_say, ask=None):
             shutil.rmtree(stage, ignore_errors=True)
 
 
+def _unchanged_since(name, pin):
+    """Under the module lock: the pin this operation started from is still
+    the pin. Another update or a rollback in between would otherwise be
+    overwritten, and its generation pruned."""
+    now = _pin(name)
+    if now.get("commit") != pin.get("commit") or now.get("digest") != pin.get("digest"):
+        raise ModuleError(f"{name} changed while this was staged (another update or a "
+                          f"rollback); nothing switched, run it again")
+
+
 def rollback(name, out=_say):
-    pin = _pin(name)
-    prev = pin.get("previous")
-    if not prev:
-        raise ModuleError(f"{name} has no previous generation to roll back to")
     with _Lock(name):
+        pin = _pin(name)
+        prev = pin.get("previous")
+        if not prev:
+            raise ModuleError(f"{name} has no previous generation to roll back to")
         base = module_dir(name)
         gen = base / prev["commit"]
         if not gen.is_dir() or tree_digest(gen) != prev["digest"]:
@@ -596,7 +636,7 @@ def _prune(name, keep):
 def remove(name, *, purge=False, out=_say):
     _pin(name)
     with _Lock(name):
-        with _PINS_LOCK:
+        with pins_lock():
             mods = load_pins()
             mods.pop(name, None)
             save_pins(mods)
@@ -625,9 +665,23 @@ def _pin(name):
 # ---------------------------------------------------------------------------
 # verification before every execution path (§5.3)
 
-def verify(name):
-    """-> (generation_dir, manifest, pin). Raises ModuleError, and disables
-    the module, when what is on disk is not what was pinned."""
+def _copy_generation(gen, dest):
+    """Plain files only, modes kept; scan_tree on the copy refuses anything
+    else that slipped in."""
+    for rel, _mode, _sha in scan_tree(gen):
+        src, dst = gen / rel, dest / rel
+        dst.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def verify(name, run_copy=None):
+    """-> (code_dir, manifest, pin). Raises ModuleError, and disables the
+    module, when what is on disk is not what was pinned.
+
+    run_copy: a fresh path. The generation is copied there and the COPY is
+    checked, so what runs is exactly what was digested: a writer that
+    swaps a file in the generation after the check changes nothing about
+    this run (round three, finding 3). The caller deletes it."""
     pin = _pin(name)
     if not pin.get("enabled"):
         raise ModuleError(pin.get("disabled_reason") or f"{name} is disabled")
@@ -642,14 +696,19 @@ def verify(name):
         gen = base / current
         if gen.is_symlink() or not gen.is_dir():
             raise ModuleError("its pinned generation is missing")
-        if tree_digest(gen) != pin.get("digest"):
+        code = gen
+        if run_copy is not None:
+            code = Path(run_copy)
+            code.mkdir(mode=0o700)
+            _copy_generation(gen, code)
+        if tree_digest(code) != pin.get("digest"):
             raise ModuleError("its files changed on disk")
-        manifest = read_manifest(gen)
+        manifest = read_manifest(code)
     except ModuleError as e:
         reason = f"disabled: changed on disk ({e})"
         update_pin(name, enabled=False, disabled_reason=reason)
         raise ModuleError(reason) from None
-    return gen, manifest, pin
+    return code, manifest, pin
 
 
 # ---------------------------------------------------------------------------
@@ -694,9 +753,37 @@ def feed_dir():
     return STATE / "module-feed" / "v1"
 
 
-def build_run(name, entry_key, extra_args=(), *, interactive=False):
-    """-> (argv, env, cwd, sandboxed) for one execution path, verified."""
-    gen, manifest, pin = verify(name)
+class RunSpec(tuple):
+    """(argv, env, cwd, sandboxed), and `.manifest` of the verified copy."""
+    manifest = None
+
+
+def _spec(argv, env, cwd, sandboxed, manifest):
+    r = RunSpec((argv, env, cwd, sandboxed))
+    r.manifest = manifest
+    return r
+
+
+@contextlib.contextmanager
+def prepared(name, entry_key, extra_args=(), *, interactive=False):
+    """Verify into a private run copy and yield (argv, env, cwd, sandboxed)
+    to run it; the copy is deleted afterwards. The caller holds the
+    module's lock, so any run copy already there is a crash's leftover."""
+    base = module_dir(name)
+    for old in base.glob(".run-*") if base.is_dir() else ():
+        shutil.rmtree(old, ignore_errors=True)
+    run_dir = base / f".run-{secrets.token_hex(8)}"
+    try:
+        yield build_run(name, entry_key, extra_args, interactive=interactive,
+                        run_dir=run_dir)
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def build_run(name, entry_key, extra_args=(), *, interactive=False, run_dir):
+    """-> (argv, env, cwd, sandboxed) for one execution path, verified into
+    run_dir. Inside the sandbox the code sits read-only at SANDBOX_CODE."""
+    code, manifest, pin = verify(name, run_copy=run_dir)
     entry = manifest.get(entry_key)
     if not entry:
         raise ModuleError(f"{name} has no {entry_key}")
@@ -726,22 +813,26 @@ def build_run(name, entry_key, extra_args=(), *, interactive=False):
         env["CORRAL_READ_" + r.upper().replace("-", "_")] = os.pathsep.join(paths)
     if interactive and os.environ.get("TERM"):
         env["TERM"] = os.environ["TERM"]
-    argv = [_interpreter(), "-I", "-B", str(gen / entry["script"])] + \
-        list(entry["args"]) + [str(a) for a in extra_args]
+    tail = list(entry["args"]) + [str(a) for a in extra_args]
     if sandboxed:
-        ro = [str(gen)] + [p for r, ps in reads.items() for p in ps]
+        argv = [_interpreter(), "-I", "-B", f"{SANDBOX_CODE}/{entry['script']}"] + tail
+        ro = [p for r, ps in reads.items() for p in ps]
+        binds = [(str(code), SANDBOX_CODE)]
         # The collector reads its config; only the CLI (setup) may write it.
         if interactive:
             argv = module_sandbox.build_argv(argv, read_only=ro, data_dir=str(data),
                                              feed_dir=str(fd) if use_feed else None,
-                                             env=env, writable_extra=[str(cfg)])
+                                             file_binds=binds, env=env,
+                                             writable_extra=[str(cfg)])
         else:
             ro.append(str(cfg))
             argv = module_sandbox.build_argv(argv, read_only=ro, data_dir=str(data),
-                                             feed_dir=str(fd) if use_feed else None, env=env)
-        return argv, None, str(data), True
+                                             feed_dir=str(fd) if use_feed else None,
+                                             file_binds=binds, env=env)
+        return _spec(argv, None, str(data), True, manifest)
+    argv = [_interpreter(), "-I", "-B", str(code / entry["script"])] + tail
     full = dict(env, PATH=module_sandbox.SANDBOX_PATH, HOME=str(data))
-    return argv, full, str(data), False
+    return _spec(argv, full, str(data), False, manifest)
 
 
 def _host_tz():
@@ -768,50 +859,75 @@ def _kill_group(proc):
         pass
 
 
+def _exited(pid):
+    """True once `pid` has exited; it is NOT reaped, so its process group
+    id stays reserved until we kill the group and wait."""
+    try:
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
 def run_capped(argv, env, cwd, timeout_s, *, stdout_cap=STDOUT_CAP, stderr_cap=STDERR_CAP):
-    """Run in a new session; read both pipes with caps; kill the group on
-    timeout or overflow. -> (rc or None, stdout bytes, stderr bytes, why)."""
+    """Run in a new session; read both pipes with caps in one loop driven by
+    a single deadline; kill the group on timeout or overflow, and once more
+    when it ends (anything left in it). -> (rc or None, stdout, stderr, why).
+
+    Raw descriptors and no reader threads: a child that left the group and
+    still holds a pipe cannot hold this call past its deadline (round three,
+    finding 4). In the sandbox the pid namespace ends such a child; with no
+    sandbox it survives, which `module add` says (UNSANDBOXED_SURVIVORS)."""
     proc = subprocess.Popen(argv, env=env if env is not None else {}, cwd=cwd,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True,
-                            preexec_fn=module_sandbox.set_limits, close_fds=True)
+                            preexec_fn=module_sandbox.limits_fn(), close_fds=True)
     bufs = {"out": bytearray(), "err": bytearray()}
-    over = {"why": None}
-
-    def pump(stream, key, cap):
-        while True:
-            chunk = stream.read1(65536) if hasattr(stream, "read1") else stream.read(65536)
-            if not chunk:
-                break
-            room = cap - len(bufs[key])
-            if len(chunk) > room:
-                bufs[key] += chunk[:max(room, 0)]
-                over["why"] = over["why"] or (
-                    f"its {'output' if key == 'out' else 'error output'} passed the "
-                    f"{cap // 1024} KiB cap")
-                _kill_group(proc)
-                break
-            bufs[key] += chunk
-
-    threads = [threading.Thread(target=pump, args=(proc.stdout, "out", stdout_cap), daemon=True),
-               threading.Thread(target=pump, args=(proc.stderr, "err", stderr_cap), daemon=True)]
-    for t in threads:
-        t.start()
+    caps = {"out": stdout_cap, "err": stderr_cap}
+    why = None
+    deadline = time.monotonic() + timeout_s
+    late = f"it ran past its {timeout_s} s timeout"
+    sel = selectors.DefaultSelector()
     try:
-        proc.wait(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        over["why"] = over["why"] or f"it ran past its {timeout_s} s timeout"
-        _kill_group(proc)
-        proc.wait()
-    _kill_group(proc)                 # anything left in the group
-    for t in threads:
-        t.join(timeout=5)
-    for s in (proc.stdout, proc.stderr):
+        sel.register(proc.stdout.fileno(), selectors.EVENT_READ, "out")
+        sel.register(proc.stderr.fileno(), selectors.EVENT_READ, "err")
+        open_pipes = 2
+        while open_pipes and why is None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                why = late
+                break
+            for key, _ev in sel.select(min(left, 0.5)):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fd)
+                    open_pipes -= 1
+                    continue
+                k = key.data
+                room = caps[k] - len(bufs[k])
+                if len(chunk) > room:
+                    bufs[k] += chunk[:max(room, 0)]
+                    why = (f"its {'output' if k == 'out' else 'error output'} passed the "
+                           f"{caps[k] // 1024} KiB cap")
+                    break
+                bufs[k] += chunk
+        while why is None and not _exited(proc.pid):
+            if time.monotonic() >= deadline:
+                why = late
+                break
+            time.sleep(0.02)
+    finally:
+        _kill_group(proc)             # before reaping: the pgid is still ours
+        sel.close()
+        for f in (proc.stdout, proc.stderr):
+            try:
+                f.close()
+            except OSError:
+                pass
         try:
-            s.close()
-        except OSError:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             pass
-    return proc.returncode, bytes(bufs["out"]), bytes(bufs["err"]), over["why"]
+    return proc.returncode, bytes(bufs["out"]), bytes(bufs["err"]), why
 
 
 # ---------------------------------------------------------------------------
@@ -973,15 +1089,17 @@ def run_collector(name, *, before_run=None):
     st["last_run_at"] = _now_iso()
     try:
         with _Lock(name, blocking=False):
-            gen, manifest, pin = verify(name)
-            if before_run:
-                try:
-                    before_run(name, manifest)
-                except Exception as e:  # noqa: BLE001 — a report failure is not fatal
-                    st["report_error"] = f"{type(e).__name__}: {str(e)[:200]}"
-            argv, env, cwd, sandboxed = build_run(name, "collector")
-            t0 = time.monotonic()
-            rc, out, err, why = run_capped(argv, env, cwd, manifest["collector"]["timeout_s"])
+            with prepared(name, "collector") as run:
+                argv, env, cwd, sandboxed = run
+                manifest = run.manifest           # of the verified copy
+                if before_run:
+                    try:
+                        before_run(name, manifest)
+                    except Exception as e:  # noqa: BLE001 — a report failure is not fatal
+                        st["report_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+                t0 = time.monotonic()
+                rc, out, err, why = run_capped(argv, env, cwd,
+                                               manifest["collector"]["timeout_s"])
             st["duration_s"] = round(time.monotonic() - t0, 3)
             st["sandboxed"] = sandboxed
             if why:
@@ -1168,16 +1286,18 @@ def _ask(prompt):
 
 
 def run_interactive(name, entry_key, args):
-    """CLI and doctor runs: verified, sandboxed, the terminal passed through."""
+    """CLI and doctor runs: verified, sandboxed, the terminal passed through.
+    The module's lock is held until the process ends, so an update cannot
+    prune the generation under a long `setup` (round three, finding 2)."""
     with _Lock(name):
-        argv, env, cwd, _sb = build_run(name, entry_key, args, interactive=True)
-        proc = subprocess.Popen(argv, env=env if env is not None else {}, cwd=cwd,
-                                preexec_fn=module_sandbox.set_limits)
-    try:
-        return proc.wait()
-    except KeyboardInterrupt:
-        proc.send_signal(signal.SIGINT)
-        return proc.wait()
+        with prepared(name, entry_key, args, interactive=True) as (argv, env, cwd, _sb):
+            proc = subprocess.Popen(argv, env=env if env is not None else {}, cwd=cwd,
+                                    preexec_fn=module_sandbox.limits_fn())
+            try:
+                return proc.wait()
+            except KeyboardInterrupt:
+                proc.send_signal(signal.SIGINT)
+                return proc.wait()
 
 
 def main(argv=None):
