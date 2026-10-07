@@ -1,12 +1,19 @@
 # Corral Light modules, and FinOps as the first one
 
-> Status: PROPOSED, rev 2, 2026-10-07. Nothing built.
+> Status: PROPOSED, rev 3, 2026-10-07. Nothing built.
 > Rev 1 went cold to a three-vendor panel (Codex on gpt-6-astra, Grok,
 > Gemini): AMEND, AMEND, REJECT. All three found the same central defect:
 > rev 1 offered collectors "read-only" access to a state dir that holds the
 > wall's cookie-signing key, and nothing enforced the read-only part. Rev 2
 > is the reshape. What changed and why:
 > `reviews/2026-10-07-finops-module-panel/synthesis.md`.
+>
+> Rev 3 (same day), on the operator's direction "automate this as much as
+> possible": every figure now comes from the vendor's own source of truth
+> wherever one exists, and local token counts priced at list are only the
+> fallback. New: §2.1 (the order of sources), vendor quota for Claude, the
+> vendor's own cost for Grok, automatic account setup, opt-in vendor billing
+> APIs. Rev 2's survey was wrong about Grok; §2 is corrected.
 
 ## 0. The ask
 
@@ -59,20 +66,43 @@ Light's FinOps answers five personal questions:
 
 | Lane | Login and plan | Usage records | Quota | Light already records |
 |---|---|---|---|---|
-| Claude Code, Linux | credentials file fields `subscriptionType`, `rateLimitTier`; each Light pane's credential is a link to the shared file | JSONL transcripts in `~/.claude/projects/` AND in each pane's private config dir `<state>/panes/<id>/config/projects/` (Light links skills and plugins into pane dirs, not `projects`, so these are a second tree) | not on disk | the latest ACP `usage_update` (`used`, `size`, `cost`) is kept in memory and written inside every `turn_end` event in the pane's `events.jsonl`; individual updates are not logged |
-| Claude Code, macOS | the login is in the Keychain; no credentials file; Light does not give panes a private config dir | `~/.claude/projects/` only | not on disk | same as Linux |
-| Codex | `auth.json` in Light's own `CODEX_HOME` (`~/.config/corral-light/codex-home` by default, from `CORRAL_CODEX_HOME`), separate from a desktop `~/.codex` | rollout JSONL under `CODEX_HOME/sessions/`; `token_count` events with cumulative and last-turn usage | each `token_count` carries `rate_limits`: `plan_type`, 5 h and weekly `used_percent`, `resets_at`, credits | `usage_update` with `used`, `size`, no cost, inside `turn_end` |
-| Grok | `~/.grok/auth.json` | session dirs; no token or cost fields found | none found | none |
-| Gemini (Antigravity) | `~/.gemini/antigravity-acp/acp_token.json` | per-conversation SQLite, schema not yet read | unknown | none; Light owns this adapter and could emit `usage_update` |
+| Claude Code, Linux | credentials file fields `subscriptionType`, `rateLimitTier`; each Light pane's credential is a link to the shared file | JSONL transcripts in `~/.claude/projects/` AND in each pane's private config dir `<state>/panes/<id>/config/projects/` (Light links skills and plugins into pane dirs, not `projects`, so these are a second tree) | **vendor-reported:** the Claude agent library emits `rate_limit_event` (type `five_hour`, `seven_day` or `overage`; status `allowed`, `allowed_warning` or `rejected`; `resetsAt`; `utilization` 0 to 1, present only at warning or rejected). Light's Claude adapter forwards it as a `usage_update` carrying `_meta["_claude/rateLimit"]` | the latest ACP `usage_update` (`used`, `size`, `cost`) is kept in memory and written inside every `turn_end` event. **The rate-limit payload is lost:** the turn's final `usage_update` overwrites it before `turn_end`, so no record on this host holds one |
+| Claude Code, macOS | the login is in the Keychain; no credentials file; Light does not give panes a private config dir | `~/.claude/projects/` only | same as Linux | same as Linux |
+| Codex | `auth.json` in Light's own `CODEX_HOME` (`~/.config/corral-light/codex-home` by default, from `CORRAL_CODEX_HOME`), separate from a desktop `~/.codex` | rollout JSONL under `CODEX_HOME/sessions/`; `token_count` events with cumulative and last-turn usage | **vendor-reported:** each `token_count` carries `rate_limits`: `plan_type`, 5 h and weekly `used_percent`, `resets_at`, credits. Codex's app server also has an official `account/rateLimits/read` call, which Light's Codex adapter already uses | `usage_update` with `used`, `size`, no cost, inside `turn_end` |
+| Grok | `~/.grok/auth.json` | **vendor-reported cost:** `grok usage <session-id>` prints JSON with session and per-turn input, output, cached and reasoning tokens, model calls, and `costUsdTicks` (10¹⁰ ticks per USD), computed by xAI. Totals include history inherited by resume or fork. Grok's docs say to use this command, not the `usage.json` file it reads. Tested: the command works with only a copy of the session dir visible, no login | weekly pool: only inside Grok's interactive `/usage`; no command | none |
+| Gemini (Antigravity) | `~/.gemini/antigravity-acp/acp_token.json` | per-conversation SQLite; a `gen_metadata` table holds binary (protobuf) generation records with model and request ids; token fields not yet decoded | no supported interface | none; the lane runs Google's own ACP server, which emits no `usage_update` |
 | Ollama | none | none needed | none | none |
 
 Consequences:
 
-- Claude and Codex are covered from local files with no network. Codex
-  reports its own quota on every turn.
-- Grok and Gemini start as "credentials found, usage not reported on disk".
+- Claude and Codex quota, and Grok cost, come from the vendor with no
+  network and no new login.
+- Gemini starts as "credentials found, usage not reported".
 - A scanner that reads only `~/.claude/projects` misses Linux pane
   transcripts; one that reads both must dedupe.
+
+### 2.1 Sources of truth, in order
+
+For each figure the module takes the first source that exists, and the
+tile names it:
+
+1. **Vendor-reported, local** (kind `vendor`): Claude and Codex quota
+   windows, Codex plan type, Grok's per-session cost. No network, no
+   extra key.
+2. **Vendor billing API, opt-in** (kind `billed`): for pay-per-call
+   accounts only, through a read-only admin key the operator creates once
+   (§6.7).
+3. **Declared by the operator** (kind `declared`): subscription prices.
+   Setup proposes them from the detected plan (§6.3).
+4. **Estimated from local token counts at API list price** (kind `list`):
+   only where nothing above covers the figure. Claude and Codex usage
+   value; never a substitute for a vendor quota or bill.
+5. **Unreported** (null): everything else.
+
+A figure from a lower source never overrides one from a higher source for
+the same account and period. Where both exist (Grok's vendor cost and a
+list-price estimate of the same tokens), the module reports the vendor
+figure and uses the estimate only as a doctor cross-check.
 
 ## 3. Trust model (new in rev 2)
 
@@ -142,7 +172,8 @@ hand-edited by operators.
                 "every_s": 300, "budget_s": 30, "timeout_s": 45},
   "cli": {"script": "cli.py"},
   "doctor": {"script": "cli.py", "args": ["doctor"]},
-  "reads": ["claude-projects", "codex-sessions", "light-feed"],
+  "reads": ["claude-projects", "codex-sessions", "grok-sessions", "light-feed"],
+  "tools": ["grok"],
   "network": "none"
 }
 ```
@@ -156,10 +187,21 @@ Rules, each refused at install with the reason:
   no way to say `python3 -c` or `-m`.
 - `reads` names entries from a fixed vocabulary the core resolves to real
   paths per platform; a module cannot ask for an arbitrary path. v1
-  vocabulary: `claude-projects`, `codex-sessions`, `gemini-store`,
-  `grok-store`, `light-feed`.
-- `network` is `none` in v1. Opt-in egress for balance reads is a later
-  phase (§7), through Light's existing egress proxy, to named domains.
+  vocabulary: `claude-projects`, `codex-sessions`, `grok-sessions`,
+  `gemini-store`, `light-feed`. None of them contains a login file.
+- `tools` names vendor command-line tools from a fixed vocabulary the
+  core resolves (v1: `grok`, for `grok usage`). The core binds the
+  resolved binary and its runtime read-only into the sandbox, sets `HOME`
+  to a throwaway dir that contains only the matching `reads` entry
+  (Grok sees `~/.grok/sessions` and nothing else, so never `auth.json`),
+  and passes the binary's path as `CORRAL_TOOL_GROK`. The module may run
+  only `grok usage <id> [turn]`; a core-owned wrapper refuses any other
+  argv. Tested on this host: the command answers with only a session dir
+  visible.
+- `network` is `none` for the collector, always. Vendor billing APIs
+  (§6.7) run in a second, separate entry, `fetcher`, declared with
+  `"network": ["api.anthropic.com", ...]`: it gets egress to those domains
+  only, through Light's existing egress proxy, and none of the `reads`.
 - Unknown keys or a `core_api` the core does not speak are refused.
 
 ### 4.3 Where things live
@@ -182,8 +224,13 @@ every observer tick when something changed. Contents:
   `model`, `title`, `created`, `closed`, `acp_session`, `worktree_id`,
   `role`, origin (`consult`, `challenge`, `rig`, human), `challenge_of`,
   and `usage`: a list of `{turn, at, used, size, cost}` taken from that
-  pane's `turn_end` events. No prompt text, no tool payloads, no paths
-  beyond `cwd`.
+  pane's `turn_end` events, and `rate_limits`: the latest vendor quota
+  payload per window type (`five_hour`, `seven_day`, `overage`) with the
+  time it arrived. No prompt text, no tool payloads, no paths beyond
+  `cwd`.
+- `quota.json`: per lane, the newest quota payload seen on any pane, so
+  the module has Claude's quota even when the pane that reported it has
+  closed.
 - `logins.json`: per lane, the facts the core already reads for its own
   login checks: present, plan and tier for Claude (credentials file on
   Linux, Keychain on macOS), account fingerprint (a hash, never the id) and
@@ -247,6 +294,7 @@ else.
 |---|---|
 | `modules.py` (new) | manifest and pin checks, staging, generations, add, list, remove, enable, disable, update, rollback; the runner thread; snapshot validation |
 | `module_feed.py` (new) | writes `module-feed/v1` from the Manager's panes and the existing login checks |
+| `sessions.py` | keep the latest `_meta["_claude/rateLimit"]` per window type on the pane, separately from `usage`, so the turn's final `usage_update` no longer overwrites it; write it into `turn_end` beside `usage`. Works for any lane that sends a rate-limit `_meta`; nothing is computed |
 | `review_sandbox.py` | factor out the bubblewrap builder so the collector can use an allowlist profile; the reviewer profile is unchanged |
 | `hub.py` | start runners after serving; `GET /api/modules`, `GET /api/module/<name>`, `POST /api/module/<name>/refresh` (rate-limited, one queued run); counts on `/health` |
 | `test_corral_light.py` | the Live-surface route allowlist gains the `/api/module/` prefix, with a dated reason; this is a deliberate edit, not an incidental one |
@@ -314,7 +362,8 @@ Stdlib Python 3.9+. Its own repository and CI.
 |---|---|
 | `module.json` | manifest |
 | `discover.py` | turns the feed and the declared read paths into account candidates |
-| `sources/claude.py`, `sources/codex.py`, `sources/light.py` | one reader each; each returns facts plus its own freshness, parse rate and error |
+| `sources/claude.py`, `sources/codex.py`, `sources/grok.py`, `sources/light.py` | one reader each; each returns facts plus its own source rank (§2.1), freshness, parse rate and error |
+| `fetchers/anthropic.py`, `fetchers/openai.py`, `fetchers/xai.py`, `fetchers/gcp_billing.py` | opt-in vendor billing API readers (§6.7), run by the separate `fetcher` entry |
 | `ledger.py` | SQLite in the data dir: an event index, daily facts, per-file cursors, all written in one transaction per batch |
 | `prices.toml` | effective-dated list prices per raw model id and pricing dimension (input, output, cache read, cache write, long-context tier), with a source URL per row, in integer micro-dollars per token |
 | `plans.toml` | known plans and list prices, effective-dated, offered as defaults only |
@@ -358,19 +407,36 @@ usd_cents_month = 2000
 sources = "codex-sessions:3f9a1c"
 ```
 
-`setup` runs discovery, prints each candidate, offers the `plans.toml`
-price with its effective date as the default, and writes only what the
-operator confirms. It is re-runnable and never deletes an account the
-operator wrote. A source with no account still shows in the dialog under
-"Not set up", with usage and no price.
+**Setup is automatic; the operator only confirms.** The module needs no
+setup to start: on its first run it builds **proposed accounts** from the
+feed and the vendor's own plan reports, and the dialog shows them at once
+with their usage and quota. A proposed account carries:
+
+- the vendor and the source it was found in;
+- the plan as the vendor states it (Claude `subscriptionType` and
+  `rateLimitTier`; Codex `plan_type`; Grok and Gemini: unknown, since
+  neither reports a plan locally);
+- a price from `plans.toml` for that plan, labelled "list price as of
+  <date>, not confirmed".
+
+`corral-light finops setup` (or one button in the dialog) lists the
+proposals; Enter accepts all, or the operator edits any line. `setup
+--yes` accepts every proposal without questions, for scripted installs.
+Only accepted accounts reach the config file. A plan change the vendor
+reports later (Codex `plan_type` moves from `plus` to `pro`) is shown as
+"plan changed, price not confirmed" until accepted, and Committed marks
+that line `list` instead of `declared`. Setup is re-runnable and never
+deletes an account the operator wrote.
 
 ### 6.4 What the dialog shows
 
 | Tile | Figure | Kind |
 |---|---|---|
-| **Committed** | declared subscription prices per month | declared |
-| **Quota** | each vendor-reported window: Codex 5 h and weekly, used percent and reset time | vendor |
-| **API-equivalent list cost** | this month's usage priced at API list, per account, beside the plan's price, never added to it | list |
+| **Committed** | subscription prices per month: accepted ones are `declared`, proposed ones `list` | declared or list |
+| **Quota** | each vendor-reported window: Codex 5 h and weekly with used percent; Claude 5 h, weekly and overage with status and reset time, plus a percent when the vendor sends one (it does only near a limit, so "allowed, no percent reported" is the normal state and is shown as such, never as 0%) | vendor |
+| **Vendor cost** | Grok's own computed cost for this month's sessions | vendor |
+| **API-equivalent list cost** | Claude and Codex usage priced at API list, per account, beside the plan's price, never added to it | list |
+| **Billed** | pay-per-call spend from vendor billing APIs, only when an opt-in fetcher account exists (§6.7) | billed |
 
 Then: a per-lane table for the month; a **Sources** list saying, per
 lane, "reported", "credentials found, usage not reported on disk", or
@@ -404,6 +470,20 @@ tiles. While the first backfill runs, the dialog shows its progress.
   mid-history takes its first total as a baseline, marked "history before
   this point not read". Duplicate or out-of-order events (same or lower
   timestamp and total) are ignored.
+- **Grok.** The module stats each session dir and runs `grok usage <id>`
+  only for sessions whose files changed since the last run, at most 20
+  per run, newest first. It records per-turn facts keyed by session and
+  turn, and dollars as integer ticks, never floats. Because totals
+  include history inherited by resume or fork, session totals are never
+  summed: the module sums turns, and a turn already recorded under a
+  parent session is not counted again. How inherited turns are marked is
+  a Phase 0 question; until it is answered, a turn whose timestamp,
+  tokens and ticks all match a recorded turn is treated as the same turn.
+- **Claude quota.** Taken from the feed's `quota.json`, newest payload per
+  window type. A payload older than its own `resetsAt` is shown as
+  "window has reset since last report", not as the old status.
+- **Codex quota.** The newest `token_count.rate_limits` across all Codex
+  homes of one account. Same staleness rule.
 - **Pricing.** Raw model ids are kept. Normalization to a price row is a
   lookup, not a rewrite, so a long-context or dated variant can carry its
   own price. An unpriced model's tokens are counted under "unpriced",
@@ -425,15 +505,48 @@ tiles. While the first backfill runs, the dialog shows its progress.
 - On Linux, the sandbox makes the rest of this enforceable rather than
   promised.
 
+### 6.7 Vendor billing APIs (opt-in, pay-per-call accounts only)
+
+Every vendor has an official billing or usage API for API-key accounts.
+None covers a consumer subscription, and each needs a key the operator
+creates once by hand. The module supports them as opt-in `api` accounts:
+
+| Vendor | API | Key | Limits |
+|---|---|---|---|
+| Anthropic | Usage and Cost Admin API (`/v1/organizations/usage_report/messages`, `/v1/organizations/cost_report`) | Admin API key | organization accounts only; individual accounts cannot create one |
+| OpenAI | Usage and Costs API (`/v1/organization/costs`) | Admin key, restricted to read on Usage | organization owner or admin |
+| xAI | Management API (`management-api.x.ai`): usage and prepaid credit | Management key | team accounts |
+| Google | Cloud Billing export to BigQuery | a service account with read on the export dataset | needs a Google Cloud project with billing export enabled; heaviest setup |
+
+Rules:
+
+- `setup` explains, per vendor, where the key is created and the least
+  scope to give it; the key goes in a file the operator names
+  (`secret_file = "..."`), mode 0600, never in the config.
+- Fetchers run in their own sandbox: egress to that vendor's API domain
+  only, the one secret file read-only, none of the usage `reads`, its own
+  writable dir. They run at most hourly; billed figures lag a day anyway.
+- Billing figures are kind `billed` and are never mixed with subscription
+  figures. A day re-reported by the vendor replaces the earlier figure.
+
+### 6.8 An alternative not adopted: vendor telemetry streams
+
+Claude Code, Codex and Grok can each export usage metrics over
+OpenTelemetry (Grok's is documented as content-free by default and off
+unless switched on). Light could switch it on for the panes it launches
+and the module could receive it. Not adopted for v1: it needs a
+long-lived receiver (against M1), covers only panes Light launched, and
+changes each vendor CLI's configuration. It is listed for the panel.
+
 ## 7. Phases
 
 | Phase | Deliverable | Done when |
 |---|---|---|
-| **0. Measure** | Claude: how many records share a `requestId`, and which is final; whether `usage_update.cost` survives resume, compaction and `/clear`; plan fields from the macOS Keychain. Codex: counter resets on resume and fork; where an account id lives that the core can hash without exposing the token; `rate_limits` against the Codex CLI's own status. Gemini schema; Grok usage command. Scan timing on this host. A prototype collector sandbox profile, with a test that it cannot open `session.key` or reach the hub port. | a results doc; this plan updated where an answer changes it |
-| **1. Seam** | §4 and §5: modules, feed, sandbox profile, runner, routes, renderer, dialog, doctor, wrapper, index; tested with fixture modules in the test tree only | the seam tests in §8.1 pass; Light's suite passes with zero modules and with each fixture |
-| **2. FinOps v1** | discovery, setup, Claude and Codex sources, ledger, prices and plans, the three tiles, per-lane table, Sources, Most used this week, CLI | installed here with one command; §8.4 checks pass |
-| **3. More vendors** | Gemini and Grok sources if Phase 0 found data; rail notices with bounds and expiry | each new source passes the §8.2 source tests |
-| **4. Network and macOS** | opt-in API balances through the egress proxy, in a separate fetcher with no usage mounts; a macOS sandbox investigation | the operator decides each |
+| **0. Measure** | Claude: how many records share a `requestId`, and which is final; whether `usage_update.cost` survives resume, compaction and `/clear`; plan fields from the macOS Keychain; how often `rate_limit_event` arrives and whether it ever carries `utilization` below the warning threshold. Codex: counter resets on resume and fork; where an account id lives that the core can hash without exposing the token; `rate_limits` against the Codex CLI's own status; whether Light's Codex adapter forwards quota updates between turns. Grok: how inherited turns appear after resume and fork; `grok usage` in the sandbox with only the sessions dir; its runtime cost per call. Gemini: decode `gen_metadata` for token fields, or confirm there are none. Scan timing on this host. A prototype collector sandbox profile, with a test that it cannot open `session.key` or reach the hub port. | a results doc; this plan updated where an answer changes it |
+| **1. Seam** | §4 and §5: modules, feed (with quota), the rate-limit fix in `sessions.py`, sandbox profile with the `tools` binding, runner, routes, renderer, dialog, doctor, wrapper, index; tested with fixture modules in the test tree only | the seam tests in §8.1 pass; Light's suite passes with zero modules and with each fixture |
+| **2. FinOps v1** | automatic proposed accounts and one-step setup; Claude, Codex and Grok sources; ledger, prices and plans; Committed, Quota, Vendor cost and API-equivalent list cost tiles; per-lane table, Sources, Most used this week; CLI | installed here with one command and no questions beyond one confirmation; §8.4 checks pass |
+| **3. Gemini and notices** | Gemini source if Phase 0 decoded usage; rail notices with bounds and expiry | the Gemini source passes the §8.2 source tests |
+| **4. Billing APIs and macOS** | opt-in fetchers for the four vendor billing APIs (§6.7); a macOS sandbox investigation | each fetcher tested against a local stub; the operator decides which to enable |
 
 Dropped: any use of the pane's Claude login to read quota. All three
 reviewers said no.
@@ -473,6 +586,13 @@ reviewers said no.
   404; traversal in a name is refused; `/health` carries counts only.
 - **Feed.** Written atomically; carries usage from `turn_end` events; a
   sentinel prompt string and a sentinel token never appear in it.
+- **Quota capture.** A fake Claude lane sends a rate-limit `usage_update`
+  and then a final plain `usage_update` in the same turn; the `turn_end`
+  event and the feed both still hold the rate-limit payload. A second
+  window type does not overwrite the first.
+- **Tool binding.** Inside the sandbox the Grok binary sees a `HOME` with
+  only the sessions dir; `auth.json` does not exist there; the wrapper
+  refuses any argv other than `usage <id> [turn]`, including extra flags.
 - **Parsing on every supported Python.** The fixture `module.json` and a
   full `finops.toml` example load under the core's readers on 3.9 and on
   the newest Python in CI.
@@ -511,6 +631,23 @@ All fixtures are synthetic.
   with 1 MB of new lines takes under 2 s; peak memory under 200 MB.
 - **Time:** month boundaries in the configured zone, a DST zone, the last
   night of a month.
+- **Grok:** a recorded `grok usage` fixture is turned into per-turn
+  facts; ticks stay integers end to end; a resumed session's inherited
+  turns are not counted twice; an unchanged session is not re-queried;
+  a failing or hanging command degrades Grok alone.
+- **Source order:** with a vendor figure and an estimate for the same
+  account and period, the tile shows the vendor figure and its kind; with
+  the vendor figure removed, the estimate appears labelled `list`.
+- **Quota staleness:** a Claude or Codex payload past its own reset time
+  says the window has reset; Claude "allowed" with no percent never
+  renders as 0%.
+- **Automatic setup:** with no config file, the first run proposes one
+  account per detected login with the vendor-stated plan and a `list`
+  price; `setup --yes` writes exactly those; a later vendor plan change
+  shows as unconfirmed and does not rewrite the config.
+- **Fetchers:** each billing API against a local stub: success, a
+  re-reported day replacing the old one, 401, 429, timeout; the secret
+  sentinel never appears in output; the fetcher cannot read usage paths.
 - **Prices:** an effective-dated change re-prices only later days; a long
   context variant uses its own row; a missing price never yields 0.
 - **Format drift:** a new line shape below the parse-rate threshold
@@ -533,7 +670,9 @@ palette, renders, shows backfill progress, survives a module failure, and
 ### 8.4 Live checks on this host (manual, before calling v1 done)
 
 - Codex quota figures match the Codex CLI's status view at the same
-  minute.
+  minute; Claude quota status matches Claude Code's own status line.
+- Grok vendor cost for three of Light's Grok panes matches `grok usage`
+  run by hand.
 - For one finished Claude pane, the module's list cost and the pane's
   last `usage_update.cost` are compared and the difference is reported.
   This is a diagnostic until Phase 0 establishes what that cost covers.
@@ -551,3 +690,7 @@ palette, renders, shows backfill progress, survives a module failure, and
 2. **Where the module repository lives.** The author recommends a public
    repository beside Corral Light under the same owner, so the index can
    point to it.
+3. **Running a vendor's binary inside the sandbox** (`grok usage`) versus
+   reading its undocumented `usage.json` directly. The author recommends
+   the binary: it is the interface the vendor documents, and the sandbox
+   shows it no login.
