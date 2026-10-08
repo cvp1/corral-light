@@ -89,12 +89,26 @@ def grok_home(home=None):
     return os.path.abspath(env) if env else os.path.join(os.path.expanduser("~"), ".grok")
 
 
+def _path_groks():
+    """Every executable `grok` on PATH, in PATH order."""
+    for d in os.get_exec_path():
+        cand = os.path.join(d or os.curdir, "grok")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            yield cand
+
+
 def find_binary(ghome=None):
-    """The resolved Grok binary file, or None. `which grok`, then
-    <grok home>/bin/grok; the symlink is resolved so only the file is bound."""
-    for cand in (shutil.which("grok"), os.path.join(grok_home(ghome), "bin", "grok")):
-        if cand and os.path.exists(cand):
-            return os.path.realpath(cand)
+    """The resolved Grok binary file, or None. Each `grok` on PATH, then
+    <grok home>/bin/grok; the symlink is resolved so only the file is bound.
+    A candidate whose resolved file is not named like Grok is skipped: a
+    version-manager shim (mise links `grok` to mise itself) only works with
+    the manager's own state, which the sandbox does not have."""
+    for cand in list(_path_groks()) + [os.path.join(grok_home(ghome), "bin", "grok")]:
+        if not os.path.exists(cand):
+            continue
+        real = os.path.realpath(cand)
+        if os.path.basename(real).startswith("grok"):
+            return real
     return None
 
 
@@ -423,6 +437,13 @@ def _refresh(out_dir, ghome_arg, binary, limit, timeout_s, scratch_dir):
     ghome = grok_home(ghome_arg)
     idx = _load_index(out_dir)
 
+    binary = os.path.realpath(str(binary)) if binary else find_binary(ghome)
+
+    def parked(prev, st):
+        """Failed RETRY_FAILED times on this usage.json with this binary."""
+        return (not prev.get("ok") and prev.get("b") == binary
+                and prev.get("m") == st.st_mtime_ns and prev.get("s") == st.st_size)
+
     sessions = scan_sessions(ghome)
     todo = []
     for sid, d, st in sessions:
@@ -430,7 +451,7 @@ def _refresh(out_dir, ghome_arg, binary, limit, timeout_s, scratch_dir):
         same = prev.get("m") == st.st_mtime_ns and prev.get("s") == st.st_size
         if same and prev.get("ok") and os.path.exists(os.path.join(out_dir, sid + ".json")):
             continue
-        if same and not prev.get("ok") and int(prev.get("fails") or 0) >= RETRY_FAILED:
+        if parked(prev, st) and int(prev.get("fails") or 0) >= RETRY_FAILED:
             continue
         todo.append((sid, d, st))
 
@@ -444,7 +465,6 @@ def _refresh(out_dir, ghome_arg, binary, limit, timeout_s, scratch_dir):
         return skip_all(f"module sandbox unavailable: {why}")
     if not todo:
         return res
-    binary = os.path.realpath(str(binary)) if binary else find_binary(ghome)
     if not binary or not os.path.isfile(binary):
         return skip_all("grok binary not found")
     if not BINARY_CHECK(binary):
@@ -477,10 +497,9 @@ def _refresh(out_dir, ghome_arg, binary, limit, timeout_s, scratch_dir):
             if rep is None:
                 res["failed"] += 1
                 res["stale"].append(sid)
-                same = prev.get("m") == st.st_mtime_ns and prev.get("s") == st.st_size
-                fails = (int(prev.get("fails") or 0) if same and not prev.get("ok") else 0) + 1
+                fails = (int(prev.get("fails") or 0) if parked(prev, st) else 0) + 1
                 idx[sid] = {"m": st.st_mtime_ns, "s": st.st_size, "ok": False,
-                            "fails": fails, "why": why}
+                            "fails": fails, "why": why, "b": binary}
                 _mark_stale(out_dir, sid, why)
                 continue
             parent, forked = summary_refs(os.path.join(d, "summary.json"))

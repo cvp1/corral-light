@@ -245,6 +245,77 @@ class SandboxedRuns(unittest.TestCase):
         self.assertEqual(r["ran"], 1)
         self.assertTrue(os.path.exists(os.path.join(self.L.out, s + ".json")))
 
+    def test_parked_failures_retry_with_a_different_binary(self):
+        # A session that failed RETRY_FAILED times is parked until its
+        # usage.json changes, or until a different binary is found: a
+        # wrong binary (a version-manager shim) must not park it forever.
+        s, d = self.L.session(1, mode="garbage")
+        for _ in range(vendor_reports.RETRY_FAILED):
+            self.assertEqual(self.L.refresh()["ran"], 1)
+        self.assertEqual(self.L.refresh()["ran"], 0)
+        other = os.path.join(self.L.home, "bin", "grok-9.9.10")
+        shutil.copy(os.path.realpath(self.L.binary), other)
+        Layout.write(d, "summary.json", {"created_at": "2026-10-01T10:00:00Z"})
+        r = self.L.refresh(binary=other)
+        self.assertEqual((r["ran"], r["failed"]), (1, 0))
+        self.assertTrue(os.path.exists(os.path.join(self.L.out, s + ".json")))
+
+    def test_old_index_entries_without_a_binary_are_retried(self):
+        # Indexes written before the binary was recorded hold parked
+        # failures with no "b"; the next run retries them once more.
+        s, d = self.L.session(1)
+        st = os.stat(os.path.join(d, "usage.json"))
+        os.makedirs(self.L.out)
+        Layout.write(self.L.out, ".index.json", {s: {
+            "m": st.st_mtime_ns, "s": st.st_size, "ok": False, "fails": 3, "why": "exit 1"}})
+        r = self.L.refresh()
+        self.assertEqual((r["ran"], r["failed"]), (1, 0))
+
+
+class FindBinary(unittest.TestCase):
+    """`which grok` can be a version-manager shim (mise, asdf): a link to
+    the manager itself, which fails inside the sandbox. Only a file named
+    like Grok is taken; otherwise the next candidate is."""
+
+    def setUp(self):
+        self.L = Layout(self)
+        self.pathdir = os.path.join(self.L.root, "shims")
+        os.makedirs(self.pathdir)
+        p = mock.patch.dict(os.environ, {"PATH": self.pathdir})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def link(self, target_name):
+        target = os.path.join(self.L.root, target_name)
+        shutil.copy(os.path.realpath(self.L.binary), target)
+        os.chmod(target, 0o755)
+        os.symlink(target, os.path.join(self.pathdir, "grok"))
+        return target
+
+    def test_shim_on_path_is_skipped_for_grok_home(self):
+        self.link("mise")
+        self.assertEqual(vendor_reports.find_binary(self.L.home),
+                         os.path.realpath(self.L.binary))
+
+    def test_real_grok_on_path_is_taken(self):
+        target = self.link("grok-native")
+        self.assertEqual(vendor_reports.find_binary(self.L.home), os.path.realpath(target))
+
+    def test_only_a_shim_finds_nothing(self):
+        self.link("mise")
+        os.remove(self.L.binary)
+        self.assertIsNone(vendor_reports.find_binary(self.L.home))
+
+    def test_later_path_entry_is_used_after_a_shim(self):
+        self.link("mise")
+        later = os.path.join(self.L.root, "later")
+        os.makedirs(later)
+        real = os.path.join(later, "grok")
+        shutil.copy(os.path.realpath(self.L.binary), real)
+        os.chmod(real, 0o755)
+        with mock.patch.dict(os.environ, {"PATH": self.pathdir + os.pathsep + later}):
+            self.assertEqual(vendor_reports.find_binary(self.L.home), real)
+
 
 @NEEDS_SANDBOX
 class BinaryCheck(unittest.TestCase):
