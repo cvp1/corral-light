@@ -5,14 +5,15 @@ the operator stores a key with `module key add`, then grants that one key
 to one module for one vendor with `module grant`. Each run then gets:
 
 - the verified run copy of the module's code, read-only;
-- that one key file, read-only, at KEY_IN_SANDBOX, and nothing else from
-  the config dir: no other key, no collector data, no usage `reads`, no
+- no key at all: the hub's fetch proxy (fetch_proxy.py) adds the grant's
+  credential to each request to the vendor, so module code never holds it;
+  nothing from the config dir, no collector data, no usage `reads`, no
   feed;
 - a writable dir of its own (not the collector's data dir);
-- egress only through a CONNECT proxy the hub runs for that run, which
-  allows the vendor's exact hosts (modules.FETCH_VENDORS) and never a lane's
-  sign-in host. The sandbox has its own network namespace, so the proxy's
-  unix socket is the only way out.
+- egress only through that proxy, in plain HTTP proxy form (no CONNECT, so
+  no tunnel the core cannot see into), to the vendor's exact hosts
+  (modules.FETCH_VENDORS) and never a lane's sign-in host. The sandbox has
+  its own network namespace, so the proxy's socket is the only way out.
 
 Fetchers need the sandbox: there is no unsandboxed acknowledgement for a
 process that holds a key and reaches the network. The result is one JSON
@@ -31,6 +32,7 @@ import sys
 import time
 from pathlib import Path
 
+import fetch_proxy
 import module_sandbox
 import modules
 import review_egress
@@ -41,12 +43,9 @@ MAX_KEY_BYTES = 16 << 10
 MIN_KEY_BYTES = 16              # shorter is no vendor key, and too short to find in output
 RESULT_CAP = 1 << 20
 RESULT_SCHEMA = "corral-light.fetch-result/1"
-KEY_IN_SANDBOX = "/run/corral/key"
 EGRESS_IN_SANDBOX = "/run/corral/egress.py"
 SOCK_DIR_IN_SANDBOX = "/run/corral/sock"
 EGRESS_PY = Path(review_egress.__file__).resolve()
-# Public CA roots for TLS, nothing secret. Bound only where they exist.
-CA_DIRS = ("/etc/ssl", "/etc/ca-certificates", "/etc/pki")
 BACKOFF_MIN_S = 3600                  # retries at most hourly per grant
 MAX_ERROR = 300
 # Non-secret settings a grant may carry (a billing export table, a region):
@@ -336,19 +335,17 @@ def scrub(text, ns=()):
 
 # ── one run ─────────────────────────────────────────────────────────────
 
-def _ca_dirs():
-    return [d for d in CA_DIRS if os.path.isdir(d)]
-
-
 DARWIN = sys.platform == "darwin"
 
 
 def build_fetch(name, key, run_dir, sock_dir, egress_port=None):
-    """-> (argv, cwd, timeout_s, every_s, vendor, key_bytes) for one granted
-    key, from the verified run copy. Raises ModuleError on anything not
-    allowed. Linux reaches the proxy through a shim and the unix socket in
-    sock_dir; macOS through `egress_port` on loopback, which its profile
-    allows and nothing else."""
+    """-> (argv, cwd, timeout_s, every_s, vendor) for one granted key, from
+    the verified run copy. Raises ModuleError on anything not allowed.
+
+    The sandbox holds no key (plan §6.7.2): the fetcher sends plain HTTP to
+    the core's fetch proxy at CORRAL_FETCH_API, which adds the credential.
+    Linux reaches it through the loopback shim and the unix socket in
+    sock_dir; macOS through `egress_port`, which its profile allows."""
     code, manifest, pin = modules.verify(name, run_copy=run_dir)
     entry = manifest.get("fetcher")
     if not entry:
@@ -363,43 +360,33 @@ def build_fetch(name, key, run_dir, sock_dir, egress_port=None):
     if not sandboxed:
         raise ModuleError(f"fetchers run only in the module sandbox, and this host has "
                           f"none ({why})")
-    key_bytes = read_key(key)
-    # The run binds a private copy in its own 0700 dir: what was checked is
-    # what is bound, whatever happens to the key file meanwhile.
-    kp = Path(sock_dir) / "key"
-    kfd = os.open(kp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(kfd, "wb") as f:
-        f.write(key_bytes)
     wd = work_dir(name, key)
     wd.mkdir(parents=True, exist_ok=True, mode=0o700)
     hosts = modules.FETCH_VENDORS[vendor]
+    port = int(egress_port) if DARWIN else review_egress.SHIM_PORT
+    if DARWIN and not egress_port:
+        raise ModuleError("no egress port for the fetch")
     env = {"LANG": "C.UTF-8", "TZ": modules._host_tz(), "CORRAL_MODULE_API": str(modules.CORE_API),
            "CORRAL_MODULE_NAME": name, "CORRAL_MODULE_DATA": str(wd),
            "CORRAL_MODULE_SANDBOXED": "1", "CORRAL_FETCH_VENDOR": vendor,
-           "CORRAL_FETCH_KEY": KEY_IN_SANDBOX, "CORRAL_FETCH_KEY_NAME": key,
-           "CORRAL_FETCH_HOSTS": ",".join(hosts)}
+           "CORRAL_FETCH_KEY_NAME": key, "CORRAL_FETCH_HOSTS": ",".join(hosts),
+           "CORRAL_FETCH_API": f"http://127.0.0.1:{port}"}
     for k, v in check_params(g.get("params")).items():
         env["CORRAL_FETCH_PARAM_" + k.upper()] = v
     interp = modules._interpreter()
     script = [interp, "-I", "-B", f"{modules.SANDBOX_CODE}/{entry['script']}"] + list(entry["args"])
-    binds = [(str(code), modules.SANDBOX_CODE), (str(kp), KEY_IN_SANDBOX)]
+    binds = [(str(code), modules.SANDBOX_CODE)]
     if DARWIN:
-        if not egress_port:
-            raise ModuleError("no egress port for the fetch")
-        proxy = f"http://127.0.0.1:{int(egress_port)}"
-        env.update({k: proxy for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY",
-                                       "http_proxy", "ALL_PROXY", "all_proxy")})
-        env["NO_PROXY"] = env["no_proxy"] = ""
-        argv = module_sandbox.build_argv(script, read_only=_ca_dirs(), data_dir=str(wd),
-                                         env=env, file_binds=binds, proxy_port=int(egress_port))
+        argv = module_sandbox.build_argv(script, data_dir=str(wd), env=env, file_binds=binds,
+                                         proxy_port=port)
     else:
         inner = [interp, "-I", "-B", EGRESS_IN_SANDBOX, f"{SOCK_DIR_IN_SANDBOX}/egress.sock",
                  "--"] + script
         argv = module_sandbox.build_argv(
-            inner, read_only=_ca_dirs(), data_dir=str(wd), env=env,
+            inner, data_dir=str(wd), env=env,
             file_binds=binds + [(str(EGRESS_PY), EGRESS_IN_SANDBOX),
                                 (str(sock_dir), SOCK_DIR_IN_SANDBOX)])
-    return argv, str(wd), entry["timeout_s"], entry["every_s"], vendor, key_bytes
+    return argv, str(wd), entry["timeout_s"], entry["every_s"], vendor
 
 
 def _check_result(out, ns):
@@ -448,17 +435,21 @@ def run_fetch(name, key, now=None):
             sock_dir.mkdir(mode=0o700)
             try:
                 granted = ((modules._pin(name).get("grants") or {}).get(key) or {})
-                hosts = modules.FETCH_VENDORS.get(granted.get("vendor"), ())
-                # The proxy first: on macOS the command needs its port.
-                egress = review_egress.Egress(
-                    sock_dir / "egress.sock", None,
-                    allow=lambda h: review_egress.exact_allowed(h, hosts),
+                vendor0 = granted.get("vendor")
+                if vendor0 not in modules.FETCH_VENDORS:
+                    raise ModuleError(f"{name} has no usable grant for key {key!r}")
+                hosts = modules.FETCH_VENDORS[vendor0]
+                # The key stays here: read once, safely, and handed to the
+                # proxy, which adds it to each vendor request (plan §6.7.2).
+                key_bytes = read_key(key)
+                ns = needles(key_bytes)
+                egress = fetch_proxy.FetchProxy(
+                    sock_dir / "egress.sock", vendor0, key_bytes, hosts,
                     on_host=lambda h, ok: seen.append((str(h).lower().rstrip(".") if ok
                                                        else None, ok)), tcp=DARWIN)
-                argv, cwd, timeout_s, every, vendor, key_bytes = build_fetch(
+                argv, cwd, timeout_s, every, vendor = build_fetch(
                     name, key, run_dir, sock_dir, egress_port=egress.port)
-                ns = needles(key_bytes)
-                if modules.FETCH_VENDORS[vendor] != hosts:
+                if vendor != vendor0:
                     raise ModuleError("the grant changed while the fetch was prepared")
                 st["vendor"] = vendor
                 t0 = time.monotonic()

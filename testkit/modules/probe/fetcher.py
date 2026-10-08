@@ -1,11 +1,14 @@
 """Fixture fetcher. Its behaviour is the JSON in mode.json in its own work
-dir, written by the test. Test-only: never installed outside the suite."""
-import base64
+dir, written by the test. It holds no key (plan §6.7.2): it reaches the
+vendor only through the core's fetch proxy at CORRAL_FETCH_API.
+Test-only: never installed outside the suite."""
+import http.client
 import json
 import os
 import socket
 import sys
 import time
+import urllib.parse
 
 
 def attempt(fn):
@@ -16,16 +19,31 @@ def attempt(fn):
         return "refused:" + type(e).__name__
 
 
-def via_proxy(host):
-    """CONNECT through the shim; -> the proxy's status line."""
-    proxy = os.environ.get("HTTPS_PROXY", "")
-    hp = proxy.rsplit("/", 1)[-1]
-    h, p = hp.rsplit(":", 1)
-    s = socket.create_connection((h, int(p)), timeout=10)
-    s.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
-    line = s.recv(200).split(b"\r\n", 1)[0].decode()
+def proxy():
+    u = urllib.parse.urlsplit(os.environ["CORRAL_FETCH_API"])
+    return u.hostname, u.port
+
+
+def call(method, url, headers=None, body=None):
+    """One request through the fetch proxy, in proxy form -> (status, text)."""
+    host, port = proxy()
+    c = http.client.HTTPConnection(host, port, timeout=20)
+    try:
+        c.request(method, url, body=body, headers=headers or {})
+        r = c.getresponse()
+        return r.status, r.read().decode("utf-8", "replace")
+    finally:
+        c.close()
+
+
+def raw(line):
+    """Send one raw request line (CONNECT, say) -> the status line."""
+    host, port = proxy()
+    s = socket.create_connection((host, port), timeout=10)
+    s.sendall(line.encode() + b"\r\n\r\n")
+    out = s.recv(200).split(b"\r\n", 1)[0].decode()
     s.close()
-    return line
+    return out
 
 
 def main():
@@ -35,30 +53,20 @@ def main():
             mode = json.load(f)
     except OSError:
         mode = {"mode": "ok"}
-    key = open(os.environ["CORRAL_FETCH_KEY"], "rb").read()
     m = mode["mode"]
     if m == "ok":
         print(json.dumps({"ok": True, "vendor": os.environ["CORRAL_FETCH_VENDOR"],
                           "hosts": os.environ["CORRAL_FETCH_HOSTS"]}))
-    elif m == "leak":
-        print(json.dumps({"oops": key.decode().strip()}))
-    elif m == "leak_b64":
-        print(json.dumps({"oops": base64.b64encode(key.strip()).decode()}))
-    elif m == "leak_u":
-        k = key.decode().strip()
-        print('{"oops": "' + "".join("\\u%04x" % ord(c) for c in k) + '"}')
-    elif m == "leak_hex":
-        print(json.dumps({"oops": key.strip().hex()}))
-    elif m == "connect_key":
-        # The key as a proxy target: refused, and must not be kept anywhere.
-        try:
-            via_proxy(key.decode().strip()[:60])
-        except Exception:  # noqa: BLE001
-            pass
-        print(json.dumps({"ok": True}))
+    elif m == "call":
+        out = []
+        for req in mode["requests"]:
+            status, text = call(req.get("method", "GET"), req["url"], req.get("headers"),
+                                req.get("body"))
+            out.append({"status": status, "text": text[:2000]})
+        print(json.dumps({"replies": out}))
     elif m == "fail":
-        print("GET https://api.example.invalid/v1/x?key=" + key.decode().strip() +
-              "\nAuthorization: Bearer abcdefghijklmnop", file=sys.stderr)
+        print("GET https://api.example.invalid/v1/x?q=1\nAuthorization: Bearer abcdefghijklmnop",
+              file=sys.stderr)
         sys.exit(1)
     elif m == "big":
         sys.stdout.write("x" * (2 << 20))
@@ -67,10 +75,12 @@ def main():
     elif m == "isolation":
         out = {line: attempt(lambda line=line: open(line, "rb").read(1))
                for line in mode.get("read", [])}
-        out["key_via_env"] = attempt(lambda: open(os.environ["CORRAL_FETCH_KEY"], "rb").read(1))
         out["list_home"] = attempt(lambda: os.listdir(os.path.expanduser("~/..")))
         out["direct"] = attempt(lambda: socket.create_connection(("1.1.1.1", 443), timeout=2))
-        out["proxy"] = {h: via_proxy(h) for h in mode.get("connect", [])}
+        out["connect"] = raw("CONNECT api.anthropic.com:443 HTTP/1.1")
+        out["other_host"] = call("GET", "https://example.com/")[0]
+        out["sign_in_host"] = call("GET", "https://console.anthropic.com/")[0]
+        out["plain_http"] = call("GET", "http://api.anthropic.com/v1/x")[0]
         out["env"] = sorted(os.environ)
         print(json.dumps(out))
 

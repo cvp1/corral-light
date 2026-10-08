@@ -1,6 +1,8 @@
 # Corral Light modules, and FinOps as the first one
 
-> Status: rev 8, 2026-10-08. Phases 3 and 4 reviewed by a panel and fixed
+> Status: rev 9, 2026-10-08. Billing keys stay in the core (§6.7.2): no
+> module code holds one. macOS jobs are in CI.
+> Rev 8, 2026-10-08. Phases 3 and 4 reviewed by a panel and fixed
 > (`reviews/2026-10-08-phase3-4-panel/synthesis.md`); the module sandbox
 > now also runs on macOS (`docs/finops-macos-sandbox.md` §6).
 > Rev 7, 2026-10-08. Phase 4 (billing APIs) built; see §6.7.1.
@@ -808,14 +810,40 @@ Where the build refines the rules above:
   the fetch and an empty one keeps earlier days. The key checks catch
   plain and common encodings only: module code that holds a key can
   always encode it otherwise, which is why a key reaches only its own
-  vendor and only pinned code the operator granted it to. A core-side
-  billing client, so module code never holds a key, is the stronger
-  design and is left for a later phase.
+  vendor and only pinned code the operator granted it to. (Superseded by
+  §6.7.2: module code no longer holds a key.)
 - **macOS.** Fetchers run on macOS too, in the Seatbelt profile, reaching
   the proxy on one loopback port (`docs/finops-macos-sandbox.md` §6).
 - **Read-only keys.** Only Google's role pair is read-only. Anthropic and
   OpenAI document no read-only admin key, and xAI's billing ACLs are
   undocumented; `finops billing` says so before the operator makes one.
+
+#### 6.7.2 Keys stay in the core (rev 9)
+
+The panel's strongest advice, built: a fetcher never holds a key. The
+sandbox gets no key file and no credential. The fetcher sends plain HTTP,
+in proxy form (`GET https://api.anthropic.com/v1/... HTTP/1.1`), to the
+hub's fetch proxy (`fetch_proxy.py`) at `CORRAL_FETCH_API`, which for each
+request:
+
+- accepts GET or POST to an `https` URL on one of the grant's vendor hosts
+  (exact, never a sign-in host), port 443, no userinfo; anything else is
+  403, and CONNECT is 405, so there is no tunnel the core cannot see into;
+- drops every request header but `Accept`, `Content-Type`, `User-Agent` and
+  `anthropic-version`, then adds the credential: Anthropic's `x-api-key`,
+  OpenAI's and xAI's bearer key, or for Google a short-lived token the core
+  obtains itself with the service account key (an RS256 assertion signed
+  in the core; `oauth2.googleapis.com` is the core's host, never the
+  module's, whose Google host is now `bigquery.googleapis.com` only);
+- makes the HTTPS request with certificate checks, to a public address,
+  with caps (500 requests a run, 8 MiB a response);
+- refuses a response carrying the key or the token (raw or base64), and
+  passes back only the status, `Content-Type`, `Retry-After` and the body.
+
+So the limit recorded in §6.7.1, that module code holding a key can always
+encode it past a scan, no longer applies: the module never has it. The
+result scans stay as a second line. Transport is unchanged: the loopback
+shim and a bound unix socket on Linux, one loopback port on macOS.
 
 ### 6.8 An alternative not adopted: vendor telemetry streams
 

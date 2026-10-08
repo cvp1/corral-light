@@ -81,7 +81,8 @@ FETCH_VENDORS = {
     "anthropic": ("api.anthropic.com",),
     "openai": ("api.openai.com",),
     "xai": ("management-api.x.ai",),
-    "gcp": ("oauth2.googleapis.com", "bigquery.googleapis.com"),
+    # Google's token host is the core's own (fetch_proxy), never the module's.
+    "gcp": ("bigquery.googleapis.com",),
 }
 FETCH_EVERY_S = (21600, 3600, 7 * 86400)      # default, least, most
 FETCH_TIMEOUT_S = (60, 5, 120)

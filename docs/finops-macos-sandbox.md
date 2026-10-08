@@ -182,7 +182,8 @@ with every path passed as a `-D` parameter. Measured on the Mac:
   the data dir is a copy. So the module's code runs from its verified run
   copy's real path rather than `/module`, and a fetcher finds its key
   through `CORRAL_FETCH_KEY`.
-- **Fetchers** reach the hub's exact-host proxy on a loopback TCP port the
+- **Fetchers** reach the hub's fetch proxy (plan §6.7.2: it holds the key
+  and adds it; the fetcher has none) on a loopback TCP port the
   profile allows (`(remote tcp "localhost:PORT")`); every other local port
   and the internet are refused, and the proxy, not the module, resolves
   names. Linux keeps the unix-socket shim.
@@ -202,6 +203,8 @@ Light state there, collected the Mac's own usage sandboxed and fetched
 from Anthropic through the proxy (a fake key: a clean 401, and the key's
 bytes nowhere in the state).
 
-Still open: the tests run by hand on one Mac and one macOS release; CI
-has no macOS runner yet. Resource limits other than open files and file
+Still open: the tests ran by hand on one Mac and one macOS release; CI
+now has a macOS job (the system Python and a current one) that fails if
+the sandbox is not available, so the sandboxed tests cannot pass by
+skipping. Resource limits other than open files and file
 size are not shown to hold on macOS.

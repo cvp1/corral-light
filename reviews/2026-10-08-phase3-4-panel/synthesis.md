@@ -95,10 +95,12 @@ its fix.
   Checked: the range in `billed_fetch` is informational; days outside a
   fetch's range stay in `billed_day` and are summed by day.
 
-## Recorded, not changed
+## Built afterwards
 
 Astra's closing sentence: move credential handling into a trusted core
-client so module code never holds a reusable secret. The key checks catch
+client so module code never holds a reusable secret. Built the same day
+(plan §6.7.2): the hub's fetch proxy adds each credential and the module
+never holds one. What follows was the reasoning before that. The key checks catch
 plain and common encodings only; module code that holds a key can always
 encode it some other way. The plan accepts that a fetcher, being pinned
 and verified code the operator chose to grant a key to, holds the key
