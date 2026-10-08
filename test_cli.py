@@ -41,6 +41,7 @@ class HubCase(unittest.TestCase):
         cls.tmp = Path(tmpdir(cls, "corral-light-cli-"))
         (cls.tmp / "agent").mkdir()
         cls.env = {**os.environ, "CORRAL_LIGHT_STATE": str(cls.tmp / "state"),
+                   "CORRAL_LIGHT_CONFIG_DIR": str(cls.tmp / "config"),
                    "CORRAL_LIGHT_ROLES_DIR": str(cls.tmp / "roles"),
                    "CORRAL_LIGHT_CONSULT_CFG": str(cls.tmp / "cfg" / "s.json"),
                    "FAKE": str(FAKE), "FAKE_ACP_DIR": str(cls.tmp / "agent")}

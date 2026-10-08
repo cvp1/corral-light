@@ -496,7 +496,8 @@ class ShutdownWritesNotesNotPauses(FakeLaneCase):
     def test_a_real_hub_process_writes_the_note_on_sigterm_and_exits(self):
         import subprocess
         state = tmpdir(self, "corral-light-sigterm-")
-        env = {**os.environ, "CORRAL_LIGHT_STATE": state, "LIGHT_ROOT": str(ROOT),
+        env = {**os.environ, "CORRAL_LIGHT_STATE": state,
+               "CORRAL_LIGHT_CONFIG_DIR": os.path.join(state, "config"), "LIGHT_ROOT": str(ROOT),
                "FAKE": str(FAKE), "FAKE_ACP_DIR": self.agent_dir}
         pr = subprocess.Popen([sys.executable, "-c", HUB_SCRIPT], env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -763,7 +764,8 @@ def start_hub(state, extra_env=None, script=BARE_HUB):
     """A real hub on a private port and state dir. Returns (proc, url)."""
     import subprocess
     port = free_port()
-    env = {**os.environ, "CORRAL_LIGHT_STATE": str(state), "PORT": str(port),
+    env = {**os.environ, "CORRAL_LIGHT_STATE": str(state),
+           "CORRAL_LIGHT_CONFIG_DIR": os.path.join(str(state), "config"), "PORT": str(port),
            "LIGHT_ROOT": str(ROOT), **(extra_env or {})}
     pr = subprocess.Popen([sys.executable, "-c", script], env=env,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)

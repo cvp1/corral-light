@@ -35,6 +35,28 @@ from corral_core.test_acp_rail import *          # noqa: F401,F403
 from corral_core.test_edge import *              # noqa: F401,F403
 
 
+class TheSuiteNeverTouchesTheLiveConfig(unittest.TestCase):
+    """A hub a test starts runs the module runner, which reads the pins in
+    the config dir. With a scratch state dir but the live config dir, it
+    found the operator's installed modules missing from the scratch state
+    and disabled them in the live pins. Config is scratch too."""
+
+    def test_config_dir_is_scratch(self):
+        cfg = os.environ.get("CORRAL_LIGHT_CONFIG_DIR")
+        self.assertTrue(cfg, "CORRAL_LIGHT_CONFIG_DIR is not set for the suite")
+        live = Path.home() / ".config" / "corral-light"
+        self.assertNotEqual(Path(cfg).resolve(), live.resolve())
+        tmp = str(Path(tempfile.gettempdir()).resolve())
+        self.assertTrue(str(Path(cfg).resolve()).startswith(tmp + os.sep), cfg)
+
+    def test_spawned_hub_envs_carry_the_scratch_config(self):
+        for name in ("test_cli.py", "test_resilience.py"):
+            src = (ROOT / name).read_text(encoding="utf-8")
+            self.assertEqual(src.count('"CORRAL_LIGHT_CONFIG_DIR":'),
+                             src.count('"CORRAL_LIGHT_STATE":'),
+                             f"{name}: a hub env sets the state dir but not the config dir")
+
+
 class TheCoreNeverImportsFullCorral(unittest.TestCase):
     """The core never imports from full Corral; the dependency points one way."""
 

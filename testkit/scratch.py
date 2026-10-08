@@ -38,11 +38,18 @@ def process_tmpdir(prefix="corral-test-"):
 
 
 def default_state(prefix="corral-light-test-"):
-    """Point CORRAL_LIGHT_STATE at a process-scoped temp dir unless one is set.
+    """Point CORRAL_LIGHT_STATE at a process-scoped temp dir unless one is set,
+    and CORRAL_LIGHT_CONFIG_DIR likewise.
 
     Replaces `os.environ.setdefault(..., tempfile.mkdtemp())`, which made
     (and leaked) a dir even when the variable was already set.
+
+    The config dir holds the module pins. A hub started with a scratch state
+    dir but the live config dir found the operator's installed modules
+    missing from the scratch state and disabled them in the live pins.
     """
     if "CORRAL_LIGHT_STATE" not in os.environ:
         os.environ["CORRAL_LIGHT_STATE"] = process_tmpdir(prefix)
+    if "CORRAL_LIGHT_CONFIG_DIR" not in os.environ:
+        os.environ["CORRAL_LIGHT_CONFIG_DIR"] = process_tmpdir(prefix + "config-")
     return os.environ["CORRAL_LIGHT_STATE"]
