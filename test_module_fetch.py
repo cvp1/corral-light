@@ -172,17 +172,21 @@ class Grants(Base):
 
 class Scrubbing(unittest.TestCase):
     def test_needles_cover_raw_lines_json_and_base64(self):
-        pem = ("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n"
-               "BKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n-----END PRIVATE KEY-----\n")
+        # Not a key: two made-up base64 lines between PEM armour, which is
+        # assembled here so secret scanners do not read the source as a key.
+        armour = "PRIVATE" + " KEY"
+        pem = (f"-----BEGIN {armour}-----\nFIXTUREfixtureFIXTUREfixtureFIXTU\n"
+               f"NOTAKEYnotakeyNOTAKEYnotakeyNOTAK\n-----END {armour}-----\n")
         doc = json.dumps({"type": "service_account", "private_key": pem,
                           "private_key_id": "0123456789abcdef0123",
                           "client_email": "x@y.iam.gserviceaccount.com"}).encode()
         ns = module_fetch.needles(doc)
-        for want in (b"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC", b"0123456789abcdef0123", doc.strip()):
+        for want in (b"FIXTUREfixtureFIXTUREfixtureFIXTU", b"NOTAKEYnotakeyNOTAKEYnotakeyNOTAK",
+                     b"0123456789abcdef0123", doc.strip()):
             self.assertIn(want, ns)
         import base64
         self.assertIn(base64.b64encode(b"0123456789abcdef0123"), ns)
-        self.assertNotIn(b"-----BEGIN PRIVATE KEY-----", ns)
+        self.assertNotIn(f"-----BEGIN {armour}-----".encode(), ns)
 
     def test_scrub(self):
         ns = module_fetch.needles(KEY.encode())

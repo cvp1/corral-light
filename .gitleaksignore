@@ -1,0 +1,3 @@
+# Known false positives (gitleaks fingerprints). Each is a made-up test
+# fixture, never a real secret; see the commit that added the line.
+1409240efa64a94edcd9eb4363fa43729afc0966:test_module_fetch.py:private-key:175
