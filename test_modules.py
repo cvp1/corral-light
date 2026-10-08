@@ -928,6 +928,12 @@ class TheNoticeRoute(RouteBase):
         _st, h = self.req("GET", "/health", cookie=False)
         self.assertNotIn("NOTICE-SENTINEL", json.dumps(h))
 
+    def test_the_modules_route_carries_them_for_the_pages_poll(self):
+        st, d = self.req("GET", "/api/modules")
+        self.assertEqual(st, 200)
+        self.assertEqual([n["title"] for n in d["notices"]["items"]], ["NOTICE-SENTINEL"])
+        self.assertEqual(self.req("GET", "/api/modules", cookie=False)[0], 401)
+
 
 class TheDispatch(Base):
     def test_a_core_verb_never_reaches_a_module(self):
@@ -1136,7 +1142,9 @@ class TheNotices(Base):
         (gen / "module.json").write_text(json.dumps(m))
         modules.update_pin(name, commit=commit, enabled=True, unsandboxed_ack=True,
                            title=name.title())
-        modules._write_json(modules.status_path(name), {"state": "ok", "fresh_at": iso(fresh)})
+        modules._write_json(modules.status_path(name), {
+            "state": "ok", "fresh_at": iso(fresh),
+            "verified": {"notices": opted, "every_s": every}})
         snap, _ = modules.validate_snapshot(json.dumps(
             {"schema": modules.SNAPSHOT_SCHEMA, "view": [], "notices": notices}), notices=True)
         modules._write_json(modules.snapshot_path(name), snap)
@@ -1147,12 +1155,48 @@ class TheNotices(Base):
             self.fake(name, [notice(i, level=("info", "warn", "bad")[i % 3])
                              for i in range(5)], now)
         out = modules.notices(now + 1)
-        self.assertEqual(len(out["items"]), modules.NOTICES_TOTAL)
-        self.assertEqual(out["more"], 4 * 2 + 4)
-        self.assertEqual([(n["level"], n["module"]) for n in out["items"]],
+        self.assertEqual(len(out["items"]), 4 * modules.NOTICES_PER_MODULE)
+        self.assertEqual(out["more"], 4 * 2)
+        self.assertEqual([(n["level"], n["module"]) for n in out["items"]][:6],
                          [("bad", "alpha"), ("bad", "beta"), ("bad", "delta"), ("bad", "gamma"),
-                          ("warn", "alpha"), ("warn", "alpha"), ("warn", "beta"),
-                          ("warn", "beta")])
+                          ("warn", "alpha"), ("warn", "alpha")])
+        for i in range(6):
+            self.fake(f"extra{i}", [notice(j) for j in range(3)], now)
+        out = modules.notices(now + 1)
+        self.assertEqual(len(out["items"]), modules.NOTICES_SENT)
+        self.assertEqual(out["more"], 4 * 2 + (10 * 3 - modules.NOTICES_SENT))
+
+    def test_an_edited_installed_manifest_cannot_stretch_expiry(self):
+        """Review finding: the period comes from the verified run, not from
+        module.json as it sits on disk now."""
+        self.install(self.make_repo(mutate=opt_in))
+        fresh = self.run_with([notice(1)])
+        commit = modules.load_pins()["probe"]["commit"]
+        mj = modules.module_dir("probe") / commit / "module.json"
+        m = json.loads(mj.read_text())
+        m["collector"]["every_s"] = 86400
+        os.chmod(mj, 0o644)
+        mj.write_text(json.dumps(m))
+        self.assertEqual(self.ids(fresh + 2 * 60 - 1), ["n.1"])
+        self.assertEqual(self.ids(fresh + 2 * 60), [])
+
+    def test_a_stored_notice_is_checked_again_at_read(self):
+        now = time.time()
+        self.fake("edited", [notice(1), notice(2)], now)
+        sp = modules.snapshot_path("edited")
+        snap = json.loads(sp.read_text())
+        snap["notices"][0]["id"] = "Not-an-id\"><img>"
+        snap["notices"][1]["title"] = "   "
+        sp.write_text(json.dumps(snap))
+        self.assertEqual(modules.notices(now + 1)["items"], [])
+
+    def test_a_status_without_verified_facts_shows_none(self):
+        now = time.time()
+        self.fake("old", [notice(1)], now)
+        st = json.loads(modules.status_path("old").read_text())
+        st.pop("verified")
+        modules.status_path("old").write_text(json.dumps(st))
+        self.assertEqual(modules.notices(now + 1)["items"], [])
 
     def test_a_broken_module_costs_only_itself(self):
         now = time.time()

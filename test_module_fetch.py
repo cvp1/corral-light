@@ -99,7 +99,7 @@ class Keys(Base):
         for bad in ("../x", "A", "", "-x", "a/b", ".hidden"):
             with self.assertRaises(modules.ModuleError, msg=bad):
                 module_fetch.key_add(bad, KEY)
-        for bad in ("", "   ", "x" * (module_fetch.MAX_KEY_BYTES + 1)):
+        for bad in ("", "   ", "shortsecret", "x" * (module_fetch.MAX_KEY_BYTES + 1)):
             with self.assertRaises(modules.ModuleError):
                 module_fetch.key_add("k", bad)
 
@@ -119,6 +119,12 @@ class Keys(Base):
             with self.assertRaises(modules.ModuleError, msg=name) as cm:
                 module_fetch.key_path(name)
             self.assertIn(why, str(cm.exception))
+        os.link(d / "good", self.tmp / "second-name")
+        with self.assertRaises(modules.ModuleError) as cm:
+            module_fetch.read_key("good")
+        self.assertIn("hard-linked", str(cm.exception))
+        os.unlink(self.tmp / "second-name")
+        self.assertTrue(module_fetch.read_key("good").startswith(KEY.encode()))
         os.chmod(d, 0o755)
         with self.assertRaises(modules.ModuleError) as cm:
             module_fetch.key_path("good")
@@ -242,13 +248,60 @@ class Runs(Base):
         self.assertNotIn(KEY, json.dumps(st))
 
     def test_the_key_in_a_result_is_refused(self):
-        for m in ("leak", "leak_b64"):
+        for m in ("leak", "leak_b64", "leak_u", "leak_hex"):
             with self.subTest(m=m):
                 self.mode(mode=m)
                 st = module_fetch.run_fetch("probe", "k1")
                 self.assertEqual(st["state"], "failing")
                 self.assertIn("contains the key", st["error"])
                 self.assertIsNone(self.result())
+
+    def test_a_key_sent_as_a_proxy_target_is_kept_nowhere(self):
+        self.mode(mode="connect_key")
+        st = module_fetch.run_fetch("probe", "k1")
+        self.assertEqual(st["state"], "ok", st.get("error"))
+        self.assertEqual(st["hosts"], ["1 other host(s) REFUSED"])
+        for path in self.state.rglob("*"):
+            if path.is_file() and path.name != "k1":
+                self.assertNotIn(KEY[:40].encode(), path.read_bytes(), path)
+
+    def test_a_swapped_key_file_is_not_what_runs(self):
+        """The run binds a private copy of the bytes it checked."""
+        self.mode(mode="ok")
+        real = module_fetch.read_key
+        swapped = []
+
+        def read_then_swap(name):
+            data = real(name)
+            p = module_fetch.keys_dir() / name
+            p.unlink()
+            p.write_text("SWAPPED-IN-SECRET-0123456789")
+            os.chmod(p, 0o600)
+            swapped.append(1)
+            return data
+        with mock.patch.object(module_fetch, "read_key", side_effect=read_then_swap):
+            st = module_fetch.run_fetch("probe", "k1")
+        self.assertTrue(swapped)
+        self.assertEqual(st["state"], "ok", st.get("error"))
+        self.assertFalse(list(module_fetch.modules.STATE.glob("module-egress/*")),
+                         "the run's key copy was not removed")
+
+    def test_revoke_waits_for_a_fetch_in_flight(self):
+        import threading
+        held = threading.Event()
+        done = threading.Event()
+
+        def hold():
+            with modules._Lock("probe"):
+                held.set()
+                time.sleep(1.0)
+            done.set()
+        threading.Thread(target=hold).start()
+        held.wait(5)
+        t0 = time.monotonic()
+        module_fetch.revoke("probe", "k1")
+        self.assertTrue(done.is_set())
+        self.assertGreater(time.monotonic() - t0, 0.5)
 
     def test_errors_are_scrubbed_and_back_off(self):
         self.mode(mode="fail")
@@ -301,7 +354,8 @@ class Runs(Base):
         self.assertIn("HTTPS_PROXY", out["env"])
         self.assertIn("CORRAL_FETCH_PARAM_LOCATION", out["env"])
         self.assertFalse([k for k in out["env"] if k.startswith("CORRAL_READ_")])
-        self.assertIn("evil.api.anthropic.com REFUSED", st["hosts"])
+        self.assertIn("4 other host(s) REFUSED", st["hosts"])
+        self.assertFalse([h for h in st["hosts"] if "evil" in h], st["hosts"])
 
     def test_the_collector_reads_results_read_only(self):
         self.mode(mode="ok")

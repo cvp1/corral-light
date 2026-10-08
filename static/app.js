@@ -3257,12 +3257,15 @@ function noticeMarkSeen(n) {
   for (const k of keys.slice(0, Math.max(0, keys.length - 200))) delete m[k];
   localStorage.setItem(NOTICE_SEEN_KEY, JSON.stringify(m));
 }
-/* -> { shown, more }: the notices to draw, minus those put off with Not now. */
+/* -> { shown, more }: the notices to draw, minus those put off with Not
+ * now, at most NOTICE_CARDS; `more` counts the rest, the hub's overflow too.
+ * Not now is applied first, so hiding one lets the next one in. */
+const NOTICE_CARDS = 8;
 function railNotices(mn, seen) {
-  const raw = mn && Array.isArray(mn.items) ? mn.items : [];
-  const more = mn && Number.isFinite(mn.more) && mn.more > 0 ? Math.floor(mn.more) : 0;
+  const raw = mn && Array.isArray(mn.items) ? mn.items.slice(0, 64) : [];
+  let more = mn && Number.isFinite(mn.more) && mn.more > 0 ? Math.floor(mn.more) : 0;
   const shown = [];
-  for (const x of raw.slice(0, 8)) {
+  for (const x of raw) {
     if (!x || typeof x.module !== 'string' || typeof x.id !== 'string' ||
         typeof x.title !== 'string' || !x.title) continue;
     const n = { module: x.module, id: x.id, title: x.title,
@@ -3270,6 +3273,7 @@ function railNotices(mn, seen) {
                 text: typeof x.text === 'string' ? x.text : '',
                 level: Object.prototype.hasOwnProperty.call(NOTICE_LEVEL_CLASS, x.level) ? x.level : 'info' };
     if (seen && seen[noticeSlot(n)] === noticeKey(n)) continue;
+    if (shown.length >= NOTICE_CARDS) { more++; continue; }
     shown.push(n);
   }
   return { shown, more };
@@ -4106,6 +4110,12 @@ async function loadModules() {
   const before = (PAL.modules || []).map(m => m.name + '\t' + m.title).join('\n');
   let d;
   try { d = await api('/api/modules'); } catch { d = {}; }
+  // The rail's notices ride along, so an idle tab drops expired cards.
+  if ('notices' in d) {
+    const before = JSON.stringify(S.moduleNotices || null);
+    S.moduleNotices = d.notices || null;
+    if (JSON.stringify(S.moduleNotices) !== before) scheduleRender();
+  }
   PAL.modules = (Array.isArray(d.modules) ? d.modules : [])
     .filter(m => m && typeof m.name === 'string' && m.name && m.enabled === true)
     .slice(0, 50)
@@ -4174,7 +4184,11 @@ function wireModuleDialog() {
   $('#mod-refresh').onclick = refreshModule;
   dlg.addEventListener('close', () => { MOD.open = null; clearTimeout(MOD.timer); });
   loadModules();
+  // Module notices expire on the hub's clock (plan §4.7); a tab nobody
+  // touches still asks once a minute, so a card never outlives its rule.
+  setInterval(() => { if (!document.hidden) loadModules().catch(() => {}); }, NOTICE_POLL_MS);
 }
+const NOTICE_POLL_MS = 60000;
 
 /* ── new-conversation dialog ─────────────────────────────────────────── */
 // Posture descriptions, matching the agent's own configOptions wording.

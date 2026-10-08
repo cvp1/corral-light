@@ -263,7 +263,8 @@ check(/\$\('#grid'\)\.addEventListener\('scroll', markSeen/.test(src),
 /* ── module notices (docs/finops-module-plan.md §4.7) ───────────────────── */
 {
   const LV = { info: 'info', warn: 'warn', bad: 'bad' };
-  const railNotices = load('railNotices', ['noticeSlot', 'noticeKey'], { NOTICE_LEVEL_CLASS: LV });
+  const railNotices = load('railNotices', ['noticeSlot', 'noticeKey'],
+                          { NOTICE_LEVEL_CLASS: LV, NOTICE_CARDS: 8 });
   const noticeKey = load('noticeKey');
   const noticeSlot = load('noticeSlot');
   const nt = (id, o = {}) => ({ module: 'finops', moduleTitle: 'FinOps', id, level: 'warn',
@@ -274,8 +275,12 @@ check(/\$\('#grid'\)\.addEventListener\('scroll', markSeen/.test(src),
      'NOT-1 malformed notices are skipped; an unknown level maps to info');
   eq(r.more, 2, 'NOT-1 the hub\'s overflow count is kept');
   eq(railNotices(null, {}), { shown: [], more: 0 }, 'NOT-1 no field, no cards');
-  eq(railNotices({ items: Array.from({ length: 12 }, (_, i) => nt('n' + i)) }, {}).shown.length, 8,
-     'NOT-1 never more than 8 cards');
+  const twelve = { items: Array.from({ length: 12 }, (_, i) => nt('n' + i)), more: 3 };
+  eq([railNotices(twelve, {}).shown.length, railNotices(twelve, {}).more], [8, 7],
+     'NOT-1 never more than 8 cards; the rest, and the hub\'s overflow, are counted');
+  const hid = { [noticeSlot(nt('n0'))]: noticeKey(nt('n0')) };
+  eq(railNotices(twelve, hid).shown.map(x => x.id).slice(-1), ['n8'],
+     'NOT-2 Not now first: hiding one lets the ninth in');
   const seen = { [noticeSlot(nt('a'))]: noticeKey(nt('a')) };
   eq(railNotices({ items: [nt('a'), nt('b')] }, seen).shown.map(x => x.id), ['b'],
      'NOT-2 Not now hides that notice');
@@ -301,6 +306,16 @@ check(/\$\('#grid'\)\.addEventListener\('scroll', markSeen/.test(src),
   eq([opened, marked, renders], [['finops'], ['a'], 1], 'NOT-3 Open opens the module; Not now hides and repaints');
   eq(railOpens(1, 1, true, null), false, 'NOT-4 phone: a notice alone (quiet) never pops the rail');
   eq(railOpens(1, 1, false, null), true, 'NOT-4 desktop: a notice opens the rail');
+  // The real el() sets text, never markup (the card tests use a stand-in).
+  const elDef = src.slice(src.indexOf('const el = '), src.indexOf('return n; };', src.indexOf('const el = ')));
+  check(/textContent/.test(elDef) && !/innerHTML/.test(elDef), 'NOT-3 el() writes textContent only');
+  const blocked = load('blockedCount', ['wtReviewDue'], {});
+  eq(blocked([{ pending: [], question: null }]), 0,
+     'NOT-4 a wall with notices and nothing pending has a hot count of 0');
+  check(/setInterval\([^]*loadModules[^]*NOTICE_POLL_MS/.test(fn('wireModuleDialog')),
+        'NOT-5 an idle tab polls for notices');
+  check(/S\.moduleNotices = d\.notices/.test(fn('loadModules')),
+        'NOT-5 the poll replaces the notices it shows');
   const rail = fn('render');
   check(/railNotices\(S\.moduleNotices[\s\S]{0,120}items\+\+; quiet\+\+/.test(rail),
         'NOT-4 the rail counts each notice as quiet');

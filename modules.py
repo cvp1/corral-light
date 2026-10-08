@@ -1136,7 +1136,8 @@ NOTICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 NOTICE_LEVELS = ("info", "warn", "bad")
 NOTICE_TITLE_CAP, NOTICE_TEXT_CAP = 80, 300
 MAX_NOTICES = 5                  # kept per snapshot
-NOTICES_PER_MODULE, NOTICES_TOTAL = 3, 8   # shown in the rail
+NOTICES_PER_MODULE = 3          # per module, to the page
+NOTICES_SENT = 24               # in all, to the page; the rail draws 8 after Not now
 NOTICE_MAX_AGE_S = 24 * 3600
 _LEVEL_RANK = {"bad": 0, "warn": 1, "info": 2}
 
@@ -1270,6 +1271,10 @@ def run_collector(name, *, before_run=None):
             if verr:
                 raise ModuleError(verr)
             _write_json(snapshot_path(name), snap)
+            # What the verified copy said, for the read-time notice rules:
+            # never re-read from the installed files, which can change.
+            st["verified"] = {"notices": manifest.get("notices") is True,
+                              "every_s": int(manifest["collector"]["every_s"])}
             st.update(state="ok", error=None, fresh_at=_now_iso(), runs_ok=st.get("runs_ok", 0) + 1)
     except ModuleError as e:
         st.update(state="failing", error=str(e)[:500])
@@ -1311,20 +1316,13 @@ def _fetch_summary(name, pin):
     return module_fetch.summary(name, pin)
 
 
-def _pinned_manifest(name, pin):
-    """The pinned generation's module.json as stored (verified at install
-    and on every run), or {}."""
-    commit = pin.get("commit") or ""
-    if not COMMIT_RE.match(commit):
-        return {}
-    m = _read_json(module_dir(name) / commit / "module.json", {})
-    return m if isinstance(m, dict) else {}
-
-
 def notices(now=None):
     """The rail's module notices (§4.7): live notices of every enabled,
     runnable, opted-in module, at most NOTICES_PER_MODULE each and
-    NOTICES_TOTAL in all. -> {"items": [...], "more": n}. Never raises."""
+    NOTICES_SENT in all (the page draws 8 after Not now). The opt-in and
+    period come from the verified copy of the run that made the snapshot
+    (status `verified`), never from installed files. -> {"items": [...],
+    "more": n}. Never raises."""
     now = time.time() if now is None else now
     items, more = [], 0
     try:
@@ -1337,23 +1335,26 @@ def notices(now=None):
             pin = pins[name] or {}
             if not pin.get("enabled") or (not sandboxed and not pin.get("unsandboxed_ack")):
                 continue
-            m = _pinned_manifest(name, pin)
-            if m.get("notices") is not True:
+            st = load_status(name)
+            ver = st.get("verified") if isinstance(st.get("verified"), dict) else {}
+            if ver.get("notices") is not True:
                 continue
-            fresh = _parse_iso(load_status(name).get("fresh_at"))
+            fresh = _parse_iso(st.get("fresh_at"))
             if fresh is None:
                 continue
-            try:
-                every = int((m.get("collector") or {}).get("every_s") or DEFAULT_EVERY_S)
-            except (TypeError, ValueError):
-                every = DEFAULT_EVERY_S
+            every = ver.get("every_s")
+            if isinstance(every, bool) or not isinstance(every, int):
+                continue
             every = max(every, MIN_EVERY_S)
             if now >= fresh + 2 * every or now >= fresh + NOTICE_MAX_AGE_S:
                 continue
             snap = _read_json(snapshot_path(name), {}) or {}
             live = []
             for n in snap.get("notices") or []:
-                if not isinstance(n, dict) or n.get("level") not in NOTICE_LEVELS:
+                # Checked again at read: the stored file is not trusted either.
+                if not isinstance(n, dict) or n.get("level") not in NOTICE_LEVELS or \
+                        not isinstance(n.get("id"), str) or not NOTICE_ID_RE.match(n["id"]) or \
+                        not _text(n.get("title"), NOTICE_TITLE_CAP).strip():
                     continue
                 exp = _parse_iso(n.get("expires_at"))
                 if exp is not None and now >= exp:
@@ -1368,8 +1369,8 @@ def notices(now=None):
         except Exception:  # noqa: BLE001 — one broken module costs only itself
             continue
     items.sort(key=lambda x: (_LEVEL_RANK[x["level"]], x["module"], x["id"]))
-    more += max(0, len(items) - NOTICES_TOTAL)
-    return {"items": items[:NOTICES_TOTAL], "more": more}
+    more += max(0, len(items) - NOTICES_SENT)
+    return {"items": items[:NOTICES_SENT], "more": more}
 
 
 def detail(name):

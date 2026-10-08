@@ -263,13 +263,16 @@ def apply(p, say):
             report = patch_adapters(root)
         except (Refused, subprocess.SubprocessError, OSError) as e:
             git(root, "reset", "-q", "--keep", old)
+            # Pristine adapters first (a patch may have half-taken), then
+            # the old checkout's own patches. Say so if that fails too.
             try:
-                if p["lockfile"]:
-                    npm_ci(root)
-                patch_adapters(root)          # the old checkout's patches, again
-            except (Refused, subprocess.SubprocessError, OSError):
-                pass
-            raise Refused(f"{e} — rolled back to {short(old)}")
+                npm_ci(root)
+                patch_adapters(root)
+                recovered = ""
+            except (Refused, subprocess.SubprocessError, OSError) as r:
+                recovered = (f"; the adapters could NOT be restored ({str(r)[:200]}): run "
+                             f"`npm ci` in spike/ and `python3 adapter_patches.py apply`")
+            raise Refused(f"{e} — rolled back to {short(old)}{recovered}")
         if p["lockfile"]:
             say("adapters reinstalled")
         if report:

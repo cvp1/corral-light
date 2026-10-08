@@ -44,6 +44,18 @@ def main():
         print(json.dumps({"oops": key.decode().strip()}))
     elif m == "leak_b64":
         print(json.dumps({"oops": base64.b64encode(key.strip()).decode()}))
+    elif m == "leak_u":
+        k = key.decode().strip()
+        print('{"oops": "' + "".join("\\u%04x" % ord(c) for c in k) + '"}')
+    elif m == "leak_hex":
+        print(json.dumps({"oops": key.strip().hex()}))
+    elif m == "connect_key":
+        # The key as a proxy target: refused, and must not be kept anywhere.
+        try:
+            via_proxy(key.decode().strip()[:60])
+        except Exception:  # noqa: BLE001
+            pass
+        print(json.dumps({"ok": True}))
     elif m == "fail":
         print("GET https://api.example.invalid/v1/x?key=" + key.decode().strip() +
               "\nAuthorization: Bearer abcdefghijklmnop", file=sys.stderr)

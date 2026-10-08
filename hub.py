@@ -690,7 +690,10 @@ class Handler(BaseHTTPRequestHandler):
         # validated snapshot. Errors and paths only past the pairing check.
         if p == "/api/modules":
             pins = modules.load_pins()
-            return self._json({"modules": [modules.summary(n, pins[n]) for n in sorted(pins)]})
+            # Notices too: the page polls this, so an idle tab's cards age
+            # out on time (plan §4.7) without a full /api/state.
+            return self._json({"modules": [modules.summary(n, pins[n]) for n in sorted(pins)],
+                               "notices": modules.notices()})
         if p.startswith("/api/module/"):
             name = _module_name(p[len("/api/module/"):])
             d = modules.detail(name) if name else None

@@ -280,6 +280,28 @@ class Run(Repo):
         self.assertEqual(self.head(), before)
         self.assertEqual(ci.call_count, 2)           # the new install, then the old again
 
+    def test_a_failed_recovery_is_said_not_hidden(self):
+        self.commit("adapter_patches.py", self.PATCHER_BAD, "patcher that drifts")
+        self.push("spike/package-lock.json", '{"v": 2}', "bump adapters")
+        calls = []
+
+        def ci(root):
+            calls.append(1)
+            if len(calls) == 2:
+                raise update.Refused("npm ci failed: offline")
+        with mock.patch.object(update, "node_bin", return_value=Path("/x")), \
+                mock.patch.object(update, "npm_ci", side_effect=ci):
+            with self.assertRaisesRegex(update.Refused, "could NOT be restored.*offline"):
+                update.apply(update.plan(self.inst), lambda m: None)
+
+    def test_a_patcher_only_failure_reinstalls_clean_adapters(self):
+        self.push("adapter_patches.py", self.PATCHER_BAD, "patcher only, drifts")
+        with mock.patch.object(update, "node_bin", return_value=Path("/x")), \
+                mock.patch.object(update, "npm_ci") as ci:
+            with self.assertRaisesRegex(update.Refused, "rolled back"):
+                update.apply(update.plan(self.inst), lambda m: None)
+        ci.assert_called_once()                      # recovery only: no lockfile change
+
     def test_a_patcher_change_alone_is_applied(self):
         self.push("adapter_patches.py", self.PATCHER_OK.format(tag="v3"), "patcher only")
         with mock.patch.object(update, "npm_ci") as ci:

@@ -38,6 +38,7 @@ from modules import ModuleError
 
 KEY_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 MAX_KEY_BYTES = 16 << 10
+MIN_KEY_BYTES = 16              # shorter is no vendor key, and too short to find in output
 RESULT_CAP = 1 << 20
 RESULT_SCHEMA = "corral-light.fetch-result/1"
 KEY_IN_SANDBOX = "/run/corral/key"
@@ -100,6 +101,29 @@ def key_path(name):
     return p
 
 
+def read_key(name):
+    """The key's bytes, read through a descriptor that refuses a symlink and
+    checked on that same descriptor, so a swap after key_path() changes
+    nothing. Raises ModuleError."""
+    p = key_path(name)
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise ModuleError(f"key {name!r} could not be opened safely") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or \
+                st.st_mode & 0o077 or st.st_nlink != 1 or st.st_size > MAX_KEY_BYTES:
+            raise ModuleError(f"key {name!r} changed or is hard-linked; refused")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(MAX_KEY_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data.strip()) < MIN_KEY_BYTES:
+        raise ModuleError(f"key {name!r} is shorter than {MIN_KEY_BYTES} characters")
+    return data
+
+
 def key_add(name, secret):
     """Store a key: one file, mode 0600, in a 0700 directory. `secret` is
     the key's text; it is never echoed or logged."""
@@ -111,11 +135,19 @@ def key_add(name, secret):
         raise ModuleError("the key is empty; nothing stored")
     if len(secret) > MAX_KEY_BYTES:
         raise ModuleError("the key is larger than 16 KiB; nothing stored")
+    if len(secret) < MIN_KEY_BYTES:
+        raise ModuleError(f"the key is shorter than {MIN_KEY_BYTES} characters; no vendor key "
+                          f"is, so nothing was stored")
     d = keys_dir()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if os.path.islink(d):
-        raise ModuleError(f"{d} is a symlink; refused")
-    os.chmod(d, 0o700)
+    try:                                   # never follow a swapped-in link
+        dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        raise ModuleError(f"{d} is not a plain directory; refused") from None
+    try:
+        os.fchmod(dfd, 0o700)
+    finally:
+        os.close(dfd)
     p = d / name
     if os.path.lexists(p):
         raise ModuleError(f"a key named {name!r} exists; remove it first")
@@ -202,20 +234,22 @@ def grant(name, key, vendor, params=None):
     if vendor not in (f.get("vendors") or []):
         raise ModuleError(f"{name} does not declare a {vendor} fetcher")
     key_path(key)
-    grants = dict(pin.get("grants") or {})
-    grants[key] = {"vendor": vendor, "granted_at": modules._now_iso(), "params": params}
-    modules.update_pin(name, grants=grants)
+    with modules._Lock(name):               # never mid-fetch
+        grants = dict(modules._pin(name).get("grants") or {})
+        grants[key] = {"vendor": vendor, "granted_at": modules._now_iso(), "params": params}
+        modules.update_pin(name, grants=grants)
     return modules.FETCH_VENDORS[vendor]
 
 
 def revoke(name, key):
-    pin = modules._pin(name)
-    grants = dict(pin.get("grants") or {})
-    if key not in grants:
-        raise ModuleError(f"{name} has no grant for key {key!r}")
-    grants.pop(key)
-    modules.update_pin(name, grants=grants)
-    _drop_results(name, key)
+    """Waits for a fetch in flight, so its result cannot land after this."""
+    with modules._Lock(name):
+        grants = dict(modules._pin(name).get("grants") or {})
+        if key not in grants:
+            raise ModuleError(f"{name} has no grant for key {key!r}")
+        grants.pop(key)
+        modules.update_pin(name, grants=grants)
+        _drop_results(name, key)
 
 
 def _drop_results(name, key):
@@ -272,11 +306,13 @@ def needles(key_bytes):
                 for line in v.encode().splitlines():
                     if len(line.strip()) >= 24 and not line.startswith(b"-----"):
                         found.add(line.strip())
-    out = set()
+    out = {raw} if raw else set()               # the key itself, whatever its length
     for n in found:
-        if len(n) >= 12:
+        if len(n) >= 12 or n == raw:
             out.add(n)
             out.add(base64.b64encode(n))
+            out.add(base64.urlsafe_b64encode(n))
+            out.add(n.hex().encode())
             out.add(json.dumps(n.decode("utf-8", "replace"))[1:-1].encode())
     return sorted(out, key=len, reverse=True)
 
@@ -327,9 +363,13 @@ def build_fetch(name, key, run_dir, sock_dir, egress_port=None):
     if not sandboxed:
         raise ModuleError(f"fetchers run only in the module sandbox, and this host has "
                           f"none ({why})")
-    kp = key_path(key)
-    with open(kp, "rb") as f:
-        key_bytes = f.read(MAX_KEY_BYTES + 1)
+    key_bytes = read_key(key)
+    # The run binds a private copy in its own 0700 dir: what was checked is
+    # what is bound, whatever happens to the key file meanwhile.
+    kp = Path(sock_dir) / "key"
+    kfd = os.open(kp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(kfd, "wb") as f:
+        f.write(key_bytes)
     wd = work_dir(name, key)
     wd.mkdir(parents=True, exist_ok=True, mode=0o700)
     hosts = modules.FETCH_VENDORS[vendor]
@@ -374,6 +414,14 @@ def _check_result(out, ns):
         raise ModuleError("the fetcher's output is not one JSON document") from None
     if not isinstance(obj, dict):
         raise ModuleError("the fetcher's result is not a JSON object")
+    # Again after parsing: \uXXXX escapes rebuild the key in the object that
+    # is stored. Encodings past these are not caught here; the fetcher is
+    # pinned, verified code the operator chose to grant a key to.
+    for canon in (json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                  json.dumps(obj).encode("utf-8")):
+        for n in ns:
+            if n in canon:
+                raise ModuleError("the fetcher's result contains the key; refused and not stored")
     return obj
 
 
@@ -405,7 +453,8 @@ def run_fetch(name, key, now=None):
                 egress = review_egress.Egress(
                     sock_dir / "egress.sock", None,
                     allow=lambda h: review_egress.exact_allowed(h, hosts),
-                    on_host=lambda h, ok: seen.append((str(h)[:80], ok)), tcp=DARWIN)
+                    on_host=lambda h, ok: seen.append((str(h).lower().rstrip(".") if ok
+                                                       else None, ok)), tcp=DARWIN)
                 argv, cwd, timeout_s, every, vendor, key_bytes = build_fetch(
                     name, key, run_dir, sock_dir, egress_port=egress.port)
                 ns = needles(key_bytes)
@@ -441,7 +490,13 @@ def run_fetch(name, key, now=None):
             egress.close()
         if sock_dir is not None:
             shutil.rmtree(sock_dir, ignore_errors=True)
-    st["hosts"] = sorted({f"{h} {'allowed' if ok else 'REFUSED'}" for h, ok in seen})[:10]
+    # Only names from the grant's own list; a refused target is the
+    # fetcher's text, so it is counted, never kept (it could carry the key).
+    allowed = sorted({h for h, ok in seen if ok and h in set(modules.FETCH_VENDORS.get(
+        st.get("vendor"), ()))})
+    refused = sum(1 for _h, ok in seen if not ok)
+    st["hosts"] = [f"{h} allowed" for h in allowed] + (
+        [f"{refused} other host(s) REFUSED"] if refused else [])
     try:
         cur = load_status(name)
         cur[key] = st
