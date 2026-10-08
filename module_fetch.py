@@ -27,6 +27,7 @@ import re
 import secrets
 import shutil
 import stat
+import sys
 import time
 from pathlib import Path
 
@@ -303,9 +304,15 @@ def _ca_dirs():
     return [d for d in CA_DIRS if os.path.isdir(d)]
 
 
-def build_fetch(name, key, run_dir, sock_dir):
-    """-> (argv, cwd, timeout_s, vendor, key_bytes) for one granted key, from
-    the verified run copy. Raises ModuleError on anything not allowed."""
+DARWIN = sys.platform == "darwin"
+
+
+def build_fetch(name, key, run_dir, sock_dir, egress_port=None):
+    """-> (argv, cwd, timeout_s, every_s, vendor, key_bytes) for one granted
+    key, from the verified run copy. Raises ModuleError on anything not
+    allowed. Linux reaches the proxy through a shim and the unix socket in
+    sock_dir; macOS through `egress_port` on loopback, which its profile
+    allows and nothing else."""
     code, manifest, pin = modules.verify(name, run_copy=run_dir)
     entry = manifest.get("fetcher")
     if not entry:
@@ -334,12 +341,24 @@ def build_fetch(name, key, run_dir, sock_dir):
     for k, v in check_params(g.get("params")).items():
         env["CORRAL_FETCH_PARAM_" + k.upper()] = v
     interp = modules._interpreter()
-    inner = [interp, "-I", "-B", EGRESS_IN_SANDBOX, f"{SOCK_DIR_IN_SANDBOX}/egress.sock", "--",
-             interp, "-I", "-B", f"{modules.SANDBOX_CODE}/{entry['script']}"] + list(entry["args"])
-    argv = module_sandbox.build_argv(
-        inner, read_only=_ca_dirs(), data_dir=str(wd), env=env,
-        file_binds=[(str(code), modules.SANDBOX_CODE), (str(kp), KEY_IN_SANDBOX),
-                    (str(EGRESS_PY), EGRESS_IN_SANDBOX), (str(sock_dir), SOCK_DIR_IN_SANDBOX)])
+    script = [interp, "-I", "-B", f"{modules.SANDBOX_CODE}/{entry['script']}"] + list(entry["args"])
+    binds = [(str(code), modules.SANDBOX_CODE), (str(kp), KEY_IN_SANDBOX)]
+    if DARWIN:
+        if not egress_port:
+            raise ModuleError("no egress port for the fetch")
+        proxy = f"http://127.0.0.1:{int(egress_port)}"
+        env.update({k: proxy for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY",
+                                       "http_proxy", "ALL_PROXY", "all_proxy")})
+        env["NO_PROXY"] = env["no_proxy"] = ""
+        argv = module_sandbox.build_argv(script, read_only=_ca_dirs(), data_dir=str(wd),
+                                         env=env, file_binds=binds, proxy_port=int(egress_port))
+    else:
+        inner = [interp, "-I", "-B", EGRESS_IN_SANDBOX, f"{SOCK_DIR_IN_SANDBOX}/egress.sock",
+                 "--"] + script
+        argv = module_sandbox.build_argv(
+            inner, read_only=_ca_dirs(), data_dir=str(wd), env=env,
+            file_binds=binds + [(str(EGRESS_PY), EGRESS_IN_SANDBOX),
+                                (str(sock_dir), SOCK_DIR_IN_SANDBOX)])
     return argv, str(wd), entry["timeout_s"], entry["every_s"], vendor, key_bytes
 
 
@@ -380,14 +399,18 @@ def run_fetch(name, key, now=None):
             sock_dir = egress_root / f"{name}-{secrets.token_hex(6)}"
             sock_dir.mkdir(mode=0o700)
             try:
-                argv, cwd, timeout_s, every, vendor, key_bytes = build_fetch(
-                    name, key, run_dir, sock_dir)
-                ns = needles(key_bytes)
-                hosts = modules.FETCH_VENDORS[vendor]
+                granted = ((modules._pin(name).get("grants") or {}).get(key) or {})
+                hosts = modules.FETCH_VENDORS.get(granted.get("vendor"), ())
+                # The proxy first: on macOS the command needs its port.
                 egress = review_egress.Egress(
                     sock_dir / "egress.sock", None,
                     allow=lambda h: review_egress.exact_allowed(h, hosts),
-                    on_host=lambda h, ok: seen.append((str(h)[:80], ok)))
+                    on_host=lambda h, ok: seen.append((str(h)[:80], ok)), tcp=DARWIN)
+                argv, cwd, timeout_s, every, vendor, key_bytes = build_fetch(
+                    name, key, run_dir, sock_dir, egress_port=egress.port)
+                ns = needles(key_bytes)
+                if modules.FETCH_VENDORS[vendor] != hosts:
+                    raise ModuleError("the grant changed while the fetch was prepared")
                 st["vendor"] = vendor
                 t0 = time.monotonic()
                 rc, out, err, why = modules.run_capped(argv, None, cwd, timeout_s,

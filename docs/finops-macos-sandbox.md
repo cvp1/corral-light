@@ -1,9 +1,9 @@
-# A module sandbox on macOS: investigation (Phase 4)
+# A module sandbox on macOS (Phase 4)
 
-> Status: investigation, 2026-10-08. Nothing built. No Mac was available to
-> test on (the build host and the second host both run Linux), so every
-> claim below comes from the cited sources, and the profile in §4 is a
-> starting point to be proven by the tests in §5 before anything ships.
+> Status: BUILT 2026-10-08 and proven on a Mac running macOS 27.0.1
+> (Apple silicon, Python 3.9.6 from the Command Line Tools). §6 records
+> what was measured and where the build differs from the design below,
+> which was written first from the cited sources.
 
 ## 1. The question
 
@@ -157,4 +157,51 @@ Run on macOS 14, 15, 26 and 27, in CI and by hand, each inside the profile:
 - the environment holds only the allowed variables.
 
 Until then, the macOS answer stays as it is: an explicit, typed
-acknowledgement for collectors, and no fetchers.
+acknowledgement for collectors, and no fetchers. (Superseded by §6.)
+
+## 6. As built and measured (2026-10-08)
+
+`module_sandbox.build_argv` and `available()` keep one interface; on
+macOS they build a Seatbelt profile run by `/usr/bin/sandbox-exec -p`,
+with every path passed as a `-D` parameter. Measured on the Mac:
+
+- **What dyld and Python need, and nothing more:** `/usr` and `/System`
+  read and map-executable; the running interpreter's own prefix (never the
+  `/usr/bin/python3` stub, which hands off to the developer tools); the
+  root directory's own entry (data and metadata: dyld aborts every binary
+  without it, even `/usr/bin/true`); metadata on the parent folders of each
+  allowed path only (Python's `realpath` walks them); four `/dev` nodes.
+  No global metadata: a module cannot stat arbitrary paths.
+- **No child processes.** The profile allows `process-exec` but not
+  `process-fork`. A child that calls `setsid()` leaves the process group
+  and macOS has no pid namespace to end it (§3), so a sandboxed module
+  starts none. Collectors and fetchers need none; the chain
+  `sandbox-exec` → `env` → `python` is exec only.
+- **No mounts.** A bind whose destination lies outside the data dir
+  becomes a path alias: the source path is used, and allowed. A bind into
+  the data dir is a copy. So the module's code runs from its verified run
+  copy's real path rather than `/module`, and a fetcher finds its key
+  through `CORRAL_FETCH_KEY`.
+- **Fetchers** reach the hub's exact-host proxy on a loopback TCP port the
+  profile allows (`(remote tcp "localhost:PORT")`); every other local port
+  and the internet are refused, and the proxy, not the module, resolves
+  names. Linux keeps the unix-socket shim.
+- **Exit without reaping.** macOS Python has no `os.waitid`; the runner
+  watches for the child's exit with a kqueue `NOTE_EXIT` event, which also
+  fires at once for a child that exited before the watch was set.
+- **Environment.** Built from nothing with `/usr/bin/env -i`; `TMPDIR` is
+  the data dir; the OS adds `LC_CTYPE` and `__CF_USER_TEXT_ENCODING`.
+
+Probed inside the profile: reading `~/.ssh`, `~/.zshrc` and the login
+keychain, listing the home folder, writing `/private/tmp` or the home
+folder, connecting to `1.1.1.1:443` or any local port, DNS, binding a
+port, `/usr/bin/security`, and a subprocess all fail; writing the data
+dir works. Light's module and fetcher tests (116) pass on the Mac with the
+real sandbox, and FinOps, installed from its repository into a scratch
+Light state there, collected the Mac's own usage sandboxed and fetched
+from Anthropic through the proxy (a fake key: a clean 401, and the key's
+bytes nowhere in the state).
+
+Still open: the tests run by hand on one Mac and one macOS release; CI
+has no macOS runner yet. Resource limits other than open files and file
+size are not shown to hold on macOS.

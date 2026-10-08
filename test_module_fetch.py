@@ -4,6 +4,7 @@ Fixture: testkit/modules/probe/fetcher.py, driven by a mode file."""
 import json
 import os
 import stat
+import sys
 import time
 import unittest
 from unittest import mock
@@ -291,7 +292,9 @@ class Runs(Base):
         out = self.result()["result"]
         for r in reads[:-1]:
             self.assertTrue(out[r].startswith("refused"), r)
-        self.assertEqual(out[module_fetch.KEY_IN_SANDBOX], "OPENED")
+        self.assertEqual(out["key_via_env"], "OPENED")
+        if sys.platform != "darwin":                  # macOS has no mounts: no fixed path
+            self.assertEqual(out[module_fetch.KEY_IN_SANDBOX], "OPENED")
         self.assertTrue(out["direct"].startswith("refused"))
         for h, line in out["proxy"].items():
             self.assertIn("403", line, h)              # the gcp host is not this grant's

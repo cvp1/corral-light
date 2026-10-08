@@ -55,6 +55,7 @@ def main():
     elif m == "isolation":
         out = {line: attempt(lambda line=line: open(line, "rb").read(1))
                for line in mode.get("read", [])}
+        out["key_via_env"] = attempt(lambda: open(os.environ["CORRAL_FETCH_KEY"], "rb").read(1))
         out["list_home"] = attempt(lambda: os.listdir(os.path.expanduser("~/..")))
         out["direct"] = attempt(lambda: socket.create_connection(("1.1.1.1", 443), timeout=2))
         out["proxy"] = {h: via_proxy(h) for h in mode.get("connect", [])}

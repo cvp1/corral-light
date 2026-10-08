@@ -32,6 +32,7 @@ import math
 import os
 import re
 import secrets
+import select
 import selectors
 import shutil
 import signal
@@ -768,7 +769,9 @@ def _interpreter():
     """A Python that exists inside the sandbox: the core's own when it lives
     under /usr, else the system's."""
     exe = os.path.realpath(sys.executable)
-    if exe.startswith("/usr/"):
+    if exe.startswith("/usr/") or sys.platform == "darwin":
+        # macOS: the hub's own interpreter, never the /usr/bin/python3 stub,
+        # which hands off to xcrun and the developer tools.
         return exe
     for c in ("/usr/bin/python3", "/usr/local/bin/python3"):
         if os.path.exists(c):
@@ -926,11 +929,43 @@ def _kill_group(proc):
 
 def _exited(pid):
     """True once `pid` has exited; it is NOT reaped, so its process group
-    id stays reserved until we kill the group and wait."""
+    id stays reserved until we kill the group and wait. Linux only (waitid);
+    see _ExitWatch for macOS."""
     try:
         return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
     except ChildProcessError:
         return True
+
+
+class _ExitWatch:
+    """Has a child exited, without reaping it? waitid(WNOWAIT) where Python
+    has it (Linux); a kqueue NOTE_EXIT event on macOS, which has no waitid.
+    A child that exited before the watch was set still reports at once
+    (measured on macOS 27)."""
+
+    def __init__(self, pid):
+        self.pid, self.kq, self.done = pid, None, False
+        if not hasattr(os, "waitid") and hasattr(select, "kqueue"):
+            self.kq = select.kqueue()
+            try:
+                if self.kq.control([select.kevent(pid, select.KQ_FILTER_PROC,
+                                                  select.KQ_EV_ADD, select.KQ_NOTE_EXIT)], 1, 0):
+                    self.done = True
+            except OSError:
+                self.done = True                  # gone before we could watch it
+
+    def exited(self):
+        if self.done:
+            return True
+        if self.kq is not None:
+            if self.kq.control(None, 1, 0):
+                self.done = True
+            return self.done
+        return _exited(self.pid)
+
+    def close(self):
+        if self.kq is not None:
+            self.kq.close()
 
 
 def run_capped(argv, env, cwd, timeout_s, *, stdout_cap=STDOUT_CAP, stderr_cap=STDERR_CAP):
@@ -952,6 +987,7 @@ def run_capped(argv, env, cwd, timeout_s, *, stdout_cap=STDOUT_CAP, stderr_cap=S
     deadline = time.monotonic() + timeout_s
     late = f"it ran past its {timeout_s} s timeout"
     sel = selectors.DefaultSelector()
+    watch = _ExitWatch(proc.pid)
     try:
         sel.register(proc.stdout.fileno(), selectors.EVENT_READ, "out")
         sel.register(proc.stderr.fileno(), selectors.EVENT_READ, "err")
@@ -975,7 +1011,7 @@ def run_capped(argv, env, cwd, timeout_s, *, stdout_cap=STDOUT_CAP, stderr_cap=S
                            f"{caps[k] // 1024} KiB cap")
                     break
                 bufs[k] += chunk
-        while why is None and not _exited(proc.pid):
+        while why is None and not watch.exited():
             if time.monotonic() >= deadline:
                 why = late
                 break
@@ -983,6 +1019,7 @@ def run_capped(argv, env, cwd, timeout_s, *, stdout_cap=STDOUT_CAP, stderr_cap=S
     finally:
         _kill_group(proc)             # before reaping: the pgid is still ours
         sel.close()
+        watch.close()
         for f in (proc.stdout, proc.stderr):
             try:
                 f.close()
