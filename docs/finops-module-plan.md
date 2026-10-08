@@ -1,7 +1,15 @@
 # Corral Light modules, and FinOps as the first one
 
-> Status: rev 5, 2026-10-07. Phase 0 done; Phase 1 (the seam) built and on
-> master; Phase 2 (the FinOps module) built in its own repository (§7).
+> Status: rev 6, 2026-10-08. Phase 0 done; Phase 1 (the seam) built and on
+> master; Phase 2 (the FinOps module) pushed, installed live from its own
+> repository, and through the §8.4 checks (§7). Phase 3 (notices) is
+> specified in §4.7 and not built.
+>
+> Rev 6 (2026-10-08) specifies Phase 3, which rev 5 left as one table row
+> pointing at tests that did not exist: the `notices` field of the
+> snapshot, its bounds and expiry, where the rail shows notices, and which
+> notices FinOps raises. Not yet reviewed by a panel.
+>
 > Rev 1 went cold to a three-vendor panel (Codex on gpt-6-astra, Grok,
 > Gemini): AMEND, AMEND, REJECT. All three found the same central defect:
 > rev 1 offered collectors "read-only" access to a state dir that holds the
@@ -174,7 +182,7 @@ control for that.
 | M5 | **Explicit updates with rollback.** `module update` stages a new generation, verifies it, waits for the collector to be idle, switches atomically, and keeps the previous generation for `module rollback`. Core `update` never touches modules. | Avoids a run importing half-old, half-new files. |
 | M6 | **The feed, not the state dir.** The hub writes a redacted, versioned feed (§4.4). It is the module's only view of Light. | Replaces rev 1's M6, which all three reviewers rejected. |
 | M7 | **CLI under its own name only.** The wrapper dispatches core verbs first; an unknown verb reaches a module only if it is the exact name of an enabled module, verified like the collector, run with argv passed as a list, never through a shell. Core verb names are reserved. | No shadowing; one verification path. |
-| M8 | **No notices in v1.** The dialog shows quota state. Rail chips come after v1, with count limits, stable ids and expiry tied to snapshot freshness. | Two reviewers wanted bounds that v1 does not need yet. |
+| M8 | **No notices in v1.** The dialog shows quota state. Rail chips come after v1, with count limits, stable ids and expiry tied to snapshot freshness. Specified for Phase 3 in §4.7. | Two reviewers wanted bounds that v1 does not need yet. |
 
 ### 4.2 The manifest (`module.json`, JSON, not TOML)
 
@@ -357,6 +365,93 @@ else.
 | `modules/index.json` (new) | first-party index |
 
 No change to `corral_core/`. The sibling product is untouched.
+
+### 4.7 Notices (Phase 3)
+
+A notice is a short line a module asks the rail to show while a condition
+holds, such as "Claude weekly 92% used". It is information, never a
+request: it blocks nothing, answers nothing, and carries no link or
+action of its own. The rule from M2 holds: the core renders it as text
+through fixed classes.
+
+**Opt-in.** The manifest gains `"notices": true`. A snapshot's notices are
+ignored unless the verified manifest says so, and `module add` shows "can
+show notices in your rail" beside the reads. `core_api` stays 1: the field
+is optional, and a core without Phase 3 drops it, since the validator
+copies only fields it knows.
+
+**The field.** A snapshot may carry a top-level list:
+
+```json
+"notices": [
+  {"id": "quota.claude-3f2a.seven_day", "level": "warn",
+   "title": "Claude weekly 82% used", "text": "resets Tue 06:52",
+   "expires_at": "2026-10-14T13:52:00Z"}
+]
+```
+
+Enforced by the core at validation, each with a test:
+
+- `id` matches `[a-z0-9][a-z0-9._-]{0,63}`; a notice without a valid id is
+  dropped, and a repeated id keeps its first notice only.
+- `level` ∈ `info`, `warn`, `bad`; anything else, `ok` included, becomes
+  `info`.
+- `title` up to 80 characters, `text` up to 300, both through the same
+  text rule as §4.5; an empty title drops the notice.
+- `expires_at`, if present, is an ISO time; unparseable means absent.
+- At most 5 notices per snapshot are kept, ordered `bad`, `warn`, `info`,
+  then by id; the snapshot records how many were dropped.
+
+**Expiry, at read time.** A stored notice is shown only while all of these
+hold, so a module cannot keep a notice up by going quiet:
+
+- the module is enabled and its sandbox state is acceptable (§9.1);
+- now is before the notice's `expires_at`, if it has one;
+- now is before the snapshot's `fresh_at` plus twice the manifest's
+  `every_s`, so a failing or stopped collector loses its notices after two
+  missed runs (10 minutes for FinOps);
+- now is before `fresh_at` plus 24 hours, whatever the module asked.
+
+Removing or disabling a module removes its notices at the next poll. A
+failed run keeps the last good snapshot (§4.5), and its notices then age
+out by the rule above; the failure itself is shown in the dialog, as now,
+not as a notice.
+
+**Delivery.** `modules.notices(now)` returns the live notices of every
+enabled module, at most 3 per module and 8 in all, ordered by level then
+module name. The hub adds them to `/api/state` as `moduleNotices` on the
+full form only, beside `claudeAuth`, and to the poller's omit list.
+`/health` and unauthenticated routes never carry them.
+
+**The rail.** Each notice is one quiet card after the review cards and
+before the paused list: the module's title and the notice's title as the
+heading, its text below, and a level class (`nmod info`, `warn`, `bad`)
+from a fixed table. Two buttons: **Open** opens the module's dialog;
+**Not now** hides the card until its content changes, keyed in
+`localStorage` by module, id, level and title, the same pattern as the
+review card's Not now, so a `warn` that turns `bad` comes back. Notices
+count as quiet items: they open the rail on a wide screen like the review
+cards, never pop the rail on a phone, never count in the hot number, and
+never send a phone notification. Past the 8-card cap the rail says how
+many more there are and that the dialogs have them.
+
+**What FinOps raises.** Only conditions the operator can act on, from data
+already in the snapshot:
+
+| Notice | id | Level | Expires |
+|---|---|---|---|
+| a quota window that is current and at or over 75% used, or whose status is `allowed_warning` | `quota.<account>.<window>` | `warn`; `bad` at 90% or when `rejected` | the window's reset, or the observation plus the window's length when no reset was sent |
+| a source frozen by format drift (§8.2) | `source.<name>.frozen` | `warn` | none; ends when a module update unfreezes the source |
+
+`<account>` is FinOps's account key (`claude:<fingerprint>`, `codex:<fingerprint>`,
+`config:<id>`) lowercased with every character outside the id alphabet
+mapped to `-`; an id that would pass 64 characters keeps its first 55
+and adds `-` and an 8-character hash of the whole.
+
+Stale and reset windows raise nothing, since the vendor has said nothing
+new. Thresholds are the tile levels FinOps already uses, so a card and its
+tile always agree. `[notices] enabled = false` in the module's config
+turns them all off.
 
 ## 5. Installing and running a module
 
@@ -673,8 +768,9 @@ changes each vendor CLI's configuration. It is listed for the panel.
 | **1. Seam** | §4 and §5: modules, feed (with account-scoped quota and login facts), the rate-limit merge in `sessions.py`, the Claude adapter patch (offered upstream), the collector sandbox profile, core-run vendor reports, runner, routes, renderer, dialog, doctor, wrapper, index; tested with fixture modules in the test tree only | the seam tests in §8.1 pass; Light's suite passes with zero modules and with each fixture |
 | | **Built 2026-10-07** on branch `modules-seam`: §4 and §5 as specified, except: the exact-host fetcher proxy moves to Phase 4 with the fetchers; Python 3.9 is checked by its grammar only (no 3.9 interpreter on the build host; CI runs 3.14); the Claude adapter patch is applied by `install.sh` and `lanes update`, not yet to a live install. Real-browser check and screenshots (synthetic fixture data) in `docs/img/module-dialog-*.png`. Round-three review: all eleven findings applied with a failing-first test each (`reviews/2026-10-07-finops-module-panel/synthesis-r3-seam.md`) | |
 | **2. FinOps v1** | automatic proposed accounts and one-step setup; Claude, Codex, Grok and Gemini sources; ledger, prices and plans; Committed, Quota, Vendor-computed cost and API-equivalent list cost tiles; per-lane table, Sources, Most used this week; CLI | installed here with one command, accounts accepted in one step, prices typed once; §8.4 checks pass |
-| | **Built 2026-10-07** in `cvp1/corral-light-finops` (local commits, not yet pushed): every Phase 2 deliverable above, tested by the §8.2 list except the fetcher items (Phase 4). Installed and run through this seam in a throwaway state on the build host, sandboxed: collector, `setup --yes`, `show` and `doctor` all pass. Differences from this plan: the config is `<config>/modules/finops/config.toml`, the folder Phase 1 built, not `finops.toml`; list prices are integer micro-dollars per **million** tokens, since cache-read rates are fractions of a micro-dollar per token; the code is one `finops/` package (sources under `finops/sources/`, discovery in `report.py`); Antigravity databases are copied (database and WAL) into the data dir to be read, because SQLite cannot open a WAL database on a read-only bind; Claude usage belongs to the login fingerprint Light reports, from the moment the module first saw it, since transcripts name no account. Measured: a 500 MB synthetic history backfills over budgeted runs at 35 MB peak memory; a full cold scan of the build host takes 1.3 s. Not yet done: the §8.4 live checks, which need the module installed on the live hub | |
-| **3. Notices** | rail notices with bounds and expiry | each notice expires and is bounded as §8.2 tests |
+| | **Built 2026-10-07** in `cvp1/corral-light-finops` (local commits, not yet pushed): every Phase 2 deliverable above, tested by the §8.2 list except the fetcher items (Phase 4). Installed and run through this seam in a throwaway state on the build host, sandboxed: collector, `setup --yes`, `show` and `doctor` all pass. Differences from this plan: the config is `<config>/modules/finops/config.toml`, the folder Phase 1 built, not `finops.toml`; list prices are integer micro-dollars per **million** tokens, since cache-read rates are fractions of a micro-dollar per token; the code is one `finops/` package (sources under `finops/sources/`, discovery in `report.py`); Antigravity databases are copied (database and WAL) into the data dir to be read, because SQLite cannot open a WAL database on a read-only bind; Claude usage belongs to the login fingerprint Light reports, from the moment the module first saw it, since transcripts name no account. Measured: a 500 MB synthetic history backfills over budgeted runs at 35 MB peak memory; a full cold scan of the build host takes 1.3 s. | |
+| | **Live 2026-10-07**: pushed to `cvp1/corral-light-finops` (CI green on Python 3.9, 3.12 and 3.14) and installed on the live hub with `module add finops`, sandboxed, every 300 s. §8.4 passed: Codex quota matched the CLI's status view at the same minute; Claude's five-hour figure matched `/usage`, and its weekly figure showed the vendor's last notice (11%) while `/usage` said 12%, because a pane gets a new notice only at the start of a turn; Grok vendor cost matched `grok usage` by hand for three sessions to the tick, with all 33 sessions reporting; a new pane's usage reached the ledger within one run. Two core bugs found on the way, both fixed on master: the hub's PATH resolved `grok` to a version manager's shim, and Light's own test hubs read the live module pins and disabled the live module. Not run on this host: the uninstall check, which Light's CI covers by running with no module installed | |
+| **3. Notices** | §4.7: the snapshot's `notices` field, validated and bounded by the core; expiry tied to the module's own freshness; quiet rail cards with Open and Not now; FinOps quota and source-frozen notices | the §8.1 notice tests and the §8.2 notice tests pass; on this host, a forced near-limit window shows one rail card that clears when the window resets, the module is disabled, or the collector stops reporting |
 | **4. Billing APIs and macOS** | opt-in fetchers for the four vendor billing APIs (§6.7); a macOS sandbox investigation | each fetcher tested against a local stub; the operator decides which to enable |
 
 Dropped: any use of the pane's Claude login to read quota. All three
@@ -751,6 +847,32 @@ reviewers said no.
   never become links. Unknown `kind` and `level` map to fixed classes.
 - Screenshots at 400 px and 1600 px wide, synthetic data only.
 
+Notices (Phase 3, §4.7), in `test_modules.py` and `selftest_inbox.mjs`:
+
+- **Opt-in.** A snapshot with notices from a manifest without
+  `"notices": true` yields none; the same snapshot with it yields them.
+- **Validation.** Invalid and repeated ids, unknown levels, an empty
+  title, over-long text, a bad `expires_at`, a non-list field and a
+  non-object entry each behave as §4.7 says; six notices keep five, in
+  level order, with the drop counted.
+- **Expiry.** With a fake clock: past `expires_at` hides a notice; two
+  missed `every_s` periods hide every notice of that module even with no
+  `expires_at` and a far `expires_at`; the 24-hour cap holds; a failed
+  run does not refresh `fresh_at`, so its old notices still age out.
+- **Lifecycle.** Disable, remove and `remove --purge` each clear the
+  module's notices on the next `/api/state`; an unacknowledged
+  unsandboxed module shows none.
+- **Caps.** Four modules with five notices each give 3 per module and 8
+  in all, ordered by level then module name.
+- **Exposure.** `moduleNotices` appears only on the full `/api/state`;
+  the light poll, `/health` and unauthenticated routes never carry it.
+- **Rail.** A notice card has no permission buttons, counts as quiet and
+  not in the hot number, does not pop the rail on a phone, and its Not
+  now holds until the level or title changes. Title and text with
+  `<script>` and `<img onerror>` render as text.
+- **Old core.** A notices-bearing snapshot through the Phase 2 validator
+  loses the field and nothing else.
+
 ### 8.2 FinOps module (its own repository and CI)
 
 All fixtures are synthetic.
@@ -816,6 +938,15 @@ All fixtures are synthetic.
   never reach the snapshot, CLI output or stderr.
 - **Contract:** every snapshot validates with the core's validator,
   vendored and pinned to the core version.
+- **Notices (Phase 3):** a current window at 74%, 75%, 89% and 90% gives
+  none, `warn`, `warn` and `bad`; `allowed_warning` below 75% gives
+  `warn`; `rejected` gives `bad`; stale and reset windows give none, a
+  stale `rejected` included; each notice's level equals its tile's level;
+  `expires_at` is the reset when sent, else observation plus window
+  length; a frozen source gives one `warn` that goes when a module update unfreezes it; a key with `:` or an over-long key gives a valid, stable id; ids
+  are stable across runs and contain no path, title or account id beyond
+  the fingerprint key; `[notices] enabled = false` gives none; message-body
+  sentinels never reach a notice.
 
 ### 8.3 Integration (Light's repository, CI)
 
