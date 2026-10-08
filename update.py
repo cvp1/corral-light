@@ -51,6 +51,10 @@ TIMER_LABEL = LAUNCHD_LABEL + ".update"
 STATUS_FILE = STATE / "update-status.json"
 SKILL = "corral-update"
 LOCKFILE = "spike/package-lock.json"
+# The checkout's own adapter patcher (adapter_patches.py). npm ci installs
+# unpatched adapters, so after a reinstall the patches must be applied again.
+PATCHER = "adapter_patches.py"
+PATCH_TIMEOUT_S = 120
 SERVICE_TEMPLATES = ("corral-light.service", f"{LAUNCHD_LABEL}.plist",
                      "corral-light-watch.service", "corral-light-watch.timer")
 GIT_TIMEOUT_S = 120
@@ -224,6 +228,23 @@ def npm_ci(root):
         raise Refused(f"npm ci failed: {(r.stderr or r.stdout).strip()[-400:]}")
 
 
+def patch_adapters(root):
+    """Run the checkout's OWN patcher on its spike/: the code just pulled,
+    which knows the adapter versions just installed, not this running
+    script. -> its report, or None for a checkout without one. Raises
+    Refused when a patch does not take."""
+    script = Path(root) / PATCHER
+    if not script.is_file():
+        return None
+    r = subprocess.run([sys.executable, "-I", "-B", str(script), "apply",
+                        str(Path(root) / "spike")],
+                       capture_output=True, text=True, timeout=PATCH_TIMEOUT_S)
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode != 0:
+        raise Refused(f"the adapter patches did not apply: {out[-400:]}")
+    return out
+
+
 def apply(p, say):
     """Fast-forward, and reinstall the adapters when their lockfile changed.
     A failed install puts the old commit (and its adapters) back."""
@@ -233,18 +254,26 @@ def apply(p, say):
                       "(set CORRAL_NODE_BIN) — nothing was changed")
     git(root, "merge", "--ff-only", "-q", p["target"])
     say(f"updated {short(old)} → {short(p['target'])} ({p['behind']} commit(s))")
-    if p["lockfile"]:
-        say("the adapters' lockfile changed: npm ci in spike/ …")
+    if p["lockfile"] or PATCHER in p["changed"]:
+        report = None
         try:
-            npm_ci(root)
+            if p["lockfile"]:
+                say("the adapters' lockfile changed: npm ci in spike/ …")
+                npm_ci(root)
+            report = patch_adapters(root)
         except (Refused, subprocess.SubprocessError, OSError) as e:
             git(root, "reset", "-q", "--keep", old)
             try:
-                npm_ci(root)
+                if p["lockfile"]:
+                    npm_ci(root)
+                patch_adapters(root)          # the old checkout's patches, again
             except (Refused, subprocess.SubprocessError, OSError):
                 pass
             raise Refused(f"{e} — rolled back to {short(old)}")
-        say("adapters reinstalled")
+        if p["lockfile"]:
+            say("adapters reinstalled")
+        if report:
+            say("adapter patches: " + "; ".join(report.splitlines()[:3]))
 
 
 def service_manager():
