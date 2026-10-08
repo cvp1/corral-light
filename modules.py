@@ -68,10 +68,22 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 MANIFEST_KEYS = {"schema", "name", "title", "version", "core_api", "summary",
                  "collector", "cli", "doctor", "reads", "vendor_reports", "network",
-                 "notices"}
+                 "notices", "fetcher"}
 ENTRY_KEYS = {"collector": {"script", "args", "every_s", "budget_s", "timeout_s"},
               "cli": {"script", "args"},
-              "doctor": {"script", "args"}}
+              "doctor": {"script", "args"},
+              "fetcher": {"script", "args", "every_s", "timeout_s", "vendors"}}
+# Vendor billing APIs a fetcher may reach (plan §6.7), by exact host. Fixed
+# here, never chosen by a module; a grant names one vendor, and that run
+# reaches only that vendor's hosts.
+FETCH_VENDORS = {
+    "anthropic": ("api.anthropic.com",),
+    "openai": ("api.openai.com",),
+    "xai": ("management-api.x.ai",),
+    "gcp": ("oauth2.googleapis.com", "bigquery.googleapis.com"),
+}
+FETCH_EVERY_S = (21600, 3600, 7 * 86400)      # default, least, most
+FETCH_TIMEOUT_S = (60, 5, 120)
 READS = ("claude-projects", "codex-sessions", "gemini-store", "light-feed")
 VENDOR_REPORTS = ("grok-usage",)
 # Python runs these on its own, in any compiled form: refused by stem.
@@ -315,7 +327,7 @@ def validate_manifest(obj, root=None):
     out["vendor_reports"] = sorted(set(vrep))
     if "collector" not in obj:
         raise ModuleError("module.json needs a collector")
-    for where in ("collector", "cli", "doctor"):
+    for where in ("collector", "cli", "doctor", "fetcher"):
         if where not in obj:
             continue
         entry = obj[where]
@@ -326,6 +338,20 @@ def validate_manifest(obj, root=None):
             raise ModuleError(f"module.json {where} has unknown keys: {', '.join(extra)}")
         e = {"script": _check_script(root, entry.get("script"), where),
              "args": _check_args(entry.get("args"), where)}
+        if where == "fetcher":
+            vendors = entry.get("vendors")
+            if not isinstance(vendors, list) or not vendors or \
+                    not all(isinstance(v, str) for v in vendors):
+                raise ModuleError("module.json fetcher vendors must be a list of names")
+            bad = [v for v in vendors if v not in FETCH_VENDORS]
+            if bad:
+                raise ModuleError(f"module.json fetcher vendor {bad[0]!r} is not one of: "
+                                  f"{', '.join(sorted(FETCH_VENDORS))}")
+            e["vendors"] = sorted(set(vendors))
+            e["every_s"] = _int_field(entry, "every_s", FETCH_EVERY_S[0], FETCH_EVERY_S[1],
+                                      FETCH_EVERY_S[2], where)
+            e["timeout_s"] = _int_field(entry, "timeout_s", FETCH_TIMEOUT_S[0],
+                                        FETCH_TIMEOUT_S[1], FETCH_TIMEOUT_S[2], where)
         if where == "collector":
             e["every_s"] = _int_field(entry, "every_s", DEFAULT_EVERY_S, MIN_EVERY_S, 86400, where)
             e["timeout_s"] = _int_field(entry, "timeout_s", DEFAULT_TIMEOUT_S, 5,
@@ -497,6 +523,11 @@ def describe(manifest, sandboxed, src, commit, digest):
     lines.append("Network  none: its collector makes no network calls")
     if manifest.get("notices"):
         lines.append("Notices  yes: it can show short notices in your rail")
+    if manifest.get("fetcher"):
+        hosts = "; ".join(f"{v}: {', '.join(FETCH_VENDORS[v])}"
+                          for v in manifest["fetcher"]["vendors"])
+        lines.append(f"Fetcher  may call vendor billing APIs, only with a key you grant, "
+                     f"only to: {hosts}")
     if sandboxed:
         lines.append("Sandbox  yes: it sees only the above, its own files and its data dir")
     else:
@@ -578,8 +609,9 @@ def update(name, *, ref=None, confirm=None, out=_say, ask=None):
         out(describe(manifest, sandboxed, pin["source"], commit, digest))
         if set(manifest["reads"]) != set(old.get("reads") or []) or \
                 set(manifest["vendor_reports"]) != set(old.get("vendor_reports") or []) or \
-                bool(manifest["notices"]) != (old.get("notices") is True):
-            out("Changed  what it reads or whether it shows notices; confirm again.")
+                bool(manifest["notices"]) != (old.get("notices") is True) or \
+                _fetch_vendors(manifest) != _fetch_vendors(old):
+            out("Changed  what it reads, its notices or its billing APIs; confirm again.")
             typed = confirm if confirm is not None else (ask(f"Type {name} to update: ")
                                                         if ask else None)
             if typed != name:
@@ -605,6 +637,12 @@ def update(name, *, ref=None, confirm=None, out=_say, ask=None):
     finally:
         if stage is not None:
             shutil.rmtree(stage, ignore_errors=True)
+
+
+def _fetch_vendors(m):
+    f = (m or {}).get("fetcher")
+    v = f.get("vendors") if isinstance(f, dict) else None
+    return sorted(set(v)) if isinstance(v, list) else []
 
 
 def _unchanged_since(name, pin):
@@ -649,6 +687,10 @@ def remove(name, *, purge=False, out=_say):
             mods.pop(name, None)
             save_pins(mods)
         shutil.rmtree(module_dir(name), ignore_errors=True)
+        # Fetch results and fetcher work dirs go with the module: they hold
+        # what a granted key fetched, and the grants went with the pin.
+        shutil.rmtree(fetch_dir(name), ignore_errors=True)
+        shutil.rmtree(STATE / "module-fetchwork" / name, ignore_errors=True)
         if purge:
             shutil.rmtree(data_dir(name), ignore_errors=True)
             shutil.rmtree(config_dir(name), ignore_errors=True)
@@ -761,6 +803,12 @@ def feed_dir():
     return STATE / "module-feed" / "v1"
 
 
+def fetch_dir(name):
+    """Fetcher results the core accepted (plan §6.7): one JSON per granted
+    key, written by the core only, read-only to the module's collector."""
+    return STATE / "module-fetch" / check_name(name)
+
+
 class RunSpec(tuple):
     """(argv, env, cwd, sandboxed), and `.manifest` of the verified copy."""
     manifest = None
@@ -791,6 +839,8 @@ def prepared(name, entry_key, extra_args=(), *, interactive=False):
 def build_run(name, entry_key, extra_args=(), *, interactive=False, run_dir):
     """-> (argv, env, cwd, sandboxed) for one execution path, verified into
     run_dir. Inside the sandbox the code sits read-only at SANDBOX_CODE."""
+    if entry_key == "fetcher":
+        raise ModuleError("a fetcher runs only through module_fetch, with one granted key")
     code, manifest, pin = verify(name, run_copy=run_dir)
     entry = manifest.get(entry_key)
     if not entry:
@@ -815,6 +865,11 @@ def build_run(name, entry_key, extra_args=(), *, interactive=False, run_dir):
            "CORRAL_MODULE_DATA": str(data),
            "CORRAL_MODULE_FEED": str(fd) if use_feed else "",
            "CORRAL_MODULE_SANDBOXED": "1" if sandboxed else "0"}
+    # A module with a fetcher reads what the core accepted from it, read-only.
+    fetched = fetch_dir(name) if manifest.get("fetcher") else None
+    if fetched is not None:
+        fetched.mkdir(parents=True, exist_ok=True, mode=0o700)
+        env["CORRAL_MODULE_FETCHED"] = str(fetched)
     for r, paths in reads.items():
         if r == "light-feed":
             continue
@@ -825,6 +880,8 @@ def build_run(name, entry_key, extra_args=(), *, interactive=False, run_dir):
     if sandboxed:
         argv = [_interpreter(), "-I", "-B", f"{SANDBOX_CODE}/{entry['script']}"] + tail
         ro = [p for r, ps in reads.items() for p in ps]
+        if fetched is not None:
+            ro.append(str(fetched))
         binds = [(str(code), SANDBOX_CODE)]
         # The collector reads its config; only the CLI (setup) may write it.
         if interactive:
@@ -1206,7 +1263,15 @@ def summary(name, pin=None):
             "summary": pin.get("summary", ""), "enabled": bool(pin.get("enabled")),
             "state": state, "sandboxed": bool(sandboxed),
             "error": pin.get("disabled_reason") if not pin.get("enabled") else st.get("error"),
-            "last_run_at": st.get("last_run_at"), "fresh_at": st.get("fresh_at")}
+            "last_run_at": st.get("last_run_at"), "fresh_at": st.get("fresh_at"),
+            "fetch": _fetch_summary(name, pin)}
+
+
+def _fetch_summary(name, pin):
+    if not pin.get("grants"):
+        return {}
+    import module_fetch
+    return module_fetch.summary(name, pin)
 
 
 def _pinned_manifest(name, pin):
@@ -1360,6 +1425,28 @@ class Runner:
                 with self._lock:
                     self._running.discard(name)
                     self._due[name] = time.monotonic() + max(every, MIN_EVERY_S)
+        self.fetch_tick()
+
+    def fetch_tick(self, now=None):
+        """Granted fetchers that are due, one at a time (plan §6.7). A fetch
+        that stores a result queues its module's collector."""
+        import module_fetch
+        for name, pin in sorted(load_pins().items()):
+            if not pin.get("enabled") or not pin.get("grants"):
+                continue
+            for key in module_fetch.due(name, pin, now):
+                with self._lock:
+                    if name in self._running:
+                        break
+                    self._running.add(name)
+                try:
+                    st = module_fetch.run_fetch(name, key)
+                finally:
+                    with self._lock:
+                        self._running.discard(name)
+                if st.get("state") == "ok":
+                    with self._lock:
+                        self._queued.add(name)
 
 
 RUNNER = None
@@ -1388,6 +1475,12 @@ USAGE = """usage: corral-light module <verb>
   rollback <name>
   remove <name> [--purge]
   doctor <name>               the module's own doctor
+  key add <key> | key list | key remove <key>
+                              billing API keys, kept in the key directory (mode 0600)
+  grant <name> <key> <vendor> [--param name=value]...
+                              let a module's fetcher use one key for one vendor
+  revoke <name> <key>         take a grant back; its fetched results are deleted
+  fetch <name> [<key>]        run its granted fetchers now
 An enabled module is also a verb: corral-light <name> ..."""
 
 
@@ -1475,6 +1568,9 @@ def main(argv=None):
             remove(rest[0], purge=purge)
         elif verb == "doctor" and len(rest) == 1:
             return run_interactive(rest[0], "doctor", [])
+        elif verb in ("key", "keys", "grant", "revoke", "fetch"):
+            import module_fetch
+            return _fetch_cli(module_fetch, verb, rest)
         else:
             print(USAGE, file=sys.stderr, flush=True)
             return 2
@@ -1482,6 +1578,70 @@ def main(argv=None):
     except ModuleError as e:
         print(f"corral-light module: {e}", file=sys.stderr, flush=True)
         return 1
+
+
+def _fetch_cli(mf, verb, rest):
+    """`module key add|list|remove`, `module grant|revoke`, `module fetch`."""
+    if verb == "keys" or (verb == "key" and rest[:1] == ["list"] and len(rest) == 1):
+        rows = mf.key_list()
+        if not rows:
+            print(f"No keys. Add one with: corral-light module key add <name>  "
+                  f"(stored in {mf.keys_dir()}, mode 0600)", flush=True)
+        for name, ok, why, users in rows:
+            print(f"{name:24} {'ok' if ok else 'REFUSED: ' + why}"
+                  + (f"  granted to {', '.join(users)}" if users else ""), flush=True)
+        return 0
+    if verb == "key" and len(rest) == 2 and rest[0] == "add":
+        import getpass
+        if sys.stdin.isatty():
+            secret = getpass.getpass(f"Paste the key for {rest[1]!r} (not shown): ")
+        else:
+            secret = sys.stdin.read(mf.MAX_KEY_BYTES + 1)
+        p = mf.key_add(rest[1], secret)
+        print(f"Stored key {rest[1]!r} in {p} (mode 0600). Grant it with: "
+              f"corral-light module grant <module> {rest[1]} <vendor>", flush=True)
+        return 0
+    if verb == "key" and len(rest) == 2 and rest[0] == "remove":
+        mf.key_remove(rest[1])
+        print(f"Removed key {rest[1]!r}.", flush=True)
+        return 0
+    if verb == "grant":
+        params = {}
+        while "--param" in rest:
+            kv = _opt(rest, "--param")
+            k, eq, v = kv.partition("=")
+            if not eq:
+                raise ModuleError("--param takes name=value")
+            params[k] = v
+        if len(rest) != 3:
+            raise ModuleError("usage: module grant <name> <key> <vendor> [--param name=value]...")
+        hosts = mf.grant(rest[0], rest[1], rest[2], params)
+        print(f"{rest[0]} may now use key {rest[1]!r} for {rest[2]}, reaching only "
+              f"{', '.join(hosts)}. It runs at the next due time, or now with: "
+              f"corral-light module fetch {rest[0]}", flush=True)
+        return 0
+    if verb == "revoke" and len(rest) == 2:
+        mf.revoke(rest[0], rest[1])
+        print(f"Revoked key {rest[1]!r} from {rest[0]}; its fetched results are deleted.",
+              flush=True)
+        return 0
+    if verb == "fetch" and len(rest) in (1, 2):
+        pin = _pin(rest[0])
+        keys = rest[1:] or sorted(pin.get("grants") or {})
+        if not keys:
+            raise ModuleError(f"{rest[0]} has no granted keys")
+        bad = 0
+        for k in keys:
+            st = mf.run_fetch(rest[0], k)
+            print(f"{rest[0]} {k}: {st.get('state')}"
+                  + (f" — {st['error']}" if st.get("error") else "")
+                  + (f"  [{'; '.join(st['hosts'])}]" if st.get("hosts") else ""), flush=True)
+            bad += st.get("state") != "ok"
+        if not bad:
+            run_collector(rest[0])
+        return 1 if bad else 0
+    print(USAGE, file=sys.stderr, flush=True)
+    return 2
 
 
 def dispatch(argv=None):

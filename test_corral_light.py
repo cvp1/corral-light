@@ -3926,6 +3926,10 @@ from test_modules import (TheManifest, InstallAndPin, Tamper, UpdateAndRollback,
                           TheNoticeField as ModuleNoticeField,
                           TheNoticeManifest as ModuleNoticeManifest,
                           TheNotices as ModuleNotices, TheNoticeRoute as ModuleNoticeRoute)
+# Module fetchers: keys, grants, the exact-host proxy, the fetch sandbox (§6.7).
+from test_module_fetch import (ExactHosts, TheFetcherManifest, Keys,  # noqa: F401,E402
+                               Grants as FetchGrants, Scrubbing as FetchScrubbing,
+                               NoSandboxNoFetch, Runs as FetchRuns)
 # The module feed, Claude quota capture, the adapter patch, login facts.
 from test_module_feed import (FeedFiles, QuotaCapture, TurnEndCarriesQuota,  # noqa: F401,E402
                               AdapterPatch, LoginFacts, QuotaMerge,

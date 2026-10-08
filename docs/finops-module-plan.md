@@ -1,6 +1,7 @@
 # Corral Light modules, and FinOps as the first one
 
-> Status: rev 6, 2026-10-08. Phase 0 done; Phase 1 (the seam) built and on
+> Status: rev 7, 2026-10-08. Phase 4 (billing APIs) built; see §6.7.1.
+> Rev 6, 2026-10-08. Phase 0 done; Phase 1 (the seam) built and on
 > master; Phase 2 (the FinOps module) pushed, installed live from its own
 > repository, and through the §8.4 checks (§7). Phase 3 (notices) is
 > specified in §4.7 and not built.
@@ -756,6 +757,44 @@ Rules:
   account or summed with one.
 - Billing figures are kind `billed`, with currency as reported.
 
+#### 6.7.1 As built (Phase 4, rev 7)
+
+Where the build refines the rules above:
+
+- **Grants, not hosts in the manifest.** The manifest's `fetcher` entry
+  names vendors from the core's fixed list (`modules.FETCH_VENDORS`), not
+  host names. The operator stores a key with `corral-light module key add
+  <name>` (read without echo, written 0600 in a 0700 directory) and grants
+  it with `module grant <module> <key> <vendor>`. Each run is one grant:
+  one key, and egress to **that vendor's** hosts only, so an Anthropic key
+  can never be sent to an OpenAI host even by the same module. `module
+  revoke` deletes the grant and what it fetched.
+- **Parameters.** A grant may carry a few short non-secret values
+  (`--param table=...`), passed as `CORRAL_FETCH_PARAM_<NAME>`; Google's
+  billing export table is one. The fetcher sees no config dir.
+- **Where results go.** Not the shared feed: the core writes each accepted
+  result to `<state>/module-fetch/<module>/<key>.json`, which only that
+  module's collector sees, read-only, as `CORRAL_MODULE_FETCHED`.
+- **Sandbox only.** A fetcher never runs unsandboxed; there is no typed
+  acknowledgement for a process that holds a key and reaches the network.
+  The profile adds the public CA directories read-only for TLS.
+- **Key bytes.** The core refuses a result containing the key, any long
+  line of it (a PEM body), the secret fields of a JSON key, or any of
+  those base64-encoded; error text loses credential headers and URLs.
+- **Schedule.** Every six hours by default (one hour at least); failures
+  back off from one hour, doubling, capped at the period.
+- **Units, as documented by each vendor.** Anthropic's cost report gives
+  cents as decimal text; OpenAI's `amount.value` is read as whole units
+  (its spec shows `0.06` for six cents but does not say so); xAI does not
+  state the unit of its `usd` value and FinOps reads it as dollars, as in
+  xAI's example, saying so on the tile; Google's query sums `cost` and
+  `credits` in the account's currency over UTC days. Google's token uses
+  the `cloud-platform.read-only` scope, signed RS256 by a small
+  standard-library implementation checked against OpenSSL.
+- **Read-only keys.** Only Google's role pair is read-only. Anthropic and
+  OpenAI document no read-only admin key, and xAI's billing ACLs are
+  undocumented; `finops billing` says so before the operator makes one.
+
 ### 6.8 An alternative not adopted: vendor telemetry streams
 
 Claude Code, Codex and Grok can each export usage metrics over
@@ -778,6 +817,7 @@ changes each vendor CLI's configuration. It is listed for the panel.
 | **3. Notices** | §4.7: the snapshot's `notices` field, validated and bounded by the core; expiry tied to the module's own freshness; quiet rail cards with Open and Not now; FinOps quota and source-frozen notices | the §8.1 notice tests and the §8.2 notice tests pass; on this host, a forced near-limit window shows one rail card that clears when the window resets, the module is disabled, or the collector stops reporting |
 | | **Built 2026-10-08** on branch `finops-phase3-plan`: §4.7 as specified, with two corrections made to the spec while building: the manifest key is refused by a core without Phase 3, so Light is updated first; and FinOps's off switch is the top-level `notices = "off"`, since its config reader takes no `[table]`. Warn cards use the module dialog's warn colour. The §8.1 and §8.2 notice tests pass. Real-browser check on a private hub from this branch, with the probe fixture reporting synthetic notices: three cards in level order, Not now hides one, Open opens the dialog, a phone keeps the rail folded with a plain count (`docs/img/module-notices-rail.png`). Not yet done: the live check on this host, which needs Light deployed and FinOps updated | |
 | **4. Billing APIs and macOS** | opt-in fetchers for the four vendor billing APIs (§6.7); a macOS sandbox investigation | each fetcher tested against a local stub; the operator decides which to enable |
+| | **Built 2026-10-08** on branch `finops-phase4`: §6.7 as refined in §6.7.1. Core: `module_fetch.py` (keys, grants, the fetch run), an exact-host mode in `review_egress.py` that also refuses every lane's sign-in host, the fetcher entry in the manifest, the runner, doctor and the `module key|grant|revoke|fetch` verbs. FinOps 0.3.0: readers for Anthropic, OpenAI, xAI and Google, each tested against a local stub (pages to the end, a failed page stores nothing, 401, 429 with its retry hint, timeouts), billed tiles and a Billing APIs table, never in Committed. End to end on this host with fake keys, sandboxed: each vendor's fetch reached only its own hosts through the proxy and failed cleanly (401 from Anthropic, OpenAI and xAI; `invalid_grant` from Google), and no key bytes appeared anywhere in Light's state. macOS: investigated in `docs/finops-macos-sandbox.md`; a Seatbelt backend is recommended and not built, since no Mac was available to prove it. Which fetchers to enable is the operator's call | |
 
 Dropped: any use of the pane's Claude login to read quota. All three
 reviewers said no.

@@ -240,6 +240,11 @@ def module_lines(pins=None):
         out.append(f"{mark}{name} {str(pin.get('commit', ''))[:12]} — {verified}, {face}, "
                    f"last run {s.get('last_run_at') or 'never'}"
                    + (f"; {s['error']}" if s.get("error") else ""))
+        for key, f in sorted((s.get("fetch") or {}).items()):
+            fm = "  ok  " if f["state"] == "ok" else "  --  "
+            out.append(f"{fm}  {name} fetcher, key {key} ({f['vendor']}): {f['state']}, "
+                       f"last run {f.get('last_run_at') or 'never'}"
+                       + (f"; {f['error']}" if f.get("error") else ""))
     return out
 
 

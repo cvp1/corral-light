@@ -61,6 +61,23 @@ def host_allowed(host, lane, extra=()):
     return False
 
 
+def denied_everywhere(host):
+    """A lane's sign-in host, for any lane: a module fetcher never reaches
+    one, whatever its vendor (docs/finops-module-plan.md §6.7)."""
+    host = host.lower().rstrip(".")
+    return any(host == d or host.endswith("." + d)
+               for ds in LANE_DENY.values() for d in ds)
+
+
+def exact_allowed(host, hosts):
+    """Exact-host mode for module fetchers: `host` is one of `hosts`,
+    compared whole (never a suffix), and no lane's sign-in host."""
+    if not isinstance(host, str):
+        return False
+    host = host.lower().rstrip(".")
+    return host in {h.lower() for h in hosts} and not denied_everywhere(host)
+
+
 def public_addresses(host, port):
     """Every address `host` resolves to, or None if any is not public."""
     try:
@@ -102,8 +119,11 @@ class Egress:
     """A CONNECT proxy on a unix socket for one reviewer. `on_host(host,
     allowed)` is called for every request."""
 
-    def __init__(self, path, lane, on_host=None):
+    def __init__(self, path, lane, on_host=None, allow=None):
+        """`allow(host) -> bool` replaces the lane's suffix rule (the exact-
+        host mode module fetchers use); None keeps the lane's rule."""
         self.path, self.lane = str(path), lane
+        self.allow = allow or (lambda host: host_allowed(host, lane))
         self.on_host = on_host or (lambda host, allowed: None)
         try:
             os.unlink(self.path)
@@ -165,7 +185,7 @@ class Egress:
             host = host.strip("[]")
             if not port.isdigit() or int(port) not in PORTS:
                 return self._refuse(c, "port", parts[1])
-            if not host_allowed(host, self.lane):
+            if not self.allow(host):
                 return self._refuse(c, "not allowed for this lane", host)
             addrs = public_addresses(host, int(port))
             if not addrs:
