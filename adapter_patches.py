@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """adapter_patches — small pinned patches to the npm adapters in spike/.
 
-Each patch is pinned to one package version and is an exact text
-replacement that must match once. `apply` is idempotent; `check` reports
+Each patch lists the package versions it was checked against and is an
+exact text replacement that must match once. `apply` is idempotent; `check` reports
 without writing. install.sh applies after `npm ci`; `lanes update` applies
 to a staged tree before its probe and refuses a Claude adapter that still
 drops early rate-limit notices with no patch for its version.
@@ -66,7 +66,9 @@ RLE_GUARD = ('case "rate_limit_event": {\n'
 
 PATCHES = (
     {"id": "rate-limit-before-usage",
-     "package": "@agentclientprotocol/claude-agent-acp", "version": "0.85.1",
+     "package": "@agentclientprotocol/claude-agent-acp",
+     # The guarded block is byte-identical in each listed release.
+     "versions": ("0.85.1", "0.88.0"),
      "file": "dist/acp-agent.js", "marker": MARKER,
      "find": _RLE_FIND, "replace": _RLE_REPLACE},
 )
@@ -89,7 +91,7 @@ def _status(spike, patch):
     version = _version(spike, patch["package"])
     if version is None:
         return "absent", None
-    if version != patch["version"]:
+    if version not in patch["versions"]:
         return "other-version", None
     try:
         text = (_pkg_dir(spike, patch["package"]) / patch["file"]).read_text(encoding="utf-8")
@@ -104,7 +106,7 @@ def _status(spike, patch):
 
 def check(spike=SPIKE):
     """[{id, package, version, installed, status}] without writing anything."""
-    return [{"id": p["id"], "package": p["package"], "version": p["version"],
+    return [{"id": p["id"], "package": p["package"], "version": ", ".join(p["versions"]),
              "installed": _version(spike, p["package"]), "status": _status(spike, p)[0]}
             for p in PATCHES]
 

@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -290,7 +291,10 @@ def probe_client(lane, url, cwd):
     try:
         r = consult.send_and_wait(hub, pid, PROBE_PROMPT, ASK_TIMEOUT_S)
         rec["reply"] = (r.get("text") or "")[:MAX_REPLY]
-        p = consult._pane_in(consult._state(hub, {pid: 1 << 40}), pid) or {}
+        # The full document: a cursor alone gets the poller's light delta,
+        # which leaves out each pane's `config`, where the model list lives.
+        q = urllib.parse.quote(json.dumps({pid: 1 << 40}))
+        p = consult._pane_in(hub.get(f"/api/state?full=1&since={q}"), pid) or {}
         model = (p.get("config") or {}).get("model") or {}
         rec["model"] = model.get("value") or p.get("model")
         rec["models"] = [o.get("value") for o in model.get("options") or [] if o.get("value")]

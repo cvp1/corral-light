@@ -411,3 +411,38 @@ class TheCliVerb(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheProbeReadsTheFullState(unittest.TestCase):
+    """The probe's model list lives in the pane's `config`, which a cursor-
+    only /api/state (the poller's light delta, since the 2026-10-04 perf
+    contract) leaves out. Every Claude update was refused with "no model
+    list" until the probe asked for the full document."""
+
+    def test_full_state_is_asked_for(self):
+        asked = []
+        pane = {"id": "p1", "model": "fable",
+                "config": {"model": {"value": "fable",
+                                     "options": [{"value": "fable"}, {"value": "haiku"}]}}}
+
+        class Hub:
+            def get(self, path, timeout=None):
+                asked.append(path)
+                full = "full=1" in path
+                return {"panes": [pane if full else {"id": "p1", "model": "fable"}],
+                        **({} if full else {"light": True})}
+
+            def post(self, path, body):
+                return {}
+
+        import consult
+        import lane_probe
+        with mock.patch.object(lane_probe, "probe", return_value={"ok": True}), \
+                mock.patch.object(consult, "connect", return_value=Hub()), \
+                mock.patch.object(consult, "open_pane", return_value={"id": "p1"}), \
+                mock.patch.object(consult, "send_and_wait",
+                                  return_value={"complete": True, "text": "pong"}):
+            rec = lanes.probe_client("claude", "http://127.0.0.1:1", "/tmp")
+        self.assertTrue(rec["ok"], rec.get("why"))
+        self.assertEqual(rec["models"], ["fable", "haiku"])
+        self.assertTrue(any("full=1" in a for a in asked), asked)

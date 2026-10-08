@@ -507,6 +507,15 @@ class AdapterPatch(unittest.TestCase):
         self.assertEqual((pkg / "dist" / "acp-agent.js").read_text(), "// changed upstream\n")
         self.assertEqual(adapter_patches.check(Path(tmpdir(self)))[0]["status"], "absent")
 
+    def test_every_listed_version_is_patched(self):
+        for v in adapter_patches.PATCHES[0]["versions"]:
+            with self.subTest(version=v):
+                spike = fake_spike(self)
+                pkg = spike / "node_modules" / ADAPTER_PKG
+                (pkg / "package.json").write_text(json.dumps({"version": v}))
+                self.assertEqual(adapter_patches.apply(spike)[0]["status"], "patched")
+                self.assertFalse(adapter_patches.drops_early_rate_limits(spike))
+
     def test_the_patch_matches_the_installed_adapter(self):
         """Against a COPY of the installed adapter, when one is installed."""
         live = adapter_patches.SPIKE / "node_modules" / ADAPTER_PKG
@@ -514,9 +523,9 @@ class AdapterPatch(unittest.TestCase):
             version = json.loads((live / "package.json").read_text())["version"]
         except (OSError, ValueError, KeyError):
             self.skipTest("no Claude adapter installed in spike/")
-        if version != adapter_patches.PATCHES[0]["version"]:
-            self.skipTest(f"installed {version}; the patch is pinned to "
-                          f"{adapter_patches.PATCHES[0]['version']}")
+        if version not in adapter_patches.PATCHES[0]["versions"]:
+            self.skipTest(f"installed {version}; the patch covers "
+                          f"{', '.join(adapter_patches.PATCHES[0]['versions'])}")
         spike = fake_spike(self, source=live / "dist" / "acp-agent.js")
         self.assertIn(adapter_patches.apply(spike)[0]["status"], ("patched",))
         (u,) = adapter_rle(self, spike, INFOS["phase0"], None)
