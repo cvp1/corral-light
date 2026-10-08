@@ -118,6 +118,10 @@ def main():
             {"type": "link", "label": "How these figures are made",
              "url": "https://example.com/finops"}],
             progress={"phase": "backfill", "done_pct": 64, "note": "reading history"}))
+    elif mode == "notices":
+        # The rest of the config is one JSON list: the snapshot's notices.
+        print(snap([{"type": "note", "text": "with notices"}],
+                   notices=json.loads(args[0]) if args else []))
     elif mode == "hostile":
         print(snap([{"type": "note", "text": "<script>alert(1)</script>"},
                     {"type": "link", "label": "x", "url": "javascript:alert(1)"},

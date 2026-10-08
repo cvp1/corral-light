@@ -3190,6 +3190,13 @@ function render() {
     n.appendChild(c); items++;
     if (!due) quiet++;
   }
+  // Module notices (plan §4.7): information, never a request. Quiet like the
+  // review cards: they open the rail on a wide screen, never pop it on a phone,
+  // never count as blocking.
+  const mn = railNotices(S.moduleNotices, noticeSeen());
+  for (const nt of mn.shown) { n.appendChild(noticeCard(nt)); items++; quiet++; }
+  if (mn.more) n.appendChild(el('div', 'fnote nmore',
+    `${mn.more} more module notice${mn.more === 1 ? '' : 's'}: open the module to see them`));
   // Paused panes: a quiet list under the cards, one Resume each (no Resume-all:
   // waking many at once can stampede new cards). Never blocking.
   if (paused.length) {
@@ -3218,6 +3225,58 @@ function render() {
     }
   }
   railFold(items, blockedCount(panes), quiet, !!solo);
+}
+
+/* ── module notices in the rail (plan §4.7; selftest_inbox.mjs) ──────────
+ * The hub has validated, bounded and expired them; this side checks shape
+ * again and renders text only. A level reaches the page only through the
+ * fixed table. Not now remembers one content key per notice id, so a notice
+ * whose level or title changes comes back. */
+const NOTICE_SEEN_KEY = 'corral.noticeSeen';
+const NOTICE_LEVEL_CLASS = { info: 'info', warn: 'warn', bad: 'bad' };
+function noticeSlot(n) { return String(n.module) + '\u0001' + String(n.id); }
+function noticeKey(n) {
+  return [n.module, n.id, n.level, n.title].map(x => String(x ?? '')).join('\u0001');
+}
+function noticeSeen() { return wtStore(NOTICE_SEEN_KEY); }
+function noticeMarkSeen(n) {
+  const m = noticeSeen();
+  m[noticeSlot(n)] = noticeKey(n);
+  const keys = Object.keys(m);                      // bounded: oldest go first
+  for (const k of keys.slice(0, Math.max(0, keys.length - 200))) delete m[k];
+  localStorage.setItem(NOTICE_SEEN_KEY, JSON.stringify(m));
+}
+/* -> { shown, more }: the notices to draw, minus those put off with Not now. */
+function railNotices(mn, seen) {
+  const raw = mn && Array.isArray(mn.items) ? mn.items : [];
+  const more = mn && Number.isFinite(mn.more) && mn.more > 0 ? Math.floor(mn.more) : 0;
+  const shown = [];
+  for (const x of raw.slice(0, 8)) {
+    if (!x || typeof x.module !== 'string' || typeof x.id !== 'string' ||
+        typeof x.title !== 'string' || !x.title) continue;
+    const n = { module: x.module, id: x.id, title: x.title,
+                moduleTitle: typeof x.moduleTitle === 'string' && x.moduleTitle ? x.moduleTitle : x.module,
+                text: typeof x.text === 'string' ? x.text : '',
+                level: Object.prototype.hasOwnProperty.call(NOTICE_LEVEL_CLASS, x.level) ? x.level : 'info' };
+    if (seen && seen[noticeSlot(n)] === noticeKey(n)) continue;
+    shown.push(n);
+  }
+  return { shown, more };
+}
+function noticeCard(nt) {
+  const c = el('div', 'ncard nmod ' + NOTICE_LEVEL_CLASS[nt.level]);
+  c.appendChild(el('div', 't', `${nt.moduleTitle} — ${nt.title}`));
+  if (nt.text) c.appendChild(el('div', 'm', nt.text));
+  const acts = el('div', 'facts');
+  const go = el('button', 'fbtn', 'Open');
+  go.title = 'open ' + nt.moduleTitle;
+  go.onclick = () => openModule(nt.module);
+  const later = el('button', 'fbtn', 'Not now');
+  later.title = 'hide this notice until it changes';
+  later.onclick = () => { noticeMarkSeen(nt); render(); };
+  acts.append(go, later);
+  c.appendChild(acts);
+  return c;
 }
 
 /* ── the rail's pure parts (selftest_inbox.mjs) ─────────────────────────── */
@@ -3413,6 +3472,7 @@ async function refresh() {
   // A field the response leaves out keeps its previous value (never emptied).
   if ('agents' in d) S.agents = d.agents || [];
   if ('claudeAuth' in d) S.claudeAuth = d.claudeAuth || null;
+  if ('moduleNotices' in d) S.moduleNotices = d.moduleNotices || null;
   S.claudeLogin = d.claudeLogin || null;
   S.agentGroups = d.agentGroups || S.agentGroups || {};
   S.catalog = d.catalog || S.catalog || {};

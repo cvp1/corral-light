@@ -584,6 +584,11 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .ncard.fleet{border-left-color:var(--dusk)}
 .ncard.fleet.ready{border-left-color:var(--sage)}
 .ncard.fleet.triage{border-left-color:var(--ember)}
+/* Module notices (plan §4.7): level from a fixed table, never a module string;
+   the same colours as the module dialog's levels. */
+.ncard.nmod.info{border-left-color:var(--dusk)}
+.ncard.nmod.warn{border-left-color:var(--gold)}
+.ncard.nmod.bad{border-left-color:var(--rust)}
 .sect{font-family:var(--mono);font-size:10.5px;letter-spacing:1.3px;text-transform:uppercase;
   color:var(--faint);padding:12px 2px 6px;border-top:1px solid var(--line);margin-top:6px}
 .facts{margin-top:7px}

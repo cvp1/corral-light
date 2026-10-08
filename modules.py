@@ -67,7 +67,8 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
 MANIFEST_KEYS = {"schema", "name", "title", "version", "core_api", "summary",
-                 "collector", "cli", "doctor", "reads", "vendor_reports", "network"}
+                 "collector", "cli", "doctor", "reads", "vendor_reports", "network",
+                 "notices"}
 ENTRY_KEYS = {"collector": {"script", "args", "every_s", "budget_s", "timeout_s"},
               "cli": {"script", "args"},
               "doctor": {"script", "args"}}
@@ -293,6 +294,10 @@ def validate_manifest(obj, root=None):
         raise ModuleError("module.json network must be \"none\": a collector never "
                           "reaches the network")
     out["network"] = "none"
+    # Rail notices (§4.7) are opt-in, and shown at install like the reads.
+    if not isinstance(obj.get("notices", False), bool):
+        raise ModuleError("module.json notices must be true or false")
+    out["notices"] = obj.get("notices", False)
     reads = obj.get("reads", [])
     if not isinstance(reads, list) or not all(isinstance(r, str) for r in reads):
         raise ModuleError("module.json reads must be a list of names")
@@ -490,6 +495,8 @@ def describe(manifest, sandboxed, src, commit, digest):
         lines.append(f"Reports  {', '.join(manifest['vendor_reports'])} "
                      f"(run by Light, not by the module)")
     lines.append("Network  none: its collector makes no network calls")
+    if manifest.get("notices"):
+        lines.append("Notices  yes: it can show short notices in your rail")
     if sandboxed:
         lines.append("Sandbox  yes: it sees only the above, its own files and its data dir")
     else:
@@ -570,8 +577,9 @@ def update(name, *, ref=None, confirm=None, out=_say, ask=None):
         old = _read_json(module_dir(name) / pin["commit"] / "module.json", {}) or {}
         out(describe(manifest, sandboxed, pin["source"], commit, digest))
         if set(manifest["reads"]) != set(old.get("reads") or []) or \
-                set(manifest["vendor_reports"]) != set(old.get("vendor_reports") or []):
-            out("Changed  what it reads; confirm again.")
+                set(manifest["vendor_reports"]) != set(old.get("vendor_reports") or []) or \
+                bool(manifest["notices"]) != (old.get("notices") is True):
+            out("Changed  what it reads or whether it shows notices; confirm again.")
             typed = confirm if confirm is not None else (ask(f"Type {name} to update: ")
                                                         if ask else None)
             if typed != name:
@@ -1030,9 +1038,62 @@ def _validate_block(b):
     return blk
 
 
-def validate_snapshot(raw):
+NOTICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+NOTICE_LEVELS = ("info", "warn", "bad")
+NOTICE_TITLE_CAP, NOTICE_TEXT_CAP = 80, 300
+MAX_NOTICES = 5                  # kept per snapshot
+NOTICES_PER_MODULE, NOTICES_TOTAL = 3, 8   # shown in the rail
+NOTICE_MAX_AGE_S = 24 * 3600
+_LEVEL_RANK = {"bad": 0, "warn": 1, "info": 2}
+
+
+def _parse_iso(v):
+    """ISO time -> epoch seconds, or None. A time with no zone is UTC."""
+    if not isinstance(v, str) or not v or len(v) > 40:
+        return None
+    try:
+        t = datetime.fromisoformat(v[:-1] + "+00:00" if v.endswith("Z") else v)
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    try:
+        ts = t.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+    return ts if math.isfinite(ts) else None
+
+
+def _validate_notices(raw):
+    """A snapshot's `notices` (§4.7) -> (kept, dropped count)."""
+    if not isinstance(raw, list):
+        return [], 0
+    seen, out, dropped = set(), [], 0
+    for n in raw[:200]:
+        nid = n.get("id") if isinstance(n, dict) else None
+        title = _text(n.get("title"), NOTICE_TITLE_CAP) if isinstance(n, dict) else ""
+        if not isinstance(nid, str) or not NOTICE_ID_RE.match(nid) or nid in seen \
+                or not title.strip():
+            dropped += 1
+            continue
+        seen.add(nid)
+        exp = _parse_iso(n.get("expires_at"))
+        out.append({"id": nid,
+                    "level": n.get("level") if n.get("level") in NOTICE_LEVELS else "info",
+                    "title": title, "text": _text(n.get("text"), NOTICE_TEXT_CAP),
+                    "expires_at": (datetime.fromtimestamp(exp, timezone.utc)
+                                   .strftime("%Y-%m-%dT%H:%M:%SZ")
+                                   if exp is not None else None)})
+    dropped += max(0, len(raw) - 200)
+    out.sort(key=lambda x: (_LEVEL_RANK[x["level"]], x["id"]))
+    dropped += max(0, len(out) - MAX_NOTICES)
+    return out[:MAX_NOTICES], dropped
+
+
+def validate_snapshot(raw, notices=False):
     """bytes or str -> (snapshot, None) or (None, error). Every string is
-    text, every enum is mapped, every bound enforced (§4.5)."""
+    text, every enum is mapped, every bound enforced (§4.5). `notices`: the
+    verified manifest opted in (§4.7); otherwise the field is ignored."""
     if isinstance(raw, (bytes, bytearray)):
         if len(raw) > STDOUT_CAP:
             return None, "the snapshot is larger than 1 MiB"
@@ -1064,6 +1125,10 @@ def validate_snapshot(raw):
                             "note": _text(pr.get("note"), LABEL_CAP)}
     if len(view) > MAX_BLOCKS:
         snap["truncated"] = {"blocks": len(view) - MAX_BLOCKS}
+    if notices:
+        snap["notices"], nd = _validate_notices(obj.get("notices"))
+        if nd:
+            snap["notices_dropped"] = nd
     return snap, None
 
 
@@ -1107,7 +1172,7 @@ def run_collector(name, *, before_run=None):
             if rc != 0:
                 tail = err.decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
                 raise ModuleError(f"the collector exited {rc}: {tail[0][:300]}")
-            snap, verr = validate_snapshot(out)
+            snap, verr = validate_snapshot(out, notices=manifest.get("notices") is True)
             if verr:
                 raise ModuleError(verr)
             _write_json(snapshot_path(name), snap)
@@ -1142,6 +1207,67 @@ def summary(name, pin=None):
             "state": state, "sandboxed": bool(sandboxed),
             "error": pin.get("disabled_reason") if not pin.get("enabled") else st.get("error"),
             "last_run_at": st.get("last_run_at"), "fresh_at": st.get("fresh_at")}
+
+
+def _pinned_manifest(name, pin):
+    """The pinned generation's module.json as stored (verified at install
+    and on every run), or {}."""
+    commit = pin.get("commit") or ""
+    if not COMMIT_RE.match(commit):
+        return {}
+    m = _read_json(module_dir(name) / commit / "module.json", {})
+    return m if isinstance(m, dict) else {}
+
+
+def notices(now=None):
+    """The rail's module notices (§4.7): live notices of every enabled,
+    runnable, opted-in module, at most NOTICES_PER_MODULE each and
+    NOTICES_TOTAL in all. -> {"items": [...], "more": n}. Never raises."""
+    now = time.time() if now is None else now
+    items, more = [], 0
+    try:
+        pins = load_pins()
+        sandboxed, _ = module_sandbox.available()
+    except Exception:  # noqa: BLE001 — the state route must not fail on a module
+        return {"items": [], "more": 0}
+    for name in sorted(pins):
+        try:
+            pin = pins[name] or {}
+            if not pin.get("enabled") or (not sandboxed and not pin.get("unsandboxed_ack")):
+                continue
+            m = _pinned_manifest(name, pin)
+            if m.get("notices") is not True:
+                continue
+            fresh = _parse_iso(load_status(name).get("fresh_at"))
+            if fresh is None:
+                continue
+            try:
+                every = int((m.get("collector") or {}).get("every_s") or DEFAULT_EVERY_S)
+            except (TypeError, ValueError):
+                every = DEFAULT_EVERY_S
+            every = max(every, MIN_EVERY_S)
+            if now >= fresh + 2 * every or now >= fresh + NOTICE_MAX_AGE_S:
+                continue
+            snap = _read_json(snapshot_path(name), {}) or {}
+            live = []
+            for n in snap.get("notices") or []:
+                if not isinstance(n, dict) or n.get("level") not in NOTICE_LEVELS:
+                    continue
+                exp = _parse_iso(n.get("expires_at"))
+                if exp is not None and now >= exp:
+                    continue
+                live.append({"module": name, "moduleTitle": pin.get("title") or name,
+                             "id": _text(n.get("id"), 64), "level": n["level"],
+                             "title": _text(n.get("title"), NOTICE_TITLE_CAP),
+                             "text": _text(n.get("text"), NOTICE_TEXT_CAP)})
+            live.sort(key=lambda x: (_LEVEL_RANK[x["level"]], x["id"]))
+            more += max(0, len(live) - NOTICES_PER_MODULE)
+            items.extend(live[:NOTICES_PER_MODULE])
+        except Exception:  # noqa: BLE001 — one broken module costs only itself
+            continue
+    items.sort(key=lambda x: (_LEVEL_RANK[x["level"]], x["module"], x["id"]))
+    more += max(0, len(items) - NOTICES_TOTAL)
+    return {"items": items[:NOTICES_TOTAL], "more": more}
 
 
 def detail(name):

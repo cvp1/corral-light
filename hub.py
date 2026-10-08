@@ -677,6 +677,10 @@ class Handler(BaseHTTPRequestHandler):
             full = (q.get("full") or ["0"])[0] in ("1", "true")
             out = MGR.state(since, full=full)
             out["claudeLogin"] = LOGIN.snapshot()
+            # Module notices for the rail (plan §4.7): host-wide, so the full
+            # document only, like claudeAuth; a poller's delta never has them.
+            if not out.get("light"):
+                out["moduleNotices"] = modules.notices()
             # Which checkout and commit this process serves (`corral-light update`).
             out["hub"] = {"root": str(ROOT), "commit": BOOT_COMMIT}
             return self._json(out)

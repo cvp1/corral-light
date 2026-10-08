@@ -3626,6 +3626,7 @@ class Manager(_core.ManagerBase):
     # `config` only when that pane's cursor is 0 (new to the client), and none
     # of the host-wide fields in LIGHT_OMITS. No `since`, or `full`, is the
     # whole document, as before. The browser always asks `full`.
+    # moduleNotices is added by the hub's route on the full form only.
     LIGHT_OMITS = ("agents", "claudeAuth", "catalog", "archived",
                    "cwdSuggestions", "schedule")
     PANE_LIGHT_OMITS = ("commands", "config")

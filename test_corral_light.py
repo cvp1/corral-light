@@ -3922,7 +3922,10 @@ from test_modules import (TheManifest, InstallAndPin, Tamper, UpdateAndRollback,
                           TheRunner as ModuleRunner, Isolation as ModuleIsolation,
                           Unsandboxed as ModuleUnsandboxed, TheSnapshot as ModuleSnapshot,
                           TheRoutes as ModuleRoutes, TheDispatch as ModuleDispatch,
-                          Locks as ModuleLocks, Limits as ModuleLimits)
+                          Locks as ModuleLocks, Limits as ModuleLimits,
+                          TheNoticeField as ModuleNoticeField,
+                          TheNoticeManifest as ModuleNoticeManifest,
+                          TheNotices as ModuleNotices, TheNoticeRoute as ModuleNoticeRoute)
 # The module feed, Claude quota capture, the adapter patch, login facts.
 from test_module_feed import (FeedFiles, QuotaCapture, TurnEndCarriesQuota,  # noqa: F401,E402
                               AdapterPatch, LoginFacts, QuotaMerge,

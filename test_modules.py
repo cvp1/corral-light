@@ -807,9 +807,8 @@ class TheSnapshot(unittest.TestCase):
             self.assertIsNone(modules.validate_snapshot(raw)[0])
 
 
-class TheRoutes(Base):
-    """Module routes need the cookie; unknown, disabled and traversal names
-    are 404; /health carries counts only (§8.1)."""
+class RouteBase(Base):
+    """A hub on a private port, with the probe installed and run once."""
 
     def setUp(self):
         super().setUp()
@@ -845,6 +844,11 @@ class TheRoutes(Base):
         out = json.loads(r.read() or b"{}")
         c.close()
         return r.status, out
+
+
+class TheRoutes(RouteBase):
+    """Module routes need the cookie; unknown, disabled and traversal names
+    are 404; /health carries counts only (§8.1)."""
 
     def test_the_cookie_is_required(self):
         for method, path in (("GET", "/api/modules"), ("GET", "/api/module/probe"),
@@ -883,6 +887,33 @@ class TheRoutes(Base):
         self.assertNotIn("boom", json.dumps(out))
 
 
+class TheNoticeRoute(RouteBase):
+    """moduleNotices rides the full /api/state only (§4.7)."""
+
+    def setUp(self):
+        super().setUp()
+        import sessions
+        self._patch(sessions.AVAIL, "read", lambda: ([], None, 0))
+        self._patch(sessions.Manager, "archived", lambda self: [])
+        self._patch(self.hub, "LOGIN", mock.Mock(snapshot=lambda: None))
+        modules.remove("probe", out=quiet)
+        self.install(self.make_repo(name="src-n", mutate=opt_in))
+        self.set_mode("notices", json.dumps([notice(1, title="NOTICE-SENTINEL")]))
+        modules.run_collector("probe")
+
+    def test_full_state_only(self):
+        st, d = self.req("GET", "/api/state?full=1&since=%7B%7D")
+        self.assertEqual(st, 200)
+        self.assertEqual([n["title"] for n in d["moduleNotices"]["items"]], ["NOTICE-SENTINEL"])
+        st, d = self.req("GET", "/api/state?since=%7B%7D")
+        self.assertEqual(st, 200)
+        self.assertTrue(d.get("light"))
+        self.assertNotIn("moduleNotices", d)
+        self.assertEqual(self.req("GET", "/api/state?full=1", cookie=False)[0], 401)
+        _st, h = self.req("GET", "/health", cookie=False)
+        self.assertNotIn("NOTICE-SENTINEL", json.dumps(h))
+
+
 class TheDispatch(Base):
     def test_a_core_verb_never_reaches_a_module(self):
         self.assertEqual(modules.dispatch(["doctor"]), 2)
@@ -899,3 +930,225 @@ class TheDispatch(Base):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ---------------------------------------------------------------------------
+# rail notices (docs/finops-module-plan.md §4.7, §8.1 "Notices")
+
+def notice(i, level="warn", **kw):
+    n = {"id": f"n.{i}", "level": level, "title": f"Notice {i}", "text": "t"}
+    n.update(kw)
+    return n
+
+
+def iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+class TheNoticeField(unittest.TestCase):
+    """Validation at run time: opt-in, ids, levels, text, expiry, bounds."""
+
+    def v(self, notices, opted=True):
+        raw = json.dumps({"schema": modules.SNAPSHOT_SCHEMA, "view": [],
+                          "notices": notices}).encode()
+        snap, err = modules.validate_snapshot(raw, notices=opted)
+        self.assertIsNone(err)
+        return snap
+
+    def test_ignored_without_the_opt_in(self):
+        s = self.v([notice(1)], opted=False)
+        self.assertNotIn("notices", s)
+        self.assertEqual(s["view"], [])
+
+    def test_ids_levels_titles_and_text(self):
+        s = self.v([notice(1), notice(1, title="again"), {"id": "Bad Id", "title": "x"},
+                    {"id": "-x", "title": "x"}, {"id": "a" * 65, "title": "x"},
+                    {"id": 7, "title": "x"}, {"id": "no.title", "title": "  "},
+                    "text", None, notice(2, level="ok"), notice(3, level="evil class"),
+                    notice(4, title="<script>" + "T" * 200, text="x" * 900)])
+        # Level order, then id: the two warns, then the two mapped to info.
+        self.assertEqual([n["id"] for n in s["notices"]], ["n.1", "n.4", "n.2", "n.3"])
+        self.assertEqual(s["notices"][0]["title"], "Notice 1")
+        self.assertEqual([n["level"] for n in s["notices"]], ["warn", "warn", "info", "info"])
+        self.assertLessEqual(len(s["notices"][1]["title"]), modules.NOTICE_TITLE_CAP)
+        self.assertTrue(s["notices"][1]["title"].startswith("<script>"))
+        self.assertLessEqual(len(s["notices"][1]["text"]), modules.NOTICE_TEXT_CAP)
+        self.assertEqual(s["notices_dropped"], 8)
+
+    def test_expires_at_is_normalised_or_absent(self):
+        s = self.v([notice(1, expires_at="2026-10-14T13:52:00Z"),
+                    notice(2, expires_at="2026-10-14T06:52:00-07:00"),
+                    notice(3, expires_at="soon"), notice(4, expires_at=12345),
+                    notice(5, expires_at="9999-99-99T00:00:00Z")])
+        self.assertEqual([n["expires_at"] for n in s["notices"]],
+                         ["2026-10-14T13:52:00Z", "2026-10-14T13:52:00Z", None, None, None])
+
+    def test_five_kept_in_level_order(self):
+        s = self.v([notice(i, level=("info", "warn", "bad")[i % 3]) for i in range(6)])
+        self.assertEqual([(n["level"], n["id"]) for n in s["notices"]],
+                         [("bad", "n.2"), ("bad", "n.5"), ("warn", "n.1"), ("warn", "n.4"),
+                          ("info", "n.0")])
+        self.assertEqual(s["notices_dropped"], 1)
+
+    def test_a_non_list_field_gives_none(self):
+        for bad in ({"id": "x"}, "x", 3, None):
+            self.assertEqual(self.v(bad)["notices"], [])
+
+    def test_an_old_core_drops_only_the_field(self):
+        raw = {"schema": modules.SNAPSHOT_SCHEMA, "ok": True,
+               "view": [{"type": "note", "text": "kept"}], "notices": [notice(1)]}
+        with_n, _ = modules.validate_snapshot(json.dumps(raw).encode())
+        raw.pop("notices")
+        without, _ = modules.validate_snapshot(json.dumps(raw).encode())
+        self.assertEqual(with_n, without)
+
+
+class TheNoticeManifest(unittest.TestCase):
+    def test_must_be_a_boolean(self):
+        self.assertTrue(modules.validate_manifest(good_manifest(notices=True))["notices"])
+        self.assertFalse(modules.validate_manifest(good_manifest())["notices"])
+        for bad in ("yes", 1, None, []):
+            with self.assertRaises(modules.ModuleError):
+                modules.validate_manifest(good_manifest(notices=bad))
+
+    def test_install_says_so(self):
+        m = modules.validate_manifest(good_manifest(notices=True))
+        self.assertIn("Notices  yes", modules.describe(m, True, "src", "c" * 40, "d"))
+        m = modules.validate_manifest(good_manifest())
+        self.assertNotIn("Notices", modules.describe(m, True, "src", "c" * 40, "d"))
+
+
+def opt_in(src):
+    (src / "module.json").write_text(json.dumps(good_manifest(notices=True)))
+
+
+class TheNotices(Base):
+    """Read-time expiry, lifecycle, caps (§4.7), through a real install."""
+
+    def run_with(self, notices):
+        self.set_mode("notices", json.dumps(notices))
+        st = modules.run_collector("probe")
+        self.assertEqual(st["state"], "ok", st.get("error"))
+        return modules._parse_iso(st["fresh_at"])
+
+    def ids(self, now):
+        return [n["id"] for n in modules.notices(now)["items"]]
+
+    def test_opt_in_is_needed_at_run_and_read(self):
+        self.install()
+        fresh = self.run_with([notice(1)])
+        self.assertEqual(self.ids(fresh + 1), [])
+        self.assertNotIn("notices", json.loads(modules.snapshot_path("probe").read_text()))
+
+    def test_shown_with_the_opt_in(self):
+        self.install(self.make_repo(mutate=opt_in))
+        fresh = self.run_with([notice(1, level="bad", text="resets Tue")])
+        out = modules.notices(fresh + 1)
+        self.assertEqual(out, {"items": [{"module": "probe", "moduleTitle": "Probe",
+                                          "id": "n.1", "level": "bad", "title": "Notice 1",
+                                          "text": "resets Tue"}], "more": 0})
+
+    def test_expiry_by_time_and_by_freshness(self):
+        self.install(self.make_repo(mutate=opt_in))
+        t0 = time.time()
+        fresh = self.run_with([notice(1, expires_at=iso(t0 + 30)),
+                               notice(2, expires_at=iso(t0 + 10 ** 6)), notice(3)])
+        self.assertEqual(self.ids(fresh + 1), ["n.1", "n.2", "n.3"])
+        self.assertEqual(self.ids(t0 + 31), ["n.2", "n.3"])
+        every = 60                                  # the probe's every_s
+        self.assertEqual(self.ids(fresh + 2 * every - 1), ["n.2", "n.3"])
+        self.assertEqual(self.ids(fresh + 2 * every), [])
+
+    def test_a_failed_run_does_not_refresh_them(self):
+        self.install(self.make_repo(mutate=opt_in))
+        fresh = self.run_with([notice(1)])
+        self.set_mode("exit1")
+        self.assertEqual(modules.run_collector("probe")["state"], "failing")
+        self.assertEqual(self.ids(fresh + 119), ["n.1"])
+        self.assertEqual(self.ids(fresh + 120), [])
+
+    def test_the_24_hour_cap(self):
+        def slow(src):
+            opt_in(src)
+            m = good_manifest(notices=True)
+            m["collector"] = dict(m["collector"], every_s=86400)
+            (src / "module.json").write_text(json.dumps(m))
+        self.install(self.make_repo(mutate=slow))
+        fresh = self.run_with([notice(1)])
+        self.assertEqual(self.ids(fresh + 86399), ["n.1"])
+        self.assertEqual(self.ids(fresh + 86400), [])
+
+    def test_disable_remove_and_purge_clear_them(self):
+        for how in ("disable", "remove", "purge"):
+            with self.subTest(how=how):
+                self.install(self.make_repo(name="src-" + how, mutate=opt_in))
+                fresh = self.run_with([notice(1)])
+                self.assertEqual(self.ids(fresh + 1), ["n.1"])
+                if how == "disable":
+                    modules.set_enabled("probe", False, out=quiet)
+                    self.assertEqual(self.ids(fresh + 1), [])
+                    modules.set_enabled("probe", True, out=quiet)
+                    self.assertEqual(self.ids(fresh + 1), ["n.1"])
+                modules.remove("probe", purge=how == "purge", out=quiet)
+                self.assertEqual(self.ids(fresh + 1), [])
+
+    def test_an_unacknowledged_unsandboxed_module_shows_none(self):
+        self.install(self.make_repo(mutate=opt_in))
+        fresh = self.run_with([notice(1)])
+        modules.update_pin("probe", unsandboxed_ack=False)
+        with mock.patch.object(module_sandbox, "available", return_value=(False, "none")):
+            self.assertEqual(self.ids(fresh + 1), [])
+        modules.update_pin("probe", unsandboxed_ack=True)
+        with mock.patch.object(module_sandbox, "available", return_value=(False, "none")):
+            self.assertEqual(self.ids(fresh + 1), ["n.1"])
+
+    def test_turning_notices_on_in_an_update_asks_again(self):
+        src = self.make_repo()
+        self.install(src)
+        opt_in(src)
+        git(src, "commit", "-qam", "notices")
+        with self.assertRaises(modules.ModuleError):
+            modules.update("probe", confirm="yes", out=quiet)
+        self.assertTrue(modules.update("probe", confirm="probe", out=quiet))
+
+    def fake(self, name, notices, fresh, every=300, opted=True):
+        """A module as notices() reads it: pin, pinned manifest, status, snapshot."""
+        commit = "%040x" % (abs(hash(name)) % (1 << 64))
+        gen = modules.module_dir(name) / commit
+        gen.mkdir(parents=True)
+        m = good_manifest(name=name, title=name.title(), notices=opted)
+        m["collector"] = dict(m["collector"], every_s=every)
+        (gen / "module.json").write_text(json.dumps(m))
+        modules.update_pin(name, commit=commit, enabled=True, unsandboxed_ack=True,
+                           title=name.title())
+        modules._write_json(modules.status_path(name), {"state": "ok", "fresh_at": iso(fresh)})
+        snap, _ = modules.validate_snapshot(json.dumps(
+            {"schema": modules.SNAPSHOT_SCHEMA, "view": [], "notices": notices}), notices=True)
+        modules._write_json(modules.snapshot_path(name), snap)
+
+    def test_caps_per_module_and_in_all(self):
+        now = time.time()
+        for name in ("delta", "alpha", "gamma", "beta"):
+            self.fake(name, [notice(i, level=("info", "warn", "bad")[i % 3])
+                             for i in range(5)], now)
+        out = modules.notices(now + 1)
+        self.assertEqual(len(out["items"]), modules.NOTICES_TOTAL)
+        self.assertEqual(out["more"], 4 * 2 + 4)
+        self.assertEqual([(n["level"], n["module"]) for n in out["items"]],
+                         [("bad", "alpha"), ("bad", "beta"), ("bad", "delta"), ("bad", "gamma"),
+                          ("warn", "alpha"), ("warn", "alpha"), ("warn", "beta"),
+                          ("warn", "beta")])
+
+    def test_a_broken_module_costs_only_itself(self):
+        now = time.time()
+        self.fake("good", [notice(1)], now)
+        self.fake("broken", [notice(1)], now)
+        modules.snapshot_path("broken").write_text("{not json")
+        modules._write_json(modules.status_path("odd"), {"fresh_at": 5})
+        modules.update_pin("odd", commit="zz", enabled=True)
+        self.assertEqual([n["module"] for n in modules.notices(now + 1)["items"]], ["good"])
+
+    def test_a_manifest_that_drops_the_opt_in_hides_old_notices(self):
+        now = time.time()
+        self.fake("optout", [notice(1)], now, opted=False)
+        self.assertEqual(modules.notices(now + 1)["items"], [])

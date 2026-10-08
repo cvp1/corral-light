@@ -260,6 +260,55 @@ check(/\$\('#grid'\)\.addEventListener\('scroll', markSeen/.test(src),
         'T-INB-9 Escape or Cancel resolves null');
 }
 
+/* ── module notices (docs/finops-module-plan.md §4.7) ───────────────────── */
+{
+  const LV = { info: 'info', warn: 'warn', bad: 'bad' };
+  const railNotices = load('railNotices', ['noticeSlot', 'noticeKey'], { NOTICE_LEVEL_CLASS: LV });
+  const noticeKey = load('noticeKey');
+  const noticeSlot = load('noticeSlot');
+  const nt = (id, o = {}) => ({ module: 'finops', moduleTitle: 'FinOps', id, level: 'warn',
+                                title: 'Claude weekly 82% used', text: 'resets Tue', ...o });
+  let r = railNotices({ items: [nt('a'), nt('b', { level: 'evil class' }), { id: 'x' }, null,
+                                nt('c', { title: '' }), nt('d', { module: 7 })], more: 2 }, {});
+  eq(r.shown.map(x => [x.id, x.level]), [['a', 'warn'], ['b', 'info']],
+     'NOT-1 malformed notices are skipped; an unknown level maps to info');
+  eq(r.more, 2, 'NOT-1 the hub\'s overflow count is kept');
+  eq(railNotices(null, {}), { shown: [], more: 0 }, 'NOT-1 no field, no cards');
+  eq(railNotices({ items: Array.from({ length: 12 }, (_, i) => nt('n' + i)) }, {}).shown.length, 8,
+     'NOT-1 never more than 8 cards');
+  const seen = { [noticeSlot(nt('a'))]: noticeKey(nt('a')) };
+  eq(railNotices({ items: [nt('a'), nt('b')] }, seen).shown.map(x => x.id), ['b'],
+     'NOT-2 Not now hides that notice');
+  eq(railNotices({ items: [nt('a', { level: 'bad' })] }, seen).shown.length, 1,
+     'NOT-2 a notice whose level changes comes back');
+  eq(railNotices({ items: [nt('a', { title: 'Claude weekly 91% used' })] }, seen).shown.length, 1,
+     'NOT-2 a notice whose title changes comes back');
+
+  const opened = [], marked = [];
+  let renders = 0;
+  const noticeCard = load('noticeCard', [], {
+    el: mk, NOTICE_LEVEL_CLASS: LV, openModule: m => opened.push(m),
+    noticeMarkSeen: x => marked.push(x.id), render: () => renders++ });
+  const c = noticeCard(railNotices({ items: [nt('a', { title: '<script>alert(1)</script>',
+                                                       level: 'bad' })] }, {}).shown[0]);
+  eq(c.className, 'ncard nmod bad', 'NOT-3 the level reaches the page through the fixed table');
+  check(texts(c).includes('FinOps — <script>alert(1)</script>'), 'NOT-3 the title is text');
+  const btns = [];
+  (function walk(x) { if (x.tag === 'button') btns.push(x); x.children.forEach(walk); })(c);
+  eq(btns.map(b => b.textContent), ['Open', 'Not now'], 'NOT-3 Open and Not now, nothing else');
+  check(!find(c, x => /perm|pbtn/.test(x.className)), 'NOT-3 no permission controls');
+  btns[0].onclick(); btns[1].onclick();
+  eq([opened, marked, renders], [['finops'], ['a'], 1], 'NOT-3 Open opens the module; Not now hides and repaints');
+  eq(railOpens(1, 1, true, null), false, 'NOT-4 phone: a notice alone (quiet) never pops the rail');
+  eq(railOpens(1, 1, false, null), true, 'NOT-4 desktop: a notice opens the rail');
+  const rail = fn('render');
+  check(/railNotices\(S\.moduleNotices[\s\S]{0,120}items\+\+; quiet\+\+/.test(rail),
+        'NOT-4 the rail counts each notice as quiet');
+  check(!fn('blockedCount').includes('otice'), 'NOT-4 notices never enter the hot count');
+  for (const lv of ['info', 'warn', 'bad'])
+    check(css.includes(`.ncard.nmod.${lv}{`), `NOT-3 CSS has the ${lv} notice class`);
+}
+
 /* ── CSS: the phone rail is full width open, a strip folded ─────────────── */
 check(/\.rail\.right:not\(\.shut\)\{width:100%;z-index:56/.test(css),
       'T-VIS-A1 (static) phone: the open rail is full width above the header controls');

@@ -376,9 +376,12 @@ through fixed classes.
 
 **Opt-in.** The manifest gains `"notices": true`. A snapshot's notices are
 ignored unless the verified manifest says so, and `module add` shows "can
-show notices in your rail" beside the reads. `core_api` stays 1: the field
+show notices in your rail" beside the reads; an update that turns it on or
+off asks for the typed name again. `core_api` stays 1: the snapshot field
 is optional, and a core without Phase 3 drops it, since the validator
-copies only fields it knows.
+copies only fields it knows. The manifest key is not: a core without
+Phase 3 refuses a manifest with unknown keys, so Light is updated before a
+module that declares notices.
 
 **The field.** A snapshot may carry a top-level list:
 
@@ -450,8 +453,10 @@ and adds `-` and an 8-character hash of the whole.
 
 Stale and reset windows raise nothing, since the vendor has said nothing
 new. Thresholds are the tile levels FinOps already uses, so a card and its
-tile always agree. `[notices] enabled = false` in the module's config
-turns them all off.
+tile always agree. `notices = "off"` at the top of the module's config
+turns them all off; `setup` keeps it when it rewrites the file. (A
+`[notices]` table was first written here; the module's config reader
+takes only strings, whole numbers and `[[account]]` tables.)
 
 ## 5. Installing and running a module
 
@@ -771,6 +776,7 @@ changes each vendor CLI's configuration. It is listed for the panel.
 | | **Built 2026-10-07** in `cvp1/corral-light-finops` (local commits, not yet pushed): every Phase 2 deliverable above, tested by the §8.2 list except the fetcher items (Phase 4). Installed and run through this seam in a throwaway state on the build host, sandboxed: collector, `setup --yes`, `show` and `doctor` all pass. Differences from this plan: the config is `<config>/modules/finops/config.toml`, the folder Phase 1 built, not `finops.toml`; list prices are integer micro-dollars per **million** tokens, since cache-read rates are fractions of a micro-dollar per token; the code is one `finops/` package (sources under `finops/sources/`, discovery in `report.py`); Antigravity databases are copied (database and WAL) into the data dir to be read, because SQLite cannot open a WAL database on a read-only bind; Claude usage belongs to the login fingerprint Light reports, from the moment the module first saw it, since transcripts name no account. Measured: a 500 MB synthetic history backfills over budgeted runs at 35 MB peak memory; a full cold scan of the build host takes 1.3 s. | |
 | | **Live 2026-10-07**: pushed to `cvp1/corral-light-finops` (CI green on Python 3.9, 3.12 and 3.14) and installed on the live hub with `module add finops`, sandboxed, every 300 s. §8.4 passed: Codex quota matched the CLI's status view at the same minute; Claude's five-hour figure matched `/usage`, and its weekly figure showed the vendor's last notice (11%) while `/usage` said 12%, because a pane gets a new notice only at the start of a turn; Grok vendor cost matched `grok usage` by hand for three sessions to the tick, with all 33 sessions reporting; a new pane's usage reached the ledger within one run. Two core bugs found on the way, both fixed on master: the hub's PATH resolved `grok` to a version manager's shim, and Light's own test hubs read the live module pins and disabled the live module. Not run on this host: the uninstall check, which Light's CI covers by running with no module installed | |
 | **3. Notices** | §4.7: the snapshot's `notices` field, validated and bounded by the core; expiry tied to the module's own freshness; quiet rail cards with Open and Not now; FinOps quota and source-frozen notices | the §8.1 notice tests and the §8.2 notice tests pass; on this host, a forced near-limit window shows one rail card that clears when the window resets, the module is disabled, or the collector stops reporting |
+| | **Built 2026-10-08** on branch `finops-phase3-plan`: §4.7 as specified, with two corrections made to the spec while building: the manifest key is refused by a core without Phase 3, so Light is updated first; and FinOps's off switch is the top-level `notices = "off"`, since its config reader takes no `[table]`. Warn cards use the module dialog's warn colour. The §8.1 and §8.2 notice tests pass. Real-browser check on a private hub from this branch, with the probe fixture reporting synthetic notices: three cards in level order, Not now hides one, Open opens the dialog, a phone keeps the rail folded with a plain count (`docs/img/module-notices-rail.png`). Not yet done: the live check on this host, which needs Light deployed and FinOps updated | |
 | **4. Billing APIs and macOS** | opt-in fetchers for the four vendor billing APIs (§6.7); a macOS sandbox investigation | each fetcher tested against a local stub; the operator decides which to enable |
 
 Dropped: any use of the pane's Claude login to read quota. All three
@@ -945,7 +951,7 @@ All fixtures are synthetic.
   `expires_at` is the reset when sent, else observation plus window
   length; a frozen source gives one `warn` that goes when a module update unfreezes it; a key with `:` or an over-long key gives a valid, stable id; ids
   are stable across runs and contain no path, title or account id beyond
-  the fingerprint key; `[notices] enabled = false` gives none; message-body
+  the fingerprint key; `notices = "off"` gives none; message-body
   sentinels never reach a notice.
 
 ### 8.3 Integration (Light's repository, CI)
