@@ -31,12 +31,20 @@
 
 <div id="app" class="app hide">
 
-  <aside class="rail left">
-    <div class="brand">Corral <span class="lightmark">light</span></div>
+  <aside class="rail left" id="lrail">
+    <!-- Two widths: open, and a strip of icons and one tile per pane. The mark
+         unfolds the strip; ‹ folds it. -->
+    <div class="brand">
+      <button class="brandmark" id="lrailopen" type="button"
+              title="Show the sidebar ([)" aria-label="Show the sidebar"></button>
+      <span class="brandname">Corral <span class="lightmark">light</span></span>
+      <button class="lfold" id="lrailfold" type="button"
+              title="Fold the sidebar ([)" aria-label="Fold the sidebar">‹</button>
+    </div>
     <!-- Quick start: the New dialog's defaults, without the dialog. -->
     <div class="newrow">
       <!-- .long drops on a narrow rail, leaving "＋ New" and "⌕ ⌘K". -->
-      <button class="new" id="new">＋ New<span class="long"> conversation</span></button>
+      <button class="new" id="new" title="New conversation">＋<span class="long"> New</span></button>
       <button class="newquick" id="new-quick" type="button"
               title="Start the default agent now (right-click to set it)" aria-label="Start the default agent now">⚡</button>
     </div>
@@ -50,7 +58,6 @@
               title="Cross-feed: every live pane gets the others' last answers"
               aria-label="Cross-feed answers between panes">⇄</button>
     </div>
-    <div class="lab">Conversations</div>
     <div id="roster" class="roster"></div>
     <div class="foot"><span id="conn" class="conn">connecting…</span>
       <button class="keysbtn" id="keysbtn" type="button" title="Keyboard shortcuts (?)"

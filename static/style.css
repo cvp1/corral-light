@@ -194,15 +194,18 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .skused{grid-column:1 / -1;font-size:11.5px;color:var(--faint)}
 
 /* ── shell ── */
-.app{display:grid;grid-template-columns:230px 1fr 300px;height:100vh;
-  transition:grid-template-columns .16s ease}
+/* Rail widths are variables so the two folds combine: open or strip on the
+   left, open or strip on the right. */
+.app{--lw:184px;--rw:300px;display:grid;grid-template-columns:var(--lw) 1fr var(--rw);
+  height:100vh;transition:grid-template-columns .16s ease}
+.app.lshut{--lw:44px}
 .rail{background:var(--panel);display:flex;flex-direction:column;min-height:0}
 .rail.left{border-right:1px solid var(--line)}
 .rail.right{border-left:1px solid var(--line)}
 
 /* Folded needs-you rail: a 34px strip, never display:none, so the count stays
    visible and turns hot when an agent is blocked. */
-.app.railshut{grid-template-columns:230px 1fr 34px}
+.app.railshut{--rw:34px}
 .railtab{display:none}
 .rail.right.shut{padding:0;align-items:center;overflow:hidden}
 .rail.right.shut > .lab,.rail.right.shut > .needs{display:none}
@@ -639,7 +642,7 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .toast.bad{border-color:var(--rust);color:#e6b3ab}
 
 /* Narrow: shrink the rail, never hide it, so permissions stay on the page. */
-@media(max-width:1100px){.app{grid-template-columns:170px 1fr 240px}
+@media(max-width:1100px){.app{--rw:240px}
   .rail.right{padding:9px 8px}.ncard .perm pre{max-height:110px}}
 @media(max-width:820px){.app{grid-template-columns:1fr}.rail.left{display:none}
   .rail.right{position:fixed;right:0;top:0;bottom:0;width:290px;z-index:40;
@@ -929,8 +932,8 @@ body{
     radial-gradient(760px 520px at 6% 104%,color-mix(in srgb,var(--wash-b) 9%,transparent),transparent 70%),
     var(--ground);
 }
-.app{grid-template-columns:248px minmax(0,1fr) 312px}
-.app.railshut{grid-template-columns:248px minmax(0,1fr) 38px}
+.app{--rw:312px;grid-template-columns:var(--lw) minmax(0,1fr) var(--rw)}
+.app.railshut{--rw:38px}
 .rail{
   background:color-mix(in srgb,var(--panel) 88%,transparent);
   backdrop-filter:blur(22px) saturate(125%);
@@ -938,18 +941,18 @@ body{
 .rail.left{border-right:1px solid var(--hairline);box-shadow:12px 0 38px rgba(0,0,0,.08)}
 .rail.right{border-left:1px solid var(--hairline);box-shadow:-12px 0 38px rgba(0,0,0,.06)}
 .brand{
-  display:flex;align-items:center;gap:10px;padding:19px 18px 17px;
-  font-family:var(--display);font-size:19px;font-weight:690;letter-spacing:-.35px;
+  display:flex;align-items:center;gap:8px;padding:11px 10px 10px 14px;
+  font-family:var(--display);font-size:15px;font-weight:690;letter-spacing:-.3px;
 }
-.brand::before{
-  content:"";width:24px;height:24px;flex:none;border-radius:8px;
+.brandmark{
+  width:20px;height:20px;flex:none;border-radius:7px;padding:0;border:0;cursor:default;
   background:
     radial-gradient(circle at 34% 32%,rgba(255,255,255,.92) 0 8%,transparent 9%),
     linear-gradient(145deg,var(--brand-a),var(--brand-b) 58%,var(--brand-c));
   box-shadow:inset 0 1px 0 rgba(255,255,255,.38),0 7px 18px color-mix(in srgb,var(--brand-b) 26%,transparent);
 }
 .new{
-  margin:0 12px 17px;padding:10px 13px;border-color:color-mix(in srgb,var(--line2) 72%,transparent);
+  margin:0 12px 10px;padding:10px 13px;border-color:color-mix(in srgb,var(--line2) 72%,transparent);
   border-radius:10px;background:linear-gradient(180deg,color-mix(in srgb,var(--raise) 92%,white 2%),var(--raise));
   box-shadow:var(--shadow-sm);font-weight:560;
 }
@@ -1049,14 +1052,13 @@ body:has(> .statusbar) .app{height:calc(100vh - 27px)}
 .mobile-actions{display:none}
 
 @media(max-width:1100px){
-  .app{grid-template-columns:190px minmax(0,1fr) 250px}
-  .app.railshut{grid-template-columns:190px minmax(0,1fr) 38px}
-  .rail .long{display:none}
+  .app{--rw:250px}
+  .app.railshut{--rw:38px}
   .new{white-space:nowrap}
 }
 @media(max-width:820px){
   /* Include .railshut so its desktop column template does not leak onto mobile. */
-  .app,.app.railshut{grid-template-columns:minmax(0,1fr)}
+  .app,.app.railshut,.app.lshut{grid-template-columns:minmax(0,1fr)}
   /* On phones the roster hides but its footer's appearance control stays. */
   .rail.left{display:block;position:fixed;left:auto;right:42px;top:7px;width:auto;height:auto;
     z-index:55;min-height:0;border:0;box-shadow:none;background:none;backdrop-filter:none}
@@ -1375,3 +1377,54 @@ dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh 
      controls it used to collide with. Folded, it is still the 34px strip. */
   .rail.right:not(.shut){width:100%;z-index:56;box-shadow:none}
 }
+
+/* ── left rail: open (184px) or a 44px strip ─────────────────────────────
+ * Open, the brand is one short row and each pane is one line; the second line
+ * (state, agent, folder) lives in the row's tooltip, since the pane header
+ * already shows it. Folded, the rail is a column of icons and one lettered
+ * tile per pane, the state dot and pending badge on the tile. */
+.brandname{flex:1;min-width:0;white-space:nowrap;overflow:hidden}
+.lfold{flex:none;width:22px;height:22px;padding:0;border-radius:6px;color:var(--faint);
+  font-size:15px;line-height:1}
+.lfold:hover{color:var(--ink);background:var(--raise)}
+.rit .ini{display:none}
+.rit .flag{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);white-space:nowrap}
+.rit .flag.warn{color:var(--gold)}
+.roster > .rit:first-child{margin-top:2px}
+/* One line: tighter rows, and the ⋯ floats over the title's end on hover
+   instead of reserving its width on every row. */
+.roster > .rit:not(.arc){position:relative;padding:6px 9px;gap:9px;margin-bottom:1px}
+.roster > .rit:not(.arc) .more{position:absolute;right:5px;top:50%;translate:0 -50%;
+  background:var(--raise)}
+
+@media(min-width:821px){
+  .app.lshut .rail.left{position:relative;z-index:30;overflow:visible}
+  .app.lshut .brand{justify-content:center;padding:12px 0 10px}
+  .app.lshut .brandmark{cursor:pointer}
+  .app.lshut .brandname,.app.lshut .lfold{display:none}
+  .app.lshut .newrow{flex-direction:column;align-items:center;gap:6px;margin:0 0 8px}
+  .app.lshut .newrow.tools{margin-bottom:12px}
+  .app.lshut .newrow .new,.app.lshut .newquick,.app.lshut .newrow .search-trigger{
+    flex:none;width:32px;height:32px;padding:0;margin:0;justify-content:center;text-align:center}
+  .app.lshut .rail.left .long,.app.lshut .search-trigger kbd{display:none}
+  .app.lshut .roster{padding:0 6px 10px;overflow-x:hidden}
+  .app.lshut .roster > .lab,.app.lshut .roster > .calm,.app.lshut .rit.arc{display:none}
+  .app.lshut .rit{position:relative;justify-content:center;padding:3px 0;margin-bottom:4px;gap:0}
+  .app.lshut .rit .txt,.app.lshut .rit .more,.app.lshut .rit .pinmark,
+  .app.lshut .rit .flag{display:none}
+  .app.lshut .rit .ini{display:flex;align-items:center;justify-content:center;width:28px;height:28px;
+    border-radius:8px;border:1px solid var(--hairline);background:var(--raise);color:var(--dim);
+    font-size:12px;font-weight:650;text-transform:uppercase}
+  .app.lshut .rit.on .ini{border-color:var(--line2);color:var(--ink)}
+  .app.lshut .rit .dot{position:absolute;right:2px;bottom:2px;
+    box-shadow:0 0 0 2px var(--panel)}
+  .app.lshut .rit .badge{position:absolute;top:-2px;right:-3px;padding:0 4px;font-size:9.5px}
+  .app.lshut .foot{flex-direction:column;gap:8px;padding:10px 0}
+  .app.lshut .conn{font-size:0;width:7px;height:7px;border-radius:50%;background:var(--faint)}
+  .app.lshut .conn.on{background:var(--sage)}
+  .app.lshut .conn.off{background:var(--rust)}
+  .app.lshut .appearance-chevron{display:none}
+  .app.lshut .appearance{padding:4px 3px}
+  .app.lshut .rail.left .theme-menu{right:auto;left:-6px}
+}
+.roster > .rit:not(.arc).on:not(:hover) .more:not(:focus-visible){opacity:0}

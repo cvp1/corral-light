@@ -191,7 +191,7 @@ for (const [site, needle] of [
   ['the pane header', /const dsp = displayState\(p\);/],
 ])
   check(needle.test(src), `${site} no longer reads the display projection`);
-check(/sub\.title = p\.state;/.test(src),
+check(/it\.title = `[^`]*state: \$\{p\.state\}`;/.test(src),
       'the roster row dropped the raw-state tooltip — the projection collapses '
     + 'six enum values into five words, and the record has to stay reachable');
 

@@ -313,5 +313,16 @@ check(/\$\('#grid'\)\.addEventListener\('scroll', markSeen/.test(src),
 check(/\.rail\.right:not\(\.shut\)\{width:100%;z-index:56/.test(css),
       'T-VIS-A1 (static) phone: the open rail is full width above the header controls');
 
+/* ── the left rail: open or a strip ─────────────────────────────────── */
+const leftShut = new Function(`const LEFT_STRIP_BELOW = 1600;\n${fn('leftShut')}\nreturn leftShut;`)();
+eq(leftShut(null, 1280), true, 'T-LR-1 the 1280px laptop starts on the strip');
+eq(leftShut(null, 1920), false, 'T-LR-1 a 1920px screen starts open');
+eq(leftShut(false, 1280), false, 'T-LR-2 a hand-open wins on a narrow screen');
+eq(leftShut(true, 1920), true, 'T-LR-2 a hand-fold wins on a wide screen');
+check(/\.app,\.app\.railshut,\.app\.lshut\{grid-template-columns:minmax\(0,1fr\)\}/.test(css),
+      'T-LR-3 (static) phone: the strip column does not leak onto the one-column layout');
+check(/@media\(min-width:821px\)\{\s*\.app\.lshut/.test(css),
+      'T-LR-3 (static) the strip styles are desktop-only');
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
 console.log('selftest_inbox: ok');

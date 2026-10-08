@@ -1327,9 +1327,9 @@ function paneHead(p) {
   // ACP usage_update is unstable and may be missing or zero: show nothing rather
   // than a misleading "0% ctx".
   const u = p.usage || {};
-  if (u.size > 0 && Number.isFinite(u.used)) {
-    const pct = Math.round(100 * u.used / u.size);
-    const warn = pct >= 75;                    // matches CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+  const pct = ctxPct(p);
+  if (pct !== null) {
+    const warn = pct >= CTX_WARN_PCT;
     const c = el('span', 'ctx' + (warn ? ' warn' : ''), `${pct}% ctx`);
     c.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
     fact(c);
@@ -2814,6 +2814,8 @@ function render() {
     const it = el('div', 'rit d-' + disp + ' ' + p.state +
                         (p.minimized ? ' min' : '') +
                         (S.focus === p.id ? ' on' : ''));
+    // The folded rail shows a lettered tile; the open rail hides it.
+    it.appendChild(el('span', 'ini', [...(p.title || p.label || '?').trim()][0] || '?'));
     it.appendChild(el('span', 'dot'));
     const t = el('div', 'txt');
 
@@ -2837,20 +2839,29 @@ function render() {
 
     t.appendChild(el('div', 't', p.title || p.label));
     // Time since the pane last emitted separates "working" from "wedged".
-    const quiet = (p.state === 'busy' || p.state === 'uncertain') && p.idleS >= 30
-      ? ` · quiet ${fmtAge(p.idleS)}` : '';
+    const quietFor = (p.state === 'busy' || p.state === 'uncertain') && p.idleS >= 30
+      ? fmtAge(p.idleS) : '';
     // Tag the agent for every lane but the default, so a directory name is never
     // mistaken for an agent badge.
     const agentTag = p.agent !== 'claude' ? p.label + ' · ' : '';
-    const sub = el('div', 's',
-      (DISPLAY_LABEL[disp] || disp) + quiet + ' · ' + agentTag +
-      paneDir(p));
-    // The raw state stays one hover away.
-    sub.title = p.state;
-    t.appendChild(sub);
+    // One line on the rail: state, agent and folder are the row's tooltip
+    // (the pane header shows them too), and the raw state is in it.
+    const sub = (DISPLAY_LABEL[disp] || disp) +
+      (quietFor ? ` · quiet ${quietFor}` : '') + ' · ' + agentTag + paneDir(p);
+    it.title = `${p.title || p.label}\n${sub}\nstate: ${p.state}`;
     const ask = askLine(p);            // ask_human: the question, on the row
     if (ask) t.appendChild(ask);
     it.appendChild(t);
+    // Only the exceptions earn room on the line: a turn gone quiet, a full context.
+    if (quietFor) {
+      const f = el('span', 'flag', quietFor); f.title = `no output for ${quietFor}`;
+      it.appendChild(f);
+    }
+    const ctx = ctxPct(p);
+    if (ctx !== null && ctx >= CTX_WARN_PCT) {
+      const f = el('span', 'flag warn', `${ctx}%`); f.title = `${ctx}% of the context window used`;
+      it.appendChild(f);
+    }
 
     // A minimized pane blocked on a permission still shows its count.
     if (p.pending.length) it.appendChild(el('span', 'badge', String(p.pending.length)));
@@ -3395,6 +3406,42 @@ function railFold(items, blocked, quiet = 0, solo = false) {
   $('#railtab').title = blocked
     ? `${blocked} agent${blocked > 1 ? 's are' : ' is'} blocked waiting on you`
     : items ? `${items} waiting` : 'nothing waiting';
+}
+
+/* Context used, in whole percent, or null when the lane did not say. */
+const CTX_WARN_PCT = 75;                     // matches CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+function ctxPct(p) {
+  const u = p.usage || {};
+  return u.size > 0 && Number.isFinite(u.used) ? Math.round(100 * u.used / u.size) : null;
+}
+
+/* ── the left rail: open or a strip ──────────────────────────────────────
+ * Folding by hand is remembered. Until then the viewport decides: a strip
+ * below LEFT_STRIP_BELOW px, where the panes need the width. */
+const LEFT_STRIP_BELOW = 1600;
+function leftShut(saved, width) {
+  return saved === null ? width < LEFT_STRIP_BELOW : saved;
+}
+function wireLeftRail() {
+  const saved = () => {
+    const v = localStorage.getItem('corral.leftShut');
+    return v === null ? null : v === '1';
+  };
+  const apply = () => {
+    const shut = leftShut(saved(), window.innerWidth);
+    $('#app').classList.toggle('lshut', shut);
+    $('#lrailopen').setAttribute('aria-expanded', String(!shut));
+    $('#lrailopen').tabIndex = shut ? 0 : -1;
+  };
+  S.toggleLeft = () => {
+    localStorage.setItem('corral.leftShut',
+                         $('#app').classList.contains('lshut') ? '0' : '1');
+    apply();
+  };
+  $('#lrailopen').onclick = () => { if ($('#app').classList.contains('lshut')) S.toggleLeft(); };
+  $('#lrailfold').onclick = () => S.toggleLeft();
+  window.addEventListener('resize', apply);
+  apply();
 }
 
 function wireRail() {
@@ -4843,6 +4890,10 @@ const KEYS = [
     match: e => e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey
                 && !isTypingTarget(e.target),
     run: () => toggleKeys() },
+  { combo: '[', what: 'Fold or unfold the sidebar',
+    match: e => e.key === '[' && !e.metaKey && !e.ctrlKey && !e.altKey
+                && !isTypingTarget(e.target) && !anyDialogOpen(),
+    run: () => S.toggleLeft && S.toggleLeft() },
   { combo: 'Esc', what: 'Close this list, or the search',
     match: e => e.key === 'Escape' && $('#keysdlg') && $('#keysdlg').open,
     run: () => toggleKeys(false) },
@@ -4931,6 +4982,7 @@ async function start() {
   wireRigDialog();
   wireModuleDialog();
   wireRail();
+  wireLeftRail();
   wireCopySelect();
   wirePalette();
   wireSeat();
