@@ -7,9 +7,8 @@ measured**, because the triage run had no shell. The second (2026-10-10,
 00:58Z to 01:20Z) was **measured**: an operator-authorised agent ran the
 read-only commands over ssh on ranch-server (user `cvande`, `~/Github/CC`)
 and on camano, outside the mailbox. The typed `delegates-status` verb that
-would do this through the mailbox is staged in camano's cc-handoff clone
-and waits for a signed commit; the direct run is recorded here so the plan
-need not wait for it.
+does this through the mailbox landed in cc-handoff `3dd7f1e` (signed); its
+first run is recorded under "0(a) through the mailbox" below.
 
 ## 0(a) The ranch's delegates tooling
 
@@ -143,6 +142,28 @@ signature is good, whatever `approval` says. The plan does not copy that.
 no network calls. A missing `ACTIVE-BOXES.md` exits 2. A failed
 `gcp/list.py` sets `gcp_visible: false` and writes `WARN:` to stderr, so a
 converter must read stdout only.
+
+## 0(a) through the mailbox (2026-10-10)
+
+Task `2026-10-10T160013Z_delegates-phase-0a-measured-delegates-status-py-js-1c5b`,
+typed `delegates-status`, posted from camano at 16:00:13Z and executed by
+ranch-server's worker (`executed-by: worker (recipe delegates-status)`,
+`delivery: polled`) at 16:00:26Z. That is 13 s with no nudge, because camano
+holds no fleetd bearer. The reply reached camano through aios
+`cc_handoff_replies`.
+
+It matches the direct run: exit 0, 0.13 s wall, no stderr, and the same
+empty board (`delegates: []`, `unattributed_audit: []`,
+`gcp_visible: true`). The four archived signature headers read
+`cc-handoff` / `sha512` / `sk-ssh-ed25519@openssh.com` again.
+
+**What it changes:** nothing in the plan, because the numbers are the same.
+What it adds is repeatability. 0(a) can be re-measured from any enrolled
+host without an ssh session, and the verb takes no input from the task, so
+asking for a re-run cannot change what runs. **When to run it again:** once
+a real charter is live on the ranch, which is what closes the fixture gap
+in plan §11 (no passing `LIVE`, `READY` or `UNAPPROVED`). Until then a
+re-run can only return the empty board.
 
 ## 0(b) Signature verification inside the collector sandbox, on this host
 
