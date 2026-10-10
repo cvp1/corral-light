@@ -107,8 +107,9 @@ def v_enable(c, a):
     st = c.post("/api/hubs/enable", {"bind": a.bind, "port": a.port})
     c.say(f"hub links on: {st.get('name')} listening on {st.get('bind')}:{st.get('port')}")
     c.say(f"certificate {st.get('fingerprint')}")
-    c.say("next: `corral-light hubs invite` here, then `corral-light hubs join <token>` "
-          "on the other hub")
+    c.say("next: `corral-light hubs invite` here, then `corral-light hubs join <this "
+          "address> <code>` on the other hub (its firewall and this one's must allow "
+          f"port {st.get('port')})")
     return 0
 
 
