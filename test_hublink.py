@@ -649,6 +649,21 @@ class HelpersTest(unittest.TestCase):
     def test_sas_is_symmetric(self):
         self.assertEqual(hublink.sas("a" * 64, "b" * 64), hublink.sas("b" * 64, "a" * 64))
 
+    def test_a_failed_enable_keeps_the_working_listener(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = hublink.Service(FakeMgr(), d)
+            port = _free_port()
+            s.enable("127.0.0.1", port)
+            self.addCleanup(s.stop)
+            with self.assertRaises(hublink.Refused) as e:
+                s.enable("192.0.2.77", port)          # not an address of this machine
+            self.assertIn("not an address of this machine", e.exception.reason)
+            self.assertEqual(e.exception.status, 400)
+            self.assertTrue(s.status()["listening"])
+            self.assertEqual(s.config()["bind"], "127.0.0.1")
+            socket.create_connection(("127.0.0.1", port), timeout=3).close()
+            s.enable("127.0.0.1", port)               # re-enabling in place is fine
+
     def test_bind_must_be_one_address(self):
         with tempfile.TemporaryDirectory() as d:
             s = hublink.Service(FakeMgr(), d)

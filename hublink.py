@@ -466,7 +466,6 @@ class Service:
         if ip.is_unspecified:
             raise Refused("bind one address, not every interface: pick the LAN "
                           "or tailnet address the other hub will dial", 400)
-        self._unlisten()
         svc = self
 
         class _Srv(ThreadingHTTPServer):
@@ -506,8 +505,23 @@ class Service:
             def handle_error(self, request, client_address):
                 pass        # a dropped or non-TLS connection is not news
 
-        httpd = _Srv((bind, port), FedHandler)
+        try:
+            httpd = _Srv((bind, port), FedHandler)
+        except OSError as e:
+            # The listener that was working keeps working: a failed bind never
+            # takes it down.
+            if e.errno == 99:
+                raise Refused(f"{bind} is not an address of this machine "
+                              f"({socket.gethostname()}); run this on the machine "
+                              f"that has it, or bind one of this machine's own "
+                              f"addresses", 400)
+            if self.httpd and e.errno == 98:
+                old = self.httpd.server_address[:2]
+                if (old[0], old[1]) == (bind, port):
+                    return                    # already listening right there
+            raise Refused(f"cannot listen on {bind}:{port}: {e.strerror or e}", 409)
         httpd.svc = self
+        self._unlisten()                      # only now: the new one is bound
         t = threading.Thread(target=httpd.serve_forever, name="hub-links", daemon=True)
         t.start()
         self.httpd = httpd

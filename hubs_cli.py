@@ -102,9 +102,9 @@ def v_status(c, a):
 
 
 def v_enable(c, a):
-    if a.name:
-        c.post("/api/hubs/name", {"name": a.name})
     st = c.post("/api/hubs/enable", {"bind": a.bind, "port": a.port})
+    if a.name:                 # only once the listener is up: a failed enable renames nothing
+        st = c.post("/api/hubs/name", {"name": a.name})
     c.say(f"hub links on: {st.get('name')} listening on {st.get('bind')}:{st.get('port')}")
     c.say(f"certificate {st.get('fingerprint')}")
     c.say("next: `corral-light hubs invite` here, then `corral-light hubs join <this "
