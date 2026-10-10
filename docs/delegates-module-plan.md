@@ -33,6 +33,12 @@
 >
 > Decided by the operator on 2026-10-09: **generic and public**; **the
 > board first, lanes later**; **Delegates, then Fleet**.
+>
+> Decided by the operator on 2026-10-10, after panel round three
+> (`synthesis-r3.md`): **Q2, the inbox lives inside the config folder**
+> (`<config>/inbox/`), no core bind; **Q7, yes**, in Grok's shape: while a
+> module is failing, the rail keeps the `bad` notices from its last good
+> snapshot, a Phase 1 core change.
 
 ## 0. The ask
 
@@ -188,10 +194,10 @@ lost") until the operator acknowledges it with `cli.py ack-ledger`.
 
 The collector gets what FinOps §3 allows: system dirs read-only, the
 config folder read-only, the data folder writable, no network, and no
-home directory. Under rev 3 it also gets the inbox folder read-only
-(§4.3). **The module CLI runs in the same sandbox,** with config writable
-and no view of `~/.ssh` (`modules.py:886-896`). No module path touches a
-private key.
+home directory. The inbox is a subfolder of config (§4.3, Q2 decided), so
+the collector already sees it read-only and no new bind is needed. **The
+module CLI runs in the same sandbox,** with config writable and no view
+of `~/.ssh` (`modules.py:886-896`). No module path touches a private key.
 
 **The board is not proof.** "Box listed" means a source says a box
 exists. It does not mean the box is up, or is the machine the charter
@@ -199,10 +205,15 @@ meant, or obeys the charter. Every row names its sources and their ages.
 The honesty line is the first note **and** the subtitle of the "Covered"
 tile.
 
-**Separation is not isolation.** The inbox lives apart from the config
-folder, so the module's CLI cannot write inventory and a converter has
-no reason to touch charters. Any process running as the operator can
-still write both. The docs say this plainly.
+**Separation is not isolation, and here there is no separation.** With
+the inbox inside the config folder (Q2), the module CLI's writable config
+mount covers it, so `setup` could write inventory, and a converter that
+can write the inbox can also write charters. The operator chose this
+because the same user can write both folders either way, and a core
+bind would have bought a boundary around the public module only. The
+module's docs say so plainly, and `doctor` warns if a file in `inbox/`
+is newer than the last collector run while `setup` was the last CLI
+command to run.
 
 ## 4. Sources
 
@@ -292,13 +303,15 @@ That lowers an alarm, which is the operator's call to make. Sources
 shows "removed from boxes.toml by hand: cal-1" for 7 days, and the ledger
 keeps the history. Probe targets are not configured here (§4.5).
 
-### 4.3 The inbox (`<state>/module-inbox/delegates/`; pending §9 Q2)
+### 4.3 The inbox (`<config>/inbox/`; §9 Q2, decided)
 
-Outside tools drop JSON files here. The core creates the folder (0700)
-when the manifest sets `"inbox": true`. It binds the folder read-only into
-the collector's sandbox, and **leaves it out of the CLI's sandbox
-entirely**. The CLI path must not reuse the read-only list the way
-`fetched` does (`modules.py:882-891`).
+Outside tools drop JSON files here. `setup` creates the folder (0700)
+inside the config folder, so the collector sees it read-only through the
+existing config bind and **no core change is needed**. The CLI's writable
+config mount covers it too (§3). The earlier design, a core-mounted
+`<state>/module-inbox/<name>/` bound for the collector only, is recorded
+in `synthesis-r2.md` and `synthesis-r3.md` and can be revisited if a
+second module needs an inbox.
 
 **Sources are declared** in `config.toml`. Each has an `id`, a `file`, a
 `label`, `stale_after_s` (default 7200), and `may_claim_complete` (default
@@ -438,16 +451,17 @@ module, `modules.py:1102`):
 **Cadence:** `every_s` 300 and `timeout_s` 30 (enforced). `budget_s` 10 is
 advisory to the module.
 
-**A known seam limit (Q7).** If the collector itself fails, `fresh_at`
-stops advancing, and the module's notices expire at `fresh_at + 2 ×
-every_s` (`modules.py:1236, 1314`). A broken collector therefore drops its
-own alarm from the rail. Every module has this today. The module dialog
-still shows the last snapshot and the error.
+**A seam limit, fixed in Phase 1 (Q7, decided).** Today, if the collector
+itself fails, `fresh_at` stops advancing and the module's notices expire
+at `fresh_at + 2 × every_s` (`modules.py`, notice drop), so a broken
+collector drops its own alarm from the rail. Phase 1 changes the core so
+a failing module's last `bad` notices stay on the rail, marked with the
+age of the last good snapshot (§7).
 
 ## 6. The module (`corral-light-delegates`)
 
 ```
-module.json            core_api 1 (2 from Phase 2); collector, cli, doctor; reads: []; network: none; notices: true; inbox: true
+module.json            core_api 1 (2 from Phase 2); collector, cli, doctor; reads: []; network: none; notices: true
 delegates/charter.py   grammar, required keys, verify (one read, one buffer)
 delegates/sources.py   charters, boxes.toml, declared inbox sources, completeness
 delegates/ledger.py    ledger, tombstones, ended_at latch, corruption handling
@@ -470,10 +484,9 @@ contrib/ranch_status_to_inbox.py
 | Phase | Change |
 |---|---|
 | 1 | `modules/index.json` gains `delegates`. |
-| 1 | **If Q2 is the separate inbox:** the manifest key `inbox: true`. The core creates `<state>/module-inbox/<name>/` and binds it read-only **for the collector only**, never added to the CLI's argv. `--purge` deletes it, and doctor shows it. |
+| 1 | **Q7 (decided):** while a module's run state is `failing`, the rail keeps serving the `bad` notices from its last good snapshot until `NOTICE_MAX_AGE_S`, suffixed "last good <age> ago" (`modules.py`, the notice drop at `fresh + 2 × every`). No new card type. Tests in §12.2. |
 | 2 | The `hostkey-probe` profile and forwarder; `module allow-probe` and its pin field; `core_reports`; `CORE_API = 2`, accepting `core_api <= CORE_API`. |
 | 3 | None beyond FinOps Phase 4's fetchers. |
-| Q7 | Only if the operator wants it: a stale-alarm card for a module whose last good snapshot had a `bad` notice. |
 
 Any other core change found while building is a finding to report.
 
@@ -490,16 +503,17 @@ destination, and per-send data-class checks.
 ## 9. Open questions
 
 1. *(Settled: `core_reports`, `core_api` 2, backward-compatible.)*
-2. **Where the inbox lives: the operator decides.** Round two: all three
-   reviewers now favour the separate core-mounted folder, Astra
-   included, though Astra argued for the config folder in round one.
-   The author recommends it too. It is separation, not isolation (§3).
+2. *(Decided by the operator, 2026-10-10: **inside the config folder**,
+   `<config>/inbox/`, no core change. Three rounds of the panel favoured a
+   separate core-mounted folder; the operator weighed that it is
+   separation, not isolation, since the same user writes both, and chose
+   the simpler shape. §3 states the consequence.)*
 3. *(Settled: `sign` prints.)* 4. *(Gone.)* 5. *(Settled in §2.3: scope.)*
 6. *(Settled: fixed 30 days of history; tombstones forever.)*
-7. **New: should the core keep a stale-alarm card** when a module whose
-   last good snapshot carried a `bad` notice stops producing snapshots?
-   That would be a seam change benefiting every module. Without it, a
-   broken collector quietly drops its own alarm.
+7. *(Decided by the operator, 2026-10-10: **yes**, in the shape Grok
+   proposed in round three: while a module is failing, the rail keeps the
+   `bad` notices from its last good snapshot until `NOTICE_MAX_AGE_S`,
+   with a "last good <age> ago" suffix. A Phase 1 core change, §7.)*
 
 ## 10. Fleet, next (not planned here)
 
@@ -605,10 +619,14 @@ sources.
 ### 12.2 Seam and core (Light's repository)
 
 - Light's suite passes with the module installed and removed.
-- **The inbox bind.** The collector can read it and cannot write it. **The
-  interactive CLI cannot see it at all**: assert its absence in the CLI's
-  argv, not only that it is read-only. No `inbox: true` → no folder.
-  `--purge` removes it. A symlinked inbox folder is refused.
+- **The inbox** (Q2 decided: inside config). The collector reads
+  `<config>/inbox/` and cannot write it. A symlinked `inbox/` is refused.
+  `doctor` warns when an inbox file is newer than the last collector run
+  and `setup` was the last CLI command (§3).
+- **Failing module keeps its alarm** (Q7). A module whose last good
+  snapshot carried a `bad` notice, then fails for three cadences: the
+  notice is still on the rail with the "last good" suffix; it goes when
+  `NOTICE_MAX_AGE_S` passes or a good snapshot clears it.
 - **The CLI has no `~/.ssh`.** A sentinel key is absent inside `cli.py
   setup`.
 - **`core_api`.** With the core at 2, a manifest with `core_api: 1` still
