@@ -47,6 +47,10 @@ ADAPTER = Path(os.environ.get("CORRAL_CLAUDE_ADAPTER",
 # bounds are re-exported by name for importers of this module.
 from corral_core import sessions as _core                        # noqa: E402
 
+# Set by the hub to hublink.Service.reopen_refusal: why a pane may not be
+# reopened here (it was handed to another hub), or None.
+REOPEN_GATE = None
+
 DEFAULT_POSTURE = _core.DEFAULT_POSTURE
 DISPLAY_STATES = _core.DISPLAY_STATES
 IDLE_DISPLAY_S = _core.IDLE_DISPLAY_S
@@ -2907,6 +2911,12 @@ class Manager(_core.ManagerBase):
         """Bring an archived conversation back, detached."""
         if pane_id in self.panes:
             return self.panes[pane_id]
+        # A pane handed to another hub stays closed here (hublink.py): the
+        # work continues there, and two live copies would diverge.
+        gate = REOPEN_GATE
+        why = gate(pane_id) if gate is not None else None
+        if why:
+            raise ValueError(why)
         with self._lock:
             if len(self.panes) >= MAX_ROSTER:
                 raise ValueError(

@@ -1428,3 +1428,12 @@ dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh 
   .app.lshut .rail.left .theme-menu{right:auto;left:-6px}
 }
 .roster > .rit:not(.arc).on:not(:hover) .more:not(:focus-visible){opacity:0}
+
+/* Hub links: rosters of paired hubs, an inbox, one pane's detail. */
+dialog#hubdlg{max-width:none;width:min(880px,96vw)}
+.hubs .hubpeer{border-top:1px solid var(--line);padding-top:8px;margin-top:4px}
+.hubs .hubpeer h3{font-size:13px;margin:0 0 4px;font-family:var(--mono)}
+.hubs .hubpeer .stale{color:var(--gold);font-size:12px}
+.hubdetail{border:1px solid var(--line);border-radius:8px;padding:8px;max-height:46vh;overflow:auto}
+.hubdetail pre{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:4px 0}
+.hubdetail .ask{color:var(--dim)}

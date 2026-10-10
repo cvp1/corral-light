@@ -50,7 +50,7 @@ class TheSuiteNeverTouchesTheLiveConfig(unittest.TestCase):
         self.assertTrue(str(Path(cfg).resolve()).startswith(tmp + os.sep), cfg)
 
     def test_spawned_hub_envs_carry_the_scratch_config(self):
-        for name in ("test_cli.py", "test_resilience.py"):
+        for name in ("test_cli.py", "test_resilience.py", "test_hublink_e2e.py"):
             src = (ROOT / name).read_text(encoding="utf-8")
             self.assertEqual(src.count('"CORRAL_LIGHT_CONFIG_DIR":'),
                              src.count('"CORRAL_LIGHT_STATE":'),
@@ -233,7 +233,11 @@ class StructuralIndependence(unittest.TestCase):
         # /api/module/: installed modules' snapshots and refresh, added
         # 2026-10-07 for the module seam (docs/finops-module-plan.md §4.6).
         # A module never adds a route; these serve every module the same way.
-        allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/", "/api/module/")
+        # /api/hubs: hub links (docs/HUB-LINKS.md, 2026-10-09), the operator's
+        # own hubs seeing, taking over and offering work. One prefix, served
+        # by hublink.Service; it never answers a card or drives a remote pane.
+        allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/", "/api/module/",
+                            "/api/hubs/")
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
                          "/manifest.json", "/api/state", "/api/stream",
                          "/api/search",
@@ -242,7 +246,9 @@ class StructuralIndependence(unittest.TestCase):
                          # Starts the vendor's login for the Live tab's Claude lane; exact path only.
                          "/api/claude/login",
                          # The installed modules' list (module seam, 2026-10-07).
-                         "/api/modules"}
+                         "/api/modules",
+                         # Hub links: this hub's links, peers, inbox (docs/HUB-LINKS.md).
+                         "/api/hubs"}
         for r in routes:
             if r in allowed_exact or r.startswith(allowed_prefixes):
                 continue
@@ -3940,6 +3946,10 @@ from test_vendor_reports import (SandboxedRuns as GrokReportRuns,  # noqa: F401,
                                  BinaryCheck as GrokBinaryCheck,
                                  SandboxUnavailable as GrokReportUnavailable,
                                  Reduce as GrokReportReduce)
+# Hub links (hublink.py): pairing, signed requests, grants, takeover, offers;
+# and two real hubs end to end.
+from test_hublink import HubLinkTest, HelpersTest as HubLinkHelpers  # noqa: F401,E402
+from test_hublink_e2e import TwoHubs                   # noqa: F401,E402
 # T-ISO-1: the own-branch suites, rerun with HOME and TMPDIR in a temp dir.
 from test_worktrees_iso import Isolation as WorktreeIsolation  # noqa: F401,E402
 

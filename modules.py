@@ -63,7 +63,7 @@ CORE_VERBS = frozenset((
     "diagnose", "consult", "watch", "panes", "open", "say", "pending", "ok", "no",
     "cancel", "pause", "resume", "close", "forget", "reopen", "rename", "seat",
     "config", "attach", "quote", "later", "search", "digest", "port", "rig",
-    "lanes", "update", "cli", "module", "modules", "help", "version"))
+    "lanes", "update", "cli", "module", "modules", "help", "version", "hubs"))
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 
