@@ -1,6 +1,6 @@
 # Delegates as the second Corral Light module (and Fleet after it)
 
-> Status: rev 4, 2026-10-10. Nothing built. Phase 0 (a) and (b) measured
+> Status: rev 4, 2026-10-10; Phase 1 built the same day (corral-light-delegates 0.1.0, 122 tests; Light's Q7 change on branch delegates-phase1). Phase 0 (a) and (b) measured
 > 2026-10-10 (`docs/delegates-phase0.md`). Rev 4 has not been put to the
 > panel: round three recommended writing it and then building Phase 1
 > without a fourth round, because the remaining risk is in the
@@ -461,9 +461,14 @@ its grants' `box` means a box of that source.
              "revoked_at": null, "reports_state": "LIVE"}]}
 ```
 
-- **Grant fields.** `name`, `grant_id`, `issued`, `expires` and `box` are
+- **Grant fields.** `name`, `grant_id`, `issued` and `expires` are
   required; a grant with any of them missing or null is `bad-charter`
-  with the reason "source gave no <field>". `approved` is a boolean.
+  with the reason "source gave no <field>". `box` is a name, a list, or
+  null when the source knows no box for the grant (the ranch: a charter
+  with no live box); a null `box` lists nothing and covers nothing, and
+  the grant is still shown with its real status (Phase 1 finding: the
+  fixture's revoked and expired rows all have `box: null`). `approved`
+  is a boolean.
   **`signature` is one of `verified | failed | absent | unverified`**;
   any other value fails the whole file. Only `verified` can make an
   inbox grant `valid`. `revoked_at` is a time or null. `reports_state`
