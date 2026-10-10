@@ -694,13 +694,16 @@ class Isolation(Base):
                 "sqlite3.connect(':memory:').execute('select 1'); print('ok')")
         data = Path(self.tmp) / "libs-data"
         data.mkdir()
-        argv = module_sandbox.build_argv([py, "-c", code], data_dir=str(data))
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        # -I and cwd=data as modules.prepared runs a collector: without -I,
+        # sys.path[0] is the cwd, which the profile does not allow.
+        argv = module_sandbox.build_argv([py, "-I", "-c", code], data_dir=str(data))
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=str(data))
         self.assertEqual(r.returncode, 0, r.stderr[-600:])
         self.assertEqual(r.stdout.strip(), "ok")
         with mock.patch.object(module_sandbox, "_linked_lib_dirs", lambda: ()):
-            r = subprocess.run(module_sandbox.build_argv([py, "-c", code], data_dir=str(data)),
-                               capture_output=True, text=True, timeout=60)
+            r = subprocess.run(module_sandbox.build_argv([py, "-I", "-c", code],
+                                                         data_dir=str(data)),
+                               capture_output=True, text=True, timeout=60, cwd=str(data))
         if r.returncode == 0:
             self.skipTest("this interpreter links nothing outside its prefix")
         self.assertIn("blocked by sandbox", r.stderr)
