@@ -42,9 +42,9 @@
 > One departure from the synthesis, stated in §2.4: the gone-record is an
 > unsigned operator assertion with the same authority as `boxes.toml`,
 > not a signed file. Signing it would make the exit unusable on a macOS
-> hub in v1 (the live hub, camano, runs Arch Linux and verifies; the
-> iMac would not), and it protects nothing `boxes.toml` does not already
-> expose.
+> hub in v1, and it protects nothing `boxes.toml` does not already
+> expose. No fleet hub runs macOS today: camano is Arch Linux and
+> ranch-server is Linux Mint; dogma is the only macOS host.
 >
 > **Rev 3** answered round two (`synthesis-r2.md`): the box became the
 > unit of the alarm; `unknown` could keep an alarm but never quiet one;
