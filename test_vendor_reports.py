@@ -314,7 +314,7 @@ class FindBinary(unittest.TestCase):
         shutil.copy(os.path.realpath(self.L.binary), real)
         os.chmod(real, 0o755)
         with mock.patch.dict(os.environ, {"PATH": self.pathdir + os.pathsep + later}):
-            self.assertEqual(vendor_reports.find_binary(self.L.home), real)
+            self.assertEqual(vendor_reports.find_binary(self.L.home), os.path.realpath(real))
 
 
 @NEEDS_SANDBOX

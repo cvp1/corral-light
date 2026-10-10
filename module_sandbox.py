@@ -26,19 +26,23 @@ Phase 0 prototype and measurements: spike/p0/sandbox/, docs/finops-phase0.md.
 
 On macOS the same interface builds a Seatbelt profile run by
 /usr/bin/sandbox-exec (docs/finops-macos-sandbox.md): deny by default;
-read-only system paths, the interpreter's own prefix and each declared
-read; metadata only on the parent folders of what is allowed; one
+read-only system paths, the interpreter's own prefix (plus the keg
+library dirs its extension modules link to) and each declared read;
+metadata only on the parent folders of what is allowed; one
 writable dir; no network, or for a fetcher outbound to one loopback
 proxy port only; a cleared environment. There are no mount namespaces,
 so a file bind whose destination lies outside the data dir is a path
 alias (the source path is used and allowed), and one inside it is a
 copy. Every path is passed as a profile parameter, never spliced in.
 """
+import functools
+import glob
 import os
 import resource
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 
 import review_sandbox
@@ -218,6 +222,46 @@ def _python_roots():
     return sorted(r for r in roots if r and r != "/")
 
 
+_OTOOL = "/usr/bin/otool"
+
+
+@functools.lru_cache(maxsize=None)
+def _linked_lib_dirs():
+    """Directories of the shared libraries the interpreter's extension
+    modules link to outside the system and its own prefix, read-only. A
+    Homebrew python's _sqlite3, _ssl, _lzma, _zstd and _decimal link
+    sibling kegs (/opt/homebrew/opt/sqlite/lib/...); without these the
+    import fails inside the profile with "blocked by sandbox". Empty
+    when otool (developer tools) is absent — then only the prefix."""
+    if sys.platform != "darwin" or not os.path.exists(_OTOOL):
+        return ()
+    dynload = sysconfig.get_config_var("DESTSHARED") or ""
+    exts = sorted(glob.glob(os.path.join(dynload, "*.so"))) if dynload else []
+    if not exts:
+        return ()
+    try:
+        out = subprocess.run([_OTOOL, "-L", *exts], capture_output=True,
+                             text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    inside = tuple(DARWIN_SYSTEM) + tuple(_python_roots())
+    dirs = set()
+    for line in out.splitlines():
+        if not line.startswith("\t"):
+            continue
+        lib = line.strip().split(" (", 1)[0]
+        if not lib.startswith("/"):
+            continue  # @rpath, @loader_path: resolved inside the prefix
+        real = os.path.realpath(lib)
+        if any(real == r or real.startswith(r + "/") for r in inside):
+            continue
+        # Both spellings: dyld opens the install name (a Homebrew opt/
+        # symlink), the kernel evaluates the resolved vnode.
+        dirs.add(os.path.dirname(lib))
+        dirs.add(os.path.dirname(real))
+    return tuple(sorted(dirs))
+
+
 def _ancestors(p):
     out = []
     p = os.path.dirname(p.rstrip("/"))
@@ -276,7 +320,8 @@ def _darwin_argv(argv, *, read_only, feed_dir, data_dir, file_binds, env, writab
         params.append(value)
         return f'(param "P{len(params) - 1}")'
 
-    ro = list(DARWIN_SYSTEM) + _python_roots() + reads + ([feed] if feed else [])
+    ro = (list(DARWIN_SYSTEM) + _python_roots() + list(_linked_lib_dirs())
+          + reads + ([feed] if feed else []))
     rules.append("(allow file-read* file-map-executable "
                  + " ".join(f"(subpath {param(p)})" for p in ro) + ")")
     rules.append("(allow file-read* " + " ".join(f"(literal {param(d)})"

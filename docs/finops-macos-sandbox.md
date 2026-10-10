@@ -167,7 +167,12 @@ with every path passed as a `-D` parameter. Measured on the Mac:
 
 - **What dyld and Python need, and nothing more:** `/usr` and `/System`
   read and map-executable; the running interpreter's own prefix (never the
-  `/usr/bin/python3` stub, which hands off to the developer tools); the
+  `/usr/bin/python3` stub, which hands off to the developer tools) and the
+  library directories its extension modules link to outside that prefix
+  (`otool -L` over `lib-dynload`: a Homebrew python's `_sqlite3`, `_ssl`,
+  `_lzma`, `_zstd`, `_decimal` link sibling kegs, in both their `opt/`
+  symlink and `Cellar/` spellings — found 2026-10-10 when the finops
+  collector died with "blocked by sandbox" on `libsqlite3.dylib`); the
   root directory's own entry (data and metadata: dyld aborts every binary
   without it, even `/usr/bin/true`); metadata on the parent folders of each
   allowed path only (Python's `realpath` walks them); four `/dev` nodes.

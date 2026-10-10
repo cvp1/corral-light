@@ -683,6 +683,28 @@ class Isolation(Base):
         self.assertFalse((self.state / "planted").exists())
         self.assertFalse((self.home / "planted").exists())
 
+    def test_the_interpreters_linked_libraries_are_readable(self):
+        """A Homebrew python's _sqlite3/_ssl/_lzma link sibling kegs outside
+        the prefix; the profile must allow them or every collector that
+        touches sqlite dies with "blocked by sandbox" (2026-10-10)."""
+        if sys.platform != "darwin":
+            self.skipTest("the keg allowlist is a Seatbelt rule")
+        py = os.path.realpath(sys.executable)
+        code = ("import sqlite3, ssl, lzma, decimal; "
+                "sqlite3.connect(':memory:').execute('select 1'); print('ok')")
+        data = Path(self.tmp) / "libs-data"
+        data.mkdir()
+        argv = module_sandbox.build_argv([py, "-c", code], data_dir=str(data))
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr[-600:])
+        self.assertEqual(r.stdout.strip(), "ok")
+        with mock.patch.object(module_sandbox, "_linked_lib_dirs", lambda: ()):
+            r = subprocess.run(module_sandbox.build_argv([py, "-c", code], data_dir=str(data)),
+                               capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            self.skipTest("this interpreter links nothing outside its prefix")
+        self.assertIn("blocked by sandbox", r.stderr)
+
     def test_the_environment_is_exactly_the_documented_set(self):
         _rows, info = self.run_attempts([], {"CORRAL_TEST_SECRET": "s3cret",
                                              "ANTHROPIC_API_KEY": "sk-test"})
