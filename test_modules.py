@@ -1088,6 +1088,23 @@ class TheNotices(Base):
         self.assertEqual(self.ids(fresh + 119), ["n.1"])
         self.assertEqual(self.ids(fresh + 120), [])
 
+    def test_a_failing_module_keeps_its_bad_notices(self):
+        """Delegates plan Q7: while the run state is failing, the bad
+        notices of the last good snapshot stay until NOTICE_MAX_AGE_S,
+        marked with that snapshot's age; warn and info go as before."""
+        self.install(self.make_repo(mutate=opt_in))
+        fresh = self.run_with([notice(1, level="bad", text="box rogue"), notice(2)])
+        self.set_mode("exit1")
+        self.assertEqual(modules.run_collector("probe")["state"], "failing")
+        self.assertEqual(self.ids(fresh + 119), ["n.1", "n.2"])
+        out = modules.notices(fresh + 3 * 60)["items"]        # three cadences on
+        self.assertEqual([n["id"] for n in out], ["n.1"])
+        self.assertEqual(out[0]["text"], "box rogue; last good 3 min ago")
+        self.assertEqual(self.ids(fresh + 86400 - 1), ["n.1"])
+        self.assertEqual(self.ids(fresh + 86400), [])
+        fresh2 = self.run_with([])                             # a good snapshot clears it
+        self.assertEqual(self.ids(fresh2 + 1), [])
+
     def test_the_24_hour_cap(self):
         def slow(src):
             opt_in(src)
