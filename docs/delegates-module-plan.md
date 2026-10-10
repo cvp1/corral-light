@@ -1,6 +1,7 @@
 # Delegates as the second Corral Light module (and Fleet after it)
 
 > Status: rev 3, 2026-10-09. Not yet reviewed by a panel. Nothing built.
+> Phase 0 (a) and (b) measured 2026-10-10 (`docs/delegates-phase0.md`).
 >
 > **Rev 3** answers panel round two on rev 2: AMEND, AMEND, AMEND
 > (`reviews/2026-10-09-delegates-module-panel/synthesis-r2.md`). Main
@@ -259,7 +260,8 @@ ssh-keygen -Y verify -f <config>/allowed_signers -I <principal>
 - `principal` and `namespace` are set per charter folder in
   `config.toml`. The default namespace is
   `corral-light-delegate-charter`; a ranch folder uses the ranch's own,
-  once Phase 0 confirms it.
+  `cc-handoff` (Phase 0, measured from the archived signatures: namespace
+  `cc-handoff`, hash `sha512`, key type `sk-ssh-ed25519@openssh.com`).
 - Any key type `ssh-keygen` accepts is fine, including `sk-ssh-ed25519`.
   Verifying needs no hardware.
 - `ssh-keygen` gets a 5 s timeout. If it is missing, times out or meets
@@ -269,6 +271,12 @@ ssh-keygen -Y verify -f <config>/allowed_signers -I <principal>
   version.
 - `require_signature` defaults to `yes` once `allowed_signers` exists.
   While it is `no`, the Covered tile reads "covered (unsigned charters)".
+- **The module checks `namespaces=` itself.** Measured (Phase 0b):
+  `ssh-keygen -Y verify` accepts an `allowed_signers` line that has no
+  `namespaces=` option, for any namespace. `setup` always writes the
+  option, and the collector refuses a line without it as `bad-sig`,
+  "cannot verify (allowed_signers line has no namespaces=)", with a note
+  in Sources.
 
 **Revoking** means `status: revoked`, a newer `issued` and a fresh
 signature. **Renewing** means a newer `issued` and `expires` and a fresh
@@ -335,6 +343,10 @@ entirely**. The CLI path must not reuse the read-only list the way
     `sig_ok`/`signed` to `signature`.
   - It turns the audit-event revocation into `revoked_at`.
   - It fills `issued` from the charter's `created`.
+  - Measured value types (Phase 0a): `budget_usd` is a **string**,
+    `capabilities` is the raw front-matter text (`[llm.chat]`) or null,
+    `hours_left` is a float or null and is ignored here, `box` is null or
+    `{tier, ip, domain, manifest_key}`.
   - It runs from the ranch's own cron, and the file reaches this host
     through whatever sync the operator already has.
 
@@ -502,7 +514,7 @@ sources.
 
 | Phase | Deliverable | Done when |
 |---|---|---|
-| **0. Measure** | **Partial, 2026-10-09** (`docs/delegates-phase0.md`). Still to do: (a) on ranch-server, by a person or an authorized agent (auto-triage cannot run commands): a timed `status.py --json`, the `delegates/selftest_status.py` fixtures, and the namespace. (b) `ssh-keygen -Y verify`, including `sk-ssh-ed25519`, inside the real collector sandbox here. (c) An inbox rename is seen on the next run. (d) The alarm notice comes back when its set changes. | results doc; plan updated |
+| **0. Measure** | **(a) and (b) done, 2026-10-10** (`docs/delegates-phase0.md`): `status.py --json` timed on ranch-server (0.13 s, exit 0, empty board), the `selftest_status.py` fixture captured with its real value types (`docs/fixtures/ranch-status-fixture.json`, 16 rows), the namespace confirmed as `cc-handoff`, and a real `sk-ssh-ed25519` signature verified inside the collector sandbox here with five negative cases failing. (c) an inbox rename seen on the next run and (d) the alarm notice returning when its set changes need a collector and a notice to exist, so they are checked when Phase 1 is built. | results doc; plan updated |
 | **1. Board v1** | §2 to §6, and §7's Phase 1 rows | §12.1 and §12.2 pass; installed here; deleting an expired charter whose box is listed keeps one `bad` notice |
 | **2. Host-key check** | §4.5 | §12.3 passes |
 | **3. Cloud inventory** | §4.4 | fetchers tested against local stubs |
@@ -572,7 +584,8 @@ sources.
   - one byte changed in the front matter;
   - the wrong namespace;
   - an unknown signer;
-  - `allowed_signers` with no `namespaces=`;
+  - `allowed_signers` with no `namespaces=` (refused by the module;
+    `ssh-keygen` alone accepts it, Phase 0b);
   - a missing `-I`;
   - CRLF on disk.
 
