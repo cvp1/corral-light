@@ -31,7 +31,14 @@ LOCKFILE = STATE / "pair.lock"
 PAIRFILE = STATE / "pairing.json"
 
 CODE_TTL = 300
-SESSION_TTL = 12 * 3600
+# How long a paired browser stays paired. The operator sets it with
+# `corral-light session ttl <duration>` (session.json in the state dir), read
+# at every mint, so a change applies from the next pairing without a restart.
+# Cookies already issued keep the expiry they were minted with.
+SESSION_TTL = 30 * 86400         # the default when session.json is absent
+STRICT_SESSION_TTL = 12 * 3600   # the pre-2026-10-10 lifetime; used when session.json is corrupt
+MIN_SESSION_TTL = 3600
+MAX_SESSION_TTL = 365 * 86400
 MAX_PENDING = 8              # kept above MAX_MINTS so one rate-limited burst never trips it
 CLAIM_WINDOW = 60            # seconds
 MAX_CLAIMS = 40              # claim attempts per window; the browser polls ~40/min
@@ -213,17 +220,111 @@ def claim(code, now=None):
     return mint(now=now), "ok"
 
 
-def mint(now=None, ttl=SESSION_TTL, user="owner"):
+def mint(now=None, ttl=None, user="owner"):
     # `user` is the token's audience: edge.LAN_USER ("owner"), or
     # edge.SERVE_USER for a cookie minted through Tailscale Serve.
     # The literal must match corral_core/edge.py.
     if "." in user:
         raise ValueError("a token user may not contain '.'")
     now = int(now or time.time())
-    exp = now + ttl
+    exp = now + (session_ttl()[0] if ttl is None else ttl)
     body = f"{user}.{exp}"
     sig = hmac.new(_secret(), body.encode(), hashlib.sha256).digest()
     return f"{body}.{base64.urlsafe_b64encode(sig).decode().rstrip('=')}"
+
+
+def cookie_max_age(token, now=None):
+    """Seconds until `token` expires: the cookie's Max-Age, taken from the
+    token itself so the two can never disagree."""
+    try:
+        exp = int((token or "").split(".", 2)[1])
+    except (IndexError, ValueError):
+        return 0
+    return max(0, exp - int(now or time.time()))
+
+
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def parse_duration(text):
+    """'30d', '12h', '90m', '2w' or plain seconds -> seconds. ValueError on
+    anything else, or outside MIN_SESSION_TTL..MAX_SESSION_TTL."""
+    t = (text or "").strip().lower()
+    unit = t[-1:] if t[-1:] in _DURATION_UNITS else "s"
+    num = t[:-1] if t[-1:] in _DURATION_UNITS else t
+    if not num.isdigit():
+        raise ValueError(f"not a duration: {text!r} (use e.g. 30d, 12h, 2w)")
+    secs = int(num) * _DURATION_UNITS[unit]
+    if not MIN_SESSION_TTL <= secs <= MAX_SESSION_TTL:
+        raise ValueError(f"{fmt_duration(secs)} is outside "
+                         f"{fmt_duration(MIN_SESSION_TTL)}..{fmt_duration(MAX_SESSION_TTL)}")
+    return secs
+
+
+def fmt_duration(secs):
+    for unit, n in (("w", 7 * 86400), ("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= n and secs % n == 0:
+            return f"{secs // n}{unit}"
+    return f"{secs}s"
+
+
+def _session_path():
+    return STATE / "session.json"
+
+
+def session_ttl():
+    """(seconds, error). Missing file -> SESSION_TTL. Unreadable, corrupt or
+    out of range -> STRICT_SESSION_TTL and a loud error: degrade toward the
+    shorter lifetime, never the longer one."""
+    try:
+        raw = _session_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return SESSION_TTL, None
+    except OSError as e:
+        err = (f"session.json is unreadable ({e.__class__.__name__}); "
+               f"sessions last {fmt_duration(STRICT_SESSION_TTL)}")
+        _loud(err)
+        return STRICT_SESSION_TTL, err
+    try:
+        value = json.loads(raw).get("ttl_s")
+    except (ValueError, AttributeError):
+        value = None
+    if not (isinstance(value, int) and not isinstance(value, bool)
+            and MIN_SESSION_TTL <= value <= MAX_SESSION_TTL):
+        err = f"session.json is corrupt; sessions last {fmt_duration(STRICT_SESSION_TTL)}"
+        _loud(err)
+        return STRICT_SESSION_TTL, err
+    return value, None
+
+
+def set_session_ttl(secs, now=None, by="shell"):
+    """Set how long the next pairings last. Recorded in key-ledger.jsonl with
+    a security banner, like a policy change: it changes how long a stolen
+    cookie stays good."""
+    if not MIN_SESSION_TTL <= int(secs) <= MAX_SESSION_TTL:
+        raise ValueError("session lifetime out of range")
+    with _locked():
+        old, _ = session_ttl()
+        _write_private(_session_path(), json.dumps({"ttl_s": int(secs)}) + "\n")
+        _ledger("session-ttl", now, before=old, after=int(secs), by=by)
+
+
+def revoke_all_sessions(now=None, by="shell"):
+    """Replace session.key: every cookie ever minted stops verifying on its
+    next request (_secret() re-reads a changed key). Every browser, on every
+    path, must pair again."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    with _locked():
+        tmp = KEYFILE.with_name(KEYFILE.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, secrets.token_bytes(32))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, KEYFILE)
+        _ledger("revoke-all", now, by=by)
 
 
 def verify(token, now=None):
@@ -331,7 +432,7 @@ def _write_private(path, text):
 # An ordinary key pairing, and minting an enrollment code, are ledger-only.
 # `recover` is its parts -- break-glass, each rm, any policy change -- so its
 # summary line raises nothing of its own.
-NOTICE_EVENTS = ("break-glass", "enroll", "rm", "policy")
+NOTICE_EVENTS = ("break-glass", "enroll", "rm", "policy", "session-ttl", "revoke-all")
 NOTIFY = notify.security          # a seam: tests record instead of showing
 
 
@@ -347,6 +448,13 @@ def _notice_text(rec):
         return "Security key enrolled", f"A key was enrolled for {rec.get('origin')}, {how}."
     if e == "rm":
         return "Security key removed", f"Key {str(rec.get('key'))[:16]} was removed."
+    if e == "session-ttl":
+        return ("Pairing lifetime changed",
+                f"New pairings last {fmt_duration(rec.get('after', 0))} "
+                f"(was {fmt_duration(rec.get('before', 0))}).")
+    if e == "revoke-all":
+        return ("All browsers unpaired",
+                "session.key was replaced; every browser must pair again.")
     return ("Pairing policy changed",
             f"Pairing policy {rec.get('before')} -> {rec.get('after')} ({rec.get('by')}).")
 

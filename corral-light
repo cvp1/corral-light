@@ -4,6 +4,9 @@
 #                               (--break-glass: even under key-only; audited)
 #   corral-light key list|enroll|rm <id>|policy <p>|recover <code> <id>|--all
 #                               security keys for pairing (key_cli.py)
+#   corral-light session [ttl <duration>|revoke-all]
+#                               how long a pairing lasts (default 30d), set it
+#                               for the next pairings, or unpair every browser
 #   corral-light serve          run the hub in the foreground
 #   corral-light doctor         say which lanes can start here, and why not
 #   corral-light launch         open the wall in your browser, already paired
@@ -51,7 +54,7 @@ set -euo pipefail
 D="$(cd "$(dirname "$0")" && pwd)"
 PY="${CORRAL_LIGHT_PYTHON:-python3}"
 case "${1:-}" in
-  pair|key) exec "$PY" "$D/key_cli.py" "$@" ;;
+  pair|key|session) exec "$PY" "$D/key_cli.py" "$@" ;;
   serve) exec "$PY" "$D/hub.py" ;;
   doctor) exec "$PY" "$D/doctor.py" ;;
   worktrees) shift; exec "$PY" "$D/worktrees_cli.py" "$@" ;;

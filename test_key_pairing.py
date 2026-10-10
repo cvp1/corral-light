@@ -769,6 +769,100 @@ class T91_TheBannerIsSilentAndLocal(unittest.TestCase):
         self.assertIs(auth.NOTIFY, notify.security)
 
 
+# ── how long a pairing lasts (2026-10-10) ───────────────────────────────────
+
+DAY = 86400
+
+
+class T10_SessionLifetime(Base):
+    """`corral-light session ttl` sets how long the next pairings last; a
+    pairing keeps the expiry it was minted with; revoke-all ends them all."""
+
+    def exp(self, tok):
+        return int(tok.split(".", 2)[1])
+
+    def test_default_is_thirty_days_when_unset(self):
+        self.assertEqual(auth.session_ttl(), (30 * DAY, None))
+        now = 1_800_000_000
+        self.assertEqual(self.exp(auth.mint(now=now)), now + 30 * DAY)
+
+    def test_setting_applies_to_the_next_mint_without_a_restart(self):
+        auth.set_session_ttl(7 * DAY, now=100)
+        self.assertEqual(auth.session_ttl(), (7 * DAY, None))
+        self.assertEqual(self.exp(auth.mint(now=1000)), 1000 + 7 * DAY)
+        # claim() mints through the same path, not a bound default
+        code, _ = auth.new_code(now=1000)
+        auth.approve(code, now=1000)
+        tok, status = auth.claim(code, now=1000)
+        self.assertEqual((status, self.exp(tok)), ("ok", 1000 + 7 * DAY))
+
+    def test_a_paired_browser_keeps_the_expiry_it_was_minted_with(self):
+        now = 1_800_000_000
+        tok = auth.mint(now=now)                     # 30 days
+        auth.set_session_ttl(3600, now=now)
+        self.assertEqual(auth.verify(tok, now=now + 20 * DAY), "owner")
+        self.assertIsNone(auth.verify(tok, now=now + 31 * DAY))
+
+    def test_a_change_is_audited_then_announced(self):
+        auth.set_session_ttl(90 * DAY, now=5)
+        ev = self.events("session-ttl")
+        self.assertEqual([(e["before"], e["after"]) for e in ev], [(30 * DAY, 90 * DAY)])
+        self.assertEqual(self.ledger_at_notice, ["session-ttl"])
+        self.assertIn("90d", self.notices[0][1])
+        self.assertEqual(stat.S_IMODE((self.state / "session.json").stat().st_mode), 0o600)
+
+    def test_corrupt_or_out_of_range_degrades_to_the_shorter_lifetime(self):
+        for raw in ("not json", '"x"', '{"ttl_s": "30d"}', '{"ttl_s": true}',
+                    '{"ttl_s": 59}', '{"ttl_s": %d}' % (400 * DAY), '{"ttl_s": 1.5e6}'):
+            (self.state / "session.json").write_text(raw)
+            ttl, err = auth.session_ttl()
+            self.assertEqual(ttl, auth.STRICT_SESSION_TTL, raw)
+            self.assertIn("corrupt", err)
+        self.assertIn("session.json is corrupt", self.stderr.getvalue())
+
+    def test_durations(self):
+        good = {"30d": 30 * DAY, "12h": 12 * 3600, "2w": 14 * DAY, "3600": 3600,
+                "90m": 5400, " 365D ": 365 * DAY}
+        for text, secs in good.items():
+            self.assertEqual(auth.parse_duration(text), secs, text)
+        for bad in ("", "0h", "59m", "366d", "abc", "-5d", "1.5d", "d", "30x"):
+            with self.assertRaises(ValueError, msg=bad):
+                auth.parse_duration(bad)
+        self.assertEqual([auth.fmt_duration(x) for x in (30 * DAY, 14 * DAY, 3600, 5400, 61)],
+                         ["30d", "2w", "1h", "90m", "61s"])
+
+    def test_cookie_max_age_comes_from_the_token(self):
+        tok = auth.mint(now=1000, ttl=500)
+        self.assertEqual(auth.cookie_max_age(tok, now=1100), 400)
+        self.assertEqual(auth.cookie_max_age(tok, now=9999), 0)
+        self.assertEqual(auth.cookie_max_age("junk", now=1), 0)
+
+    def test_revoke_all_ends_every_pairing_at_once(self):
+        old = [auth.mint(), auth.mint(user="tailnet")]
+        self.assertTrue(all(auth.verify(t) for t in old))
+        auth.revoke_all_sessions(now=7)
+        self.assertEqual([auth.verify(t) for t in old], [None, None])
+        self.assertEqual(auth.verify(auth.mint()), "owner")
+        self.assertEqual(stat.S_IMODE((self.state / "session.key").stat().st_mode), 0o600)
+        self.assertEqual(len(self.events("revoke-all")), 1)
+        self.assertEqual(self.ledger_at_notice, ["revoke-all"])
+
+    def test_cli(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(key_cli.main(["session", "ttl", "90d"]), 0)
+            self.assertEqual(key_cli.main(["session"]), 0)
+        self.assertEqual(auth.session_ttl()[0], 90 * DAY)
+        self.assertIn("pairing lasts: 90d", out.getvalue())
+        before = (self.state / "session.json").read_bytes()
+        self.assertEqual(key_cli.main(["session", "ttl", "999d"]), 2)
+        self.assertEqual((self.state / "session.json").read_bytes(), before)
+        tok = auth.mint()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(key_cli.main(["session", "revoke-all"]), 0)
+        self.assertIsNone(auth.verify(tok))
+
+
 # ── over a real socket, through hub.Handler ─────────────────────────────────
 
 @unittest.skipIf(OPENSSL is None, "no openssl on this machine")
@@ -830,6 +924,18 @@ class Routes(Base):
         self.assertEqual(user, edge.SERVE_USER)
         self.assertTrue(edge.audience_ok(user, ts, "127.0.0.1"))
         self.assertFalse(edge.audience_ok(user, {}, "127.0.0.1"))
+
+    def test_claim_cookie_lasts_the_configured_lifetime(self):
+        auth.set_session_ttl(14 * DAY)
+        st, new, _, _ = self.call("GET", "/api/pair/new")
+        self.assertEqual(st, 200)
+        auth.approve(new["code"])
+        st, body, cookie, _ = self.call("GET", f"/api/pair/claim?code={new['code']}")
+        self.assertEqual((st, body), (200, {"status": "ok"}))
+        tok = cookie.split(";")[0].split("=", 1)[1]
+        max_age = int(cookie.split("Max-Age=")[1].split(";")[0])
+        self.assertAlmostEqual(max_age, 14 * DAY, delta=5)
+        self.assertAlmostEqual(auth.cookie_max_age(tok), max_age, delta=5)
 
     def test_t712_begin_without_the_code_leaks_no_ids(self):
         self.enroll_first(self.a, origin=self.origin)

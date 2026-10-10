@@ -591,7 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok = auth.mint(user=edge.SERVE_USER if serve else edge.LAN_USER)
                 return self._json({"status": "ok"}, 200, {
                     "Set-Cookie": edge.cookie_header(
-                        COOKIE, tok, auth.SESSION_TTL, secure=serve)})
+                        COOKIE, tok, auth.cookie_max_age(tok), secure=serve)})
             cookie = self._token()
             if p == "/api/pair/key/enroll/begin":
                 return self._json(auth.enroll_begin(cookie, b.get("code"), origin, rp_id))
@@ -667,7 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok = auth.mint(user=edge.SERVE_USER)   # good only via Serve
             return self._json({"status": "ok"}, 200, {
                 "Set-Cookie": edge.cookie_header(
-                    COOKIE, tok, auth.SESSION_TTL, secure=serve)})
+                    COOKIE, tok, auth.cookie_max_age(tok), secure=serve)})
 
         if p in ("/", "/index.html"):
             return self._static("index.html")

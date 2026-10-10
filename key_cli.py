@@ -7,6 +7,9 @@
     corral-light key rm <id>
     corral-light key policy <code|key-or-code|key-only>
     corral-light key recover <pair-code> (<id>... | --all)
+    corral-light session                 how long a pairing lasts
+    corral-light session ttl <duration>  set it for the next pairings (30d, 12h, 2w)
+    corral-light session revoke-all      unpair every browser now
 
 `rm` and `policy` exist only here: the hub has no route for them. Every
 security event lands in the state dir's key-ledger.jsonl. Running this
@@ -92,6 +95,38 @@ def cmd_pair(a):
     return 0 if ok else 2
 
 
+def cmd_session(_a):
+    ttl, err = auth.session_ttl()
+    print(f"pairing lasts: {auth.fmt_duration(ttl)}"
+          + (f"  ({err})" if err else "  (default)" if not auth._session_path().exists() else ""),
+          flush=True)
+    print(f"range:         {auth.fmt_duration(auth.MIN_SESSION_TTL)} to "
+          f"{auth.fmt_duration(auth.MAX_SESSION_TTL)}; "
+          "change with `corral-light session ttl <duration>`", flush=True)
+    print("applies to:    the next pairing; a browser keeps the expiry it was paired with "
+          "(`corral-light session revoke-all` ends them all)", flush=True)
+    return 0
+
+
+def cmd_session_ttl(a):
+    try:
+        secs = auth.parse_duration(a.duration)
+    except ValueError as e:
+        print(f"corral-light: {e}", file=sys.stderr, flush=True)
+        return 2
+    auth.set_session_ttl(secs)
+    print(f"new pairings last {auth.fmt_duration(secs)}. Browsers paired before now keep "
+          "their old expiry; pair one again to give it the new lifetime.", flush=True)
+    return 0
+
+
+def cmd_session_revoke(_a):
+    auth.revoke_all_sessions()
+    print("every browser is unpaired; each must pair again (corral-light pair <code>).",
+          flush=True)
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="corral-light")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -115,6 +150,14 @@ def main(argv=None):
     x.add_argument("ids", nargs="*")
     x.add_argument("--all", action="store_true")
     x.set_defaults(fn=cmd_recover)
+    se = sub.add_parser("session", help="how long a pairing lasts")
+    se.set_defaults(fn=cmd_session)
+    ses = se.add_subparsers(dest="session_cmd")
+    x = ses.add_parser("ttl", help="set the lifetime of the next pairings")
+    x.add_argument("duration", help="e.g. 30d, 12h, 2w, or seconds")
+    x.set_defaults(fn=cmd_session_ttl)
+    ses.add_parser("revoke-all", help="unpair every browser now").set_defaults(
+        fn=cmd_session_revoke)
     a = ap.parse_args(argv)
     return a.fn(a)
 
