@@ -13,6 +13,7 @@ The short version:
 | A second opinion on one answer | ⌘K, pick the *other* pane, ⇧↵ | That pane's last answer lands in your composer, quoted and named. You add the question. Nothing is sent until you press send. |
 | Independent answers from everyone | Type once, press ⌘↵ | The same prompt goes to every live pane. No pane sees another's answer. |
 | The answers to fight it out | Press **⇄ Cross-feed** | Every pane gets every other pane's answer under a preamble you can edit. Round two. Press again for round three. |
+| Work on another machine's hub, seen, taken over or handed off | `corral-light hubs ls / take / offer` | Hub links: see [HUB-LINKS.md](HUB-LINKS.md). |
 | An assistant to consult another one *itself* | Ask it to ("run this by Grok") | It shells out to the other tool, through the same approval you give any command, and reads the answer back. |
 
 Everything below is the long version: when each one earns its place, what it

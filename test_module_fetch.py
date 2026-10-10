@@ -4,6 +4,7 @@ Fixture: testkit/modules/probe/fetcher.py, driven by a mode file."""
 import json
 import os
 import stat
+import sys
 import time
 import unittest
 from unittest import mock
@@ -47,8 +48,7 @@ class ExactHosts(unittest.TestCase):
 
     def test_vendor_hosts_are_fixed_and_exact(self):
         self.assertEqual(modules.FETCH_VENDORS["anthropic"], ("api.anthropic.com",))
-        self.assertEqual(modules.FETCH_VENDORS["gcp"],
-                         ("oauth2.googleapis.com", "bigquery.googleapis.com"))
+        self.assertEqual(modules.FETCH_VENDORS["gcp"], ("bigquery.googleapis.com",))
         for hosts in modules.FETCH_VENDORS.values():
             for h in hosts:
                 self.assertFalse(review_egress.denied_everywhere(h), h)
@@ -98,7 +98,7 @@ class Keys(Base):
         for bad in ("../x", "A", "", "-x", "a/b", ".hidden"):
             with self.assertRaises(modules.ModuleError, msg=bad):
                 module_fetch.key_add(bad, KEY)
-        for bad in ("", "   ", "x" * (module_fetch.MAX_KEY_BYTES + 1)):
+        for bad in ("", "   ", "shortsecret", "x" * (module_fetch.MAX_KEY_BYTES + 1)):
             with self.assertRaises(modules.ModuleError):
                 module_fetch.key_add("k", bad)
 
@@ -118,6 +118,12 @@ class Keys(Base):
             with self.assertRaises(modules.ModuleError, msg=name) as cm:
                 module_fetch.key_path(name)
             self.assertIn(why, str(cm.exception))
+        os.link(d / "good", self.tmp / "second-name")
+        with self.assertRaises(modules.ModuleError) as cm:
+            module_fetch.read_key("good")
+        self.assertIn("hard-linked", str(cm.exception))
+        os.unlink(self.tmp / "second-name")
+        self.assertTrue(module_fetch.read_key("good").startswith(KEY.encode()))
         os.chmod(d, 0o755)
         with self.assertRaises(modules.ModuleError) as cm:
             module_fetch.key_path("good")
@@ -211,10 +217,225 @@ class NoSandboxNoFetch(Base):
         self.assertFalse((modules.fetch_dir("probe") / "k1.json").exists())
 
 
-@unittest.skipUnless(HAVE_BWRAP, "needs bubblewrap")
+class Upstream:
+    """A stand-in vendor: records what the proxy sent; `reply(method, path,
+    headers, body)` -> (status, bytes)."""
+
+    def __init__(self, reply):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        up = self
+        self.seen = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _do(self, method):
+                n = int(self.headers.get("content-length") or 0)
+                body = self.rfile.read(n) if n else b""
+                up.seen.append((method, self.path, {k.lower(): v for k, v in self.headers.items()},
+                                body))
+                status, data = reply(method, self.path, self.headers, body)
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Set-Cookie", "s=1")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self._do("GET")
+
+            def do_POST(self):
+                self._do("POST")
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.srv.daemon_threads = True
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addr = ("127.0.0.1", self.srv.server_address[1])
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def via(proxy, method, url, headers=None, body=None):
+    import http.client
+    c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=20)
+    try:
+        c.request(method, url, body=body, headers=headers or {})
+        r = c.getresponse()
+        return r.status, dict(r.getheaders()), r.read()
+    finally:
+        c.close()
+
+
+class TheFetchProxy(unittest.TestCase):
+    """The key stays in the core: the proxy adds it, the module never has it
+    (plan §6.7.2). No sandbox needed, so these run on every platform."""
+
+    def setUp(self):
+        import fetch_proxy
+        self.fp = fetch_proxy
+        self.addCleanup(fetch_proxy.UPSTREAM_OVERRIDE.clear)
+
+    def upstream(self, host, reply):
+        up = Upstream(reply)
+        self.addCleanup(up.close)
+        self.fp.UPSTREAM_OVERRIDE[host] = up.addr
+        return up
+
+    def proxy(self, vendor, key, hosts):
+        seen = []
+        p = self.fp.FetchProxy("", vendor, key, hosts,
+                               on_host=lambda h, ok: seen.append((h, ok)), tcp=True)
+        self.addCleanup(p.close)
+        return p, seen
+
+    def test_the_credential_is_added_and_the_modules_are_dropped(self):
+        up = self.upstream("api.anthropic.com", lambda m, p, h, b: (200, b'{"data": []}'))
+        p, seen = self.proxy("anthropic", KEY.encode(), ("api.anthropic.com",))
+        st, hdrs, body = via(p, "GET", "https://api.anthropic.com/v1/organizations/cost_report?x=1",
+                             {"x-api-key": "module-chosen", "Authorization": "Bearer evil",
+                              "Cookie": "c=1", "anthropic-version": "2023-06-01",
+                              "Host": "evil.example"})
+        self.assertEqual((st, body), (200, b'{"data": []}'))
+        method, path, h, _ = up.seen[0]
+        self.assertEqual((method, path), ("GET", "/v1/organizations/cost_report?x=1"))
+        self.assertEqual(h["x-api-key"], KEY)
+        self.assertEqual(h["anthropic-version"], "2023-06-01")
+        self.assertEqual(h["host"], "api.anthropic.com")
+        self.assertNotIn("authorization", h)
+        self.assertNotIn("cookie", h)
+        self.assertNotIn("set-cookie", {k.lower() for k in hdrs})
+        self.assertEqual(seen, [("api.anthropic.com", True)])
+
+    def test_bearer_vendors(self):
+        for vendor, host in (("openai", "api.openai.com"), ("xai", "management-api.x.ai")):
+            up = self.upstream(host, lambda m, p, h, b: (200, b"{}"))
+            p, _ = self.proxy(vendor, KEY.encode(), (host,))
+            via(p, "POST", f"https://{host}/v1/x", {"Content-Type": "application/json"}, b'{"a":1}')
+            self.assertEqual(up.seen[0][2]["authorization"], f"Bearer {KEY}")
+            self.assertEqual(up.seen[0][3], b'{"a":1}')
+
+    def test_refusals(self):
+        self.upstream("api.anthropic.com", lambda m, p, h, b: (200, b"{}"))
+        p, seen = self.proxy("anthropic", KEY.encode(), ("api.anthropic.com",))
+        for url in ("https://example.com/", "https://evil.api.anthropic.com/",
+                    "http://api.anthropic.com/", "https://api.anthropic.com:8443/",
+                    "https://u:p@api.anthropic.com/", "https://console.anthropic.com/"):
+            self.assertEqual(via(p, "GET", url)[0], 403, url)
+        self.assertEqual(via(p, "DELETE", "https://api.anthropic.com/")[0], 405)
+        self.assertFalse([h for h, ok in seen if ok])
+
+    def test_no_connect_tunnel(self):
+        import socket
+        p, _ = self.proxy("anthropic", KEY.encode(), ("api.anthropic.com",))
+        s = socket.create_connection(("127.0.0.1", p.port), timeout=5)
+        s.sendall(b"CONNECT api.anthropic.com:443 HTTP/1.1\r\n\r\n")
+        self.assertIn(b" 405 ", s.recv(200))
+        s.close()
+
+    def test_a_response_carrying_the_key_is_refused(self):
+        import base64
+        for echo in (KEY.encode(), base64.b64encode(KEY.encode())):
+            self.upstream("api.anthropic.com", lambda m, p, h, b, e=echo: (200, b'{"k":"' + e + b'"}'))
+            p, _ = self.proxy("anthropic", KEY.encode(), ("api.anthropic.com",))
+            st, _h, body = via(p, "GET", "https://api.anthropic.com/v1/x")
+            self.assertEqual(st, 502)
+            self.assertNotIn(KEY.encode(), body)
+
+    def test_a_request_cap(self):
+        self.upstream("api.anthropic.com", lambda m, p, h, b: (200, b"{}"))
+        p, _ = self.proxy("anthropic", KEY.encode(), ("api.anthropic.com",))
+        with mock.patch.object(self.fp, "MAX_REQUESTS", 2):
+            codes = [via(p, "GET", "https://api.anthropic.com/v1/x")[0] for _ in range(3)]
+        self.assertEqual(codes, [200, 200, 429])
+
+
+@unittest.skipUnless(__import__("shutil").which("openssl"), "needs openssl")
+class TheGoogleToken(unittest.TestCase):
+    """The core signs the service-account assertion and keeps the token."""
+
+    def setUp(self):
+        import fetch_proxy
+        import subprocess
+        import tempfile
+        self.fp = fetch_proxy
+        self.addCleanup(fetch_proxy.UPSTREAM_OVERRIDE.clear)
+        d = tempfile.mkdtemp(prefix="corral-rsa-")
+        self.addCleanup(__import__("shutil").rmtree, d, ignore_errors=True)
+        self.dir = d
+        k = os.path.join(d, "k.pem")
+        subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt",
+                        "rsa_keygen_bits:2048", "-out", k], check=True, capture_output=True)
+        with open(k) as f:
+            self.pem = f.read()
+        self.sa = {"type": "service_account", "client_email": "fx@p.iam.gserviceaccount.com",
+                   "private_key": self.pem, "private_key_id": "abcdef0123456789abcd"}
+
+    def verify(self, msg, sig):
+        import subprocess
+        pub, m, s = (os.path.join(self.dir, n) for n in ("pub.pem", "m", "s"))
+        subprocess.run(["openssl", "pkey", "-in", os.path.join(self.dir, "k.pem"), "-pubout",
+                        "-out", pub], check=True, capture_output=True)
+        for path, data in ((m, msg), (s, sig)):
+            with open(path, "wb") as f:
+                f.write(data)
+        r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", pub, "-signature", s, m],
+                           capture_output=True)
+        return r.returncode == 0
+
+    def test_openssl_verifies_the_signature(self):
+        for msg in (b"", b"hello", os.urandom(777)):
+            self.assertTrue(self.verify(msg, self.fp.rsa_sign(self.pem, msg)))
+        self.assertFalse(self.verify(b"other", self.fp.rsa_sign(self.pem, b"hello")))
+        for bad in ("", "-----BEGIN PRIVATE KEY-----\nMA==\n-----END PRIVATE KEY-----"):
+            with self.assertRaises(ValueError):
+                self.fp.rsa_sign(bad, b"x")
+
+    def test_the_module_gets_data_never_the_token(self):
+        import base64
+        import urllib.parse
+        tokens = []
+
+        def token(m, path, h, body):
+            form = urllib.parse.parse_qs(body.decode())
+            head, claims, sig = form["assertion"][0].split(".")
+            pad = lambda x: x + "=" * (-len(x) % 4)  # noqa: E731
+            c = json.loads(base64.urlsafe_b64decode(pad(claims)))
+            assert c["aud"] == self.fp.GOOGLE_TOKEN_URL and c["iss"] == self.sa["client_email"]
+            assert self.verify(f"{head}.{claims}".encode(), base64.urlsafe_b64decode(pad(sig)))
+            tokens.append("ya29.SECRET-TOKEN-0123456789")
+            return 200, json.dumps({"access_token": tokens[-1], "expires_in": 3600}).encode()
+        tok_up = Upstream(token)
+        bq_up = Upstream(lambda m, p, h, b: (200, b'{"jobComplete": true, "rows": []}'))
+        self.addCleanup(tok_up.close)
+        self.addCleanup(bq_up.close)
+        self.fp.UPSTREAM_OVERRIDE.update({"oauth2.googleapis.com": tok_up.addr,
+                                          "bigquery.googleapis.com": bq_up.addr})
+        p = self.fp.FetchProxy("", "gcp", json.dumps(self.sa).encode(),
+                               ("bigquery.googleapis.com",), tcp=True)
+        self.addCleanup(p.close)
+        for _ in range(2):
+            st, _h, body = via(p, "POST", "https://bigquery.googleapis.com/bigquery/v2/projects/"
+                               "p/queries", {"Content-Type": "application/json"}, b"{}")
+            self.assertEqual(st, 200)
+            self.assertNotIn(b"SECRET-TOKEN", body)
+        self.assertEqual(len(tokens), 1, "the token is cached for the run")
+        self.assertEqual(bq_up.seen[0][2]["authorization"], "Bearer " + tokens[0])
+        self.assertEqual(via(p, "POST", "https://oauth2.googleapis.com/token")[0], 403,
+                         "the token host is the core's, never the module's")
+
+
+@unittest.skipUnless(HAVE_BWRAP, "needs the module sandbox")
 class Runs(Base):
     def setUp(self):
         super().setUp()
+        import fetch_proxy
+        self.fp = fetch_proxy
+        self.addCleanup(fetch_proxy.UPSTREAM_OVERRIDE.clear)
         self.install(self.make_repo(mutate=with_fetcher(("anthropic", "gcp"))))
         module_fetch.key_add("k1", KEY)
         module_fetch.grant("probe", "k1", "anthropic", {"location": "US"})
@@ -223,6 +444,12 @@ class Runs(Base):
         wd = module_fetch.work_dir("probe", "k1")
         wd.mkdir(parents=True, exist_ok=True)
         (wd / "mode.json").write_text(json.dumps(m))
+
+    def upstream(self, reply):
+        up = Upstream(reply)
+        self.addCleanup(up.close)
+        self.fp.UPSTREAM_OVERRIDE["api.anthropic.com"] = up.addr
+        return up
 
     def result(self):
         p = modules.fetch_dir("probe") / "k1.json"
@@ -238,23 +465,65 @@ class Runs(Base):
         self.assertEqual(r["result"], {"ok": True, "vendor": "anthropic",
                                        "hosts": "api.anthropic.com"})
         self.assertGreater(st["next_due_at"], time.time() + 3000)
-        self.assertNotIn(KEY, json.dumps(st))
 
-    def test_the_key_in_a_result_is_refused(self):
-        for m in ("leak", "leak_b64"):
-            with self.subTest(m=m):
-                self.mode(mode=m)
-                st = module_fetch.run_fetch("probe", "k1")
-                self.assertEqual(st["state"], "failing")
-                self.assertIn("contains the key", st["error"])
-                self.assertIsNone(self.result())
+    def test_the_sandboxed_fetcher_reaches_the_vendor_without_the_key(self):
+        up = self.upstream(lambda m, p, h, b: (200, b'{"data": [1]}'))
+        self.mode(mode="call", requests=[
+            {"url": "https://api.anthropic.com/v1/organizations/cost_report",
+             "headers": {"anthropic-version": "2023-06-01", "x-api-key": "guess"}}])
+        st = module_fetch.run_fetch("probe", "k1")
+        self.assertEqual(st["state"], "ok", st.get("error"))
+        self.assertEqual(self.result()["result"]["replies"], [{"status": 200,
+                                                             "text": '{"data": [1]}'}])
+        self.assertEqual(up.seen[0][2]["x-api-key"], KEY)
+        self.assertEqual(st["hosts"], ["api.anthropic.com allowed"])
+
+    def test_a_vendor_that_echoes_the_key_never_reaches_the_module(self):
+        self.upstream(lambda m, p, h, b: (200, b'{"echo": "' + KEY.encode() + b'"}'))
+        self.mode(mode="call", requests=[{"url": "https://api.anthropic.com/v1/x"}])
+        st = module_fetch.run_fetch("probe", "k1")
+        self.assertEqual(st["state"], "ok", st.get("error"))
+        self.assertEqual(self.result()["result"]["replies"][0]["status"], 502)
+        self.assertNotIn(KEY, json.dumps(self.result()))
+
+    def test_isolation(self):
+        data = modules.data_dir("probe")
+        data.mkdir(parents=True, exist_ok=True)
+        (data / "ledger").write_text("collector data")
+        cfg = modules.config_dir("probe")
+        (cfg / "config.toml").write_text("ok\n")
+        feed = modules.feed_dir()
+        feed.mkdir(parents=True, exist_ok=True)
+        (feed / "host.json").write_text("{}")
+        reads = [str(data / "ledger"), str(cfg / "config.toml"),
+                 str(module_fetch.keys_dir() / "k1"), str(feed / "host.json"),
+                 str(self.state / "session.key"), str(self.home / ".ssh" / "id_test"),
+                 "/run/corral/key"]
+        self.mode(mode="isolation", read=reads)
+        st = module_fetch.run_fetch("probe", "k1")
+        self.assertEqual(st["state"], "ok", st.get("error"))
+        out = self.result()["result"]
+        for r in reads:
+            self.assertTrue(out[r].startswith("refused"), r)
+        self.assertTrue(out["direct"].startswith("refused"))
+        self.assertIn(" 405 ", out["connect"])
+        self.assertEqual((out["other_host"], out["sign_in_host"], out["plain_http"]),
+                         (403, 403, 403))
+        self.assertFalse([k for k in out["env"] if k.startswith("CORRAL_READ_")])
+        self.assertNotIn("CORRAL_FETCH_KEY", out["env"])
+        self.assertIn("CORRAL_FETCH_PARAM_LOCATION", out["env"])
+        self.assertIn("CORRAL_FETCH_API", out["env"])
+        self.assertTrue(any("REFUSED" in h for h in st["hosts"]))
+        for path in self.state.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(KEY[:40].encode(), path.read_bytes(), path)
 
     def test_errors_are_scrubbed_and_back_off(self):
         self.mode(mode="fail")
         t0 = time.time()
         st = module_fetch.run_fetch("probe", "k1", now=t0)
         self.assertEqual(st["state"], "failing")
-        for bad in (KEY, "abcdefghijklmnop", "https://"):
+        for bad in ("abcdefghijklmnop", "https://"):
             self.assertNotIn(bad, json.dumps(st))
         self.assertGreaterEqual(st["next_due_at"], t0 + module_fetch.BACKOFF_MIN_S)
         st = module_fetch.run_fetch("probe", "k1", now=t0)
@@ -269,36 +538,39 @@ class Runs(Base):
         self.assertEqual(st["state"], "failing")
         self.assertLess(time.monotonic() - t0, 30)
 
-    def test_isolation(self):
-        data = modules.data_dir("probe")
-        data.mkdir(parents=True, exist_ok=True)
-        (data / "ledger").write_text("collector data")
-        cfg = modules.config_dir("probe")
-        (cfg / "config.toml").write_text("ok\n")
-        module_fetch.key_add("k2", "OTHER-KEY-0123456789")
-        feed = modules.feed_dir()
-        feed.mkdir(parents=True, exist_ok=True)
-        (feed / "host.json").write_text("{}")
-        reads = [str(data / "ledger"), str(cfg / "config.toml"),
-                 str(module_fetch.keys_dir() / "k2"), str(feed / "host.json"),
-                 str(self.state / "session.key"), str(self.home / ".ssh" / "id_test"),
-                 module_fetch.KEY_IN_SANDBOX]
-        self.mode(mode="isolation", read=reads,
-                  connect=["evil.api.anthropic.com", "example.com", "console.anthropic.com",
-                           "bigquery.googleapis.com"])
-        st = module_fetch.run_fetch("probe", "k1")
+    def test_a_swapped_key_file_is_not_what_is_sent(self):
+        up = self.upstream(lambda m, p, h, b: (200, b"{}"))
+        self.mode(mode="call", requests=[{"url": "https://api.anthropic.com/v1/x"}])
+        real = module_fetch.read_key
+
+        def read_then_swap(name):
+            data = real(name)
+            p = module_fetch.keys_dir() / name
+            p.unlink()
+            p.write_text("SWAPPED-IN-SECRET-0123456789")
+            os.chmod(p, 0o600)
+            return data
+        with mock.patch.object(module_fetch, "read_key", side_effect=read_then_swap):
+            st = module_fetch.run_fetch("probe", "k1")
         self.assertEqual(st["state"], "ok", st.get("error"))
-        out = self.result()["result"]
-        for r in reads[:-1]:
-            self.assertTrue(out[r].startswith("refused"), r)
-        self.assertEqual(out[module_fetch.KEY_IN_SANDBOX], "OPENED")
-        self.assertTrue(out["direct"].startswith("refused"))
-        for h, line in out["proxy"].items():
-            self.assertIn("403", line, h)              # the gcp host is not this grant's
-        self.assertIn("HTTPS_PROXY", out["env"])
-        self.assertIn("CORRAL_FETCH_PARAM_LOCATION", out["env"])
-        self.assertFalse([k for k in out["env"] if k.startswith("CORRAL_READ_")])
-        self.assertIn("evil.api.anthropic.com REFUSED", st["hosts"])
+        self.assertEqual(up.seen[0][2]["x-api-key"], KEY)
+
+    def test_revoke_waits_for_a_fetch_in_flight(self):
+        import threading
+        held = threading.Event()
+        done = threading.Event()
+
+        def hold():
+            with modules._Lock("probe"):
+                held.set()
+                time.sleep(1.0)
+            done.set()
+        threading.Thread(target=hold).start()
+        held.wait(5)
+        t0 = time.monotonic()
+        module_fetch.revoke("probe", "k1")
+        self.assertTrue(done.is_set())
+        self.assertGreater(time.monotonic() - t0, 0.5)
 
     def test_the_collector_reads_results_read_only(self):
         self.mode(mode="ok")

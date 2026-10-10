@@ -1,6 +1,11 @@
 # Corral Light modules, and FinOps as the first one
 
-> Status: rev 7, 2026-10-08. Phase 4 (billing APIs) built; see §6.7.1.
+> Status: rev 9, 2026-10-08. Billing keys stay in the core (§6.7.2): no
+> module code holds one. macOS jobs are in CI.
+> Rev 8, 2026-10-08. Phases 3 and 4 reviewed by a panel and fixed
+> (`reviews/2026-10-08-phase3-4-panel/synthesis.md`); the module sandbox
+> now also runs on macOS (`docs/finops-macos-sandbox.md` §6).
+> Rev 7, 2026-10-08. Phase 4 (billing APIs) built; see §6.7.1.
 > Rev 6, 2026-10-08. Phase 0 done; Phase 1 (the seam) built and on
 > master; Phase 2 (the FinOps module) pushed, installed live from its own
 > repository, and through the §8.4 checks (§7). Phase 3 (notices) is
@@ -422,10 +427,14 @@ out by the rule above; the failure itself is shown in the dialog, as now,
 not as a notice.
 
 **Delivery.** `modules.notices(now)` returns the live notices of every
-enabled module, at most 3 per module and 8 in all, ordered by level then
-module name. The hub adds them to `/api/state` as `moduleNotices` on the
-full form only, beside `claudeAuth`, and to the poller's omit list.
-`/health` and unauthenticated routes never carry them.
+enabled module, at most 3 per module and 24 in all, ordered by level then
+module name; the opt-in and period come from the verified copy of the run
+that made the snapshot, recorded in its status, never from installed
+files, and each stored notice is validated again. The hub adds them to
+`/api/state` as `moduleNotices` on the full form only, and to
+`/api/modules`, which the page asks once a minute while visible, so an
+idle tab drops expired cards. `/health` and unauthenticated routes never
+carry them.
 
 **The rail.** Each notice is one quiet card after the review cards and
 before the paused list: the module's title and the notice's title as the
@@ -437,7 +446,8 @@ review card's Not now, so a `warn` that turns `bad` comes back. Notices
 count as quiet items: they open the rail on a wide screen like the review
 cards, never pop the rail on a phone, never count in the hot number, and
 never send a phone notification. Past the 8-card cap the rail says how
-many more there are and that the dialogs have them.
+many more there are and that the dialogs have them. Not now is applied
+before the cap of eight, so hiding a card lets the next one in.
 
 **What FinOps raises.** Only conditions the operator can act on, from data
 already in the snapshot:
@@ -791,9 +801,49 @@ Where the build refines the rules above:
   `credits` in the account's currency over UTC days. Google's token uses
   the `cloud-platform.read-only` scope, signed RS256 by a small
   standard-library implementation checked against OpenSSL.
+- **After the panel (rev 8).** A refused proxy target is counted, never
+  kept (it is the fetcher's text); the parsed result is checked for the
+  key again, and needles include URL-safe base64, hex and the key itself
+  at any length; keys under 16 characters are refused; grant and revoke
+  take the module lock; the key is read through an `O_NOFOLLOW`
+  descriptor and the run binds a private copy; a malformed response fails
+  the fetch and an empty one keeps earlier days. The key checks catch
+  plain and common encodings only: module code that holds a key can
+  always encode it otherwise, which is why a key reaches only its own
+  vendor and only pinned code the operator granted it to. (Superseded by
+  §6.7.2: module code no longer holds a key.)
+- **macOS.** Fetchers run on macOS too, in the Seatbelt profile, reaching
+  the proxy on one loopback port (`docs/finops-macos-sandbox.md` §6).
 - **Read-only keys.** Only Google's role pair is read-only. Anthropic and
   OpenAI document no read-only admin key, and xAI's billing ACLs are
   undocumented; `finops billing` says so before the operator makes one.
+
+#### 6.7.2 Keys stay in the core (rev 9)
+
+The panel's strongest advice, built: a fetcher never holds a key. The
+sandbox gets no key file and no credential. The fetcher sends plain HTTP,
+in proxy form (`GET https://api.anthropic.com/v1/... HTTP/1.1`), to the
+hub's fetch proxy (`fetch_proxy.py`) at `CORRAL_FETCH_API`, which for each
+request:
+
+- accepts GET or POST to an `https` URL on one of the grant's vendor hosts
+  (exact, never a sign-in host), port 443, no userinfo; anything else is
+  403, and CONNECT is 405, so there is no tunnel the core cannot see into;
+- drops every request header but `Accept`, `Content-Type`, `User-Agent` and
+  `anthropic-version`, then adds the credential: Anthropic's `x-api-key`,
+  OpenAI's and xAI's bearer key, or for Google a short-lived token the core
+  obtains itself with the service account key (an RS256 assertion signed
+  in the core; `oauth2.googleapis.com` is the core's host, never the
+  module's, whose Google host is now `bigquery.googleapis.com` only);
+- makes the HTTPS request with certificate checks, to a public address,
+  with caps (500 requests a run, 8 MiB a response);
+- refuses a response carrying the key or the token (raw or base64), and
+  passes back only the status, `Content-Type`, `Retry-After` and the body.
+
+So the limit recorded in §6.7.1, that module code holding a key can always
+encode it past a scan, no longer applies: the module never has it. The
+result scans stay as a second line. Transport is unchanged: the loopback
+shim and a bound unix socket on Linux, one loopback port on macOS.
 
 ### 6.8 An alternative not adopted: vendor telemetry streams
 
@@ -1020,7 +1070,9 @@ Decided by the author in rev 5 under the operator's standing direction to
 make design calls rather than return them. Each can be reversed before
 Phase 1 without rework.
 
-1. **Unsandboxed hosts: run after a typed acknowledgement.** On macOS
+1. **Unsandboxed hosts: run after a typed acknowledgement.** (Rev 8: macOS
+   now has the Seatbelt sandbox, so this applies only where its self-test
+   fails, and on Linux without bubblewrap.) On macOS
    and on Linux without bubblewrap, install shows "this module will run
    unsandboxed as your user and can read anything you can" and runs it
    only after the operator types `unsandboxed`; the pin records it and

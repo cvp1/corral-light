@@ -38,6 +38,8 @@
 #   corral-light module add|list|show|run|enable|disable|update|rollback|remove
 #                               installed modules, each its own repository, run
 #                               sandboxed (modules.py; docs/finops-module-plan.md)
+#   corral-light hubs ...       link other Corral Light hubs: see what they are
+#                               working on, take work over, offer work (hubs_cli.py)
 #   corral-light <module> ...   an enabled module's own commands (e.g. finops setup)
 #   corral-light lanes update <lane>   stage a lane's newer adapter, prove it on a
 #                               private hub, and only then move its pin (lanes.py)
@@ -53,6 +55,7 @@ case "${1:-}" in
   serve) exec "$PY" "$D/hub.py" ;;
   doctor) exec "$PY" "$D/doctor.py" ;;
   worktrees) shift; exec "$PY" "$D/worktrees_cli.py" "$@" ;;
+  hubs) shift; exec "$PY" "$D/hubs_cli.py" "$@" ;;
   launch) shift; exec "$PY" "$D/launch.py" "$@" ;;
   install-service) shift; exec "$PY" "$D/install_service.py" "$@" ;;
   diagnose) shift; exec "$PY" "$D/diagnose.py" "$@" ;;

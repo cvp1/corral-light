@@ -28,6 +28,7 @@ if sys.version_info < (3, 9):
 
 import auth
 import claude_auth
+import hublink
 import claude_login
 import modules
 import notify
@@ -105,6 +106,54 @@ FRAME_LOCK = (
 ATTACH_EXCERPT_CHARS = 6000
 
 MGR = sessions.Manager()
+
+
+# ── hub links (hublink.py): other Corral Light hubs, off until enabled ─────
+def _hub_open(lane, cwd, title, text, origin):
+    """Open a pane for work that came from another hub and send it its brief."""
+    pane = MGR.create(lane, cwd)
+    pane.title, pane.title_locked = (title or "from another hub")[:60], True
+    pane.ported_from = {"pane": origin.get("pane") or origin.get("offer") or "?",
+                        "agent": origin.get("agent") or lane,
+                        "hub": str(origin.get("hub") or "?")[:40],
+                        "host": str(origin.get("hub") or "?")[:64],
+                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "turns": None, "omitted": None,
+                        "transfer": origin.get("transfer"), "offer": origin.get("offer")}
+    pane.save_meta()
+    try:
+        pane.send(text)
+        pane.ported_from["delivered"] = True
+    except Exception as e:                          # noqa: BLE001
+        pane.emit("note", {"text": f"the brief from the other hub was not delivered: {e}"})
+        pane.ported_from.update(delivered=False, error=str(e)[:300])
+    pane.save_meta()
+    return pane.id
+
+
+def _hub_compose(pane):
+    import port as port_mod
+    return port_mod.compose(pane, pane.agent)
+
+
+def _hub_export(pane_id):
+    import port as port_mod
+    return port_mod.export(pane_id, state_dir=sessions.STATE)
+
+
+def _hub_import(bundle):
+    import port as port_mod
+    return port_mod.import_bundle(bundle, state_dir=sessions.STATE)
+
+
+HUBS = hublink.Service(MGR, sessions.STATE, notify=notify.security,
+                       hooks={"open": _hub_open, "compose": _hub_compose,
+                              "export": _hub_export, "import_bundle": _hub_import})
+sessions.REOPEN_GATE = HUBS.reopen_refusal
+# Changing who this hub trusts is for the operator at this machine only.
+HUBS_LOCAL_ONLY = ("/api/hubs/enable", "/api/hubs/disable", "/api/hubs/invite",
+                   "/api/hubs/join", "/api/hubs/grant", "/api/hubs/forget",
+                   "/api/hubs/name", "/api/hubs/addr")
 
 # What code this process is running, for /health (docs/PERF-REVIEW-2026-10-04.md
 # item 1): on 2026-10-04 the hub ran code 6.5 h older than its tree and nothing
@@ -368,6 +417,68 @@ class Handler(BaseHTTPRequestHandler):
                                     body)
         return self._json(obj, status)
 
+    def _hubs_route(self, method, p, q, b):
+        """/api/hubs/*: the wall's and the CLI's view of linked hubs. Past the
+        cookie and same-origin checks; trust changes need the local operator."""
+        if method == "POST" and p in HUBS_LOCAL_ONLY and not self._local_human():
+            return self._json({"error": "pairing and grants are changed only at "
+                                        "this machine (the local CLI or browser)"}, 403)
+        g = (lambda k, d=None: (q.get(k) or [d])[0]) if method == "GET" else b.get
+        try:
+            if method == "GET":
+                if p == "/api/hubs":
+                    return self._json(dict(HUBS.status(), ledger=HUBS.ledger_tail(30)))
+                if p == "/api/hubs/roster":
+                    peer = g("peer")
+                    if peer:
+                        return self._json(HUBS.remote_roster(peer))
+                    return self._json({"hubs": [HUBS.remote_roster(x["id"])
+                                                for x in HUBS.status()["peers"]]})
+                if p == "/api/hubs/pane":
+                    return self._json(HUBS.remote_pane(g("peer"), g("pane")))
+                if p == "/api/hubs/offer":
+                    return self._json(HUBS.offer_status(g("offer")))
+                return self._json({"error": "not found"}, 404)
+            routes = {
+                "/api/hubs/enable": lambda: HUBS.enable(str(g("bind") or ""),
+                                                        g("port") or hublink.DEFAULT_PORT),
+                "/api/hubs/disable": HUBS.disable,
+                "/api/hubs/invite": lambda: HUBS.invite(g("grants") or hublink.DEFAULT_GRANTS,
+                                                        g("ttl") or hublink.INVITE_TTL),
+                "/api/hubs/join": lambda: HUBS.join(g("token") or g("addr"),
+                                                    g("grants") or hublink.DEFAULT_GRANTS,
+                                                    code=g("code"), port=g("port")),
+                "/api/hubs/grant": lambda: HUBS.grant(g("peer"), g("grants") or []),
+                "/api/hubs/forget": lambda: HUBS.forget(g("peer")),
+                "/api/hubs/name": lambda: HUBS.set_name(g("name")) or HUBS.status(),
+                "/api/hubs/addr": lambda: HUBS.set_addr(g("peer"), g("addr"), g("port")),
+                "/api/hubs/take": lambda: HUBS.take(
+                    g("peer"), g("pane"), interrupt=g("interrupt") is True,
+                    lane=g("lane") or None, cwd=g("cwd") or None, send=g("send") is not False),
+                "/api/hubs/fetch": lambda: HUBS.fetch(
+                    g("transfer"), lane=g("lane") or None, cwd=g("cwd") or None,
+                    send=g("send") is not False),
+                "/api/hubs/reclaim": lambda: HUBS.reclaim(g("transfer")),
+                "/api/hubs/offer": lambda: HUBS.offer(
+                    g("peer"), g("prompt"), title=g("title"), lane=g("lane"),
+                    cwd_hint=g("cwdHint")),
+                "/api/hubs/offer/withdraw": lambda: HUBS.cancel_offer(g("offer")),
+                "/api/hubs/accept": lambda: HUBS.accept(g("offer"), cwd=g("cwd"),
+                                                        lane=g("lane")),
+                "/api/hubs/decline": lambda: HUBS.decline(g("offer")),
+            }
+            fn = routes.get(p)
+            if not fn:
+                return self._json({"error": "not found"}, 404)
+            r = fn()
+            return self._json(r if isinstance(r, dict) else {"ok": True, "result": r})
+        except hublink.Refused as e:
+            # A peer's 401 is about the link, not this browser's cookie: the
+            # CLI and the wall read a 401 here as "pair again".
+            return self._json({"error": e.reason}, 403 if e.status == 401 else e.status)
+        except hublink.Unreachable as e:
+            return self._json({"error": str(e), "unreachable": True}, 504)
+
     def _peer(self):
         return self.client_address[0] if self.client_address else None
 
@@ -572,6 +683,8 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             return self._json({"error": "not paired"}, 401)
 
+        if p == "/api/hubs" or p.startswith("/api/hubs/"):
+            return self._hubs_route("GET", p, q, None)
         if p == "/api/session/worktree/probe":
             return self._worktree_probe((q.get("cwd") or [""])[0])
         if p == "/api/session/worktrees":
@@ -690,7 +803,10 @@ class Handler(BaseHTTPRequestHandler):
         # validated snapshot. Errors and paths only past the pairing check.
         if p == "/api/modules":
             pins = modules.load_pins()
-            return self._json({"modules": [modules.summary(n, pins[n]) for n in sorted(pins)]})
+            # Notices too: the page polls this, so an idle tab's cards age
+            # out on time (plan §4.7) without a full /api/state.
+            return self._json({"modules": [modules.summary(n, pins[n]) for n in sorted(pins)],
+                               "notices": modules.notices()})
         if p.startswith("/api/module/"):
             name = _module_name(p[len("/api/module/"):])
             d = modules.detail(name) if name else None
@@ -775,6 +891,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "cross-origin request refused"}, 403)
         try:
             b = self._body()
+            if p.startswith("/api/hubs/"):
+                return self._hubs_route("POST", p, None, b if isinstance(b, dict) else {})
             if p in ENROLL_ROUTES:
                 return self._key_route(p, b if isinstance(b, dict) else {})
             if p in ("/api/session/rigs/save", "/api/session/rigs/up",
@@ -1107,6 +1225,7 @@ def serve(bind=BIND, port=PORT):
     # all interfaces, else the bound address.
     sessions._core.PEER_HUB_URL = (
         f"http://{'127.0.0.1' if bind in ('0.0.0.0', '', '::') else bind}:{port}")
+    HUBS.start()                       # hub links: listener only if enabled
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     install_shutdown_handler()

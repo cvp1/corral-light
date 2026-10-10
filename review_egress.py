@@ -119,19 +119,29 @@ class Egress:
     """A CONNECT proxy on a unix socket for one reviewer. `on_host(host,
     allowed)` is called for every request."""
 
-    def __init__(self, path, lane, on_host=None, allow=None):
+    def __init__(self, path, lane, on_host=None, allow=None, tcp=False):
         """`allow(host) -> bool` replaces the lane's suffix rule (the exact-
-        host mode module fetchers use); None keeps the lane's rule."""
+        host mode module fetchers use); None keeps the lane's rule.
+        `tcp`: listen on 127.0.0.1 at a free port (`self.port`) instead of
+        the unix socket at `path`, for macOS, where a sandbox has no network
+        namespace and its profile allows that one loopback port."""
         self.path, self.lane = str(path), lane
         self.allow = allow or (lambda host: host_allowed(host, lane))
         self.on_host = on_host or (lambda host, allowed: None)
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.bind(self.path)
-        os.chmod(self.path, 0o600)
+        self.port = None
+        if tcp:
+            self.path = ""
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.bind(("127.0.0.1", 0))
+            self.port = self.sock.getsockname()[1]
+        else:
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.bind(self.path)
+            os.chmod(self.path, 0o600)
         self.sock.listen(64)
         self.closed = False
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
@@ -143,10 +153,11 @@ class Egress:
             self.sock.close()
         except OSError:
             pass
-        try:
-            os.unlink(self.path)
-        except OSError:
-            pass
+        if self.path:
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
 
     def _serve(self):
         while not self.closed:

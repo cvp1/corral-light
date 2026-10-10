@@ -22,8 +22,10 @@ import modules  # noqa: E402
 FIXTURE = ROOT / "testkit" / "modules" / "probe"
 GIT_ID = ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
           "-c", "init.defaultBranch=main", "-c", "commit.gpgSign=false"]
-HAVE_BWRAP = bool(shutil.which(os.environ.get("CORRAL_BWRAP", "bwrap"))) and \
-    sys.platform.startswith("linux")
+# The module sandbox exists here: bubblewrap on Linux, Seatbelt on macOS.
+HAVE_BWRAP = (bool(shutil.which(os.environ.get("CORRAL_BWRAP", "bwrap"))) and
+              sys.platform.startswith("linux")) or \
+    (sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK))
 
 
 def git(cwd, *args):
@@ -37,8 +39,16 @@ def quiet(*_a, **_k):
 
 
 def marked_pids(marker):
-    """Pids whose command line carries `marker`."""
+    """Pids whose command line carries `marker` (ps where there is no /proc)."""
     out = []
+    if not Path("/proc").is_dir():
+        r = subprocess.run(["/bin/ps", "-axww", "-o", "pid=,command="],
+                           capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            pid, _, cmd = line.strip().partition(" ")
+            if marker in cmd and pid.isdigit():
+                out.append(int(pid))
+        return out
     for p in Path("/proc").iterdir():
         if not p.name.isdigit():
             continue
@@ -367,7 +377,13 @@ class Tamper(Base):
             self.skipTest("needs the sandbox")
         with modules.prepared("probe", "collector") as (argv, _env, _cwd, sb):
             self.assertTrue(sb)
-            self.assertIn(modules.SANDBOX_CODE + "/collector.py", argv)
+            if sys.platform == "darwin":
+                # No mounts on macOS: the verified run copy's own path runs.
+                script = [a for a in argv if a.endswith("/collector.py")]
+                self.assertEqual(len(script), 1, argv)
+                self.assertIn("/.run-", script[0])
+            else:
+                self.assertIn(modules.SANDBOX_CODE + "/collector.py", argv)
             self.assertNotIn(str(self.gen / "collector.py"), argv)
 
     def test_a_good_snapshot_survives_a_later_tamper(self):
@@ -583,19 +599,15 @@ class TheRunner(Base):
         took = self.failing("sleep", "timeout")
         self.assertLess(took, 15)
 
-    @unittest.skipUnless(HAVE_BWRAP, "needs bubblewrap")
+    @unittest.skipUnless(HAVE_BWRAP, "needs the module sandbox")
     def test_a_child_that_leaves_the_group_dies_too(self):
         marker = f"corral-escape-{os.getpid()}-{time.time_ns()}"
-        self.failing("escape", "timeout", marker)
+        self.addCleanup(kill_marked, marker)
+        # Linux: the pid namespace ends it at the timeout. macOS: the profile
+        # allows no fork, so the collector fails at once and nothing escapes.
+        self.failing("escape", "exited" if sys.platform == "darwin" else "timeout", marker)
         time.sleep(0.5)
-        for p in Path("/proc").iterdir():
-            if not p.name.isdigit():
-                continue
-            try:
-                cmd = (p / "cmdline").read_bytes()
-            except OSError:
-                continue
-            self.assertNotIn(marker.encode(), cmd, "an escaped child outlived the run")
+        self.assertEqual(marked_pids(marker), [], "an escaped child outlived the run")
 
     def test_the_runner_thread_survives_anything(self):
         r = modules.Runner(tick_s=0.05, grace_s=0)
@@ -677,6 +689,9 @@ class Isolation(Base):
         allowed = {"PATH", "HOME", "LANG", "TZ", "PWD", "CORRAL_MODULE_API",
                    "CORRAL_MODULE_NAME", "CORRAL_MODULE_CONFIG", "CORRAL_MODULE_DATA",
                    "CORRAL_MODULE_FEED", "CORRAL_MODULE_SANDBOXED"}
+        if sys.platform == "darwin":
+            # TMPDIR is set to the data dir; the other two the OS adds itself.
+            allowed |= {"TMPDIR", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
         self.assertEqual(set(info["env"]) - allowed, set())
         self.assertNotIn("CORRAL_TEST_SECRET", info["env"])
 
@@ -913,6 +928,12 @@ class TheNoticeRoute(RouteBase):
         _st, h = self.req("GET", "/health", cookie=False)
         self.assertNotIn("NOTICE-SENTINEL", json.dumps(h))
 
+    def test_the_modules_route_carries_them_for_the_pages_poll(self):
+        st, d = self.req("GET", "/api/modules")
+        self.assertEqual(st, 200)
+        self.assertEqual([n["title"] for n in d["notices"]["items"]], ["NOTICE-SENTINEL"])
+        self.assertEqual(self.req("GET", "/api/modules", cookie=False)[0], 401)
+
 
 class TheDispatch(Base):
     def test_a_core_verb_never_reaches_a_module(self):
@@ -1121,7 +1142,9 @@ class TheNotices(Base):
         (gen / "module.json").write_text(json.dumps(m))
         modules.update_pin(name, commit=commit, enabled=True, unsandboxed_ack=True,
                            title=name.title())
-        modules._write_json(modules.status_path(name), {"state": "ok", "fresh_at": iso(fresh)})
+        modules._write_json(modules.status_path(name), {
+            "state": "ok", "fresh_at": iso(fresh),
+            "verified": {"notices": opted, "every_s": every}})
         snap, _ = modules.validate_snapshot(json.dumps(
             {"schema": modules.SNAPSHOT_SCHEMA, "view": [], "notices": notices}), notices=True)
         modules._write_json(modules.snapshot_path(name), snap)
@@ -1132,12 +1155,48 @@ class TheNotices(Base):
             self.fake(name, [notice(i, level=("info", "warn", "bad")[i % 3])
                              for i in range(5)], now)
         out = modules.notices(now + 1)
-        self.assertEqual(len(out["items"]), modules.NOTICES_TOTAL)
-        self.assertEqual(out["more"], 4 * 2 + 4)
-        self.assertEqual([(n["level"], n["module"]) for n in out["items"]],
+        self.assertEqual(len(out["items"]), 4 * modules.NOTICES_PER_MODULE)
+        self.assertEqual(out["more"], 4 * 2)
+        self.assertEqual([(n["level"], n["module"]) for n in out["items"]][:6],
                          [("bad", "alpha"), ("bad", "beta"), ("bad", "delta"), ("bad", "gamma"),
-                          ("warn", "alpha"), ("warn", "alpha"), ("warn", "beta"),
-                          ("warn", "beta")])
+                          ("warn", "alpha"), ("warn", "alpha")])
+        for i in range(6):
+            self.fake(f"extra{i}", [notice(j) for j in range(3)], now)
+        out = modules.notices(now + 1)
+        self.assertEqual(len(out["items"]), modules.NOTICES_SENT)
+        self.assertEqual(out["more"], 4 * 2 + (10 * 3 - modules.NOTICES_SENT))
+
+    def test_an_edited_installed_manifest_cannot_stretch_expiry(self):
+        """Review finding: the period comes from the verified run, not from
+        module.json as it sits on disk now."""
+        self.install(self.make_repo(mutate=opt_in))
+        fresh = self.run_with([notice(1)])
+        commit = modules.load_pins()["probe"]["commit"]
+        mj = modules.module_dir("probe") / commit / "module.json"
+        m = json.loads(mj.read_text())
+        m["collector"]["every_s"] = 86400
+        os.chmod(mj, 0o644)
+        mj.write_text(json.dumps(m))
+        self.assertEqual(self.ids(fresh + 2 * 60 - 1), ["n.1"])
+        self.assertEqual(self.ids(fresh + 2 * 60), [])
+
+    def test_a_stored_notice_is_checked_again_at_read(self):
+        now = time.time()
+        self.fake("edited", [notice(1), notice(2)], now)
+        sp = modules.snapshot_path("edited")
+        snap = json.loads(sp.read_text())
+        snap["notices"][0]["id"] = "Not-an-id\"><img>"
+        snap["notices"][1]["title"] = "   "
+        sp.write_text(json.dumps(snap))
+        self.assertEqual(modules.notices(now + 1)["items"], [])
+
+    def test_a_status_without_verified_facts_shows_none(self):
+        now = time.time()
+        self.fake("old", [notice(1)], now)
+        st = json.loads(modules.status_path("old").read_text())
+        st.pop("verified")
+        modules.status_path("old").write_text(json.dumps(st))
+        self.assertEqual(modules.notices(now + 1)["items"], [])
 
     def test_a_broken_module_costs_only_itself(self):
         now = time.time()

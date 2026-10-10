@@ -1,0 +1,15 @@
+SHIP / FIX-FIRST / REWORK: FIX-FIRST
+
+**Findings**
+1. **High - PROVEN - Path leaked in ID:** `corral-light-finops/finops/view.py:89`. `notice_id` embeds `w["account"]` directly. For Claude, this is the absolute path to the credential file (e.g., `/home/USER/...`). A short path completely bypasses the 64-character hash fallback, visibly leaking the path into the wall state via `quota.<path>.window`. **Fix:** Hash the account string before embedding: `notice_id("quota", hashlib.sha256(w["account"].encode()).hexdigest()[:8], w["window"])`.
+2. **High - PROVEN - Notice outlives freshness on open tabs:** `corral-light/static/app.js:3516` & `corral-light/hub.py:683`. `moduleNotices` is only queried during `refresh()` via `/api/state?full=1`. The `/api/stream` delta omits notices. If a user leaves the wall open, the UI relies on an indefinitely stale snapshot. Notices outlive their backend expiry and freshness caps because the client never repolls. **Fix:** Periodically re-call `/api/state?full=1` from JS to refresh them, or include `moduleNotices` in stream updates.
+3. **Medium - PROVEN - Module cap discards higher severity:** `corral-light/modules.py:1330`. The per-module cap (`live[:NOTICES_PER_MODULE]`) is applied *before* the global level ranking. If one module produces 4 `"bad"` notices, its 4th is dropped, yielding the 8th global slot to another module's `"info"` notice. **Fix:** Apply the global severity sort across all unlocked notices first, then enforce caps in a single pass.
+4. **Medium - PROVEN - UI cap hides valid notices after 'Not now':** `corral-light/static/app.js:3265`. `raw.slice(0, 8)` runs *before* the `seen` (Not now) filter. If the hub returns 8 notices and the user hides the first 5, the client displays only 3, permanently silencing the hub's additional overflow pool. **Fix:** Filter `raw` by `seen` first, *then* slice to 8.
+5. **Medium - PROVEN - FinOps notice fires without a tile:** `corral-light-finops/finops/view.py:145`. If `w["bp"] is None` and the vendor rejects the request, `notices()` properly issues a `"bad"` notification. However, the display loop manually continues (`if w["bp"] is None: continue`), leaving the notice visible but skipping the correlated tile. **Fix:** Drop the `bp is None` condition for the UI tiles block so the warning renders without a bar, or suppress its notice entirely.
+
+**Tests**
+- **Test that would pass broken:** `test_ids_are_valid_and_stable` in `test_notices.py`. It asserts the length and character set of `notice_id` but does not enforce that raw secret file paths are stripped, letting the path privacy violation slip.
+- **Most needed test:** An orchestration test running `app.js` via the stream, asserting that `moduleNotices` correctly age out strictly from polling deltas or timer ticks on an uninterrupted DOM interaction.
+
+**One sentence change** 
+Include `moduleNotices` in `/api/stream` payloads or initiate a background refresh cycle in `app.js` to prevent notices from quietly outliving their strictly defined phase rules while the tab is active.

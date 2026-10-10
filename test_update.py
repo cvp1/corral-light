@@ -247,6 +247,68 @@ class Run(Repo):
         self.assertEqual(self.head(), before)
         rs.assert_not_called()
 
+    PATCHER_OK = ("import pathlib, sys\n"
+                  "pathlib.Path(sys.argv[2], 'patched-by').write_text('{tag}')\n"
+                  "print('rate-limit-before-usage: patched')\n")
+    PATCHER_BAD = ("print('rate-limit-before-usage: drift')\n"
+                   "raise SystemExit(1)\n")
+
+    def test_adapters_are_patched_by_the_pulled_patcher(self):
+        """npm ci installs unpatched adapters; the checkout's OWN patcher (the
+        code just pulled, not this running script) must then apply."""
+        self.commit("adapter_patches.py", self.PATCHER_OK.format(tag="v1"), "patcher v1")
+        sh(self.dev, "git", "push", "-q", "origin", "master")
+        sh(self.inst, "git", "pull", "-q", "--ff-only")
+        self.commit("adapter_patches.py", self.PATCHER_OK.format(tag="v2"), "patcher v2")
+        self.push("spike/package-lock.json", '{"v": 2}', "bump adapters")
+        lines = []
+        with mock.patch.object(update, "node_bin", return_value=Path("/x")), \
+                mock.patch.object(update, "npm_ci") as ci:
+            update.apply(update.plan(self.inst), lines.append)
+        ci.assert_called_once()
+        self.assertEqual((self.inst / "spike" / "patched-by").read_text(), "v2")
+        self.assertTrue(any("adapter patches" in ln and "patched" in ln for ln in lines), lines)
+
+    def test_a_patch_that_does_not_take_rolls_back(self):
+        self.commit("adapter_patches.py", self.PATCHER_BAD, "patcher that drifts")
+        self.push("spike/package-lock.json", '{"v": 2}', "bump adapters")
+        before = self.head()
+        with mock.patch.object(update, "node_bin", return_value=Path("/x")), \
+                mock.patch.object(update, "npm_ci") as ci:
+            with self.assertRaisesRegex(update.Refused, "patches did not apply.*rolled back"):
+                update.apply(update.plan(self.inst), lambda m: None)
+        self.assertEqual(self.head(), before)
+        self.assertEqual(ci.call_count, 2)           # the new install, then the old again
+
+    def test_a_failed_recovery_is_said_not_hidden(self):
+        self.commit("adapter_patches.py", self.PATCHER_BAD, "patcher that drifts")
+        self.push("spike/package-lock.json", '{"v": 2}', "bump adapters")
+        calls = []
+
+        def ci(root):
+            calls.append(1)
+            if len(calls) == 2:
+                raise update.Refused("npm ci failed: offline")
+        with mock.patch.object(update, "node_bin", return_value=Path("/x")), \
+                mock.patch.object(update, "npm_ci", side_effect=ci):
+            with self.assertRaisesRegex(update.Refused, "could NOT be restored.*offline"):
+                update.apply(update.plan(self.inst), lambda m: None)
+
+    def test_a_patcher_only_failure_reinstalls_clean_adapters(self):
+        self.push("adapter_patches.py", self.PATCHER_BAD, "patcher only, drifts")
+        with mock.patch.object(update, "node_bin", return_value=Path("/x")), \
+                mock.patch.object(update, "npm_ci") as ci:
+            with self.assertRaisesRegex(update.Refused, "rolled back"):
+                update.apply(update.plan(self.inst), lambda m: None)
+        ci.assert_called_once()                      # recovery only: no lockfile change
+
+    def test_a_patcher_change_alone_is_applied(self):
+        self.push("adapter_patches.py", self.PATCHER_OK.format(tag="v3"), "patcher only")
+        with mock.patch.object(update, "npm_ci") as ci:
+            update.apply(update.plan(self.inst), lambda m: None)
+        ci.assert_not_called()
+        self.assertEqual((self.inst / "spike" / "patched-by").read_text(), "v3")
+
     def test_no_npm_refuses_before_pulling(self):
         self.push("spike/package-lock.json", '{"v": 2}', "bump adapters")
         before = self.head()

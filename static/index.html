@@ -64,6 +64,8 @@
               aria-label="Keyboard shortcuts">?</button>
       <button class="keysbtn" id="seckeysbtn" type="button" title="Security keys"
               aria-label="Security keys">⚿</button>
+      <button class="keysbtn" id="hubsbtn" type="button" title="Other hubs: what they are working on"
+              aria-label="Other hubs">⇆</button>
       <div class="themes" id="themes"></div></div>
   </aside>
 
@@ -166,6 +168,35 @@
     <p class="hint err" id="rig-error"></p>
     <div id="rig-out" class="rigout"></div>
     <menu>
+      <button value="cancel" class="btn">Close</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- Hub links (hublink.py): what paired hubs are working on, take work over,
+     offer work, and this hub's inbox. Everything a peer sends is shown as text. -->
+<dialog id="hubdlg">
+  <form method="dialog" class="dlg hubs">
+    <h2>Other hubs</h2>
+    <p class="hint" id="hub-me"></p>
+    <div id="hub-inbox" class="riglist"></div>
+    <div id="hub-peers" class="riglist"></div>
+    <div id="hub-detail" class="hubdetail hide"></div>
+    <details id="hub-offer-box">
+      <summary>Offer work to another hub</summary>
+      <label>To <select id="hub-offer-peer"></select></label>
+      <label>Title <input id="hub-offer-title" spellcheck="false"></label>
+      <label>Lane there (optional) <input id="hub-offer-lane" spellcheck="false" placeholder="claude"></label>
+      <label>Folder there (optional) <input id="hub-offer-cwd" spellcheck="false"></label>
+      <label>The work <textarea id="hub-offer-text" rows="4"></textarea></label>
+      <button type="button" class="btn" id="hub-offer-send">Offer</button>
+    </details>
+    <label>Your checkout of the same repository, for code you take over
+      <input id="hub-take-cwd" spellcheck="false" placeholder="~/code/project"></label>
+    <p class="hint err" id="hub-error"></p>
+    <p class="hint" id="hub-out"></p>
+    <menu>
+      <button type="button" class="btn" id="hub-refresh">Refresh</button>
       <button value="cancel" class="btn">Close</button>
     </menu>
   </form>

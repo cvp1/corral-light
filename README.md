@@ -62,6 +62,11 @@ Then the assistants can finally work *together*:
 - **Second opinions without a second bill.** Any assistant, or any script,
   can run `corral-light consult ask --lane grok --prompt "…"` and get an
   answer through your Grok subscription, in a pane you can watch.
+- **Reach your other machines.** Link two hubs and the one in the bedroom
+  can see what the one in the office is working on, take a pane over
+  (transcript and code, uncommitted changes included), or offer it work,
+  over pinned TLS with signed requests and grants you set per machine. See
+  [docs/HUB-LINKS.md](docs/HUB-LINKS.md).
 - **Bring the whole team back.** Save your named panes as a **rig** and
   restore them all with one command tomorrow.
 

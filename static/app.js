@@ -3257,12 +3257,15 @@ function noticeMarkSeen(n) {
   for (const k of keys.slice(0, Math.max(0, keys.length - 200))) delete m[k];
   localStorage.setItem(NOTICE_SEEN_KEY, JSON.stringify(m));
 }
-/* -> { shown, more }: the notices to draw, minus those put off with Not now. */
+/* -> { shown, more }: the notices to draw, minus those put off with Not
+ * now, at most NOTICE_CARDS; `more` counts the rest, the hub's overflow too.
+ * Not now is applied first, so hiding one lets the next one in. */
+const NOTICE_CARDS = 8;
 function railNotices(mn, seen) {
-  const raw = mn && Array.isArray(mn.items) ? mn.items : [];
-  const more = mn && Number.isFinite(mn.more) && mn.more > 0 ? Math.floor(mn.more) : 0;
+  const raw = mn && Array.isArray(mn.items) ? mn.items.slice(0, 64) : [];
+  let more = mn && Number.isFinite(mn.more) && mn.more > 0 ? Math.floor(mn.more) : 0;
   const shown = [];
-  for (const x of raw.slice(0, 8)) {
+  for (const x of raw) {
     if (!x || typeof x.module !== 'string' || typeof x.id !== 'string' ||
         typeof x.title !== 'string' || !x.title) continue;
     const n = { module: x.module, id: x.id, title: x.title,
@@ -3270,6 +3273,7 @@ function railNotices(mn, seen) {
                 text: typeof x.text === 'string' ? x.text : '',
                 level: Object.prototype.hasOwnProperty.call(NOTICE_LEVEL_CLASS, x.level) ? x.level : 'info' };
     if (seen && seen[noticeSlot(n)] === noticeKey(n)) continue;
+    if (shown.length >= NOTICE_CARDS) { more++; continue; }
     shown.push(n);
   }
   return { shown, more };
@@ -4106,6 +4110,12 @@ async function loadModules() {
   const before = (PAL.modules || []).map(m => m.name + '\t' + m.title).join('\n');
   let d;
   try { d = await api('/api/modules'); } catch { d = {}; }
+  // The rail's notices ride along, so an idle tab drops expired cards.
+  if ('notices' in d) {
+    const before = JSON.stringify(S.moduleNotices || null);
+    S.moduleNotices = d.notices || null;
+    if (JSON.stringify(S.moduleNotices) !== before) scheduleRender();
+  }
   PAL.modules = (Array.isArray(d.modules) ? d.modules : [])
     .filter(m => m && typeof m.name === 'string' && m.name && m.enabled === true)
     .slice(0, 50)
@@ -4174,7 +4184,11 @@ function wireModuleDialog() {
   $('#mod-refresh').onclick = refreshModule;
   dlg.addEventListener('close', () => { MOD.open = null; clearTimeout(MOD.timer); });
   loadModules();
+  // Module notices expire on the hub's clock (plan §4.7); a tab nobody
+  // touches still asks once a minute, so a card never outlives its rule.
+  setInterval(() => { if (!document.hidden) loadModules().catch(() => {}); }, NOTICE_POLL_MS);
 }
+const NOTICE_POLL_MS = 60000;
 
 /* ── new-conversation dialog ─────────────────────────────────────────── */
 // Posture descriptions, matching the agent's own configOptions wording.
@@ -4942,6 +4956,171 @@ function toggleKeys(want) {
   dlg.showModal();
 }
 
+/* ── hub links (hublink.py) ────────────────────────────────────────────── */
+// Other paired hubs: their rosters, one pane's detail, take over, offers, inbox.
+// Everything that came from another hub is set as textContent, never markup.
+const HUBS = { status: null };
+
+function hubAge(iso) {
+  if (!iso) return 'never';
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  return s >= 86400 ? `${Math.floor(s / 86400)}d ago` : s >= 3600 ? `${Math.floor(s / 3600)}h ago`
+    : s >= 60 ? `${Math.floor(s / 60)}m ago` : `${s}s ago`;
+}
+
+function hubBtn(label, fn) {
+  const b = el('button', 'btn', label);
+  b.type = 'button';
+  b.onclick = async () => {
+    b.disabled = true;
+    $('#hub-error').textContent = '';
+    try { await fn(); } catch (e) { $('#hub-error').textContent = e.message; }
+    finally { b.disabled = false; }
+  };
+  return b;
+}
+
+function hubInboxRows(st) {
+  const waiting = (st.inbox || []).filter(o => o.state === 'offered');
+  if (!waiting.length) return [];
+  const rows = [el('div', 'lab', 'Offered to this hub')];
+  for (const o of waiting) {
+    const row = el('div', 'rigrow');
+    row.appendChild(el('span', 'pill', String(o.fromName || '?').slice(0, 40)));
+    row.appendChild(el('span', 't', String(o.title || '').slice(0, 80)));
+    const body = el('pre', '', String(o.prompt || '').slice(0, 4000));
+    row.appendChild(hubBtn('Accept', async () => {
+      const r = await api('/api/hubs/accept', { offer: o.offer });
+      $('#hub-out').textContent = `Accepted: pane ${r.pane} has the work.`;
+      refresh(); renderHubs();
+    }));
+    row.appendChild(hubBtn('Decline', async () => {
+      await api('/api/hubs/decline', { offer: o.offer }); renderHubs();
+    }));
+    rows.push(row, body);
+  }
+  return rows;
+}
+
+function hubPaneRow(h, p, may) {
+  const row = el('div', 'rigrow');
+  row.appendChild(el('span', 'pill', String(p.display || p.state || '').slice(0, 20)));
+  row.appendChild(el('span', 't', `${p.agent || ''}`));
+  const wt = p.worktree && p.worktree.branch ? ` ⎇ ${p.worktree.branch}` : '';
+  row.appendChild(el('span', '', `${String(p.title || '').slice(0, 80)}  [${p.cwd || ''}${wt}]`
+    + (p.pending ? `  · waiting cards there: ${p.pending}` : '')));
+  if (may.includes('watch')) row.appendChild(hubBtn('Look', () => hubDetail(h.peer, p.id)));
+  if (may.includes('takeover') && h.reachable) {
+    row.appendChild(hubBtn('Take over', async () => {
+      const busy = ['busy', 'uncertain', 'needs-you'].includes(p.state) || p.pending;
+      if (busy && !confirm('That pane is mid-turn there. Stop its turn and take it over?')) return;
+      const cwd = ($('#hub-take-cwd').value || '').trim();
+      $('#hub-out').textContent = 'Taking over… bundling its transcript and code.';
+      const r = await api('/api/hubs/take', { peer: h.peer, pane: p.id, interrupt: !!busy,
+                                             cwd: cwd || undefined });
+      $('#hub-out').textContent = `Took over “${r.title || ''}”` +
+        (r.live ? `: live pane ${r.live}` : '') + (r.workDir ? `, code at ${r.workDir}` : '') +
+        ((r.notes || []).length ? ` — ${r.notes.join(' · ')}` : '');
+      refresh(); renderHubs();
+    }));
+  }
+  return row;
+}
+
+async function hubDetail(peer, pane) {
+  const box = $('#hub-detail');
+  box.classList.remove('hide');
+  box.replaceChildren(el('div', 'modline', 'Loading…'));
+  const d = await api('/api/hubs/pane?' + new URLSearchParams({ peer, pane }));
+  const out = [el('div', 'lab', `${d.title || ''} (${d.agent || ''}, ${d.state || ''})`)];
+  for (const t of d.turns || []) {
+    out.push(el('pre', 'ask', `▸ ${t.from || 'operator'}: ${String(t.ask || '').slice(0, 2000)}`));
+    if (t.answer) out.push(el('pre', '', `◂ ${t.answer}`));
+  }
+  if (d.question) out.push(el('pre', 'ask', `asking: ${d.question}`));
+  for (const c of d.pending || []) out.push(el('div', 'modline warn',
+    `waiting on a card there: ${c.title} — it is answered on that hub`));
+  if (d.code) {
+    out.push(el('div', 'lab', `code: ${d.code.branch || '(detached)'} against ${d.code.against}`));
+    out.push(el('pre', '', d.code.stat || '(no changes)'));
+    if ((d.code.untracked || []).length) out.push(el('pre', '', 'untracked: ' + d.code.untracked.join(', ')));
+    if (d.code.diff) {
+      const det = el('details'); det.appendChild(el('summary', '', 'diff'));
+      det.appendChild(el('pre', '', d.code.diff)); out.push(det);
+    }
+  }
+  box.replaceChildren(...out);
+}
+
+async function renderHubs() {
+  let st;
+  try { st = await api('/api/hubs'); } catch (e) { $('#hub-error').textContent = e.message; return; }
+  HUBS.status = st;
+  $('#hub-me').textContent = st.enabled
+    ? `This hub: ${st.name} on ${st.bind}:${st.port}${st.listening ? '' : ' (not listening — see the hub log)'}.`
+    : 'Hub links are off. Turn them on at this machine: corral-light hubs enable --bind <LAN address>.';
+  $('#hub-inbox').replaceChildren(...hubInboxRows(st));
+  const sel = $('#hub-offer-peer');
+  sel.replaceChildren(...(st.peers || []).map(p => {
+    const o = el('option', '', p.name); o.value = p.id; return o; }));
+  if (!(st.peers || []).length) {
+    $('#hub-peers').replaceChildren(el('div', 'hint',
+      'No paired hubs. On one machine run `corral-light hubs invite`, on the other `corral-light hubs join <token>`.'));
+    return;
+  }
+  $('#hub-peers').replaceChildren(...st.peers.map(p => {
+    const box = el('div', 'hubpeer');
+    box.appendChild(el('h3', '', `${p.name}  ·  ${p.addr}`));
+    box.appendChild(el('div', 'modline', 'Loading…'));
+    return box;
+  }));
+  const boxes = [...$('#hub-peers').children];
+  await Promise.all(st.peers.map(async (p, i) => {
+    const box = boxes[i];
+    let h;
+    try { h = await api('/api/hubs/roster?' + new URLSearchParams({ peer: p.id })); }
+    catch (e) { box.replaceChildren(el('h3', '', p.name), el('div', 'modline bad', e.message)); return; }
+    const may = h.reachable ? ((HUBS.status.peers.find(x => x.id === p.id) || {}).weMay || [])
+      : (p.weMay || []);
+    const kids = [el('h3', '', `${p.name}  ·  we may: ${may.join(', ') || 'nothing'}`)];
+    if (!h.reachable) kids.push(el('div', 'stale',
+      `Not answering: ${h.lastError || 'unreachable'}. Last seen ${hubAge(h.lastSeen)}. ` +
+      (h.panes && h.panes.length ? 'Showing what it had then.' : '')));
+    for (const pane of h.panes || []) kids.push(hubPaneRow(h, pane, h.reachable ? (h._grants || may) : []));
+    if (!(h.panes || []).length) kids.push(el('div', 'hint', 'No panes.'));
+    box.replaceChildren(...kids);
+  }));
+}
+
+function openHubs() {
+  $('#hub-error').textContent = '';
+  $('#hub-out').textContent = '';
+  $('#hub-detail').classList.add('hide');
+  $('#hubdlg').showModal();
+  renderHubs();
+}
+
+function wireHubs() {
+  const b = $('#hubsbtn');
+  if (!b || !$('#hubdlg')) return;
+  b.onclick = () => openHubs();
+  $('#hub-refresh').onclick = () => renderHubs();
+  $('#hub-offer-send').onclick = async () => {
+    $('#hub-error').textContent = '';
+    try {
+      const r = await api('/api/hubs/offer', {
+        peer: $('#hub-offer-peer').value, prompt: $('#hub-offer-text').value,
+        title: $('#hub-offer-title').value || undefined,
+        lane: $('#hub-offer-lane').value || undefined,
+        cwdHint: $('#hub-offer-cwd').value || undefined });
+      $('#hub-out').textContent = r.state === 'queued'
+        ? `Queued: ${r.toName} is not answering; it is retried until it lands.`
+        : `Offer ${r.state} at ${r.toName}.` + (r.lastError ? ` ${r.lastError}` : '');
+      if (r.state !== 'refused') $('#hub-offer-text').value = '';
+    } catch (e) { $('#hub-error').textContent = e.message; }
+  };
+}
+
 function wireKeysButton() {
   const b = $('#keysbtn');
   // A page without the button wires nothing rather than throwing.
@@ -4980,6 +5159,7 @@ async function start() {
   wireThemes();
   wireDialog();
   wireRigDialog();
+  wireHubs();
   wireModuleDialog();
   wireRail();
   wireLeftRail();

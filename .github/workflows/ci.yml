@@ -33,6 +33,33 @@ jobs:
       - name: Container suite
         run: python3 -m unittest discover -s tests/container -p 'test_*.py'
 
+  # The module sandbox on macOS (Seatbelt; docs/finops-macos-sandbox.md §6).
+  # It must be available here: the sandboxed tests skip without it, so the
+  # first step fails the job instead of letting them pass by skipping.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["system", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.python != 'system'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Pick the interpreter
+        run: |
+          if [ "${{ matrix.python }}" = system ]; then echo "PY=/usr/bin/python3" >> "$GITHUB_ENV"
+          else echo "PY=$(command -v python3)" >> "$GITHUB_ENV"; fi
+      - name: The sandbox is available
+        run: |
+          "$PY" -B -c "import sys, module_sandbox as m; ok, why = m.available(); print(sys.version.split()[0], ok, why); sys.exit(0 if ok else 1)"
+      - name: Module, fetcher and update tests
+        run: |
+          "$PY" -B -m unittest -v test_modules test_module_fetch test_update
+
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
