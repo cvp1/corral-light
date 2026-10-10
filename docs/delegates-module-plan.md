@@ -41,9 +41,10 @@
 >
 > One departure from the synthesis, stated in §2.4: the gone-record is an
 > unsigned operator assertion with the same authority as `boxes.toml`,
-> not a signed file. Signing it would make the exit unusable on the
-> operator's own macOS hub in v1, and it protects nothing `boxes.toml`
-> does not already expose.
+> not a signed file. Signing it would make the exit unusable on a macOS
+> hub in v1 (the live hub, camano, runs Arch Linux and verifies; the
+> iMac would not), and it protects nothing `boxes.toml` does not already
+> expose.
 >
 > **Rev 3** answered round two (`synthesis-r2.md`): the box became the
 > unit of the alarm; `unknown` could keep an alarm but never quiet one;
@@ -265,7 +266,7 @@ are in config, written by the CLI.
   operator's hand inventory, both lower alarms, and both are writes by
   the same user to the same folder. Round three asked for it to be
   signed when signing is on; rev 4 does not do that, because v1 cannot
-  verify on macOS (§4.1) and the exit must work on this hub.
+  verify on macOS (§4.1) and the exit must work on every hub.
 - **What this protects against:** mistakes, stale tools and restored
   files. It does not protect against the operator, because same-user code
   can delete the data dir. The docs say so.
@@ -308,9 +309,9 @@ profile; `docs/finops-macos-sandbox.md` §3). So v1 verifies signatures
 on Linux only. On macOS every signed charter is `bad-sig: cannot verify
 (no subprocess in this sandbox)`, the Covered tile's subtitle says
 "signatures unverifiable on this host", and Sources carries one warn
-row saying so. That is honest and not reassuring, and it is the state
-of the operator's own hub until Phase 2's core-provided verifier (§7,
-§11).
+row saying so. That is honest and not reassuring. The live hub (camano)
+runs Arch Linux under bubblewrap and verifies; a macOS hub waits for
+Phase 2's core-provided verifier (§7, §11).
 
 **The board is not proof.** "Box listed" means a source says a box
 exists. It does not mean the box is up, or is the machine the charter
