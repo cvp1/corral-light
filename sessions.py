@@ -770,15 +770,20 @@ def available_agents():
 # available_agents() costs 30 to 70 ms (the Ollama HTTP probe, launcher checks)
 # and on a cold cache a full lane_probe handshake or a `security` call. Run on
 # every /api/state, that was most of a state request's latency. One bounded
-# worker computes it every AVAIL_PERIOD_S; requests serve its last result.
+# worker computes it; requests serve its last result.
+# No timer: the worker used to recompute every 5 s whether or not anyone was
+# looking — ~17k Ollama /api/tags hits a day per host, flooding ollama.log
+# (2026-10-12). Now it runs at boot, on invalidate(), and when a read finds the
+# result older than AVAIL_PERIOD_S. An idle hub probes nothing.
 # Not the observer tick: that tick runs auth_sweep resumes and is the wedge
 # detector, so a slow probe there would delay both.
-AVAIL_PERIOD_S = 5
+AVAIL_PERIOD_S = 60             # staleness that lets a read trigger a recheck
 AVAIL_OLLAMA_TIMEOUT_S = 1      # the probe's own default is 5 s; the worker waits less
 
 
 class Availability:
-    """Last known lanes + Claude login status, refreshed by one daemon thread.
+    """Last known lanes + Claude login status, refreshed by one daemon thread
+    on demand — never on a timer.
 
     Without start() (tests, one-shot tools) every read computes fresh, which
     is exactly the old behaviour. A probe that hangs stalls only the worker:
@@ -804,7 +809,7 @@ class Availability:
     def _loop(self):
         while True:
             self.refresh()
-            self._wake.wait(self.period)
+            self._wake.wait()          # sleeps until invalidate() or a stale read
             self._wake.clear()
 
     def refresh(self, only_if_empty=False):
@@ -834,6 +839,8 @@ class Availability:
             return available_agents(), claude_auth.status(), time.time()
         with self._lock:
             if self.agents is not None:
+                if time.time() - self.checked_at > self.period:
+                    self._wake.set()           # stale: recheck in the background
                 return self.agents, self.auth, self.checked_at
         self.refresh(only_if_empty=True)           # first read after boot only
         with self._lock:

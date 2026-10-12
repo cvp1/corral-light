@@ -242,6 +242,25 @@ class AvailabilityWorker(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(len(calls), n + 1)
 
+    def test_an_idle_worker_never_probes_and_a_stale_read_rechecks_once(self):
+        calls = []
+        with mock.patch.object(sessions, "available_agents",
+                               lambda: calls.append(1) or LANES), \
+                mock.patch.object(sessions.claude_auth, "status", lambda *a, **k: AUTH):
+            a = sessions.Availability(period=0.05)   # would fire ~10x below on a timer
+            a.start()
+            deadline = time.time() + 5
+            while a.agents is None and time.time() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.5)                          # idle: nobody reads
+            self.assertEqual(len(calls), 1, "the worker probed on a timer")
+            a.read()                                 # stale now: kicks one recheck
+            deadline = time.time() + 5
+            while len(calls) == 1 and time.time() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.2)
+            self.assertEqual(len(calls), 2)
+
     def test_a_probe_that_raises_keeps_the_previous_answer(self):
         state = {"boom": False}
 
