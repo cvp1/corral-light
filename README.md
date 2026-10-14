@@ -308,7 +308,7 @@ credential. Corral Light never sees a password or a token.
 ## Honest limits
 
 - **Linux first.** The one-line installer is for Linux. macOS works by hand
-  (below); own branches are not yet approved for any macOS lane.
+  (below); own branches work there for Claude, ChatGPT and Grok, as on Linux.
 - **Not a sandbox.** The gate covers every request an assistant makes
   through its tools. An agent with shell access runs as you, and Codex's
   own sandbox auto-approves commands inside its working folder.

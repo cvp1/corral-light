@@ -80,3 +80,60 @@ These need you at the wall, or an outward step:
 Everything ran under a temp dir that macOS clears. The driver is
 `~/.wt-matrix-driver.py` and its env is `~/.wt-matrix.env`, both outside the
 repo. Nothing was written to the live hub's state.
+
+## 2026-10-14: the open items, run on the Mac host
+
+Same method: a private hub on port 8199 with its own temp state, driven
+through the hub API. The live hub was never touched. The driver is
+`~/.wt-ship-driver.py` with env `~/.wt-ship.env`, both outside the repo. Every
+scratch repo had a `.gitignore` and a local bare remote as `origin`.
+
+**Verdict.** Claude, Codex and Grok meet the bar Linux was enabled on
+(`docs/worktree-phase0.md`): the rail behaves as each lane's posture allows,
+an agent's own commit lands on its branch only, and Publish pushes by URL and
+OID to the remote with `main` unmoved. All three are enabled on macOS.
+
+| Step | Claude | Codex | Grok |
+|---|---|---|---|
+| Strict posture: shell commands reach the rail | yes: 2 cards on the rail turn, 3 on the commit turn | no cards: its sandbox auto-runs (same as Linux) | no cards for `unittest` or `touch`: its strict default runs what its own policy allows (known; why it is not in `REVIEW_AT_END_LANES`) |
+| A rejected card stops the command | yes: `touch` refused, marker not created | n/a | n/a: marker created |
+| Agent's own `git commit` | pass, after an approved card | **pass**: the sandbox blocked it, then Codex retried with escalated access and no card. Linux failed here | pass |
+| Publish to a local bare remote | pass | pass | pass |
+| `main` unmoved; main checkout untouched | yes | yes | yes |
+| Tool locations outside the worktree | none | 1 read, `~/.agents/skills/…/SKILL.md` | none |
+
+Cards were answered through `/api/session/permission` with the card's digest
+and `via: wall`: the route the wall's buttons call. Card rendering is covered
+by the browser selftests, not by this run.
+
+**Three lanes at once.** One repo, three files (`mod_a`, `mod_b`, `mod_c`),
+Claude, Codex and Grok in parallel under posture `auto`. Each branch changed
+only its own file. All three were hub-committed and published. The bare remote
+holds all three `corral/*` branches, and `main` did not move.
+
+**M5.** Claude in a worktree pane names its auto-memory directory as the
+**main repo's** project folder (`~/.claude/projects/<main repo key>/memory/`),
+as on Linux. Transcripts go under the worktree's own project folder, which
+`doctor` lists once the worktree is gone. So a pane on an `~/ai-os` worktree
+reads and writes the same memory store as `~/ai-os`.
+
+**Not run, as on Linux.** A PR via `gh`: it needs a throwaway GitHub repo,
+an outward step. `open_pr` has no platform branch; it moves to dogfood.
+
+**Ship gate item 4 (one week of dogfood) does not block.** The maintainer's
+standing ruling for this project: green-lit builds ship in days, and live use
+steers but never blocks. Dogfood continues after enabling; a lost-work report
+is the falsifier, and `CORRAL_LIGHT_WORKTREES_ENABLED=0` is the kill switch.
+
+### Findings
+
+1. **Codex escalates its own commit on macOS without a card.** Codex's posture
+   is not mapped, so this is the lane's own approval policy. It wrote only the
+   branch and the shared object store; `main` did not move. The hub's review
+   and Publish remain the gate for Codex, as the README already says.
+2. **Hub Commit picks up whatever the agent left.** In the Codex and Grok
+   runs it committed `corral_rail_rejected.txt`, the marker the rail test asked
+   for. The review dialog shows every file; that remains the guard.
+3. **Driver note.** The deny list first matched `rm ` inside "confirm the", so
+   one harmless `unittest` card on the Claude commit turn was refused. It
+   changed no result.

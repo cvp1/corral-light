@@ -49,6 +49,7 @@ Stdlib only, plus the `openssl` and `git` command-line tools.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import hmac
 import http.client
@@ -510,12 +511,12 @@ class Service:
         except OSError as e:
             # The listener that was working keeps working: a failed bind never
             # takes it down.
-            if e.errno == 99:
+            if e.errno == errno.EADDRNOTAVAIL:      # 99 on Linux, 49 on macOS
                 raise Refused(f"{bind} is not an address of this machine "
                               f"({socket.gethostname()}); run this on the machine "
                               f"that has it, or bind one of this machine's own "
                               f"addresses", 400)
-            if self.httpd and e.errno == 98:
+            if self.httpd and e.errno == errno.EADDRINUSE:   # 98 on Linux, 48 on macOS
                 old = self.httpd.server_address[:2]
                 if (old[0], old[1]) == (bind, port):
                     return                    # already listening right there

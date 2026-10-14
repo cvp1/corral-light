@@ -1851,6 +1851,9 @@ class LifecycleBasics(LifecycleCase):
                 self.assertIsNone(self.sessions.worktree_refusal("claude"))
                 self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
             with mock.patch.object(self.sessions.sys, "platform", "darwin"):
+                self.assertIsNone(self.sessions.worktree_refusal("claude"))
+                self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
+            with mock.patch.object(self.sessions.sys, "platform", "win32"):
                 why = self.sessions.worktree_refusal("claude")
                 self.assertIn("lane matrix has not run", why or "")
         with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREES_ENABLED": "0"}):
@@ -2113,14 +2116,14 @@ class TheMacAddendum(unittest.TestCase):
         with self.platform("linux"):
             for lane in ("claude", "codex", "grok"):
                 self.assertIsNone(self.sessions.worktree_refusal(lane), lane)
-        with self.platform("darwin"):
+        with self.platform("darwin"):       # docs/worktree-phase0-macos.md
             for lane in ("claude", "codex", "grok"):
-                why = self.sessions.worktree_refusal(lane)
-                self.assertIsNotNone(why, lane)
-                self.assertIn("macOS", why)
-                self.assertIn("lane matrix", why)
-        with self.platform("win32"):
-            self.assertIsNotNone(self.sessions.worktree_refusal("claude"))
+                self.assertIsNone(self.sessions.worktree_refusal(lane), lane)
+            self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))   # held (D8)
+        with self.platform("win32"):        # no matrix run there: refused, with the reason
+            why = self.sessions.worktree_refusal("claude")
+            self.assertIsNotNone(why)
+            self.assertIn("lane matrix", why)
 
     def test_M2_an_explicit_lane_list_still_opts_in_for_the_matrix_run(self):
         with self.platform("darwin"), mock.patch.dict(os.environ,

@@ -31,6 +31,13 @@ is partly done: the unattended matrix slice passed for Claude, Codex and Grok,
 but the rail, push and PR, agent commit and three-at-once steps still need a
 human. No lane is enabled yet. M5 is not run.
 
+**2026-10-14, run on the Mac host.** M2 is done: the rail, agent commit, Publish
+to a local bare remote and three-at-once all pass for Claude, Codex and Grok, to
+Linux's enable bar. M5 is done: Claude's auto-memory resolves to the main repo,
+as on Linux. The PR via `gh` moves to dogfood, as it did on Linux. The week of
+dogfood steers, never blocks. The three lanes are enabled in
+`WORKTREE_LANES["darwin"]` (results: `docs/worktree-phase0-macos.md`).
+
 ## Changes design or tests
 
 ### M1. Discard's `/proc` scan does not exist on macOS
