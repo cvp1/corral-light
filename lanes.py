@@ -392,6 +392,7 @@ def update(lane, root=ROOT, version=None, release=None, run=_run, probe_fn=probe
             if row and row["release"].startswith(release + "-"):
                 rec["outcome"], rec["why"] = "current", "already pinned"
                 return rec
+            _refuse_in_keg(root)
             scratch, extract, old, new, overrides = stage_release(release, fetch)
             rec["latest"] = new["release"]
             rec["probe"] = probe_fn(root, lane, overrides)
@@ -411,6 +412,7 @@ def update(lane, root=ROOT, version=None, release=None, run=_run, probe_fn=probe
                 import adapter_patches
                 rec["patches"] = adapter_patches.apply(root / "spike")
             return rec
+        _refuse_in_keg(root)
         scratch, overrides = stage_npm(root, lane, rec["latest"], run)
         rec["probe"] = probe_fn(root, lane, overrides)
         if not rec["probe"].get("ok"):
@@ -426,6 +428,15 @@ def update(lane, root=ROOT, version=None, release=None, run=_run, probe_fn=probe
     finally:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _refuse_in_keg(root):
+    """A Homebrew keg is brew's: a pin swapped in place would be undone, or
+    half-undone, by the next upgrade. Raised before anything is staged."""
+    import install_kind
+    if install_kind.is_homebrew(root):
+        raise Red("this is a Homebrew install: its adapter pins move with a "
+                  "new release (`brew upgrade corral-light`), not in place")
 
 
 def _notify(title, body):

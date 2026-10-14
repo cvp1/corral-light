@@ -174,6 +174,15 @@ def main(argv=None):
                     help="overwrite an existing file (it is shown first "
                          "otherwise, and nothing is written)")
     a = ap.parse_args(argv)
+    import install_kind
+    kind = install_kind.detect(HERE)
+    if kind["kind"] == "homebrew":
+        # brew writes and owns this service; a second agent would fight it
+        # for the port.
+        print(f"This is a Homebrew install: its service is brew's.\n"
+              f"  brew services start {kind['formula']}\n"
+              f"  brew services info {kind['formula']}", flush=True)
+        return 0
     p = plan(bind=a.bind, port=a.port, ollama=a.ollama_url)
 
     if a.show:

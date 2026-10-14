@@ -328,6 +328,225 @@ class Run(Repo):
         self.assertEqual(rec["outcome"], "updated")
 
 
+class Homebrew(unittest.TestCase):
+    """A Homebrew keg: brew stands in for git, mocked at update.brew. Two
+    versioned kegs and an opt link, as brew lays them out."""
+
+    def setUp(self):
+        base = Path(tmpdir(self, "update-brew-"))
+        self.state = base / "state"
+        self.state.mkdir()
+        for name, val in (("STATE", self.state),
+                          ("STATUS_FILE", self.state / "update-status.json"),
+                          ("POLL_S", 0)):
+            p = mock.patch.object(update, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(mock.patch.stopall)
+        cellar = base / "Cellar" / "corral-light"
+        self.old = cellar / "0.1.0" / "libexec"
+        self.new = cellar / "0.2.0" / "libexec"
+        for k in (self.old, self.new):
+            k.mkdir(parents=True)
+        (base / "opt").mkdir()
+        self.opt = base / "opt" / "corral-light"
+        self.opt.symlink_to(self.old.parent)
+        self.kind = {"kind": "homebrew", "formula": "corral-light",
+                     "opt_root": str(self.opt / "libexec"), "python": None,
+                     "brew": "brew"}
+        import json
+        for k in (self.old, self.new):
+            (k / "install-kind.json").write_text(json.dumps(self.kind))
+        self.calls = []
+        self.latest = "0.1.0"
+
+    def fake_brew(self, kind, *args, **kw):
+        self.calls.append(args[0])
+        if args[0] == "list":
+            return f"corral-light {Path(self.opt.resolve()).name}\n"
+        if args[0] == "outdated":
+            inst = Path(self.opt.resolve()).name
+            if self.latest == inst:
+                return '{"formulae": [], "casks": []}'
+            return ('{"formulae": [{"name": "corral-light", "installed_versions": ["%s"],'
+                    ' "current_version": "%s"}]}' % (inst, self.latest))
+        if args[0] == "upgrade":
+            self.opt.unlink()
+            self.opt.symlink_to(self.new.parent)
+        return ""
+
+    def hub(self, *panes, root=None):
+        return {"panes": list(panes), "hub": {"root": str(root or self.old),
+                                              "commit": None}}
+
+    def run_update(self, st, **kw):
+        a = update.build_parser().parse_args([])
+        a.dir = str(self.old)
+        for k, v in kw.items():
+            setattr(a, k, v)
+        lines = []
+
+        def state(url):
+            if st is None or not getattr(state, "seen", False):
+                state.seen = True
+                return st
+            return dict(st, hub={"root": str(self.opt.resolve() / "libexec")})
+        with mock.patch.object(update, "hub_state", side_effect=state), \
+                mock.patch.object(update, "brew", side_effect=self.fake_brew):
+            code, res = update.run(a, lines.append)
+        return code, res, lines
+
+    def test_detect(self):
+        import install_kind
+        self.assertEqual(install_kind.detect(self.old)["kind"], "homebrew")
+        self.assertEqual(install_kind.detect(HERE)["kind"], "git")
+        bare = self.old.parent.parent / "0.3.0" / "libexec"
+        bare.mkdir(parents=True)
+        k = install_kind.detect(bare)
+        self.assertEqual((k["kind"], k["formula"]), ("homebrew", "corral-light"))
+        self.assertTrue(k["opt_root"].endswith("/opt/corral-light/libexec"), k)
+
+    def test_plan_names_brew_not_install_sh(self):
+        with self.assertRaisesRegex(update.Refused, "brew upgrade"):
+            update.plan(self.old, fetch=False)
+
+    def test_check_changes_nothing_and_does_not_refresh_taps(self):
+        self.latest = "0.2.0"
+        code, res, _ = self.run_update(self.hub(), check=True)
+        self.assertEqual((code, res["action"]), (0, "update"))
+        self.assertNotIn("update", self.calls)
+        self.assertNotIn("upgrade", self.calls)
+
+    def test_busy_panes_defer_and_nothing_is_upgraded(self):
+        self.latest = "0.2.0"
+        with mock.patch.object(update, "restart") as rs:
+            code, res, _ = self.run_update(
+                self.hub({"id": "x", "state": "busy", "title": "Big job", "pending": []}))
+        self.assertEqual((code, res["outcome"]), (update.EXIT_DEFERRED, "deferred"))
+        self.assertNotIn("upgrade", self.calls)
+        rs.assert_not_called()
+
+    def test_idle_hub_upgraded_restarted_then_cleaned(self):
+        self.latest = "0.2.0"
+        with mock.patch.object(update, "inside_hub", return_value=False), \
+                mock.patch.object(update, "restart", return_value=(True, "ok")) as rs, \
+                mock.patch.object(update, "wait_healthy", return_value=True):
+            code, res, lines = self.run_update(self.hub())
+        self.assertEqual((code, res["outcome"]), (0, "updated"), lines)
+        rs.assert_called_once_with(False)
+        # cleanup only after the hub is verified on the new keg
+        self.assertEqual(self.calls[-2:], ["upgrade", "cleanup"], self.calls)
+
+    def test_hub_back_on_the_old_keg_is_a_failure_and_keeps_it(self):
+        self.latest = "0.2.0"
+        st = self.hub()
+
+        def stuck(url, _n=[0]):
+            _n[0] += 1
+            return st
+        with mock.patch.object(update, "inside_hub", return_value=False), \
+                mock.patch.object(update, "restart", return_value=(True, "ok")), \
+                mock.patch.object(update, "wait_healthy", return_value=True), \
+                mock.patch.object(update, "hub_state", side_effect=stuck), \
+                mock.patch.object(update, "brew", side_effect=self.fake_brew):
+            a = update.build_parser().parse_args(["--dir", str(self.old)])
+            code, res = update.run(a, lambda m: None)
+        self.assertEqual((code, res["outcome"]), (update.EXIT_REFUSED, "restart-failed"))
+        self.assertNotIn("cleanup", self.calls)
+
+    def test_inside_a_pane_queues_and_keeps_the_old_keg(self):
+        self.latest = "0.2.0"
+        with mock.patch.object(update, "inside_hub", return_value=True), \
+                mock.patch.object(update, "restart", return_value=(True, "queued")) as rs:
+            code, _, _ = self.run_update(self.hub())
+        self.assertEqual(code, 0)
+        rs.assert_called_once_with(True)
+        self.assertNotIn("cleanup", self.calls)
+
+    def test_stale_hub_restarted_when_brew_is_current(self):
+        self.opt.unlink()
+        self.opt.symlink_to(self.new.parent)
+        self.latest = "0.2.0"
+        with mock.patch.object(update, "inside_hub", return_value=False), \
+                mock.patch.object(update, "restart", return_value=(True, "ok")) as rs, \
+                mock.patch.object(update, "wait_healthy", return_value=True):
+            code, res, _ = self.run_update(self.hub(root=self.old))
+        self.assertEqual((code, res["outcome"], res["hub_stale"]), (0, "restarted", True))
+        rs.assert_called_once()
+        self.assertNotIn("upgrade", self.calls)
+
+    def test_current_and_fresh_only_cleans(self):
+        with mock.patch.object(update, "restart") as rs:
+            code, res, _ = self.run_update(self.hub())
+        self.assertEqual((code, res["outcome"]), (0, "current"))
+        rs.assert_not_called()
+        self.assertIn("cleanup", self.calls)
+
+    def test_no_restart_keeps_the_old_keg(self):
+        self.latest = "0.2.0"
+        with mock.patch.object(update, "restart") as rs:
+            code, res, _ = self.run_update(self.hub(), no_restart=True)
+        self.assertEqual((code, res["outcome"]), (0, "updated"))
+        rs.assert_not_called()
+        self.assertNotIn("cleanup", self.calls)
+
+    def test_brew_runs_without_install_cleanup(self):
+        with mock.patch.object(update.subprocess, "run") as r:
+            r.return_value = subprocess.CompletedProcess([], 0, "out", "")
+            update.brew(self.kind, "upgrade", "corral-light")
+        env = r.call_args.kwargs["env"]
+        self.assertEqual(env["HOMEBREW_NO_INSTALL_CLEANUP"], "1")
+
+    def test_outdated_exit_1_is_an_answer_not_a_failure(self):
+        out = ('{"formulae": [{"name": "corral-light", "installed_versions": ["0.1.0"],'
+               ' "current_version": "0.1.1"}], "casks": []}')
+
+        def fake(argv, **kw):
+            if argv[1] == "list":
+                return subprocess.CompletedProcess(argv, 0, "corral-light 0.1.0\n", "")
+            return subprocess.CompletedProcess(argv, 1, out, "")
+        with mock.patch.object(update.subprocess, "run", side_effect=fake):
+            self.assertEqual(update.brew_versions(self.kind, refresh=False), ("0.1.0", "0.1.1"))
+        with mock.patch.object(update.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 1, "", "boom")), \
+                self.assertRaises(update.Refused):
+            update.brew(self.kind, "upgrade", "corral-light")
+
+    def test_lane_swaps_refused_in_a_keg(self):
+        import lanes
+        with self.assertRaisesRegex(lanes.Red, "Homebrew install"):
+            lanes._refuse_in_keg(self.old)
+        lanes._refuse_in_keg(HERE)          # a checkout: no refusal
+
+    def test_install_service_points_at_brew_services(self):
+        import install_service
+        with mock.patch.object(install_service, "HERE", self.old), \
+                mock.patch("sys.stdout") as out, \
+                mock.patch.object(install_service, "plan") as plan:
+            self.assertEqual(install_service.main([]), 0)
+        plan.assert_not_called()
+        said = "".join(c.args[0] for c in out.write.call_args_list)
+        self.assertIn("brew services start corral-light", said)
+
+    def test_restart_finds_the_brew_services_label(self):
+        seen = []
+
+        def fake(argv, **kw):
+            seen.append(argv)
+            ok = argv[:2] == ["launchctl", "print"] and argv[2].endswith("/sh.brew.corral-light")
+            return subprocess.CompletedProcess(argv, 0 if ok or argv[1] == "kickstart" else 113, "", "")
+        with mock.patch.object(update.shutil, "which", return_value="/bin/launchctl"), \
+                mock.patch.object(update.platform, "system", return_value="Darwin"), \
+                mock.patch.object(update.subprocess, "run", side_effect=fake):
+            self.assertEqual(update.restart(False), (True, "hub restarted"))
+        self.assertTrue(seen[-1][-1].endswith("/sh.brew.corral-light"), seen[-1])
+
+    def test_timer_plist_takes_the_kegs_python(self):
+        text = update.launchd_plist(Path("/opt/x/libexec"), "/opt/py/bin/python3.14")
+        self.assertIn("<string>/opt/py/bin/python3.14</string><string>/opt/x/libexec/update.py",
+                      text)
+
+
 class Installers(unittest.TestCase):
     def test_skill_link_and_refusal(self):
         home = Path(tmpdir(self, "update-home-"))

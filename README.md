@@ -81,8 +81,8 @@ You will like Corral Light if you use AI assistants for real work, pay for
 at least one of them, and want them to cooperate without handing your
 repository, your keys or your judgment to someone else. You do not need to
 be a terminal expert: the installer is one pasted line, and it was built
-for someone who has never opened a terminal. You do need a Linux desktop
-today; macOS works by hand (see below).
+for someone who has never opened a terminal. On Linux that is one pasted
+line; on a Mac, [Homebrew](#install-on-macos-homebrew).
 
 | Works with | You need |
 |---|---|
@@ -196,6 +196,39 @@ journalctl --user -u corral-light -n 50   # the hub's own log
 before each thing it removes. Your sign-ins and your files are never part of
 it.
 
+## Install on macOS (Homebrew)
+
+```
+brew install cvp1/tap/corral-light
+brew services start cvp1/tap/corral-light   # the hub, now and at every login
+corral-light doctor                         # which assistants can run here
+corral-light launch                         # open the wall, already paired
+```
+
+Homebrew brings Python and Node, installs the Claude and ChatGPT adapters at
+the versions this release pins, and runs the hub as your user on
+`127.0.0.1:8098`. It does not install the assistants themselves:
+[Claude Code](https://claude.com/claude-code), the Grok CLI or Antigravity are
+each yours to install and sign in to, and `doctor` names what is missing.
+AI-OS Seed is a separate install too: step 1 of the by-hand install below,
+and the Seed README.
+
+Your settings and history live in `~/.local/share/corral-light`, outside
+Homebrew, so upgrading or uninstalling never touches them. The hub's own log
+is `$(brew --prefix)/var/log/corral-light.log`.
+
+**Update** with `corral-light update`, not `brew upgrade` alone. It upgrades
+only when no pane is mid-turn, restarts the hub, checks it came back on the
+new version, and only then lets Homebrew remove the old one (see
+[Keeping Corral Light current](#keeping-corral-light-current)).
+
+**Uninstall:** `brew services stop cvp1/tap/corral-light`, then
+`brew uninstall corral-light`.
+
+If you ran Corral Light from a clone with `install-service` before, unload
+that agent first, or the two will fight over the port:
+`launchctl bootout gui/$(id -u)/com.cvp1.corral-light`.
+
 ---
 
 ## Your first twenty minutes
@@ -307,8 +340,9 @@ credential. Corral Light never sees a password or a token.
 
 ## Honest limits
 
-- **Linux first.** The one-line installer is for Linux. macOS works by hand
-  (below); own branches work there for Claude, ChatGPT and Grok, as on Linux.
+- **Two install paths.** The one-line installer is for Linux; macOS installs
+  with Homebrew, or by hand (below). Own branches work on both for Claude,
+  ChatGPT and Grok.
 - **Not a sandbox.** The gate covers every request an assistant makes
   through its tools. An agent with shell access runs as you, and Codex's
   own sandbox auto-approves commands inside its working folder.
@@ -389,6 +423,8 @@ The availability check is intentionally honest: an assistant is marked unavailab
 ```
 
 The update fast-forwards the checkout the running hub serves. Then it restarts the hub, but only when no pane is mid-turn or waiting on a permission, because a restart ends those turns. Paused panes resume on their next message. When panes are busy, it changes nothing, names them, and exits 3. `--wait 600` waits for them, and `--now` interrupts them. It refuses, changing nothing, when the checkout has local changes, commits of its own, or is on another branch. The adapters are reinstalled only when their lockfile changed, and a failed install puts the old commit back. It also notices a hub still serving older code after a pull without a restart. The timer records each run in `update-status.json` in the state folder, and `--check` shows the last one.
+
+On a Homebrew install the same verb runs `brew upgrade` in place of git, under the same rule: busy panes defer it and nothing changes. Homebrew's own cleanup is held off until the hub answers from the new version, because the running hub still loads code from the old one. `--check` reads the tap as of its last `brew update` and changes nothing. `lanes update` does not swap the Claude, ChatGPT or Gemini adapter inside a Homebrew install: those pins move with a release.
 
 ### Keeping the assistants current
 
@@ -865,6 +901,9 @@ anything**: writing a file is reversible, and starting a daemon that holds a
 port and spawns assistants with your filesystem access is your decision. The
 exact enable command is printed for you to run. An existing file is left alone
 unless you pass `--force`.
+
+On a Homebrew install, `brew services start cvp1/tap/corral-light` is the
+service instead, and `install-service` says so and writes nothing.
 
 The repository also ships the two files as templates (`corral-light.service`,
 `com.cvp1.corral-light.plist`) if you would rather edit them by hand.

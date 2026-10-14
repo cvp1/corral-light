@@ -10,6 +10,10 @@
     corral-light update --install-timer   a daily unattended update (systemd or launchd)
     corral-light update --remove-timer
 
+A Homebrew install is not a checkout: there `update` runs `brew upgrade`
+under the same busy-pane rule, keeps the old keg until the hub is answering
+on the new one, and only then lets brew clean it up.
+
 The checkout updated is the one the running hub serves (it says so in
 /api/state), else this script's own. Nothing is touched when the checkout has
 local changes, commits of its own, or is not on the branch; every reason is
@@ -47,6 +51,8 @@ BRANCH = "master"
 UNIT = "corral-light.service"
 TIMER_NAME = "corral-light-update"
 from install_service import LABEL as LAUNCHD_LABEL     # noqa: E402
+import install_kind                                    # noqa: E402
+BREW_LABELS = install_kind.BREW_LABELS
 TIMER_LABEL = LAUNCHD_LABEL + ".update"
 STATUS_FILE = STATE / "update-status.json"
 SKILL = "corral-update"
@@ -58,6 +64,7 @@ PATCH_TIMEOUT_S = 120
 SERVICE_TEMPLATES = ("corral-light.service", f"{LAUNCHD_LABEL}.plist",
                      "corral-light-watch.service", "corral-light-watch.timer")
 GIT_TIMEOUT_S = 120
+BREW_TIMEOUT_S = 1800
 NPM_TIMEOUT_S = 900
 BOOT_WAIT_S = 90
 POLL_S = 15
@@ -85,6 +92,9 @@ def plan(root, branch=BRANCH, fetch=True):
     the reason when it cannot be fast-forwarded. Touches nothing but refs."""
     root = Path(root)
     if not (root / ".git").exists():
+        if install_kind.is_homebrew(root):
+            raise Refused(f"{root} is a Homebrew install — `brew upgrade "
+                          f"{install_kind.FORMULA}` updates it")
         raise Refused(f"{root} is not a git checkout — reinstall with install.sh")
     if fetch:
         git(root, "fetch", "-q", "origin")
@@ -279,14 +289,23 @@ def apply(p, say):
             say("adapter patches: " + "; ".join(report.splitlines()[:3]))
 
 
+def launchd_label():
+    """The launchd label the hub runs under: this checkout's own agent, or
+    `brew services`' one. None when neither is loaded."""
+    if not shutil.which("launchctl"):
+        return None
+    for label in (LAUNCHD_LABEL, *BREW_LABELS):
+        r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            return label
+    return None
+
+
 def service_manager():
     """('systemd'|'launchd', active) for the hub's service, or (None, False)."""
     if platform.system() == "Darwin":
-        if not shutil.which("launchctl"):
-            return None, False
-        r = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"],
-                           capture_output=True, text=True)
-        return ("launchd", True) if r.returncode == 0 else (None, False)
+        return ("launchd", True) if launchd_label() else (None, False)
     if not shutil.which("systemctl"):
         return None, False
     r = subprocess.run(["systemctl", "--user", "is-active", UNIT],
@@ -306,7 +325,8 @@ def restart(inside):
         if inside:
             argv.insert(2, "--no-block")
     else:
-        argv = ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"]
+        argv = ["launchctl", "kickstart", "-k",
+                f"gui/{os.getuid()}/{launchd_label() or LAUNCHD_LABEL}"]
     if inside:
         # Detached and delayed: this process dies with the hub.
         subprocess.Popen(["/bin/sh", "-c", "sleep 2; exec \"$@\"", "restart", *argv],
@@ -364,14 +384,14 @@ WantedBy=timers.target
     return service, timer
 
 
-def launchd_plist(root):
+def launchd_plist(root, python="/usr/bin/python3"):
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>{TIMER_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>/usr/bin/python3</string><string>{root}/update.py</string><string>--unattended</string></array>
+  <array><string>{python}</string><string>{root}/update.py</string><string>--unattended</string></array>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>15</integer></dict>
   <key>StandardOutPath</key><string>{STATE}/update.log</string>
   <key>StandardErrorPath</key><string>{STATE}/update.log</string>
@@ -380,11 +400,11 @@ def launchd_plist(root):
 """
 
 
-def install_timer(root, say):
+def install_timer(root, say, python="/usr/bin/python3"):
     if platform.system() == "Darwin":
         path = Path.home() / "Library/LaunchAgents" / f"{TIMER_LABEL}.plist"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(launchd_plist(root), encoding="utf-8")
+        path.write_text(launchd_plist(root, python), encoding="utf-8")
         subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{TIMER_LABEL}"],
                        capture_output=True)
         r = subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(path)],
@@ -451,12 +471,152 @@ def record(result):
         pass
 
 
+def settle(a, st, own, say, res):
+    """Wait up to --wait for the panes a restart would interrupt. -> True
+    (and res says why) when they are still busy: the caller changes nothing."""
+    deadline = time.time() + max(0, a.wait)
+    while True:
+        busy = blockers(st, own)
+        if not busy or time.time() >= deadline:
+            break
+        time.sleep(POLL_S)
+        st = hub_state(a.url) or {}
+    if not busy:
+        return False
+    say("not now — a restart would interrupt:")
+    for b in busy:
+        say(f"    {b['id']}  {b['title']}  ({b['why']})")
+    say("nothing was changed; run again when they settle, or with --now")
+    res.update(outcome="deferred", blockers=busy)
+    return True
+
+
+# ── Homebrew ─────────────────────────────────────────────────────────────
+def brew(kind, *args, timeout=BREW_TIMEOUT_S, extra_env=None, ok=(0,)):
+    """Run brew. Install-time cleanup is always off: the running hub may still
+    be loading code from the old keg, so it goes only once the hub has moved."""
+    env = dict(os.environ, HOMEBREW_NO_INSTALL_CLEANUP="1",
+               HOMEBREW_NO_ENV_HINTS="1", **(extra_env or {}))
+    r = subprocess.run([kind["brew"], *args], capture_output=True, text=True,
+                       timeout=timeout, env=env)
+    if r.returncode not in ok:
+        raise Refused(f"brew {' '.join(args)} failed: "
+                      f"{(r.stderr or r.stdout).strip()[-400:]}")
+    return r.stdout
+
+
+def brew_versions(kind, refresh):
+    """-> (installed, latest). `refresh` first updates the taps, as `brew
+    upgrade` would; without it the answer is as of the last `brew update`."""
+    if refresh:
+        brew(kind, "update", "--quiet")
+    out = brew(kind, "list", "--formula", "--versions", kind["formula"])
+    installed = (out.split() or [None, None])[-1]
+    # `brew outdated` exits 1 when something IS outdated: that is its answer.
+    data = json.loads(brew(kind, "outdated", "--formula", "--json=v2", kind["formula"],
+                           extra_env={"HOMEBREW_NO_AUTO_UPDATE": "1"}, ok=(0, 1)) or "{}")
+    for f in data.get("formulae") or []:
+        return installed, f.get("current_version") or installed
+    return installed, installed
+
+
+def keg_root(kind):
+    """The versioned keg the opt link points at now."""
+    return Path(kind["opt_root"]).resolve()
+
+
+def brew_hub_is_stale(st, kind):
+    """True when the hub loaded its code from another keg than the one
+    installed now, None when it does not say where it runs from."""
+    served = ((st or {}).get("hub") or {}).get("root")
+    if not served:
+        return None
+    return Path(served).resolve() != keg_root(kind)
+
+
+def brew_cleanup(kind, say):
+    """Remove kegs the hub no longer runs from. Never fatal."""
+    try:
+        brew(kind, "cleanup", kind["formula"])
+        say("old versions removed (brew cleanup)")
+    except (Refused, subprocess.SubprocessError, OSError) as e:
+        say(f"note: brew cleanup did not run: {str(e)[:200]}")
+
+
+def run_brew(a, say, st, kind, res):
+    """`update` for a Homebrew install: the same busy-pane rule, with brew
+    in place of git. -> (exit code, result dict)."""
+    res["install"] = "homebrew"
+    installed, latest = brew_versions(kind, refresh=not a.check)
+    behind = latest != installed
+    res.update(installed=installed, latest=latest, behind=int(behind))
+    stale = brew_hub_is_stale(st, kind) if st else False
+    res["hub_stale"] = stale
+    say(f"Homebrew install: {kind['formula']} {installed}"
+        + (f", {latest} available" if behind else ", up to date"))
+    if stale:
+        say("the running hub is serving an older version than the one installed")
+    elif stale is None and st:
+        say("could not tell which version the running hub serves")
+    need_restart = bool(st) and (behind or bool(stale)) and not a.no_restart
+    if a.check:
+        res["action"] = "update" if behind else "restart" if need_restart else "none"
+        return EXIT_OK, res
+    if not behind and not need_restart:
+        res["outcome"] = "current"
+        if not st or stale is False:
+            brew_cleanup(kind, say)
+        return EXIT_OK, res
+    own, inside = own_pane(), inside_hub()
+    if need_restart and not a.now and settle(a, st, own, say, res):
+        return EXIT_DEFERRED, res
+    if behind:
+        say(f"brew upgrade {kind['formula']} …")
+        brew(kind, "upgrade", kind["formula"])
+        say(f"upgraded {installed} → {latest}")
+    if not need_restart:
+        res["outcome"] = "updated" if behind else "current"
+        if not st:
+            say("no hub answered; the next start loads the new version")
+            brew_cleanup(kind, say)
+        elif a.no_restart:
+            say("--no-restart: the running hub keeps the old version (and its "
+                "keg) until it restarts")
+        return EXIT_OK, res
+    if inside:
+        say("restarting the hub from inside it: this pane's turn ends now; it "
+            "resumes on your next message. The old keg stays until the next "
+            "`corral-light update` finds the hub on the new one.")
+    done, msg = restart(inside)
+    say(msg)
+    res["outcome"] = ("updated" if behind else "restarted") if done else "restart-failed"
+    if not done:
+        return EXIT_REFUSED, res
+    if inside:
+        return EXIT_OK, res
+    if not wait_healthy(a.url):
+        say(f"the hub did not answer within {BOOT_WAIT_S}s — "
+            f"see {Path.home() / 'Library/Logs'} or `brew services info {kind['formula']}`")
+        res["outcome"] = "restart-failed"
+        return EXIT_REFUSED, res
+    if brew_hub_is_stale(hub_state(a.url), kind):
+        say(f"the hub came back on its old keg, not {keg_root(kind)}")
+        res["outcome"] = "restart-failed"
+        return EXIT_REFUSED, res
+    say(f"hub answering on {kind['formula']} {latest}")
+    brew_cleanup(kind, say)
+    return EXIT_OK, res
+
+
 def run(a, say):
     """-> (exit code, result dict)."""
     st = hub_state(a.url)
     served = ((st or {}).get("hub") or {}).get("root")
     root = Path(a.dir or served or ROOT)
     res = {"root": str(root), "hub": "running" if st else "not answering"}
+    kind = install_kind.detect(root)
+    if kind["kind"] == "homebrew":
+        return run_brew(a, say, st, kind, res)
     if served and Path(served).resolve() != root.resolve():
         say(f"note: the running hub serves {served}, not {root}")
     p = plan(root, a.branch, fetch=True)
@@ -493,21 +653,8 @@ def run(a, say):
         return EXIT_OK, res
 
     own, inside = own_pane(), inside_hub()
-    if need_restart and not a.now:
-        deadline = time.time() + max(0, a.wait)
-        while True:
-            busy = blockers(st, own)
-            if not busy or time.time() >= deadline:
-                break
-            time.sleep(POLL_S)
-            st = hub_state(a.url) or {}
-        if busy:
-            say("not now — a restart would interrupt:")
-            for b in busy:
-                say(f"    {b['id']}  {b['title']}  ({b['why']})")
-            say("nothing was changed; run again when they settle, or with --now")
-            res.update(outcome="deferred", blockers=busy)
-            return EXIT_DEFERRED, res
+    if need_restart and not a.now and settle(a, st, own, say, res):
+        return EXIT_DEFERRED, res
 
     if p["behind"]:
         apply(p, say)
@@ -580,11 +727,16 @@ def main(argv=None):
 
     try:
         if a.install_skill or a.install_timer or a.remove_timer:
-            root = Path(a.dir or ROOT)
+            root, python = Path(a.dir or ROOT), "/usr/bin/python3"
+            kind = install_kind.detect(root)
+            if kind["kind"] == "homebrew":
+                # The unversioned path, so the link and the timer survive upgrades.
+                root = Path(kind["opt_root"])
+                python = kind.get("python") or sys.executable
             if a.install_skill:
                 install_skill(root, say)
             if a.install_timer:
-                install_timer(root, say)
+                install_timer(root, say, python)
             if a.remove_timer:
                 remove_timer(say)
             return EXIT_OK
