@@ -112,6 +112,17 @@ class FeedCase(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude)})
         env.start()
         self.addCleanup(env.stop)
+        # The fixture above is the credentials FILE, which only the non-darwin
+        # path reads (on macOS the login is a Keychain item, left unread). Pin
+        # that path so these tests mean the same on every host. A caller that
+        # names a platform still gets it: LoginFacts tests darwin explicitly.
+        import claude_auth
+        real_facts = claude_auth.login_facts
+        pin = mock.patch.object(claude_auth, "login_facts",
+                                lambda hasher=None, platform=None:
+                                real_facts(hasher, platform=platform or "linux"))
+        pin.start()
+        self.addCleanup(pin.stop)
         import codex_launcher
         import grok_launcher
         self.codex = self.homes / "codex"
