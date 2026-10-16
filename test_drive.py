@@ -279,6 +279,27 @@ class DriveTest(unittest.TestCase):
         print(f"drive loopback command round trip: {per * 1000:.1f} ms", flush=True)
         self.assertLess(per, 0.1)
 
+    def test_a_listener_whose_address_is_late_comes_up_on_its_own(self):
+        """A laptop's hub can start before Wi-Fi has its address. The listener
+        must come up when the address does, not wait for a restart."""
+        import hublink
+        saved = hublink.LISTEN_RETRY_S
+        hublink.LISTEN_RETRY_S = 0.2
+        self.addCleanup(setattr, hublink, "LISTEN_RETRY_S", saved)
+        late = Hub(self.tmp.name, "late")
+        self.addCleanup(late.svc.stop)
+        late.svc.identity()
+        # 192.0.2.1 is a documentation address: never this machine's.
+        late.svc._save_config({"enabled": True, "bind": "192.0.2.1", "port": late.port})
+        late.svc.start()
+        self.assertIsNone(late.svc.httpd)
+        # The address "arrives": the bind becomes one this machine has.
+        late.svc._save_config({"enabled": True, "bind": "127.0.0.1", "port": late.port})
+        deadline = time.time() + 5
+        while late.svc.httpd is None and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIsNotNone(late.svc.httpd)
+
     def test_frames_are_capped(self):
         with self.assertRaises(drive.ProtocolError):
             drive.pack({"t": "x", "blob": "a" * (drive.FRAME_MAX + 1)})

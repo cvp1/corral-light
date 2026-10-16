@@ -94,6 +94,7 @@ WATCH_TURNS = 6
 WATCH_MAX_CHARS = 40_000
 DIFF_MAX_CHARS = 200_000
 CALL_TIMEOUT = 6
+LISTEN_RETRY_S = 15           # a listener whose address is not up yet tries again
 MAX_CONNS = 32                # concurrent peer connections; refuse past it
 MAX_CONNS_IP = 4              # ...from one address
 MAX_INBOX_PER_PEER = 200      # offer records kept per peer, decided ones included
@@ -432,11 +433,30 @@ class Service:
             except (OSError, Refused, KeyError) as e:
                 print(f"corral-light: hub links: listener not started: {e}",
                       file=sys.stderr, flush=True)
+                if "bind" in c:
+                    # Most often a laptop's hub starting before Wi-Fi has its
+                    # address (seen 2026-10-12 and -13). Keep trying until the
+                    # address exists, instead of staying deaf until a restart.
+                    threading.Thread(target=self._listen_retry, name="hub-listen-retry",
+                                     daemon=True).start()
         if self._outbox_thread is None:
             self._outbox_thread = threading.Thread(target=self._outbox_loop,
                                                    name="hub-outbox", daemon=True)
             self._outbox_thread.start()
         return self
+
+    def _listen_retry(self):
+        """Bring the listener up once its address exists. Stops when it is up,
+        when hub links are turned off, or when the hub stops."""
+        while not self._stop.wait(LISTEN_RETRY_S):
+            c = self.config()
+            if not c.get("enabled") or self.httpd is not None:
+                return
+            try:
+                self._listen(c["bind"], int(c.get("port") or DEFAULT_PORT))
+                return
+            except (OSError, Refused, KeyError):
+                continue
 
     def _recover(self):
         """A takeover reservation or an accept that a crash interrupted."""
