@@ -1,10 +1,10 @@
 # Panes on another host, from the picker — plan
 
-Status: PLAN, v1, 2026-10-16. Nothing built. Reviewed in one round by a
+Status: PLAN, v1.1, 2026-10-16. Nothing built. Reviewed in one round by a
 three-vendor panel (Codex, Grok, Gemini); the charge, the v0 draft and the
 answers are in `reviews/2026-10-16-remote-panes-panel/`. All three chose A
 over B, and all three cut it down for v1. §3 is rewritten from their
-findings. §5 lists the decisions the operator must make before Phase 0.
+findings, then amended by the operator's ruling on what `drive` is. §5 lists the decisions the operator must make before Phase 0.
 
 **What this adds.** In the New conversation dialog, the operator picks an
 agent (Claude, Codex, Grok, Gemini) and a **host**. The pane runs on that
@@ -70,28 +70,40 @@ paths and still ends with a weaker pane.
 
 ## 3. Design for A, v1
 
-**What the panel changed.** `drive` is remote code execution as the peer's
-user, with that machine's logins, `gh` and SSH agent. Folder roots set the
-starting directory; they do not contain the agent. Card answers are what
-gate those tools, so a driving hub that can answer cards can do anything
-the agent can. That is materially more than `takeover`, which copies one
-repository and runs the work elsewhere. The grant's notice and HUB-LINKS.md
-must say this in those words.
+**What `drive` is.** `drive` lets the driving hub act as the operator's
+own user on the peer machine: open agents there, prompt them, and answer
+their permission cards and questions. That is the intent. The operator is
+that user on that machine, and the grant is set by the operator, at that
+machine, like every grant. The panel called it remote code execution as
+the peer's user, with that machine's logins; that is an accurate
+description of the feature, not a defect in it. The grant's notice and
+HUB-LINKS.md say so in those words, so nobody grants it to a hub they would
+not hand a login shell to. It is never a default.
 
-**R1. A new grant, `drive`, split in two.** Granted locally, never a
-default, with a security notice and a ledger line.
+Operator ruling, 2026-10-16: "The intent is to act as my user on that
+host. Because I AM that user on that host." The panel's v1 cut that kept
+card answers at the peer's wall is overruled. The panel's correctness
+findings stand.
 
-- `drive` (v1): list lanes, open a pane, send prompts, cancel and close
-  panes this peer opened. Nothing else.
-- `drive-answer` (later, a separate decision): answer those panes'
-  permission cards and ask_human questions from the driving wall. Until
-  then, cards are answered at the peer's own wall, as HUB-LINKS.md says
-  today. That wall is a browser tab away on the LAN.
+**R1. The `drive` grant.** Granted locally, with a security notice and a
+ledger line per open, prompt, answer, cancel and close (ids and digests,
+never prompt text). It lets the peer list lanes, open panes, send prompts,
+answer permission cards and ask_human questions, cancel, and close, for
+panes that peer opened. Ownership is persistent: (peer id, pairing
+generation, pane id) in the pane's meta. Every route, event reads included,
+re-checks ownership and the current grant at commit and before releasing
+results. Unpairing or re-pairing ends driving of old panes.
 
-Ownership is persistent: (peer id, pairing generation, pane id) in the
-pane's meta. Every route, including event reads, re-checks ownership and
-the current grant at commit and before releasing results. Unpairing or
-re-pairing ends driving of old panes.
+**R1a. Card answers that cannot hit the wrong card.** This is correctness,
+not authority. Today a card is keyed by the adapter's request id, which
+restarts with the agent, and answer() compares the digest before taking
+the lock. A late answer could approve a later card with the same id and
+the same bytes. A driven pane's cards get a hub-minted card id bound to the
+agent's generation. The answer is checked and consumed under one lock: the
+card is still open, the generation matches, the digest matches, the option
+is offered. Answers are idempotent: a retry returns the first outcome. The
+first answer from either wall wins, and the other wall sees "answered
+there", not an error. A reject never needs a digest.
 
 **R2. Lanes route.** `GET /fed/v1/drive/lanes` returns an explicit,
 stripped record per lane: key, label, model options, effort options,
@@ -108,9 +120,8 @@ end, attachments and Later are hidden for a remote host in v1.
 **R4. Open.** `POST /fed/v1/drive/open` carries a client-made mutation id;
 a retry with the same id returns the first result instead of a second pane.
 The folder is resolved with `realpath` on the peer and must lie under an
-allowed root. A driven pane gets no seat tools, so it cannot message the
-peer's other panes. `allow_always` is stripped from its cards, as on
-own-branch panes, so it cannot write lasting permissions into a checkout.
+allowed root. A driven pane is an ordinary pane on the peer: it keeps its
+seat tools and the full card options, as a pane opened at that wall would.
 
 **R5. Relay.** One short poll per peer, never one held connection per pane:
 `POST /fed/v1/drive/events` with a cursor per pane, the same shape as the
@@ -132,11 +143,11 @@ and resume runs on the peer.
 its own quiet-hours clock. The peer stays silent for panes another hub is
 driving.
 
-**R8. Still out of v1.** Card answers from the driving wall, own branch,
-review and publish, challenges, attachments, quote, fan-out, port, and
-takeover of a driven pane (refused, and the pane is badged in the hub
-dialog). Credentials, signing, trust changes, shell lanes and seat tools
-never cross.
+**R8. Still out of v1, for size, not authority.** Own branch, review and
+publish, challenges, attachments, quote, fan-out, port, and takeover of a
+driven pane (refused, and the pane is badged in the hub dialog). Each can
+follow once the relay is proven. Trust changes stay local to each machine.
+Credentials never cross: the agent uses the logins already on its machine.
 
 ## 4. Phase 0
 
@@ -145,10 +156,10 @@ never cross.
 2. Measure the short-poll relay's latency and nonce use against a busy
    streaming pane, not an idle one.
 3. Falsifiers. Each one stops the design if it fails:
-   - A `drive`-only peer approves a tool call, answers a question, or
-     pushes.
-   - A driven pane's agent reaches another pane on the peer through seat
-     tools.
+   - A peer without `drive` lists lanes, opens a pane, or answers a card.
+   - An answer sent for one card approves a different one: a stale card id,
+     a restarted agent with the same request id, or two walls answering at
+     once.
    - A retried open creates a second pane, or a retried prompt is
      delivered twice.
    - A driven pane, its relay and a roster poll starve an operator command
@@ -158,12 +169,9 @@ never cross.
 
 ## 5. Decisions for the operator
 
-1. **Option A, as a prompt relay in v1.** Cards stay answered at the peer's
-   own wall, so the two HUB-LINKS rules stand unchanged for v1.
-2. **Whether `drive-answer` should come later at all.** It would let one
-   wall answer the other machine's cards. The panel's condition is a
-   per-card instance id bound to the agent's generation, an atomic check
-   and consume, and an idempotent answer.
-3. **Folder roots for driving** start empty; the operator lists them on
+Settled 2026-10-16: option A, with card and question answers from the
+driving wall in v1.
+
+1. **Folder roots for driving** start empty; the operator lists them on
    each hub that may be driven.
-4. **Which hubs to pair**, and which may drive which.
+2. **Which hubs to pair**, and which may drive which.
