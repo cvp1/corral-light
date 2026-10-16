@@ -300,6 +300,16 @@ class DriveTest(unittest.TestCase):
             time.sleep(0.05)
         self.assertIsNotNone(late.svc.httpd)
 
+    def test_the_wall_keeps_the_machines_the_hub_sends(self):
+        """The hub sent remoteHosts but the page never stored it, so the
+        Machine row stayed hidden (found live, 2026-10-16). The page must keep
+        the field from a full state, and fetch it again when the dialog opens."""
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent / "static" / "app.js").read_text()
+        self.assertIn("if ('remoteHosts' in d) S.remoteHosts = d.remoteHosts || [];", js)
+        opener = js[js.index("$('#new').onclick"):js.index("const remoteLanes")]
+        self.assertIn("api('/api/state?full=1')", opener)
+
     def test_frames_are_capped(self):
         with self.assertRaises(drive.ProtocolError):
             drive.pack({"t": "x", "blob": "a" * (drive.FRAME_MAX + 1)})

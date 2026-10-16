@@ -3542,6 +3542,8 @@ async function refresh() {
   S.defaultCwd = d.defaultCwd || S.defaultCwd || '';
   S.dataDir = d.dataDir || S.dataDir || '';
   S.cwdSuggestions = d.cwdSuggestions || S.cwdSuggestions || [];
+  // Paired hubs this one may drive (the dialog's Machine row); full state only.
+  if ('remoteHosts' in d) S.remoteHosts = d.remoteHosts || [];
   if ('archived' in d) S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
   if ('schedule' in d) S.schedule = d.schedule || [];
@@ -4239,18 +4241,30 @@ function wireDialog() {
   $('#new').onclick = () => {
     // Machine: this one, or a paired hub that lets this one drive it
     // (drive_remote.py). A remote machine's lanes, models and folders are its own.
-    const hosts = S.remoteHosts || [];
+    let hosts = S.remoteHosts || [];
     const msel = $('#f-machine');
-    msel.innerHTML = '';
-    const here = el('option', null, 'This machine'); here.value = '';
-    msel.appendChild(here);
-    for (const h of hosts) {
-      const o = el('option', null, h.up ? h.name : `${h.name} — not reachable`);
-      o.value = h.peer; o.disabled = !h.up;
-      msel.appendChild(o);
-    }
-    $('#machinerow').className = hosts.length ? '' : 'hide';
-    msel.value = '';
+    const fillMachines = () => {
+      const keep = msel.value;
+      msel.innerHTML = '';
+      const here = el('option', null, 'This machine'); here.value = '';
+      msel.appendChild(here);
+      for (const h of hosts) {
+        const o = el('option', null, h.up ? h.name : `${h.name} — not reachable`);
+        o.value = h.peer; o.disabled = !h.up;
+        msel.appendChild(o);
+      }
+      $('#machinerow').className = hosts.length ? '' : 'hide';
+      msel.value = hosts.some(h => h.peer === keep && h.up) ? keep : '';
+    };
+    fillMachines();
+    // A pairing or a link that came up after this page loaded: ask the hub
+    // now, and add the machines without disturbing a choice already made.
+    api('/api/state?full=1').then(d => {
+      if (!('remoteHosts' in d)) return;
+      S.remoteHosts = d.remoteHosts || [];
+      hosts = S.remoteHosts;
+      if (dlg.open) fillMachines();
+    }).catch(() => {});
     const remoteHost = () => hosts.find(h => h.peer === msel.value) || null;
     dlg._remoteHost = remoteHost;
     const remoteLanes = () => ((remoteHost() || {}).lanes || {}).lanes || [];
