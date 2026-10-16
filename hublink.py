@@ -73,7 +73,9 @@ from urllib.parse import parse_qs, urlparse
 
 PROTO = "clhub1"
 DEFAULT_PORT = 8097
-GRANTS = ("see", "watch", "takeover", "delegate")
+# `drive` is an SSH login by another road: the peer opens agents here, prompts
+# them and answers their cards, as this machine's own user (drive.py).
+GRANTS = ("see", "watch", "takeover", "delegate", "drive")
 DEFAULT_GRANTS = ("see",)
 SKEW_S = 300                  # accepted clock difference between hubs
 INVITE_TTL = 600              # seconds an invite token lives
@@ -294,6 +296,10 @@ class Service:
         self._sctx = None             # (peers.json stamp, context)
         self._nonces_loaded = False
         self._ip_conns = {}
+        self._channels = {}           # peer id -> drive.Served (this hub is driven)
+        self._links = {}              # peer id -> drive.Link (this hub drives)
+        self._mutations = None
+        self._upgraded = set()        # id() of listener sockets now channels
 
     # ── files ─────────────────────────────────────────────────────────────
     def _p(self, name):
@@ -455,6 +461,9 @@ class Service:
     def stop(self):
         self._stop.set()
         self._outbox_wake.set()
+        for link in list(self._links.values()):
+            link.stop()
+        self._links.clear()
         self._unlisten()
 
     def _listen(self, bind, port):
@@ -496,12 +505,8 @@ class Service:
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
-                    ip = client_address[0] if client_address else "?"
-                    with svc.lock:
-                        svc._ip_conns[ip] = svc._ip_conns.get(ip, 1) - 1
-                        if svc._ip_conns[ip] <= 0:
-                            svc._ip_conns.pop(ip, None)
-                    svc._slots.release()
+                    if not svc._released(request):
+                        svc._release_slot(client_address)
 
             def handle_error(self, request, client_address):
                 pass        # a dropped or non-TLS connection is not news
@@ -530,9 +535,27 @@ class Service:
 
     def _unlisten(self):
         h, self.httpd = self.httpd, None
+        self._close_channels()
         if h:
             h.shutdown()
             h.server_close()
+
+    def _release_slot(self, client_address):
+        ip = client_address[0] if client_address else "?"
+        with self.lock:
+            self._ip_conns[ip] = self._ip_conns.get(ip, 1) - 1
+            if self._ip_conns[ip] <= 0:
+                self._ip_conns.pop(ip, None)
+        self._slots.release()
+
+    def _released(self, request):
+        """True for a connection that became a drive channel: its slot was
+        handed back at the upgrade, and the channel counts on its own."""
+        with self.lock:
+            if id(request) in self._upgraded:
+                self._upgraded.discard(id(request))
+                return True
+        return False
 
     def enable(self, bind, port=DEFAULT_PORT):
         port = int(port)
@@ -795,6 +818,8 @@ class Service:
             self._save_peers(peers)
         rec = self.ledger("grant", peer=pid, name=p.get("name"), before=before, after=grants)
         self._security_notice(rec)
+        if "drive" not in grants:
+            self._close_channels(pid)
         return {"peer": pid, "theyMay": grants}
 
     def forget(self, ref):
@@ -810,6 +835,12 @@ class Service:
             self._nonces.pop(pid, None)
         rec = self.ledger("forget", peer=pid, name=p.get("name"))
         self._security_notice(rec)
+        self._close_channels(pid)
+        link = self._links.pop(pid, None)
+        if link:
+            link.stop()
+        if self._mutations is not None:
+            self._mutations.forget_peer(pid)
         return {"forgot": pid}
 
     def set_addr(self, ref, addr, port=None):
@@ -835,6 +866,96 @@ class Service:
             self.notify("Corral Light — hub links", what)
         except Exception:                                   # noqa: BLE001
             pass
+
+    # ── drive (drive.py): an SSH login by another road ───────────────────
+    def drive_once(self, pid, mid, fn):
+        """Run a peer's command once per command id; a retry gets the result."""
+        import drive
+        with self.lock:
+            if self._mutations is None:
+                self.dir.mkdir(parents=True, exist_ok=True)
+                self._mutations = drive.Mutations(str(self._p("drive-mutations.json")))
+        return self._mutations.once(pid, mid, fn)
+
+    def drive_accept(self, handler, raw, der):
+        """The listener's POST /fed/v1/drive/channel. Checked like every
+        request (pinned certificate, signature, clock, nonce, recipient), then
+        the `drive` grant; then the connection becomes a channel, served on
+        this thread until it ends. Raises Refused before the upgrade only."""
+        import drive
+        pid, peer = self.verify("POST", handler.path, handler.headers, raw, der)
+        if "drive" not in peer.get("grants", []):
+            self.ledger("refused", peer=pid, route=drive.PATH, why="no drive grant")
+            raise Refused(f"hub {peer.get('name')!s} may not drive here — the operator "
+                          f"of this hub has not granted it")
+        adapter = self.hooks.get("drive")
+        if adapter is None:
+            raise Refused("this hub cannot be driven from another one", 501)
+        body = _json_body(raw)
+        with self.lock:
+            old = self._channels.pop(pid, None)
+            if old is None and len(self._channels) >= drive.MAX_CHANNELS:
+                raise Refused("this hub is serving as many drive channels as it allows", 429)
+        if old is not None:
+            old.wire.close()                 # one channel per peer: the new one wins
+        handler.send_response(101)
+        handler.send_header("Upgrade", drive.PROTOCOL)
+        handler.send_header("Connection", "Upgrade")
+        handler.end_headers()
+        handler.wfile.flush()
+        handler.close_connection = True
+        # The channel is not a request: its listener slot goes back now, and
+        # it counts against MAX_CHANNELS instead, so a busy channel never
+        # starves the other hub-link calls.
+        with self.lock:
+            self._upgraded.add(id(handler.request))
+        self._release_slot(handler.client_address)
+        sock = handler.connection
+        drive._tune(sock)
+        served = drive.Served(self, adapter, drive._Wire(sock), pid, peer,
+                              (body or {}).get("cursors"))
+        with self.lock:
+            self._channels[pid] = served
+        self.ledger("drive-channel", peer=pid, name=peer.get("name"))
+        try:
+            served.run()
+        except Exception as e:                               # noqa: BLE001
+            # Past the upgrade nothing may answer as HTTP on this socket.
+            print(f"corral-light: drive channel: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+        finally:
+            with self.lock:
+                if self._channels.get(pid) is served:
+                    del self._channels[pid]
+
+    def _close_channels(self, pid=None):
+        with self.lock:
+            hit = [c for k, c in self._channels.items() if pid is None or k == pid]
+        for c in hit:
+            try:
+                c.wire.send({"t": "bye", "why": "this hub no longer lets yours drive it"})
+            except Exception:                                # noqa: BLE001
+                pass
+            c.wire.close()
+
+    def drive_link(self, ref, on_frame, cursors=lambda: {}):
+        """This hub's link to a peer it drives: dialled now and kept up."""
+        import drive
+        pid, _p = self.find_peer(ref)
+        with self.lock:
+            link = self._links.get(pid)
+            if link is None or link.stopped.is_set():
+                link = self._links[pid] = drive.Link(self, pid, on_frame, cursors)
+        return link
+
+    def drive_links(self):
+        with self.lock:
+            return dict(self._links)
+
+    def drive_status(self):
+        with self.lock:
+            return {"driving": {k: l.status() for k, l in self._links.items()},
+                    "drivenBy": sorted(self._channels)}
 
     # ── client side ───────────────────────────────────────────────────────
     def _raw_call(self, peer, method, path, body=None, *, signed, timeout=CALL_TIMEOUT,
@@ -1819,6 +1940,9 @@ class FedHandler(BaseHTTPRequestHandler):
                 der = self.connection.getpeercert(binary_form=True)
             except (AttributeError, ValueError, ssl.SSLError):
                 der = None
+            if method == "POST" and urlparse(self.path).path == "/fed/v1/drive/channel":
+                svc.drive_accept(self, raw, der)       # serves until the channel ends
+                return
             status, obj = svc.handle(method, self.path, self.headers, raw,
                                      self.client_address[0] if self.client_address else None,
                                      tls_der=der)
