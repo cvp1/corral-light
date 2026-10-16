@@ -1956,6 +1956,20 @@ class PermissionDigestIsConsent(unittest.TestCase):
         self.assertTrue(p.answer("r1", "allow_once", digest="deadbeef"))
         self.assertNotIn("r1", p.pending)
 
+    def test_an_answer_for_another_card_never_lands(self):
+        """A late answer carries the card id it was shown with. A new card
+        with the same request id and the same bytes (the agent restarted)
+        has a new id, so the old answer is refused and the card stays."""
+        p = self._pane()
+        p.pending["r1"]["_gate"]["card"] = "c0ffee00c0ffee00"
+        for verb in ("allow_once", "reject_once"):
+            with self.assertRaises(ValueError):
+                p.answer("r1", verb, digest="deadbeef", card="0123456789abcdef")
+            self.assertIn("r1", p.pending)
+        self.assertTrue(p.answer("r1", "allow_once", digest="deadbeef",
+                                 card="c0ffee00c0ffee00"))
+        self.assertNotIn("r1", p.pending)
+
     def test_oversize_still_cannot_be_granted_even_with_the_digest(self):
         p = self._pane(oversize=True)
         with self.assertRaises(ValueError):
@@ -2040,7 +2054,7 @@ class AnAnswerSaysWhoGaveIt(unittest.TestCase):
 
     def test_each_client_declares_itself(self):
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
-        self.assertEqual(js.count("digest: d.digest, via: 'wall'"), 2,
+        self.assertEqual(js.count("digest: d.digest, card: d.card, via: 'wall'"), 2,
                          "card click and composer 1-9/Esc must both say wall")
         self.assertIn('"via": "terminal"', (ROOT / "cli.py").read_text(encoding="utf-8"))
         self.assertIn('"via": "script"', (ROOT / "lane_matrix.py").read_text(encoding="utf-8"))

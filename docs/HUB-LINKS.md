@@ -10,6 +10,7 @@ poll. Hub links let a hub:
 | Read one pane's recent turns and its diff | `corral-light hubs show PEER PANE [--diff]`, or **Look** | `watch` |
 | Move a pane here and keep going | `corral-light hubs take PEER PANE --cwd ~/your/checkout`, or **Take over** | `takeover` |
 | Hand a task to the other hub | `corral-light hubs offer PEER "…"`, or **Offer work** | `delegate` |
+| Open and work panes on the other machine from this wall | `corral-light open --host PEER --lane L`, or **Machine** in New conversation | `drive` |
 
 Hub links are **off** until you turn them on, on each machine.
 
@@ -98,13 +99,29 @@ which shows the pane's state and, with `watch`, its answer. An offer to a
 sleeping hub waits in an outbox and is retried with backoff until it lands;
 a retried offer is still one offer.
 
+**Drive** is an SSH login by another road. A hub granted `drive` opens agents
+on this machine, as this machine's user, in any folder under its home;
+prompts them; answers their cards and questions; cancels and closes them.
+Grant it only to a hub you would hand a login shell to. It never comes by
+default, granting it raises a security notice, and every open, prompt,
+answer and close is a ledger line (ids and digests, never the prompt text).
+The pane is an ordinary pane here, shown on this wall too, with this
+machine's logins; nothing of the driving hub's crosses. One persistent
+channel per pair of hubs carries it: a single signed request upgrades the
+connection, then frames flow both ways with heartbeats, an immediate redial
+and resume from where each pane was. A dropped link costs the agent
+nothing; it keeps working, and the driving wall catches up. Design and
+measurements: `docs/remote-panes-plan.md`.
+
 ## What never crosses a link
 
-- **Permission cards are answered on the hub that shows them.** Watch shows
-  that a card is waiting and its title; the answer stays at that hub's wall,
-  where the payload and its digest are shown (P17).
-- **No typing into another hub's panes.** Take over moves the work; it does
-  not drive the pane where it was.
+- **Permission cards are answered on the hub that shows them,** except on a
+  pane opened with `drive`, where the driving wall shows the same payload
+  and digest and may answer. Each card has its own id, and the check and
+  the answer are one step, so an answer can never land on a later card.
+- **No typing into another hub's panes,** except panes this hub opened
+  there with `drive`. Take over moves the work; it does not drive the pane
+  where it was.
 - **No credentials, no signing.** Only the pair key exists, and it never
   leaves the two hubs' state directories.
 - **No shell takes remote work.** Offers and takeovers refuse SSH and other

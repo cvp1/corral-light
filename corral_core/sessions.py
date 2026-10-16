@@ -7,6 +7,7 @@ override what differs. Must not import from `corral/`.
 """
 import hashlib
 import json
+import secrets
 import os
 import queue
 import re
@@ -496,8 +497,13 @@ class PaneBase:
                  # Launched minimized by a bulk spawner (rig, panel, eval,
                  # schedule); it un-minimizes itself when it needs you.
                  # Absent = False.
-                 "background")
+                 "background",
+                 # {hub, gen, name, at}: the paired hub that opened this pane
+                 # with `drive` (drive_host.py), and may work it from afar.
+                 # None = opened here.
+                 "driven_by")
     ephemeral = False
+    driven_by = None
     background = False
     pid = pgid = pid_start = None
     seat = None
@@ -801,10 +807,15 @@ class PaneBase:
         digest = hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
         oversize = len(blob) > MAX_PERM_BYTES
         # Keep the verdict on the request itself; the event ring can evict it.
+        # `card`: this card's own id. The adapter's request id restarts with
+        # the agent, so a late answer could otherwise land on a later card
+        # with the same id and the same bytes (docs/remote-panes-plan.md R1a).
+        card = secrets.token_hex(8)
         req["_gate"] = {"oversize": oversize, "digest": digest,
-                        "bytes": len(blob)}
+                        "bytes": len(blob), "card": card}
         self.emit("permission", {
-            "requestId": rid, "title": tc.get("title"), "kind": tc.get("kind"),
+            "requestId": rid, "card": card,
+            "title": tc.get("title"), "kind": tc.get("kind"),
             # The digest binds the approval to these exact bytes.
             "digest": digest, "bytes": len(blob), "oversize": oversize,
             "rawInput": None if oversize else body["rawInput"],

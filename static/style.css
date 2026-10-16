@@ -434,6 +434,9 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 /* Unknown posture: deliberately drab so it never reads as a safety assurance. */
 .ph2 .f.unknown{font-style:italic}
 .ph2 .f.ctx.warn{color:var(--rust)}
+/* A pane on another hub this one drives; rust while the link is down. */
+.ph2 .f.remote{color:var(--dusk)}
+.ph2 .f.remote.warn{color:var(--rust)}
 .ph2 .f.wt{flex:0 1 auto;max-width:22em;overflow:hidden;text-overflow:ellipsis;color:var(--dusk)}
 .ph2 .f.wt.warn{color:var(--rust)}
 .ph2 .f.wt.gone{color:var(--faint);text-decoration:line-through}

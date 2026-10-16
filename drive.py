@@ -46,6 +46,7 @@ DEAD_S = 30
 BATCH_MAX = 256                # events per frame; a batch is what is already queued
 BACKOFF_FIRST_S = 0.25
 BACKOFF_MAX_S = 5.0
+REFUSED_BACKOFF_S = 60.0       # after the other hub refused the channel
 MAX_CHANNELS = 8               # channels this hub serves at once (one per peer)
 MAX_INFLIGHT = 16              # commands one channel runs at once
 MUTATIONS_KEEP = 500           # remembered command results per peer
@@ -56,11 +57,16 @@ PROTOCOL = "corral-drive/1"
 PATH = "/fed/v1/drive/channel"
 # Commands. Every one but `open` names a pane the caller opened.
 OPS = ("open", "send", "answer", "answer_question", "cancel", "close", "resume",
-       "history")
+       "history", "pending")
 
 
 class ProtocolError(Exception):
     pass
+
+
+class Refusal(ConnectionError):
+    """The other hub answered, and said no (no grant, unpaired, bad clock).
+    Dialling again soon would only fill its ledger: back off long."""
 
 
 class DriveError(Exception):
@@ -203,6 +209,23 @@ class Served:
             self.sent[pane] = max(self.sent.get(pane, 0), int(s["seq"]))
         return s
 
+    def _state(self, pane):
+        s = self.adapter.snapshot(pane, 1 << 62)
+        if s is None:
+            return {"id": pane, "gone": True}
+        s.pop("events", None)
+        return s
+
+    def _sweep(self):
+        """Panes this peer drove that are gone (closed at this hub's own
+        wall, say): say so, once."""
+        now = set(self.adapter.owned(self.owner))
+        with self.olock:
+            gone = sorted(self.owned - now)
+            self.owned -= set(gone)
+        if gone:
+            self.wire.send({"t": "panes", "panes": [{"id": p, "gone": True} for p in gone]})
+
     def _lanes(self, force=False):
         lanes = self.adapter.lanes()
         sig = json.dumps(lanes, sort_keys=True)
@@ -253,7 +276,11 @@ class Served:
                     self.wire.send({"t": "panes", "panes": [
                         self._snap(p, self.sent.get(p, 0)) for p in owned]})
                 elif batch:
-                    self.wire.send({"t": "ev", "evs": batch})
+                    # With the events, each touched pane's state now (no
+                    # events), so the mirror's state never waits on a poll.
+                    touched = sorted({e["pane"] for e in batch})
+                    self.wire.send({"t": "ev", "evs": batch,
+                                    "states": {p: self._state(p) for p in touched}})
                 if time.monotonic() >= next_lanes:
                     next_lanes = time.monotonic() + LANES_EVERY_S
                     lanes = self._lanes()
@@ -270,9 +297,13 @@ class Served:
                 return
             try:
                 self.wire.send({"t": "ping"})
-            except (OSError, ConnectionError):
+                self._sweep()
+            except (OSError, ConnectionError, ProtocolError):
                 self.wire.close()
                 return
+            except Exception as e:                       # noqa: BLE001
+                print(f"corral-light: drive sweep: {type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
 
     def _read(self):
         self.wire.sock.settimeout(DEAD_S)
@@ -423,9 +454,12 @@ class Link:
     def _loop(self):
         attempt = 0
         while not self.stopped.is_set():
-            ok = False
+            ok, refused = False, False
             try:
                 ok = self._session()
+            except Refusal as e:
+                refused = True
+                self.error = str(e)[:300]
             except Exception as e:                       # noqa: BLE001
                 self.error = f"{type(e).__name__}: {e}"[:300]
             finally:
@@ -443,8 +477,8 @@ class Link:
             else:
                 delay = min(BACKOFF_MAX_S, BACKOFF_FIRST_S * (2 ** (attempt - 1)))
                 delay *= 0.5 + random.random() / 2
-            if self.error and "no longer" in self.error:
-                delay = max(delay, 30.0)               # refused, not dropped
+            if refused or (self.error and "no longer" in self.error):
+                delay = max(delay, REFUSED_BACKOFF_S)  # refused, not dropped
             self.kick.wait(delay)
             self.kick.clear()
 
@@ -493,7 +527,7 @@ class Link:
                     why = json.loads(data or b"{}").get("error")
                 except ValueError:
                     why = None
-                raise ConnectionError(why or f"the other hub answered {status}")
+                raise Refusal(why or f"the other hub answered {status}")
             if rest:
                 raise ProtocolError("bytes after the upgrade before any frame")
             sock.settimeout(HEARTBEAT_S)

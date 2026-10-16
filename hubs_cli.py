@@ -4,7 +4,7 @@
     corral-light hubs                              this hub, its peers, inbox, transfers
     corral-light hubs enable --bind ADDR [--port N] [--name NAME]
     corral-light hubs disable
-    corral-light hubs invite [--allow see,watch,takeover,delegate] [--ttl S]
+    corral-light hubs invite [--allow see,watch,takeover,delegate,drive] [--ttl S]
     corral-light hubs join ADDR CODE [--allow …]   pair with the hub whose invite showed CODE
     corral-light hubs join TOKEN [--allow …]       ...or with its full token
     corral-light hubs grant PEER --allow …         what PEER may do HERE (replaces)
@@ -357,8 +357,9 @@ def main(argv=None):
                                              "and delegate work.")
     ap.add_argument("--url", default=consult.DEFAULT_URL)
     sub = ap.add_subparsers(dest="cmd")
-    allow = dict(default="see", help="comma list of: see, watch, takeover, delegate "
-                                     "(default: see)")
+    allow = dict(default="see", help="comma list of: see, watch, takeover, delegate, "
+                                     "drive (SSH-level: open and work panes here as "
+                                     "you) (default: see)")
 
     s = sub.add_parser("status")
     s.add_argument("--json", action="store_true")
@@ -382,7 +383,7 @@ def main(argv=None):
     s.set_defaults(fn=v_join)
     s = sub.add_parser("grant")
     s.add_argument("peer")
-    s.add_argument("--allow", required=True, help="see, watch, takeover, delegate; "
+    s.add_argument("--allow", required=True, help="see, watch, takeover, delegate, drive; "
                                                   "'' for nothing")
     s.set_defaults(fn=v_grant)
     s = sub.add_parser("forget")

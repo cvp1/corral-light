@@ -1029,7 +1029,7 @@ function permCard(p, d, outcome, live) {
       try {
         await api('/api/session/permission',
                   { pane: p.id, requestId: d.requestId, optionId: o.optionId,
-                    digest: d.digest, via: 'wall' });
+                    digest: d.digest, card: d.card, via: 'wall' });
       } catch (e) { toast(e.message, true); }
     };
     opts.appendChild(b);
@@ -1100,6 +1100,7 @@ function headSignature(p) {
           (cfg.model || {}).value, (cfg.effort || {}).value, u.size, u.used,
           S.detail.has(p.id) ? 1 : 0, FIND.pane === p.id ? 1 : 0,
           p.portedFrom ? JSON.stringify(p.portedFrom) : '', p.cwd,
+          p.remote ? JSON.stringify(p.remote) : '',
           JSON.stringify(wtPillModel(p.worktree)), JSON.stringify(paneMeta(p))].join('|');
 }
 
@@ -1333,6 +1334,17 @@ function paneHead(p) {
     const c = el('span', 'ctx' + (warn ? ' warn' : ''), `${pct}% ctx`);
     c.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
     fact(c);
+  }
+  if (p.remote) {
+    // A pane on another hub this one drives (drive_remote.py).
+    const r = p.remote;
+    const tag = el('span', r.up ? 'remote' : 'remote warn',
+                   r.up ? `on ${r.hub}` : `on ${r.hub} — not reachable`);
+    tag.title = r.up ? `runs on ${r.hub}, as you; this wall works it over the hub link`
+                     : `the link to ${r.hub} is down: ${r.error || 'no answer'}; ` +
+                       `the agent keeps working there, and this pane catches up when ` +
+                       `the link is back`;
+    fact(tag);
   }
   if (p.portedFrom) {
     const pf = p.portedFrom;
@@ -2547,7 +2559,7 @@ function composer(p, kind) {
       const answer = o => {
         api('/api/session/permission',
             { pane: p.id, requestId: d.requestId, optionId: o.optionId,
-              digest: d.digest, via: 'wall' })
+              digest: d.digest, card: d.card, via: 'wall' })
           .catch(err => toast(err.message, true));
       };
       if (d && /^[1-9]$/.test(e.key)) {
@@ -4225,10 +4237,39 @@ function wireDialog() {
     }
   };
   $('#new').onclick = () => {
+    // Machine: this one, or a paired hub that lets this one drive it
+    // (drive_remote.py). A remote machine's lanes, models and folders are its own.
+    const hosts = S.remoteHosts || [];
+    const msel = $('#f-machine');
+    msel.innerHTML = '';
+    const here = el('option', null, 'This machine'); here.value = '';
+    msel.appendChild(here);
+    for (const h of hosts) {
+      const o = el('option', null, h.up ? h.name : `${h.name} — not reachable`);
+      o.value = h.peer; o.disabled = !h.up;
+      msel.appendChild(o);
+    }
+    $('#machinerow').className = hosts.length ? '' : 'hide';
+    msel.value = '';
+    const remoteHost = () => hosts.find(h => h.peer === msel.value) || null;
+    dlg._remoteHost = remoteHost;
+    const remoteLanes = () => ((remoteHost() || {}).lanes || {}).lanes || [];
     // Agents in a GROUP collapse to one entry. `group:<id>` is a UI-only sentinel,
     // resolved to the real lane key from the host picker before submit.
     const groups = S.agentGroups || {};
-    const sel = $('#f-agent'); sel.innerHTML = '';
+    const sel = $('#f-agent');
+    const fillAgents = () => {
+    sel.innerHTML = '';
+    if (remoteHost()) {
+      for (const a of remoteLanes()) {
+        const o = el('option', null, a.available ? a.label : `${a.label} — ${a.why}`);
+        o.value = a.key; o.disabled = !a.available;
+        sel.appendChild(o);
+      }
+      const live = [...sel.options].find(o => !o.disabled);
+      if (live) sel.value = live.value;
+      return;
+    }
     const seen = new Set();
     for (const a of S.agents) {
       if (a.group) {
@@ -4249,10 +4290,14 @@ function wireDialog() {
       o.value = a.key; o.disabled = !a.available;
       sel.appendChild(o);
     }
+    const firstOpt = [...(sel.options || [])].find(o => !o.disabled);
+    if (firstOpt) sel.value = firstOpt.value;
+    };
+    fillAgents();
     // The group's members, each greyed with its own reason when unavailable.
     const fillHost = () => {
       const v = $('#f-agent').value;
-      const gid = v.startsWith('group:') ? v.slice(6) : null;
+      const gid = !remoteHost() && v.startsWith('group:') ? v.slice(6) : null;
       const row = $('#hostrow'), node = $('#f-host'), hint = $('#hosthint');
       if (!gid) { row.className = 'hide'; hint.textContent = ''; return; }
       row.className = '';
@@ -4272,7 +4317,7 @@ function wireDialog() {
     // The real lane key behind whatever the two pickers currently show.
     const chosenAgent = () => {
       const v = $('#f-agent').value;
-      return v.startsWith('group:') ? $('#f-host').value : v;
+      return !remoteHost() && v.startsWith('group:') ? $('#f-host').value : v;
     };
     dlg._chosenAgent = chosenAgent;   // the close handler submits this, not #f-agent
     const si = $('#signinrow');
@@ -4284,21 +4329,30 @@ function wireDialog() {
         si.appendChild(signInButton('picker'));
       }
     }
-    // Select the first enabled option, so the common path is open and press Start.
-    const firstOpt = sel.options?.find?.(o => !o.disabled)
-                  || [...(sel.options || [])].find(o => !o.disabled);
-    if (firstOpt) sel.value = firstOpt.value;
-    $('#f-cwd').value = S.lastCwd || S.defaultCwd || '~';
-    // Directory suggestions; the input stays free text.
-    const dl = $('#cwdlist'); dl.innerHTML = '';
-    for (const d of S.cwdSuggestions || []) {
-      const o = document.createElement('option'); o.value = d;
-      dl.appendChild(o);
-    }
+    // The folder field and its suggestions follow the machine.
+    const fillCwd = () => {
+      const h = remoteHost();
+      $('#f-cwd').value = h ? ((h.home || {}).defaultCwd || '~')
+                            : (S.lastCwd || S.defaultCwd || '~');
+      // Directory suggestions; the input stays free text.
+      const dl = $('#cwdlist'); dl.innerHTML = '';
+      for (const d of (h ? (h.home || {}).suggestions : S.cwdSuggestions) || []) {
+        const o = document.createElement('option'); o.value = d;
+        dl.appendChild(o);
+      }
+      $('#machinehint').textContent = h
+        ? `runs on ${h.name} as you, in a folder under its home; own branch, ` +
+          `roles and Later are not available there yet`
+        : '';
+      $('#f-role').disabled = !!h;
+      $('#f-when').disabled = !!h;
+    };
+    fillCwd();
     // Model/effort options come from the server's catalog for the selected agent,
     // so they work with nothing running.
     const fillCfg = () => {
-      const cat = (S.catalog || {})[chosenAgent()] || {};
+      const lane = remoteHost() ? remoteLanes().find(x => x.key === chosenAgent()) : null;
+      const cat = (remoteHost() ? (lane || {}).catalog : (S.catalog || {})[chosenAgent()]) || {};
       for (const [sel, cid, hintSel] of
            [['#f-model', 'model', '#modelhint'], ['#f-effort', 'effort', '#efforthint']]) {
         const node = $(sel), hint = $(hintSel), label = node.closest('label');
@@ -4339,7 +4393,8 @@ function wireDialog() {
     // Do not offer a posture Corral cannot impose (only lanes launched through a
     // CLAUDE_CONFIG_DIR obey it).
     const fillPosture = () => {
-      const a = S.agents.find(x => x.key === chosenAgent()) || {};
+      const a = (remoteHost() ? remoteLanes() : S.agents)
+        .find(x => x.key === chosenAgent()) || {};
       const sel = $('#f-posture'), hint = $('#posturehint');
       if (a.postureEnforced === false) {
         sel.disabled = true;
@@ -4354,17 +4409,24 @@ function wireDialog() {
         hint.textContent = HINTS[sel.value];
       }
     };
+    // Own branch is probed on this machine's disk: never for a remote one.
+    const probe = ms => {
+      if (remoteHost()) { dlg._wt = { show: false }; paintWtRow(dlg._wt); return; }
+      wtProbeSoon(dlg, ms);
+    };
     // Order matters: fillHost resolves which lane the other two describe.
-    $('#f-agent').onchange = () => { fillHost(); fillCfg(); fillPosture(); wtProbeSoon(dlg, 0); };
+    $('#f-agent').onchange = () => { fillHost(); fillCfg(); fillPosture(); probe(0); };
     // Switching host changes the lane, so model and posture follow it.
-    $('#f-host').onchange = () => { fillCfg(); fillPosture(); wtProbeSoon(dlg, 0); };
+    $('#f-host').onchange = () => { fillCfg(); fillPosture(); probe(0); };
+    // Switching machine changes everything the dialog offers.
+    msel.onchange = () => { fillAgents(); fillCwd(); fillHost(); fillCfg(); fillPosture(); probe(0); };
     // Own branch: the row follows the folder (debounced) and the lane.
     dlg._wt = { show: false };
     paintWtRow(dlg._wt);
-    $('#f-cwd').oninput = () => wtProbeSoon(dlg, 300);
+    $('#f-cwd').oninput = () => probe(300);
     $('#f-wt').onchange = paintRae;
     $('#f-rae').onchange = raeSyncPosture;
-    wtProbeSoon(dlg, 0);
+    probe(0);
     fillHost();
     fillCfg();
     fillPosture();
@@ -4382,13 +4444,21 @@ function wireDialog() {
   dlg.addEventListener('close', async () => {
     if (dlg.returnValue !== 'ok') return;
     const cwd = $('#f-cwd').value.trim();
-    S.lastCwd = cwd;
     // Remember the posture only when it was a choice, not a blanked control.
     const posture = $('#f-posture').disabled ? '' : $('#f-posture').value;
     if (posture) localStorage.setItem('corral.posture', posture);
     const common = { agent: dlg._chosenAgent(), cwd,
                      model: $('#f-model').value, effort: $('#f-effort').value,
                      role: $('#f-role').value };
+    const rh = dlg._remoteHost && dlg._remoteHost();
+    if (rh) {
+      // A pane on another machine: its lane, its folder, run there as you.
+      common.host = rh.peer; delete common.role;
+      if (posture) common.posture = posture;
+      await startConversation(common);
+      return;
+    }
+    S.lastCwd = cwd;
     // Omit posture rather than send it empty, so it is never read as a deliberate
     // "none".
     if (posture) common.posture = posture;

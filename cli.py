@@ -253,6 +253,7 @@ class Cli:
                       {"pane": pid, "requestId": card["requestId"],
                        "optionId": o["optionId"],
                        "digest": card.get("digest") if grant else "",
+                       "card": card.get("card"),
                        "via": "terminal"})
         return o, r
 
@@ -381,7 +382,8 @@ def v_panes(c, a):
     if a.json:
         c.say(json.dumps([{k: p.get(k) for k in ("id", "state", "agent", "model",
                                                  "effort", "title", "cwd", "pending",
-                                                 "resumable", "seat", "seatWithheld")}
+                                                 "resumable", "seat", "seatWithheld",
+                                                 "remote", "drivenBy")}
                           for p in rows],
                          indent=2))
         return 0
@@ -392,10 +394,13 @@ def v_panes(c, a):
         # `@name`, or `(@name withheld)` when another open pane holds it.
         seat = (f"@{p['seat']}" if p.get("seat") else
                 f"(@{p['seatWithheld']} withheld)" if p.get("seatWithheld") else "-")
+        r = p.get("remote") or {}
+        where = (f"  [on {r.get('hub')}{'' if r.get('up') else ', not reachable'}]"
+                 if r else "")
         c.say(f"{p['id']}  {p.get('state', ''):<10} {p.get('agent', ''):<10} "
               f"{(p.get('model') or '-'):<18} {seat:<16} "
               f"{('!' + str(pend)) if pend else '  '}  "
-              f"{p.get('title') or ''}")
+              f"{p.get('title') or ''}{where}")
     if st.get("notRestored"):
         c.say(f"({st['notRestored']} pane(s) were not restored — see the hub log)")
     return 0
@@ -403,7 +408,11 @@ def v_panes(c, a):
 
 def v_open(c, a):
     body = {"agent": consult.lane_key(a.lane),
-            "cwd": str(Path(a.cwd).expanduser().resolve())}
+            # A remote folder is that machine's to resolve, never this one's.
+            "cwd": (a.cwd or "~") if a.host else
+                   str(Path(a.cwd or Path.cwd()).expanduser().resolve())}
+    if a.host:
+        body["host"] = a.host
     for k in ("model", "effort", "posture", "role"):
         if getattr(a, k, None):
             body[k] = getattr(a, k)
@@ -685,7 +694,8 @@ def main(argv=None):
 
     s = sub.add_parser("open", help="open a pane on a lane")
     s.add_argument("--lane", required=True)
-    s.add_argument("--cwd", default=str(Path.cwd()))
+    s.add_argument("--cwd", default=None,
+                   help="default: this folder; with --host, that machine's home")
     s.add_argument("--model")
     s.add_argument("--effort")
     s.add_argument("--posture", choices=("strict", "edits", "auto"))
@@ -695,6 +705,8 @@ def main(argv=None):
                                  "this ask as the first turn, and follow it")
     s.add_argument("--background", action="store_true",
                    help="start minimized; it restores itself when it needs you")
+    s.add_argument("--host", help="a paired hub that lets this one drive it: the pane "
+                                  "runs there, as you, in a folder under its home")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=v_open)
 

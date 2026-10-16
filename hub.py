@@ -13,6 +13,7 @@ import re
 import signal
 import sys
 import threading
+import types
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -146,10 +147,17 @@ def _hub_import(bundle):
     return port_mod.import_bundle(bundle, state_dir=sessions.STATE)
 
 
+import drive_host  # noqa: E402  (after MGR exists)
+import drive_remote  # noqa: E402
 HUBS = hublink.Service(MGR, sessions.STATE, notify=notify.security,
                        hooks={"open": _hub_open, "compose": _hub_compose,
-                              "export": _hub_export, "import_bundle": _hub_import})
+                              "export": _hub_export, "import_bundle": _hub_import,
+                              "drive": drive_host.HostAdapter(
+                                  MGR, sessions, pending=lambda p: pending_payloads(p))})
 sessions.REOPEN_GATE = HUBS.reopen_refusal
+# Panes on paired hubs this one drives (drive_remote.py), shown with ours.
+REMOTE = drive_remote.Remote(HUBS, MGR, sessions.STATE)
+MGR.extra_panes = REMOTE.views
 # Changing who this hub trusts is for the operator at this machine only.
 HUBS_LOCAL_ONLY = ("/api/hubs/enable", "/api/hubs/disable", "/api/hubs/invite",
                    "/api/hubs/join", "/api/hubs/grant", "/api/hubs/forget",
@@ -266,7 +274,7 @@ def pending_payloads(pane):
         gate = req.get("_gate") or {}
         tc = req.get("toolCall") or {}
         over = bool(gate.get("oversize"))
-        out.append({"requestId": rid, "title": tc.get("title"),
+        out.append({"requestId": rid, "card": gate.get("card"), "title": tc.get("title"),
                     "kind": tc.get("kind"), "digest": gate.get("digest"),
                     "bytes": gate.get("bytes"), "oversize": over,
                     "rawInput": None if over else tc.get("rawInput"),
@@ -277,7 +285,8 @@ def pending_payloads(pane):
 
 
 def mark_seen(pane_id, seq):
-    MGR.get(pane_id)                     # ValueError for a pane that is not here
+    if not REMOTE.has(pane_id):
+        MGR.get(pane_id)                 # ValueError for a pane that is not here
     seq = int(seq)
     with _NOTIFY_LOCK:
         if seq > SEEN.get(pane_id, 0):
@@ -307,7 +316,11 @@ def _notify_check(pane_id):
         return None                         # a human saw it
     p = MGR.panes.get(pane_id)
     if p is None:
-        return None                         # closed meanwhile
+        # A pane on another hub this one drives: notify here as well.
+        t = REMOTE.notice_target(pane_id)
+        if t is None:
+            return None                     # closed meanwhile
+        p = types.SimpleNamespace(title=t["title"], pending=t["pending"], state=t["state"])
     d = ev.get("data") or {}
     if ev["kind"] == "permission":
         if d.get("requestId") not in getattr(p, "pending", {}):
@@ -753,6 +766,12 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/session/pending":
             # Authoritative pending permission payloads (from pane.pending, not
             # the bounded event ring), with the digest an approval must carry.
+            pane_q = (q.get("pane") or [""])[0]
+            if REMOTE.has(pane_q):
+                try:
+                    return self._json(REMOTE.pending(pane_q))
+                except ValueError as e:
+                    return self._json({"error": str(e)[:200]}, 400)
             try:
                 pane = MGR.get((q.get("pane") or [""])[0])
                 return self._json({"pane": pane.id, "state": pane.state,
@@ -762,6 +781,14 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/session/history":
             # Transcript paging: events OLDER than `before` from the on-disk
             # log — the ring in /api/state holds only the tail.
+            pane_q = (q.get("pane") or [""])[0]
+            if REMOTE.has(pane_q):
+                try:
+                    return self._json({"events": REMOTE.history(
+                        pane_q, int((q.get("before") or ["0"])[0] or 0),
+                        int((q.get("n") or ["200"])[0] or 200))})
+                except ValueError as e:
+                    return self._json({"error": str(e)[:200]}, 400)
             try:
                 pane = MGR.get((q.get("pane") or [""])[0])
                 before = int((q.get("before") or ["0"])[0] or 0)
@@ -794,6 +821,8 @@ class Handler(BaseHTTPRequestHandler):
             # document only, like claudeAuth; a poller's delta never has them.
             if not out.get("light"):
                 out["moduleNotices"] = modules.notices()
+                # Paired hubs this one may drive, with their lanes (the picker).
+                out["remoteHosts"] = REMOTE.hosts()
             # Which checkout and commit this process serves (`corral-light update`).
             out["hub"] = {"root": str(ROOT), "commit": BOOT_COMMIT}
             return self._json(out)
@@ -814,6 +843,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "no such module"}, 404)
             return self._json(d)
         return self._json({"error": "not found"}, 404)
+
+    def _remote_post(self, p, b):
+        """A wall POST naming a pane on another hub; None = not for a mirror."""
+        pane = str(b.get("pane") or "")
+        if p in drive_remote.ROUTES:
+            return self._json(REMOTE.route(p, b))
+        if p == "/api/session/minimize":
+            return self._json({"ok": True, "minimized":
+                               REMOTE.set_minimized(pane, b.get("minimized", True))})
+        if p == "/api/session/forget":
+            return self._json({"ok": True, "forgot": REMOTE.forget(pane)})
+        if p == "/api/session/seen":
+            return None                  # the seen handler takes mirrors too
+        raise ValueError("that is not available yet on a pane from another hub")
 
     def _static(self, rel):
         f = _safe_static_path(rel)
@@ -891,6 +934,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "cross-origin request refused"}, 403)
         try:
             b = self._body()
+            if isinstance(b, dict) and REMOTE.has(str(b.get("pane") or "")):
+                r = self._remote_post(p, b)
+                if r is not None:
+                    return r
             if p.startswith("/api/hubs/"):
                 return self._hubs_route("POST", p, None, b if isinstance(b, dict) else {})
             if p in ENROLL_ROUTES:
@@ -909,6 +956,16 @@ class Handler(BaseHTTPRequestHandler):
                 r = LOGIN.start(f"{who} ({where})" if where else who,
                                 local=self._local_human())
                 return self._json(r, 200 if r["state"] != "refused" else 403)
+            if p == "/api/session/new" and b.get("host"):
+                # A pane on a paired hub this one drives (drive_remote.py).
+                if b.get("role") or b.get("worktree") or b.get("reviewAtEnd"):
+                    raise ValueError("roles, own branches and review at the end are "
+                                     "not available yet for a pane on another hub")
+                snap = REMOTE.open(b["host"], {
+                    "lane": b.get("agent", ""), "cwd": b.get("cwd") or "~",
+                    "model": b.get("model"), "effort": b.get("effort"),
+                    "posture": b.get("posture"), "title": b.get("title")})
+                return self._json({"ok": True, "pane": snap, "preamble": "", "notes": []})
             if p == "/api/session/new":
                 agent = b.get("agent", "")
                 posture = b.get("posture") or sessions.DEFAULT_POSTURE
@@ -993,7 +1050,7 @@ class Handler(BaseHTTPRequestHandler):
                 pane = MGR.get(b.get("pane", ""))
                 ok = pane.answer(b.get("requestId", ""), b.get("optionId", ""),
                                  digest=(b.get("digest") or ""),
-                                 via=b.get("via"))
+                                 via=b.get("via"), card=(b.get("card") or None))
                 return self._json({"ok": True, "delivered": ok})
             if p == "/api/session/resume":
                 pane = MGR.resume(b.get("pane", ""))
@@ -1226,6 +1283,7 @@ def serve(bind=BIND, port=PORT):
     sessions._core.PEER_HUB_URL = (
         f"http://{'127.0.0.1' if bind in ('0.0.0.0', '', '::') else bind}:{port}")
     HUBS.start()                       # hub links: listener only if enabled
+    REMOTE.start()                     # links to hubs this one drives
     httpd = Server((bind, port), Handler)
     httpd.daemon_threads = True
     install_shutdown_handler()

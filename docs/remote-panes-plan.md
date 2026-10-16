@@ -1,6 +1,6 @@
 # Panes on another host, from the picker — plan
 
-Status: PLAN, v1.2, 2026-10-16. Nothing built. Reviewed in one round by a
+Status: BUILDING, v1.3, 2026-10-16. Phase 1 built on branch `remote-panes`: §6 records what exists and what was measured. Reviewed in one round by a
 three-vendor panel (Codex, Grok, Gemini); the charge, the v0 draft and the
 answers are in `reviews/2026-10-16-remote-panes-panel/`. All three chose A
 over B, and all three cut it down for v1. §3 is rewritten from their
@@ -180,9 +180,11 @@ Mirrors do not count against the local live-pane cap. If the peer
 restarts, the mirror shows the pane's real state there (detached, dead),
 and resume runs on the peer.
 
-**R7. Notifications.** The driving hub raises notices for its mirrors, on
-its own quiet-hours clock. The peer stays silent for panes another hub is
-driving.
+**R7. Notifications.** Both hubs raise their usual notices for a driven
+pane: the driving hub for its mirror, the peer for its own pane, each on its
+own quiet-hours clock. Silencing the peer was considered and dropped: the
+machine an agent runs on keeps telling its own wall what that agent is
+doing.
 
 **R8. Still out of v1, for size, not authority.** Own branch, review and
 publish, challenges, attachments, quote, fan-out, port, and takeover of a
@@ -220,3 +222,26 @@ login; the transport is a persistent channel built for speed and resume.
 
 1. **Which hubs to pair**, and which may drive which. Pairing and granting
    happen at each machine, since trust changes are refused remotely.
+
+## 6. Built (branch `remote-panes`)
+
+| Piece | Where |
+|---|---|
+| The channel: framing, heartbeats, redial, resume, run-once commands | `drive.py` |
+| The `drive` grant, the upgrade path, channels outside the listener's slots | `hublink.py` |
+| The driven side: lanes, home-confined folders, `driven_by`, commands | `drive_host.py` |
+| Card ids and an atomic check-and-take for every card answer | `sessions.py`, `corral_core/sessions.py` |
+| The driving side: mirrors, persisted, reattached on restart | `drive_remote.py` |
+| Wall routes, state, history and pending cards for mirrors | `hub.py` |
+| Machine choice in the New conversation dialog; a header badge | `static/` |
+| `corral-light open --host`; remote panes in `corral-light panes` | `cli.py` |
+
+Measured on loopback (`test_drive.py`): event latency 0.1 ms at the
+median, command round trip 0.5 ms. Through two real hubs and the CLI
+(`test_drive_e2e.py`): open 84 ms, prompt to reply 58 ms, both including
+the CLI's own start. One finding on the way: a 30 ms timed queue wait took
+about 100 ms on macOS, so batching never waits; it takes only what is
+already queued.
+
+Not yet measured: the LAN between two machines, and sleep and wake of the
+driving Mac. Those need two paired machines (Phase 0 step 1).

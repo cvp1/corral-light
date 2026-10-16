@@ -25,10 +25,12 @@ class FakeDriven:
 
     # adapter interface
     def lanes(self):
-        return [{"key": "fake", "label": "Fake", "available": True}]
+        return {"lanes": [{"key": "fake", "label": "Fake", "available": True}]}
+
+    HOME = "the-operator-home"
 
     def home(self):
-        return "/home/op"
+        return self.HOME
 
     def subscribe(self, q):
         with self.lock:
@@ -159,13 +161,17 @@ class DriveTest(unittest.TestCase):
         time.sleep(1.0)
         self.assertFalse(link.up.is_set())
         self.assertIn("may not drive", link.error or "")
-        self.assertTrue(any(e["event"] == "refused" for e in self.b.svc.ledger_tail()))
+        # A refusal is not a drop: the link waits long before asking again,
+        # so a revoked grant never fills the other hub's ledger.
+        time.sleep(3)
+        refused = [e for e in self.b.svc.ledger_tail() if e["event"] == "refused"]
+        self.assertEqual(len(refused), 1)
 
     def test_open_and_stream(self):
         link = self.link()
         ready = link.ready
-        self.assertEqual(ready["lanes"][0]["key"], "fake")
-        self.assertEqual(ready["home"], "/home/op")
+        self.assertEqual(ready["lanes"]["lanes"][0]["key"], "fake")
+        self.assertEqual(ready["home"], FakeDriven.HOME)
         pane = link.call("open", {"lane": "fake", "cwd": "~", "text": "hello"})["pane"]
         for i in range(40):
             self.driven.emit(pane, "text", {"text": str(i)})
@@ -264,13 +270,13 @@ class DriveTest(unittest.TestCase):
         lat.sort()
         med = lat[len(lat) // 2]
         print(f"\ndrive loopback event latency: median {med * 1000:.1f} ms, "
-              f"max {lat[-1] * 1000:.1f} ms")
+              f"max {lat[-1] * 1000:.1f} ms", flush=True)
         self.assertLess(med, 0.02)
         t0 = time.perf_counter()
         for _ in range(20):
             link.call("send", {"pane": pane, "text": "x"})
         per = (time.perf_counter() - t0) / 20
-        print(f"drive loopback command round trip: {per * 1000:.1f} ms")
+        print(f"drive loopback command round trip: {per * 1000:.1f} ms", flush=True)
         self.assertLess(per, 0.1)
 
     def test_frames_are_capped(self):

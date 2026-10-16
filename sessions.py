@@ -75,7 +75,7 @@ TURN_VIAS = _core.TURN_VIAS
 # control, like TURN_VIAS): the wall, the operator's terminal (`corral-light
 # ok|no`), or a script such as lane_matrix. Any other value is recorded as
 # unknown, so the transcript never claims "you" for an answer it cannot place.
-ANSWER_VIAS = ("wall", "terminal", "script")
+ANSWER_VIAS = ("wall", "terminal", "script", "hub")
 
 
 # A reviewer's lane at its most read-only (vendor-enforced, set and read back
@@ -971,6 +971,8 @@ class Pane(_core.PaneBase):
         # None = unaddressable.
         p.seat = meta.get("seat")
         p.question = _core.PaneBase.restore_question(meta)   # ask_human
+        d = meta.get("driven_by")
+        p.driven_by = d if isinstance(d, dict) and d.get("hub") and d.get("gen") else None
         p.seat_withheld = False
         # Restored so the next save does not blank them.
         p.role = meta.get("role")
@@ -2238,42 +2240,49 @@ class Pane(_core.PaneBase):
             "bytes": size, "optionId": opt["optionId"], "optionKind": "allow_once"})
         return True
 
-    def answer(self, request_id, option_id, digest=None, via=None):
-        req = self.pending.get(request_id)
-        if not req:
-            raise ValueError("no such pending permission (already answered?)")
-        valid = {o.get("optionId") for o in req.get("options") or []}
-        if option_id not in valid:
-            raise ValueError(f"invalid option {option_id!r}; expected one of {sorted(valid)}")
-        # Enforce the display gate server-side, from the pending record (which lives
-        # exactly as long as the authority it guards).
-        rec = req.get("_gate") or {}
-        kind = next((str(o.get("kind", "")) for o in req.get("options") or []
-                     if o.get("optionId") == option_id), "")
-        if self.challenge_of and not kind.startswith("reject"):
-            raise ValueError("a blind reviewer is read-only: its requests can only "
-                             "be refused")
-        # The digest binds an approval to the bytes shown. It gates granting only:
-        # refusing must always work, even from a stale client. Which option refuses
-        # comes from the agent's declared `kind`, never from the client.
-        shown = rec.get("digest") or ""
-        granting = not kind.startswith("reject")
-        if granting and (not shown or digest != shown):
-            raise ValueError(
-                "the digest on this approval does not match the bytes that "
-                "were shown — an approval proves only what you could see. "
-                "Reload the page and answer the card again; refusing works "
-                "either way.")
-        if rec.get("oversize") and granting:
-            raise ValueError(
-                "this request was too large to display, so it cannot be "
-                "approved here — only refused. An approval proves only what "
-                "you could see.")
-        # Pop before waking the agent so concurrent answers can't both win;
-        # restore the record if the wake fails.
+    def answer(self, request_id, option_id, digest=None, via=None, card=None):
+        """Answer a permission card. Every check runs, and the card is taken,
+        under one lock, so two answers (two walls, a retry) cannot both pass.
+        `card`, when given, must be the id the card was shown with: an answer
+        for a card that was replaced or already answered never lands on its
+        successor, even one with the same request id and bytes."""
         with self._lock:
-            if request_id not in self.pending:
+            req = self.pending.get(request_id)
+            if not req:
                 raise ValueError("no such pending permission (already answered?)")
+            rec = req.get("_gate") or {}
+            if card is not None and card != rec.get("card"):
+                raise ValueError("that card is no longer waiting (answered, or replaced "
+                                 "by a new one); answer the card shown now")
+            valid = {o.get("optionId") for o in req.get("options") or []}
+            if option_id not in valid:
+                raise ValueError(f"invalid option {option_id!r}; expected one of {sorted(valid)}")
+            # Enforce the display gate server-side, from the pending record (which
+            # lives exactly as long as the authority it guards).
+            kind = next((str(o.get("kind", "")) for o in req.get("options") or []
+                         if o.get("optionId") == option_id), "")
+            if self.challenge_of and not kind.startswith("reject"):
+                raise ValueError("a blind reviewer is read-only: its requests can only "
+                                 "be refused")
+            # The digest binds an approval to the bytes shown. It gates granting
+            # only: refusing must always work, even from a stale client. Which
+            # option refuses comes from the agent's declared `kind`, never from
+            # the client.
+            shown = rec.get("digest") or ""
+            granting = not kind.startswith("reject")
+            if granting and (not shown or digest != shown):
+                raise ValueError(
+                    "the digest on this approval does not match the bytes that "
+                    "were shown — an approval proves only what you could see. "
+                    "Reload the page and answer the card again; refusing works "
+                    "either way.")
+            if rec.get("oversize") and granting:
+                raise ValueError(
+                    "this request was too large to display, so it cannot be "
+                    "approved here — only refused. An approval proves only what "
+                    "you could see.")
+            # Taken before waking the agent so concurrent answers can't both
+            # win; restored if the wake fails.
             self.pending.pop(request_id, None)
         try:
             ok = self.client.answer_permission(request_id, option_id)
@@ -2287,6 +2296,7 @@ class Pane(_core.PaneBase):
         self.emit("permission_answered", {"requestId": request_id,
                                           "optionId": option_id, "kind": kind,
                                           "digest": rec.get("digest"),
+                                          "card": rec.get("card"),
                                           "delivered": ok,
                                           "via": via if via in ANSWER_VIAS else None})
         return ok
@@ -2367,6 +2377,9 @@ class Pane(_core.PaneBase):
             "role": getattr(self, "role", None),
             # Set when the transcript was carried from another lane (port.py).
             "portedFrom": getattr(self, "ported_from", None),
+            # Opened from a paired hub with `drive` ({hub, name, at}); None = here.
+            "drivenBy": ({k: v for k, v in self.driven_by.items() if k != "gen"}
+                         if self.driven_by else None),
             # Own branch (worktrees.py): None for an ordinary pane.
             "worktree": self.worktree_view(),
             "usage": self.usage, "alive": alive,
@@ -3661,6 +3674,13 @@ class Manager(_core.ManagerBase):
                 for k in self.PANE_LIGHT_OMITS:
                     snap.pop(k, None)
             panes.append(snap)
+        # Panes from another hub (drive_remote.Remote.views), after the local ones.
+        extra = getattr(self, "extra_panes", None)
+        if extra is not None:
+            try:
+                panes.extend(extra(since))
+            except Exception:                       # noqa: BLE001
+                pass
         if light:
             return {"panes": panes, "agentGroups": agent_groups(),
                     "postures": sorted(POSTURES), "defaultCwd": str(default_cwd()),
