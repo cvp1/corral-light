@@ -1,6 +1,6 @@
 # Panes on another host, from the picker — plan
 
-Status: PLAN, v1.1, 2026-10-16. Nothing built. Reviewed in one round by a
+Status: PLAN, v1.2, 2026-10-16. Nothing built. Reviewed in one round by a
 three-vendor panel (Codex, Grok, Gemini); the charge, the v0 draft and the
 answers are in `reviews/2026-10-16-remote-panes-panel/`. All three chose A
 over B, and all three cut it down for v1. §3 is rewritten from their
@@ -80,8 +80,13 @@ description of the feature, not a defect in it. The grant's notice and
 HUB-LINKS.md say so in those words, so nobody grants it to a hub they would
 not hand a login shell to. It is never a default.
 
-Operator ruling, 2026-10-16: "The intent is to act as my user on that
-host. Because I AM that user on that host." The panel's v1 cut that kept
+Operator rulings, 2026-10-16: "The intent is to act as my user on that
+host. Because I AM that user on that host." And: "Treat this like ssh
+access. Essentially, it is, we are just removing the need to ssh over and
+start claude in the ssh session. We want this connection to be as robust,
+efficient, and fast as possible." So `drive` is held to the bar of an SSH
+login: one strong, pinned, mutually authenticated channel, no extra
+friction once it is up, and no more exposure than SSH to that user. The panel's v1 cut that kept
 card answers at the peer's wall is overruled. The panel's correctness
 findings stand.
 
@@ -105,32 +110,68 @@ is offered. Answers are idempotent: a retry returns the first outcome. The
 first answer from either wall wins, and the other wall sees "answered
 there", not an error. A reject never needs a digest.
 
-**R2. Lanes route.** `GET /fed/v1/drive/lanes` returns an explicit,
-stripped record per lane: key, label, model options, effort options,
-posture options, and the peer's allowed roots. No `why` text, since today's
-`why` strings carry absolute paths. Shell lanes and lanes whose posture is
-not enforced are left out.
+**R2. Lanes.** The peer sends its lane list on the channel when it opens
+and again whenever it changes, so the picker never waits on a request:
+per lane, key, label, availability and why, model options, effort options
+and posture options, plus the peer user's home and recent folders. Every
+agent lane is offered. Shell lanes are left out, because an SSH host lane
+already covers a plain shell.
 
 **R3. Picker.** The Host select becomes its own dimension, filled
 independently of lane groups: this machine, then each peer with `drive`.
 Picking a peer refills Agent, Model and Effort from that peer's lanes and
-the folder suggestions from its allowed roots. Own branch, Review at the
+the folder suggestions from that machine's home and recent folders. Own branch, Review at the
 end, attachments and Later are hidden for a remote host in v1.
 
-**R4. Open.** `POST /fed/v1/drive/open` carries a client-made mutation id;
-a retry with the same id returns the first result instead of a second pane.
-The folder is resolved with `realpath` on the peer and must lie under an
-allowed root. A driven pane is an ordinary pane on the peer: it keeps its
-seat tools and the full card options, as a pane opened at that wall would.
+**R4. Open.** An open carries a client-made mutation id; a retry with the
+same id returns the first result instead of a second pane. The folder may
+be anywhere under the peer user's home directory, as with an SSH login
+there. It is resolved with `realpath` on the peer, so a symlink cannot
+take it outside home, and a missing folder is refused rather than created.
+There is no per-folder allowlist to maintain. A driven pane is an ordinary
+pane on the peer: it keeps its seat tools and the full card options, as a
+pane opened at that wall would.
 
-**R5. Relay.** One short poll per peer, never one held connection per pane:
-`POST /fed/v1/drive/events` with a cursor per pane, the same shape as the
-wall's `/api/state?since=`. Batches stay under the response cap. The poll
-carries pane state (state, pending card titles, question, error) as well as
-events. Polling backs off when nothing changes. This fits the listener's
-limits of four connections per address, a six-second call timeout and a
-15-second socket timeout, and the 20,000-nonce window. Prompts, cancel and
-close each carry a mutation id and are never replayed blindly.
+**R5. The channel.** One persistent, duplex channel per pair of hubs,
+shaped like an SSH connection, not a series of web requests.
+
+- *Open.* The driving hub dials the peer's existing listener with mutual
+  TLS and the pinned certificate, and sends one signed request to
+  `/fed/v1/drive/channel`. That request passes the usual checks (grant,
+  clock, nonce, recipient). The peer then switches the same connection to
+  length-prefixed JSON frames in both directions. Each frame after that is
+  authenticated by the TLS session itself, as each SSH packet is by its
+  transport, so there is no per-frame signature, nonce or disk write.
+- *Why.* Today every hub-link call opens a new TLS connection, appends a
+  nonce to disk under the hub lock, and closes; the listener allows four
+  connections per address and drops sockets idle for 15 seconds. A channel
+  pays the handshake and the nonce once per connection, not once per
+  keystroke or token.
+- *Down the channel.* Every event of every pane that peer is driving,
+  multiplexed by pane and sequence number, plus pane state (state, cards,
+  question, error). Token deltas are coalesced into frames of at most
+  about 30 ms. `TCP_NODELAY` is on.
+- *Up the channel.* Commands: open, prompt, answer, question answer,
+  cancel, close. Each carries a mutation id and is acknowledged on the
+  channel with its result; a retry of the same id returns that result.
+  Every command re-checks the grant and pane ownership when it runs.
+- *Liveness.* Heartbeats both ways every 10 seconds; 30 seconds of silence
+  ends the channel. Revoking `drive`, forgetting the peer or re-pairing
+  closes it at once.
+- *Reconnect.* The driving hub redials at once, then backs off with jitter
+  from a quarter second up to five seconds, and redials immediately on
+  network change or wake from sleep. It resumes with a cursor per pane.
+  The peer replays from each pane's event log; if a cursor is older than
+  the log keeps, it sends a snapshot and says so. No event is lost or
+  shown twice.
+- *Limits.* A channel has its own slot, outside the per-address cap, so
+  the other hub-link calls never starve. One channel per peer: a new one
+  replaces the old. A small overall cap on channels, and the existing
+  frame size cap.
+- *What a drop costs.* Nothing on the peer. The agent keeps working there
+  while the link is down, and the wall catches up on reconnect. That is
+  the robustness gain over SSH plus a CLI, where the session dies with the
+  connection unless it was started under tmux.
 
 **R6. The mirror.** The driving hub keeps a mirror pane with no process.
 It persists the peer, the remote pane id, the pairing generation and the
@@ -153,8 +194,10 @@ Credentials never cross: the agent uses the logins already on its machine.
 
 1. Pair two hubs on the LAN with `see` and `watch`, and confirm the
    existing routes work between the two machines.
-2. Measure the short-poll relay's latency and nonce use against a busy
-   streaming pane, not an idle one.
+2. Measure the channel against a busy streaming pane, on the LAN: added
+   latency over a local pane (target under 20 ms at the median), time to
+   resume after a dropped connection, and time to resume after the driving
+   Mac wakes from sleep.
 3. Falsifiers. Each one stops the design if it fails:
    - A peer without `drive` lists lanes, opens a pane, or answers a card.
    - An answer sent for one card approves a different one: a stale card id,
@@ -162,16 +205,18 @@ Credentials never cross: the agent uses the logins already on its machine.
      once.
    - A retried open creates a second pane, or a retried prompt is
      delivered twice.
-   - A driven pane, its relay and a roster poll starve an operator command
-     of a connection.
-   - A path under an allowed root that symlinks outside it is accepted.
+   - A busy channel and a roster poll starve another hub-link call of a
+     connection.
+   - Cutting the connection mid-stream loses an event or shows one twice
+     after resume.
+   - A folder that symlinks outside the peer user's home is accepted.
    - A restart of the driving hub starts a local agent for a mirror.
 
 ## 5. Decisions for the operator
 
-Settled 2026-10-16: option A, with card and question answers from the
-driving wall in v1.
+Settled 2026-10-16: option A; card and question answers from the driving
+wall in v1; any folder under the peer user's home; the trust bar is an SSH
+login; the transport is a persistent channel built for speed and resume.
 
-1. **Folder roots for driving** start empty; the operator lists them on
-   each hub that may be driven.
-2. **Which hubs to pair**, and which may drive which.
+1. **Which hubs to pair**, and which may drive which. Pairing and granting
+   happen at each machine, since trust changes are refused remotely.
