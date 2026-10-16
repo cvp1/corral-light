@@ -527,6 +527,61 @@ def seed_config_dir(d, posture):
     return d
 
 
+def project_key(cwd):
+    """Claude Code's directory name for a project under <config>/projects:
+    the absolute path with every character that is not a letter or digit
+    replaced by '-' (/srv/work/aios -> -srv-work-aios)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def link_project_memory(config_dir, cwd):
+    """Point a pane's auto-memory for `cwd` at the user's shared store.
+
+    Claude Code keeps a project's auto-memory in <CLAUDE_CONFIG_DIR>/projects/
+    <key>/memory. A pane's private config dir (seed_config_dir) therefore gave
+    every pane a memory of its own: notes a pane saved reached no other session,
+    the pane read only its own MEMORY.md at start, and writes there bypassed a
+    workspace's guard on the shared store, which resolves real paths
+    (2026-10-16). Only the memory dir is linked: the rest of projects/<key>
+    holds this pane's own session transcripts.
+
+    Returns "linked", "ok" (already linked), "kept" (a real dir with notes is
+    left alone: merge them into the shared store, then remove it) or None.
+    """
+    if config_dir is None or not cwd:
+        return None
+    key = project_key(cwd)
+    shared = Path.home() / ".claude" / "projects" / key / "memory"
+    mine = Path(config_dir) / "projects" / key / "memory"
+    try:
+        shared.mkdir(parents=True, exist_ok=True)
+        mine.parent.mkdir(parents=True, exist_ok=True)
+        if mine.is_symlink():
+            if mine.readlink() == shared:
+                return "ok"
+            mine.unlink()
+        elif mine.is_dir():
+            notes = [p for p in mine.iterdir()
+                     if not (p.name == "MEMORY.md" and p.is_file()
+                             and not p.read_text(encoding="utf-8", errors="replace").strip())]
+            if notes:
+                print(f"corral-light: {mine} holds {len(notes)} note(s) of its own; "
+                      f"left in place (merge them into {shared}, then remove it)",
+                      file=sys.stderr, flush=True)
+                return "kept"
+            for p in mine.iterdir():          # only an empty MEMORY.md
+                p.unlink()
+            mine.rmdir()
+        elif mine.exists():
+            return "kept"                     # a file where the dir goes: not ours
+        mine.symlink_to(shared)
+        return "linked"
+    except OSError as e:
+        print(f"corral-light: pane memory not linked to {shared}: {e}",
+              file=sys.stderr, flush=True)
+        return None          # a missing link costs shared memory, never the pane
+
+
 # Ambient vendor credentials never reach a pane; the strip list lives in
 # corral_core. Opt-out: CORRAL_LIGHT_ALLOW_VENDOR_ENV=1.
 STRIP_ENV_PREFIXES = _core.STRIP_ENV_PREFIXES
@@ -1700,7 +1755,9 @@ class Pane(_core.PaneBase):
         return self.config.get(config_id)
 
     def _config_dir(self):
-        return seed_config_dir(self.dir / "config", self.posture)
+        d = seed_config_dir(self.dir / "config", self.posture)
+        link_project_memory(d, self.cwd)
+        return d
 
     def send(self, text, via=None):
         # Validate `via` before anything is resumed, titled or queued.

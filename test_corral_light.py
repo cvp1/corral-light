@@ -4,6 +4,8 @@ independence from full Corral.
 
 Run: python3 -m unittest test_corral_light -v   (from this directory)
 """
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -1509,6 +1511,98 @@ class DiagnoseIsSafeToPaste(unittest.TestCase):
         # Names and lengths only — no dict dump of the environment anywhere.
         self.assertNotIn("json.dumps(dict(os.environ", src)
         self.assertNotIn("print(os.environ", src)
+
+
+class PaneMemoryIsTheSharedStore(unittest.TestCase):
+    """A pane's auto-memory is the user's shared store, not a private copy.
+
+    2026-10-16: a pane wrote its notes into <pane config>/projects/<key>/
+    memory, where no other session saw them, and where a workspace's guard on the
+    shared store (it resolves real paths) did not apply.
+    """
+
+    def setUp(self):
+        self.home = Path(tmpdir(self))
+        (self.home / ".claude").mkdir()
+        real = Path.home
+        Path.home = staticmethod(lambda: self.home)
+        self.addCleanup(lambda: setattr(Path, "home", real))
+        self.cfg = self.home / "pane" / "config"
+        self.cwd = "/srv/work/aios"
+        self.shared = self.home / ".claude" / "projects" / "-srv-work-aios" / "memory"
+        self.mine = self.cfg / "projects" / "-srv-work-aios" / "memory"
+
+    def test_project_key_is_claude_codes(self):
+        import sessions
+        self.assertEqual(sessions.project_key("/srv/work/aios"), "-srv-work-aios")
+        self.assertEqual(sessions.project_key("/srv/my.repo_x"), "-srv-my-repo-x")
+
+    def test_links_the_memory_dir_and_creates_the_store(self):
+        import sessions
+        self.assertEqual(sessions.link_project_memory(self.cfg, self.cwd), "linked")
+        self.assertTrue(self.shared.is_dir())
+        self.assertTrue(self.mine.is_symlink())
+        self.assertEqual(self.mine.resolve(), self.shared.resolve())
+        (self.mine / "note.md").write_text("x")
+        self.assertTrue((self.shared / "note.md").is_file())
+
+    def test_only_memory_is_shared_not_the_transcripts(self):
+        import sessions
+        sessions.link_project_memory(self.cfg, self.cwd)
+        project = self.mine.parent
+        self.assertFalse(project.is_symlink())
+        (project / "session.jsonl").write_text("{}")
+        self.assertFalse((self.shared.parent / "session.jsonl").exists())
+
+    def test_again_is_a_no_op(self):
+        import sessions
+        sessions.link_project_memory(self.cfg, self.cwd)
+        self.assertEqual(sessions.link_project_memory(self.cfg, self.cwd), "ok")
+
+    def test_a_link_elsewhere_is_repointed(self):
+        import sessions
+        other = self.home / "elsewhere"
+        other.mkdir()
+        self.mine.parent.mkdir(parents=True)
+        self.mine.symlink_to(other)
+        self.assertEqual(sessions.link_project_memory(self.cfg, self.cwd), "linked")
+        self.assertEqual(self.mine.resolve(), self.shared.resolve())
+
+    def test_a_private_dir_with_notes_is_never_replaced(self):
+        import sessions
+        self.mine.mkdir(parents=True)
+        (self.mine / "MEMORY.md").write_text("- [x](x.md)\n")
+        (self.mine / "x.md").write_text("a note only this pane has")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(sessions.link_project_memory(self.cfg, self.cwd), "kept")
+        self.assertFalse(self.mine.is_symlink())
+        self.assertEqual((self.mine / "x.md").read_text(), "a note only this pane has")
+        self.assertIn("merge them into", err.getvalue())
+
+    def test_an_empty_private_dir_becomes_the_link(self):
+        import sessions
+        self.mine.mkdir(parents=True)
+        (self.mine / "MEMORY.md").write_text("\n")
+        self.assertEqual(sessions.link_project_memory(self.cfg, self.cwd), "linked")
+        self.assertTrue(self.mine.is_symlink())
+
+    def test_the_store_keeps_what_it_has(self):
+        import sessions
+        self.shared.mkdir(parents=True)
+        (self.shared / "MEMORY.md").write_text("- [y](y.md)\n")
+        sessions.link_project_memory(self.cfg, self.cwd)
+        self.assertEqual((self.mine / "MEMORY.md").read_text(), "- [y](y.md)\n")
+
+    def test_no_config_dir_or_cwd_does_nothing(self):
+        import sessions
+        self.assertIsNone(sessions.link_project_memory(None, self.cwd))
+        self.assertIsNone(sessions.link_project_memory(self.cfg, ""))
+        self.assertFalse(self.cfg.exists())
+
+    def test_every_pane_config_dir_links_it(self):
+        import sessions, inspect
+        src = inspect.getsource(sessions.Pane._config_dir)
+        self.assertIn("link_project_memory(d, self.cwd)", src)
 
 
 class AnEmptyTokenIsNotACredential(unittest.TestCase):
