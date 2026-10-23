@@ -4,6 +4,10 @@
     "finops": {
       "url": "https://github.com/cvp1/corral-light-finops",
       "summary": "What your lanes cost, and how much quota is left"
+    },
+    "delegates": {
+      "url": "https://github.com/cvp1/corral-light-delegates",
+      "summary": "Which boxes your delegates run on, what each grant allows, and any box no valid grant covers"
     }
   }
 }

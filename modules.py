@@ -1161,6 +1161,15 @@ def _parse_iso(v):
     return ts if math.isfinite(ts) else None
 
 
+def _age_text(seconds):
+    s = max(0, int(seconds))
+    if s < 3600:
+        return f"{s // 60} min"
+    if s < 86400:
+        return f"{s // 3600} h"
+    return f"{s // 86400} d"
+
+
 def _validate_notices(raw):
     """A snapshot's `notices` (§4.7) -> (kept, dropped count)."""
     if not isinstance(raw, list):
@@ -1348,11 +1357,20 @@ def notices(now=None):
             if isinstance(every, bool) or not isinstance(every, int):
                 continue
             every = max(every, MIN_EVERY_S)
-            if now >= fresh + 2 * every or now >= fresh + NOTICE_MAX_AGE_S:
+            if now >= fresh + NOTICE_MAX_AGE_S:
+                continue
+            # A failing module keeps the `bad` notices of its last good
+            # snapshot until NOTICE_MAX_AGE_S, marked with that snapshot's age
+            # (Delegates plan Q7): a broken collector must not drop its own
+            # alarm from the rail. Everything else still goes at 2 x every_s.
+            last_good = now >= fresh + 2 * every
+            if last_good and st.get("state") != "failing":
                 continue
             snap = _read_json(snapshot_path(name), {}) or {}
             live = []
             for n in snap.get("notices") or []:
+                if last_good and n.get("level") != "bad":
+                    continue
                 # Checked again at read: the stored file is not trusted either.
                 if not isinstance(n, dict) or n.get("level") not in NOTICE_LEVELS or \
                         not isinstance(n.get("id"), str) or not NOTICE_ID_RE.match(n["id"]) or \
@@ -1361,10 +1379,15 @@ def notices(now=None):
                 exp = _parse_iso(n.get("expires_at"))
                 if exp is not None and now >= exp:
                     continue
+                text = _text(n.get("text"), NOTICE_TEXT_CAP)
+                if last_good:
+                    suffix = f"last good {_age_text(now - fresh)} ago"
+                    text = _text(text, NOTICE_TEXT_CAP - len(suffix) - 2)
+                    text = (text + "; " if text else "") + suffix
                 live.append({"module": name, "moduleTitle": pin.get("title") or name,
                              "id": _text(n.get("id"), 64), "level": n["level"],
                              "title": _text(n.get("title"), NOTICE_TITLE_CAP),
-                             "text": _text(n.get("text"), NOTICE_TEXT_CAP)})
+                             "text": text})
             live.sort(key=lambda x: (_LEVEL_RANK[x["level"]], x["id"]))
             more += max(0, len(live) - NOTICES_PER_MODULE)
             items.extend(live[:NOTICES_PER_MODULE])
