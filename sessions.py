@@ -641,6 +641,32 @@ def usable_credential(path):
     return has_token(doc)
 
 
+# Lanes that sign in to their own vendor, not to Claude.
+OWN_LOGIN_LANES = ("codex", "grok", "gemini")
+
+
+def lane_auth_remedy(agent, reason):
+    """The dead reason for a non-Claude lane that failed on its own login.
+
+    Names the lane and its own login command; the vendor's error stays in
+    brackets. Never the Claude remedy: that sends the operator to the wrong
+    vendor's sign-in."""
+    label = (AGENTS.get(agent) or {}).get("label", agent)
+    cmd = None
+    try:
+        if agent == "grok":
+            from grok_launcher import login_command, resolve_grok
+            cmd = login_command(resolve_grok())
+        elif agent == "codex":
+            from codex_launcher import login_command
+            cmd = login_command()
+    except Exception:                              # noqa: BLE001 — wording only
+        cmd = None
+    how = f"run `{cmd}` on the hub machine" if cmd else "sign in to it on the hub machine"
+    return (f"{label} is not signed in — {how}, then resume this pane. "
+            f"[{str(reason)[:160]}]")
+
+
 def posture_enforceable(spec, posture=None):
     """Can Corral impose a posture on this lane on this host?
 
@@ -738,7 +764,8 @@ def available_agents():
             reason = unavailable_reason()
             out.append({"key": key, "label": spec["label"],
                         "available": reason is None, "why": reason or "",
-                        "postureEnforced": bool(spec["posture_via_config_dir"]),
+                        # Same answer a live pane gives (argv lanes realize a posture).
+                        "postureEnforced": posture_enforceable(spec),
                         "tools": bool(spec.get("tools"))})
             continue
         # codex: adapter present AND logged in, resolved by its launcher.
@@ -747,7 +774,8 @@ def available_agents():
             reason = unavailable_reason()
             out.append({"key": key, "label": spec["label"],
                         "available": reason is None, "why": reason or "",
-                        "postureEnforced": bool(spec["posture_via_config_dir"]),
+                        # Same answer a live pane gives (argv lanes realize a posture).
+                        "postureEnforced": posture_enforceable(spec),
                         "tools": bool(spec.get("tools"))})
             continue
         # ollama needs a running server, not just the adapter on disk.
@@ -1539,14 +1567,22 @@ class Pane(_core.PaneBase):
         Auth deaths carry a plain-English remedy, a `cause`, and the login they
         died under, so auth_sweep resumes them only after a new sign-in.
         """
-        cause = "auth" if claude_auth.is_auth_error(reason) else None
+        # Lanes with their own vendor login did not die of the Claude login:
+        # auth_sweep resumes "auth" deaths on a new Claude sign-in, and the
+        # Claude remedy would send the operator to the wrong vendor.
+        own_login = self.agent in OWN_LOGIN_LANES
+        auth_shaped = claude_auth.is_auth_error(reason)
+        cause = "auth" if auth_shaped and not own_login else None
         self._flush_text()              # its last words land before `dead`
         self._flush_thought()
         # Reason first, then state: anyone who sees `dead` also sees why. An
         # exit with no reason of its own (the reap after a failed start) keeps
         # the reason already given.
         if reason or not (self.state == "dead" and self.error):
-            self.error = claude_auth.explain(reason)
+            if not (own_login and auth_shaped):
+                self.error = claude_auth.explain(reason)
+            else:
+                self.error = lane_auth_remedy(self.agent, reason)
         self.dead_cause = cause
         self.dead_login = (claude_auth.status().get("refreshExpiresAt")
                            if cause else None)
