@@ -2933,6 +2933,24 @@ class PostureRidesTheAcpMode(unittest.TestCase):
                 self.assertTrue(p._apply_posture())
                 self.assertEqual(p.client.calls, [("mode", wire)])
 
+    def test_the_lane_list_says_what_a_live_pane_says(self):
+        """`consult lanes` listed Grok as not enforced while its live pane
+        reported enforced: the list hard-coded the config-dir answer."""
+        import sessions, grok_launcher, codex_launcher
+        for mod in (grok_launcher, codex_launcher):
+            self.addCleanup(setattr, mod, "unavailable_reason",
+                            mod.unavailable_reason)
+            mod.unavailable_reason = lambda: None
+        keep = dict(sessions.AGENTS)
+        self.addCleanup(lambda: (sessions.AGENTS.clear(),
+                                 sessions.AGENTS.update(keep)))
+        sessions.AGENTS.clear()
+        sessions.AGENTS.update({k: keep[k] for k in ("grok", "codex")})
+        got = {a["key"]: a["postureEnforced"] for a in sessions.available_agents()}
+        for key in ("grok", "codex"):
+            self.assertEqual(got[key], sessions.posture_enforceable(keep[key]), key)
+        self.assertTrue(got["grok"])
+
     def test_a_session_already_in_that_mode_costs_no_wire_call(self):
         p = self._pane(posture="strict", mode_value="default")
         p.client = self._Client()

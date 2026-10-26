@@ -196,6 +196,25 @@ class ADeadLoginIsSurvived(FakeLaneCase):
         self.assertEqual(snap["deadCause"], "auth")
         self.assertTrue(snap["resumable"])
 
+    def test_another_vendors_login_failure_names_that_vendor(self):
+        """A Grok pane refused for its own login once read "Claude login
+        expired", and was tagged for the Claude sweep to resume."""
+        agents = self.sessions.AGENTS
+        self.addCleanup(agents.__setitem__, "grok", agents["grok"])
+        agents["grok"] = dict(agents["fake"], label="Grok")
+        agents["fake"]["env"]["FAKE_ACP_AUTH_FAIL"] = "1"
+        self._login(True, "2026-10-27T00:00:00Z")
+        p = self.mgr.create("grok", self.agent_dir)
+        self.assertEqual(p.state, "ready", p.error)
+        p.send("hello")
+        self.assertTrue(wait_for(lambda: p.state == "dead"), p.state)
+        self.assertNotIn("Claude", p.error)
+        self.assertIn("Grok is not signed in", p.error)
+        self.assertIn("-32000", p.error)
+        self.assertIsNone(p.dead_cause)
+        acted = self.mgr.auth_sweep(notify_fn=lambda t, b: self.said.append(b))
+        self.assertEqual(acted["resumed"], [])
+
     def test_a_plain_crash_is_not_an_auth_death(self):
         p = self.mgr.create("fake", self.agent_dir)
         p.send("die")
