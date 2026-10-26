@@ -221,6 +221,20 @@
   </form>
 </dialog>
 
+<!-- A pane's subagents: running, planned and finished, derived from its own
+     events (app.js agentView). -->
+<dialog id="agentsdlg">
+  <form method="dialog" class="dlg agents">
+    <h2 id="ag-title">Agents</h2>
+    <p class="hint" id="ag-pane"></p>
+    <div id="ag-view" class="modbody"></div>
+    <p class="hint">Per-agent context and cost are not reported to Corral; a background agent counts as finished when the turn that waited on it ends.</p>
+    <menu>
+      <button value="cancel" class="btn">Close</button>
+    </menu>
+  </form>
+</dialog>
+
 <!-- Cross-feed: who takes part, who is left out, and the preamble each arm gets. -->
 <dialog id="xfdlg">
   <form method="dialog" class="dlg">

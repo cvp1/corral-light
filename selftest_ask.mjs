@@ -153,7 +153,7 @@ check(p.turnVia === 'peer' && p.state === 'busy', 'a peer turn is not recorded a
 /* ── the wiring ───────────────────────────────────────────────────────── */
 check(/const qb = questionBanner\(p\);[\s\S]{0,120}rec\.ask\.replaceChildren/.test(fn('updatePane')),
       'updatePane no longer fills the question banner slot');
-check(/root\.append\(head, ask, log, comp\)/.test(fn('buildPane')),
+check(/root\.append\(head, ask, log, (strip, )?comp\)/.test(fn('buildPane')),
       'buildPane no longer places the banner slot between header and transcript');
 check(/const ask = askLine\(p\);\s*\/\/[^\n]*\n\s*if \(ask\) t\.appendChild\(ask\);/.test(src),
       'the roster row no longer shows the question preview');

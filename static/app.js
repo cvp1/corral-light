@@ -1052,8 +1052,9 @@ function buildPane(p) {
   const head = el('div', 'ph');
   const ask = el('div', 'askslot');       // ask_human's banner, when open
   const log = el('div', 'log');
+  const strip = el('div', 'agslot');     // the flow's progress strip, when one runs
   const comp = el('div', 'compslot');
-  root.append(head, ask, log, comp);
+  root.append(head, ask, log, strip, comp);
   log.onscroll = () => {
     // Only whether the log is pinned to the bottom needs tracking.
     const rec = PANES.get(p.id);
@@ -1066,7 +1067,7 @@ function buildPane(p) {
       updatePane(rec, p);
     }
   };
-  return { root, head, ask, log, comp, kind: null, pinned: true };
+  return { root, head, ask, log, strip, comp, kind: null, pinned: true };
 }
 
 function composerKind(p) {
@@ -1149,6 +1150,17 @@ function updatePane(rec, p) {
     if (FIND.pane === p.id) applyFind(p.id);
   }
 
+  if (rec.strip && !isTerm(p)) {
+    const av = paneAgents(p);
+    const ssig = stripKey(av) + '|' + (AGHIDE.get(p.id) || '');
+    if (ssig !== rec.stripSig) {
+      rec.stripSig = ssig;
+      const st = agentStrip(p, av);
+      rec.strip.replaceChildren(...(st ? [st] : []));
+    }
+    if (AGDLG.pane === p.id && AGDLG.view !== av) renderAgents();
+  }
+
   const kind = composerKind(p);
   if (kind !== rec.kind) {            // only a SHAPE change rebuilds it
     rec.kind = kind;
@@ -1161,6 +1173,363 @@ function updatePane(rec, p) {
     if (sb && sb._reset) sb._reset();
   }
   return rec.root;
+}
+
+/* ── agents: the savvy-progress mod, on the wall ────────────────────────────
+ * A strip above the composer (the flow's title, phase, accepted tasks out of
+ * planned) and an Agents dialog (running, finished and planned subagents).
+ * Everything is derived from the pane's own `tool` and `turn_end` events, so a
+ * reload draws what watching live drew. The tools the flow reports through are
+ * progress_mcp.py's; the hub keeps their input, the name of each tool and the
+ * Agent call a subagent's call belongs to (sessions.py tool_event).
+ *
+ * What the mod has and this does not: per-agent model requests are not sent to
+ * Corral, so there is no per-agent context, token count or cost. A background
+ * agent's finish is not reported either: it is read off the turn the hub holds
+ * open until the agents it spawned are done (the next `turn_end`). */
+const FLOW_TOOL = 'mcp__savvy-progress__progress';
+const FLOW_STEP_TOOL = 'mcp__savvy-progress__step';
+const FLOW_PHASES = ['plan', 'design', 'delegate', 'review', 'close'];
+const FLOW_TIERS = ['fable', 'heavy', 'careful', 'medium', 'light'];
+const FLOW_MAX_TASKS = 200;
+// What each savvy tier runs on (the savvy-flow plugin's agent files), for a run
+// whose Agent call names no model, and for planned tasks with no run yet.
+const TIER_MODEL = { fable: 'Fable · high', heavy: 'Opus · xhigh', careful: 'Opus · high',
+                     medium: 'Opus · medium', light: 'Opus · low' };
+const AGVIEW = new Map();     // paneId -> {key, view}: derived once per event change
+const AGHIDE = new Map();     // paneId -> the strip key its × dismissed
+const AGDLG = { pane: null, view: null };
+
+function agentNorm(s) {
+  return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+/* `savvy-careful`, or `savvy-flow:savvy-careful` when the agents ship in a
+ * plugin -> 'careful'; anything else -> 'other'. */
+function agentTier(type) {
+  const bare = String(type || '').replace(/^[^:]*:/, '');
+  const t = bare.replace(/^savvy-/, '').toLowerCase();
+  return bare.startsWith('savvy-') && FLOW_TIERS.includes(t) ? t : 'other';
+}
+
+function flowBlank() {
+  return { title: 'savvy-flow', total: 0, done: 0, running: 0, phase: 'plan',
+           finished: false, tasks: [] };
+}
+
+function flowIsNew(prev, input) {
+  return !prev || prev.finished ||
+         (input.title !== undefined && String(input.title).trim() !== prev.title);
+}
+
+/* One `progress` call over the flow so far: fields left out keep their value,
+ * and a new title is a new flow (its counters never carry over). */
+function flowMerge(prev, input) {
+  const base = flowIsNew(prev, input) ? flowBlank() : { ...flowBlank(), ...prev };
+  const tasks = Array.isArray(input.tasks)
+    ? input.tasks.filter(t => t && String(t.title || '').trim()).slice(0, FLOW_MAX_TASKS)
+        .map(t => ({ title: String(t.title).trim(),
+                     tier: FLOW_TIERS.includes(t.tier) ? t.tier : '',
+                     after: (Array.isArray(t.after) ? t.after : [])
+                       .filter(n => Number.isInteger(n) && n > 0).slice(0, 20) }))
+    : base.tasks;
+  const num = v => (Number.isFinite(v) ? Math.round(v) : null);
+  const total = Math.min(FLOW_MAX_TASKS, Math.max(0,
+    num(input.total) ?? (Array.isArray(input.tasks) ? tasks.length : base.total)));
+  const done = Math.min(total || Infinity, Math.max(0, num(input.done) ?? base.done));
+  const phase = FLOW_PHASES.includes(input.phase) ? input.phase : base.phase;
+  const finished = input.finished === true;
+  return { ...base, title: String(input.title || '').trim() || base.title,
+           total, done, tasks, finished, phase: finished ? 'close' : phase };
+}
+
+/* The first text of a tool event's content, for telling a background launch
+ * ("Async agent launched…") from a foreground agent's answer. */
+function toolText(d) {
+  for (const c of d.content || []) {
+    const t = c && c.content && c.content.type === 'text' ? c.content.text : null;
+    if (typeof t === 'string' && t) return t;
+  }
+  return '';
+}
+
+/* -> {flow, agents, planned} from a pane's events (after its last /clear).
+ * `live` is false for a dead pane: what still ran when it died has stopped. */
+function agentView(events, live = true) {
+  let from = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'cleared') { from = i + 1; break; }
+  }
+  const tools = new Map(), order = [], ends = [];
+  for (let i = from; i < events.length; i++) {
+    const ev = events[i], d = ev.data || {};
+    const at = Date.parse(ev.at) || 0;
+    if (ev.kind === 'turn_end') { ends.push({ at, seq: ev.seq, reason: d.stopReason }); continue; }
+    if (ev.kind !== 'tool' || !d.id) continue;
+    let r = tools.get(d.id);
+    if (!r) {
+      r = { id: d.id, name: '', parent: '', input: {}, status: '', title: '', text: '',
+            first: at, last: at, seq: ev.seq, endSeq: ev.seq };
+      tools.set(d.id, r); order.push(r);
+    }
+    r.last = at; r.endSeq = ev.seq;
+    if (d.name) r.name = d.name;
+    if (d.parent) r.parent = d.parent;
+    if (d.input) r.input = d.input;            // each report carries the input so far
+    if (d.status) r.status = d.status;
+    if (d.title) r.title = d.title;
+    const t = toolText(d);
+    if (t) r.text = t;
+  }
+
+  // Children: a subagent's own tool calls, by the Agent call they belong to.
+  const kids = new Map();
+  for (const r of order) {
+    if (!r.parent) continue;
+    const k = kids.get(r.parent) || { n: 0, last: 0, lastSeq: 0, title: '', step: null };
+    if (r.name === FLOW_STEP_TOOL) {
+      if (r.status !== 'failed') {
+        const s = k.step || {};
+        k.step = { done: r.input.done ?? s.done ?? 0, total: r.input.total ?? s.total ?? 0,
+                   note: r.input.note || '' };
+      }
+    } else if (r.name !== FLOW_TOOL) {          // a worker's progress call is ignored
+      k.n++;
+      k.title = r.title || r.name || k.title;
+    }
+    k.last = Math.max(k.last, r.last); k.lastSeq = Math.max(k.lastSeq, r.endSeq);
+    kids.set(r.parent, k);
+  }
+
+  // The flow: the main session's `progress` calls, in order. A worker's is ignored.
+  let flow = null, flowSeq = 0;
+  for (const r of order) {
+    if (r.name !== FLOW_TOOL || r.parent || r.status === 'failed') continue;
+    if (flowIsNew(flow, r.input) && r.input.title !== undefined) flowSeq = r.seq;
+    flow = flowMerge(flow, r.input);
+  }
+
+  const agents = [];
+  for (const r of order) {
+    if (!(r.name === 'Agent' || r.name === 'Task') || r.parent) continue;
+    const k = kids.get(r.id) || { n: 0, last: 0, lastSeq: 0, title: '', step: null };
+    const background = r.input.background === true || /^async agent launched/i.test(r.text);
+    const activeSeq = Math.max(r.seq, k.lastSeq);
+    const end = ends.find(e => e.seq > activeSeq);
+    let status = 'running', endedAt = null;
+    if (r.status === 'failed') { status = 'failed'; endedAt = r.last; }
+    else if (!background && r.status === 'completed') { status = 'done'; endedAt = r.last; }
+    else if (end) {
+      // A foreground call still open when its turn ended was cut short.
+      status = end.reason === 'cancelled' || !background ? 'stopped' : 'done';
+      endedAt = Math.max(r.last, k.last) || end.at;
+    } else if (!live) { status = 'stopped'; endedAt = Math.max(r.last, k.last); }
+    const description = r.input.description || (r.title !== 'Task' ? r.title : '') || 'subagent';
+    const type = r.input.subagent_type || 'general-purpose';
+    const tier = agentTier(type);
+    agents.push({ id: r.id, type, tier, description, background, status,
+                  model: r.input.model || '', tierModel: TIER_MODEL[tier] || '',
+                  startedAt: r.first, endedAt, seq: r.seq,
+                  tools: k.n, lastTool: k.title, step: k.step,
+                  round: 1 + agents.filter(a => agentNorm(a.description) === agentNorm(description)).length });
+  }
+
+  // A new flow starts with a clean list: what finished before it is the last flow's.
+  const shown = flowSeq ? agents.filter(a => a.seq > flowSeq || a.status === 'running') : agents;
+  // Safety net, as the mod's: savvy workers running with no report still draw a flow.
+  if (!flow && shown.some(a => a.tier !== 'other')) flow = { ...flowBlank(), phase: 'delegate' };
+  if (flow) flow.running = shown.filter(a => a.tier !== 'other' && a.status === 'running').length;
+  const started = new Set(shown.map(a => agentNorm(a.description)));
+  const planned = flow && !flow.finished
+    ? flow.tasks.map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(agentNorm(t.title)))
+    : [];
+  return { flow, agents: shown, planned };
+}
+
+function paneAgents(p) {
+  const evs = p.events || [];
+  const key = [evs.length, evs.length ? evs[0].seq : 0, evs.length ? evs[evs.length - 1].seq : 0,
+               p.state === 'dead' ? 0 : 1].join('|');
+  const hit = AGVIEW.get(p.id);
+  if (hit && hit.key === key) return hit.view;
+  const view = agentView(evs, p.state !== 'dead');
+  AGVIEW.set(p.id, { key, view });
+  return view;
+}
+
+function flowLabel(f) {
+  if (f.finished) return 'Done';
+  if (f.phase === 'plan') return 'Plan';
+  if (f.phase === 'design') return 'Design';
+  const count = f.total ? `${f.done}/${f.total}` : `${f.running} running`;
+  return `${f.phase === 'review' ? 'Review' : 'Tasks'} ${count}`;
+}
+
+function flowRatio(f) { return f.finished ? 1 : f.total ? Math.min(1, f.done / f.total) : 0; }
+
+/* What the strip shows, as one string: the slot rebuilds only when it changes,
+ * and a dismissed strip stays away until this moves on. */
+function stripKey(v) {
+  const running = v.agents.filter(a => a.status === 'running').length;
+  if (v.flow) {
+    const f = v.flow;
+    return ['f', f.title, f.phase, f.total, f.done, f.running, f.finished, v.agents.length].join('|');
+  }
+  return running ? ['a', running, v.agents.length].join('|') : '';
+}
+
+function agentStrip(p, v) {
+  const key = stripKey(v);
+  if (!key || AGHIDE.get(p.id) === key) return null;
+  const running = v.agents.filter(a => a.status === 'running').length;
+  const s = el('div', 'agstrip' + (v.flow && v.flow.finished ? ' fin' : ''));
+  if (v.flow) {
+    const f = v.flow;
+    s.appendChild(el('span', 'agdot'));
+    const t = el('span', 'agtitle', f.title); t.title = f.title;
+    s.appendChild(t);
+    const bar = el('div', 'agbar');
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', String(f.total || 1));
+    bar.setAttribute('aria-valuenow', String(f.finished ? f.total || 1 : f.done));
+    const pct = Math.round(flowRatio(f) * 100);
+    // Handed to workers, not yet accepted: a faint second layer.
+    const run = el('div', 'agrun');
+    run.style.width = (f.total ? Math.min(100, 100 * Math.min(f.total, f.done + f.running) / f.total) : 0) + '%';
+    const fill = el('div', 'agfill');
+    fill.style.width = pct + '%';
+    bar.append(run, fill);
+    for (let i = 1; i < f.total && f.total <= 40; i++) {
+      const tk = el('i', 'agtick'); tk.style.left = (100 * i / f.total) + '%';
+      bar.appendChild(tk);
+    }
+    bar.appendChild(el('span', 'agpill', flowLabel(f)));
+    s.appendChild(bar);
+    s.appendChild(el('span', 'agpct', pct + '%'));
+  } else {
+    s.appendChild(el('span', 'agdot'));
+    s.appendChild(el('span', 'agtitle', 'Subagents'));
+    s.appendChild(el('span', 'agsum', `${running} running · ${v.agents.length - running} finished`));
+  }
+  const open = el('button', 'agbtn', `${v.agents.length} agent${v.agents.length === 1 ? '' : 's'}`);
+  open.type = 'button';
+  open.title = 'running, finished and planned subagents';
+  if (running) open.classList.add('live');
+  open.onclick = () => openAgents(p);
+  const x = el('button', 'agx', '×');
+  x.type = 'button'; x.title = 'hide until the flow moves on';
+  x.setAttribute('aria-label', 'hide the progress strip');
+  x.onclick = () => { AGHIDE.set(p.id, key); render(); };
+  s.append(open, x);
+  return s;
+}
+
+function fmtSpan(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+}
+
+function agentElapsed(a, now) { return (a.endedAt ?? Math.max(now, a.startedAt)) - a.startedAt; }
+
+const AGENT_GLYPH = { running: '●', done: '✓', failed: '✗', stopped: '■', planned: '◷' };
+
+function agentRow(a, now) {
+  const row = el('div', 'agrow s-' + a.status + ' t-' + a.tier);
+  row.appendChild(el('span', 'agglyph', AGENT_GLYPH[a.status] || '·'));
+  const main = el('div', 'agmain');
+  const top = el('div', 'agname');
+  top.appendChild(el('span', 'agdesc', a.description));
+  if (a.round > 1) top.appendChild(el('span', 'agbadge', `round ${a.round}`));
+  if (a.background) top.appendChild(el('span', 'agbadge', 'background'));
+  main.appendChild(top);
+  const facts = [a.tier !== 'other' ? a.tier : a.type, a.model || a.tierModel,
+                 a.tools ? `${a.tools} tool call${a.tools === 1 ? '' : 's'}` : ''].filter(Boolean);
+  main.appendChild(el('div', 'agfacts', facts.join(' · ')));
+  const note = a.step && a.step.note ? a.step.note : a.status === 'running' ? a.lastTool : '';
+  if (note) main.appendChild(el('div', 'agnote', note));
+  row.appendChild(main);
+  const side = el('div', 'agside');
+  const st = a.step;
+  const prog = a.status === 'done' ? 1 : st && st.total ? Math.min(1, st.done / st.total) : null;
+  if (prog != null) {
+    const b = el('div', 'agmini');
+    const f = el('div', 'agfill'); f.style.width = Math.round(prog * 100) + '%';
+    b.appendChild(f);
+    side.appendChild(b);
+    if (st && st.total && a.status !== 'done') side.appendChild(el('span', 'agsteps', `${Math.min(st.done, st.total)}/${st.total}`));
+  }
+  const tm = el('span', 'agtime', fmtSpan(agentElapsed(a, now)));
+  if (a.status === 'running') tm.dataset.t0 = String(a.startedAt);
+  side.appendChild(tm);
+  row.appendChild(side);
+  return row;
+}
+
+function plannedRow(t) {
+  const row = el('div', 'agrow s-planned t-' + (t.tier || 'other'));
+  row.appendChild(el('span', 'agglyph', AGENT_GLYPH.planned));
+  const main = el('div', 'agmain');
+  const top = el('div', 'agname');
+  top.appendChild(el('span', 'agdesc', `${t.n}. ${t.title}`));
+  main.appendChild(top);
+  const facts = [t.tier, TIER_MODEL[t.tier] || '',
+                 t.after.length ? `after ${t.after.join(', ')}` : ''].filter(Boolean);
+  main.appendChild(el('div', 'agfacts', facts.join(' · ')));
+  row.appendChild(main);
+  return row;
+}
+
+function renderAgents() {
+  const p = AGDLG.pane && S.panes.get(AGDLG.pane);
+  if (!p || !$('#agentsdlg').open) return;
+  const v = paneAgents(p), now = Date.now();
+  AGDLG.view = v;
+  $('#ag-title').textContent = v.flow ? v.flow.title : 'Agents';
+  $('#ag-pane').textContent = p.title || p.label || '';
+  const running = v.agents.filter(a => a.status === 'running');
+  const finished = v.agents.filter(a => a.status !== 'running');
+  const start = Math.min(...v.agents.map(a => a.startedAt));
+  const end = Math.max(...v.agents.map(a => a.endedAt ?? Math.max(now, a.startedAt)));
+  const tiles = el('div', 'agtiles');
+  const tile = (label, value) => {
+    const t = el('div', 'agtile');
+    t.append(el('span', 'k', label), el('span', 'v', value));
+    tiles.appendChild(t);
+  };
+  if (v.flow) tile('Flow', flowLabel(v.flow));
+  tile('Agents', String(v.agents.length));
+  tile('Tool calls', String(v.agents.reduce((s, a) => s + a.tools, 0)));
+  tile('Time', v.agents.length ? fmtSpan(end - start) : '0:00');
+  const body = el('div', 'agbody');
+  body.appendChild(tiles);
+  const section = (title, rows) => {
+    if (!rows.length) return;
+    body.appendChild(el('div', 'agsec', `${title} · ${rows.length}`));
+    for (const r of rows) body.appendChild(r);
+  };
+  section('Running', running.map(a => agentRow(a, now)));
+  section('Planned', v.planned.map(plannedRow));
+  section('Finished', finished.slice().reverse().map(a => agentRow(a, now)));
+  if (!v.agents.length && !v.planned.length) body.appendChild(el('div', 'modline', 'No subagents yet.'));
+  $('#ag-view').replaceChildren(body);
+}
+
+function openAgents(p) {
+  AGDLG.pane = p.id;
+  const d = $('#agentsdlg');
+  if (!d.open) d.showModal();
+  renderAgents();
+}
+
+/* Once a second while the dialog is open: the running agents' clocks. */
+function agentsTick() {
+  const d = $('#agentsdlg');
+  if (!d || !d.open) return;
+  const now = Date.now();
+  for (const t of d.querySelectorAll('.agtime[data-t0]'))
+    t.textContent = fmtSpan(now - Number(t.dataset.t0));
 }
 
 /* ── seats ───────────────────────────────────────────────────────────────
@@ -1402,6 +1771,12 @@ function openPaneMenu(p, at) {
     item('Review changes…', () => openReview(p), { key: 'r' });
   }
   if (!isTerm(p)) item('Carry to another lane…', () => openPort(p));
+  if (!isTerm(p)) {
+    const av = paneAgents(p);
+    if (av.agents.length || av.flow) {
+      item('Agents…', () => openAgents(p), { title: 'running, finished and planned subagents' });
+    }
+  }
   sep();
   item('Rename…', () => { S.renaming = p.id; render(); });
   item(p.pinned ? 'Unpin' : 'Pin to the top', async () => {
@@ -5260,6 +5635,8 @@ async function start() {
   // Re-check display state periodically so quiet panes age into `idle`.
   setInterval(displayTick, DISPLAY_TICK_MS);
   setInterval(workingTick, 1000);     // the busy spinners' seconds
+  setInterval(agentsTick, 1000);      // an open Agents dialog's clocks
+  $('#agentsdlg').addEventListener('close', () => { AGDLG.pane = null; AGDLG.view = null; });
   // Re-sync when the tab becomes visible: a sleeping tab may have lost the
   // stream before onerror fired.
   document.addEventListener('visibilitychange', () => {

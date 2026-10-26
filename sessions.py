@@ -30,6 +30,7 @@ import challenge as _chl
 import review_sandbox as _sbx
 import review_egress as _egress
 import module_feed as _feed
+import progress_mcp
 
 ROOT = Path(__file__).resolve().parent
 # Separate from the full Corral's state dir so two hubs never share panes or keys.
@@ -837,6 +838,29 @@ AVAIL_PERIOD_S = 60             # staleness that lets a read trigger a recheck
 AVAIL_OLLAMA_TIMEOUT_S = 1      # the probe's own default is 5 s; the worker waits less
 
 
+def tool_event(data):
+    """The `tool` event for an ACP tool_call / tool_call_update. Beside what the
+    transcript row shows, it keeps the tool's name, the Agent call a subagent's
+    call belongs to, and — for the Agent and flow progress tools only — a
+    bounded copy of the input (progress_mcp.kept_input), which the wall's
+    progress strip and agents panel are drawn from."""
+    cc = (data.get("_meta") or {}).get("claudeCode") or {}
+    ev = {"id": data.get("toolCallId"), "title": data.get("title"),
+          "kind": data.get("kind"), "status": data.get("status"),
+          "content": (data.get("content") or [])[:6],
+          "locations": (data.get("locations") or [])[:8]}
+    name = data.get("name") or cc.get("toolName")
+    if isinstance(name, str) and name:
+        ev["name"] = name[:120]
+    parent = cc.get("parentToolUseId")
+    if isinstance(parent, str) and parent:
+        ev["parent"] = parent[:120]
+    kept = progress_mcp.kept_input(ev.get("name"), data.get("rawInput"))
+    if kept:
+        ev["input"] = kept
+    return ev
+
+
 class Availability:
     """Last known lanes + Claude login status, refreshed by one daemon thread
     on demand — never on a timer.
@@ -1446,11 +1470,7 @@ class Pane(_core.PaneBase):
             self._thought_acc = (getattr(self, "_thought_acc", "") or "") + \
                 (data.get("content") or {}).get("text", "")
         elif kind in ("tool_call", "tool_call_update"):
-            self.emit("tool", {
-                "id": data.get("toolCallId"), "title": data.get("title"),
-                "kind": data.get("kind"), "status": data.get("status"),
-                "content": (data.get("content") or [])[:6],
-                "locations": (data.get("locations") or [])[:8]})
+            self.emit("tool", tool_event(data))
             if self.worktree_id and not self._replaying:
                 self._worktree_guard(data)
         elif kind == "stall_notice":
@@ -2050,6 +2070,14 @@ class Pane(_core.PaneBase):
         now = (self.worktree_summary or {}).get("digest")
         return [dict(c, stale=bool(now and c.get("digest") and c["digest"] != now))
                 for c in list(self.challenges or ())]
+
+    def _mcp_servers(self):
+        """The core's servers plus the flow progress tools (progress_mcp)."""
+        servers = super()._mcp_servers()
+        mine = None if self.challenge_of else progress_mcp.descriptor(self)
+        if mine is None:
+            return servers
+        return [d for d in servers if d.get("name") != mine["name"]] + [mine]
 
     def _native_mcp(self):
         """A blind reviewer gets no seat tools: it must not message other panes."""

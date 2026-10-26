@@ -4060,6 +4060,10 @@ from test_hublink import HubLinkTest, HelpersTest as HubLinkHelpers  # noqa: F40
 from test_hublink_e2e import TwoHubs                   # noqa: F401,E402
 # T-ISO-1: the own-branch suites, rerun with HOME and TMPDIR in a temp dir.
 from test_worktrees_iso import Isolation as WorktreeIsolation  # noqa: F401,E402
+# The flow progress tools and the tool fields the wall's agents panel reads.
+from test_progress_mcp import (KeptInput, ToolEvent,                   # noqa: F401,E402
+                               Server as ProgressServer, Offered as ProgressOffered,
+                               WallDerivation as AgentsWall)
 
 
 if __name__ == "__main__":

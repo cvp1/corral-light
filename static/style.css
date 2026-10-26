@@ -1440,3 +1440,66 @@ dialog#hubdlg{max-width:none;width:min(880px,96vw)}
 .hubdetail{border:1px solid var(--line);border-radius:8px;padding:8px;max-height:46vh;overflow:auto}
 .hubdetail pre{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:4px 0}
 .hubdetail .ask{color:var(--dim)}
+
+/* Agents (app.js agentStrip / renderAgents): the savvy-flow progress strip above
+   the composer and a pane's subagents dialog. Tier colours follow the
+   savvy-progress mod's; status colours are the theme's. */
+.agslot:empty{display:none}
+.agstrip{display:flex;align-items:center;gap:8px;padding:5px 8px 5px 12px;
+  border-top:1px solid var(--line);background:var(--raise);font-size:12.5px;min-width:0}
+.agstrip .agdot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--ember)}
+.agstrip.fin .agdot{background:var(--sage)}
+.agstrip .agtitle{font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:38%;flex:0 1 auto}
+.agstrip .agsum{color:var(--dim);flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agbar{position:relative;flex:1 1 120px;min-width:80px;height:16px;border-radius:8px;
+  background:var(--panel);border:1px solid var(--line);overflow:hidden}
+.agbar .agrun,.agbar .agfill{position:absolute;inset:0 auto 0 0;border-radius:8px;transition:width .4s ease}
+.agbar .agrun{background:var(--ember);opacity:.22}
+.agbar .agfill{background:var(--ember);opacity:.85;
+  background-image:radial-gradient(rgb(255 255 255 / .28) 1px,transparent 1.2px);background-size:4px 4px}
+.agstrip.fin .agbar .agfill{background-color:var(--sage)}
+.agbar .agtick{position:absolute;top:4px;bottom:4px;width:1.5px;margin-left:-.75px;
+  border-radius:1px;background:var(--line2)}
+.agbar .agpill{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  font-family:var(--mono);font-size:10.5px;font-weight:600;color:var(--ink);
+  white-space:nowrap;text-shadow:0 0 3px var(--panel),0 0 2px var(--panel)}
+.agstrip .agpct{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--dim);
+  font-size:12px;min-width:3.2em;text-align:right}
+.agstrip button{font:inherit;background:none;border:1px solid var(--line2);color:var(--dim);
+  border-radius:999px;padding:1px 9px;cursor:pointer;white-space:nowrap}
+.agstrip button:hover{color:var(--ink);border-color:var(--ink)}
+.agstrip .agbtn.live{color:var(--dusk);border-color:var(--dusk)}
+.agstrip .agx{border:none;padding:0 4px;font-size:15px;line-height:1}
+@media (prefers-reduced-motion:reduce){.agbar .agrun,.agbar .agfill{transition:none}}
+
+dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
+.dlg.agents .hint{min-height:0}
+.agbody{display:flex;flex-direction:column;gap:6px;margin:6px 0;font-size:13px}
+.agtiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-bottom:4px}
+.agtile{display:flex;flex-direction:column;gap:2px;padding:7px 10px;border:1px solid var(--line);
+  border-radius:8px;background:var(--raise)}
+.agtile .k{font-size:11.5px;color:var(--dim)}
+.agtile .v{font-family:var(--mono);font-size:15px}
+.agsec{margin-top:8px;font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--faint)}
+.agrow{--tier:var(--line2);display:flex;align-items:flex-start;gap:9px;padding:7px 10px;
+  border:1px solid var(--line);border-left:3px solid var(--tier);border-radius:8px;background:var(--raise)}
+.agrow.t-fable{--tier:#7F77DD}.agrow.t-heavy{--tier:#D85A30}.agrow.t-careful{--tier:#BA7517}
+.agrow.t-medium{--tier:#378ADD}.agrow.t-light{--tier:#1D9E75}
+.agrow .agglyph{width:1em;text-align:center;color:var(--faint);flex:none}
+.agrow.s-running .agglyph{color:var(--dusk);animation:pulse 1.4s infinite}
+.agrow.s-done .agglyph{color:var(--sage)}
+.agrow.s-failed .agglyph,.agrow.s-stopped .agglyph{color:var(--rust)}
+.agrow.s-planned{opacity:.75;border-style:dashed;border-left-style:solid}
+.agmain{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.agname{display:flex;gap:6px;align-items:baseline;min-width:0}
+.agdesc{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agbadge{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.6px;
+  border:1px solid var(--line2);border-radius:999px;padding:0 6px;color:var(--faint);flex:none}
+.agfacts{font-size:11.5px;color:var(--dim)}
+.agnote{font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agside{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex:none;min-width:70px}
+.agmini{position:relative;width:70px;height:5px;border-radius:3px;background:var(--panel);overflow:hidden}
+.agmini .agfill{position:absolute;inset:0 auto 0 0;background:var(--tier)}
+.agrow.t-other .agmini .agfill{background:var(--dusk)}
+.agsteps,.agtime{font-family:var(--mono);font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}

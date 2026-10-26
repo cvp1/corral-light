@@ -605,6 +605,40 @@ turn — prose alone raises nothing.
   own user could call the route as a pane, or send a turn that closes a
   question.
 
+## Subagents and the savvy-flow progress strip
+
+Corral's version of the [savvy-progress](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/savvy-progress)
+Claude Code mod. When a Claude pane runs subagents, a strip appears above its
+composer. For a [savvy-flow](https://github.com/JohnnyVizz/claude-kit/tree/main/plugins/savvy-flow)
+run, the strip shows the flow's title, its phase, and the tasks accepted out of
+those planned; a fainter layer marks tasks handed to workers but not yet
+accepted. **N agents** (also **Agents…** in the pane menu) opens a list of
+running, planned and finished subagents. Each one shows its tier, its model, the
+steps it reported, how many tool calls it made, and how long it ran. **×** hides
+the strip until the flow moves on.
+
+- **The tools.** Claude panes are offered a second MCP server, `savvy-progress`
+  (`progress_mcp.py`). It has the mod's two tools, `progress` and `step`, under
+  the mod's names, so the unmodified savvy-flow skill and its workers find them.
+  Install savvy-flow in Claude Code as usual (`/plugin marketplace add
+  JohnnyVizz/claude-kit`, then `/plugin install savvy-flow@claude-kit`). Panes
+  share `~/.claude/plugins`. Don't install the savvy-progress mod itself for
+  Corral panes, because Corral provides those tools. To turn them off, set
+  `CORRAL_PROGRESS_MCP=0` in the hub's environment.
+- **Where the data comes from.** The tools send nothing. The hub keeps three
+  things from each tool call: the tool's name, the Agent call it ran under (if
+  any), and a bounded copy of the input. It keeps input only for the Agent call
+  and for these two tools. For an Agent call it keeps the label, type and model,
+  never the brief. The wall works out the rest from the pane's own events, so a
+  reload shows the same thing as watching live. If a subagent calls `progress`,
+  it is ignored, so a worker can't rename, finish or reset the flow.
+- **What it can't show.** The adapter doesn't send Corral a subagent's own
+  model requests, so there is no per-agent context, token count or cost, which
+  the mod has. A background agent's finish isn't reported either: it counts as
+  finished when the turn that waited on it ends, and it reopens if more of its
+  calls arrive afterwards. Events recorded before this feature existed have no
+  tool names, so older `Task` rows don't appear in the list.
+
 ## Rigs: bring your seats back with one verb
 
 A **rig** is your seated panes, saved by name: `rigs/<name>.toml` in the state
@@ -1033,6 +1067,8 @@ Key files:
 - `content.py` — file indexing and search
 - `consult.py` — scripted client of the hub (`corral-light consult`): ask a lane, fan out, cross-feed, from a shell or an assistant
 - `test_consult.py` — its offline tests (`python3 test_consult.py`)
+- `progress_mcp.py` — the savvy-progress MCP server behind the subagents strip;
+  `test_progress_mcp.py` and `selftest_agents.mjs` are its tests
 - `static/` — browser interface
 - `test_corral_light.py` — automated tests
 
