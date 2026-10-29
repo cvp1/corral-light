@@ -102,11 +102,18 @@ class TheGitWrapper(GitCase):
     def test_T_GIT_3_a_hung_git_is_killed_with_its_whole_group(self):
         pidfile = self.tmp / "child.pid"
         stub = self.stub_git(f"sleep 300 & echo $! > {pidfile}; wait")
+        # The stub needs time to start and record its grandchild before the
+        # timeout fires. 1 s was enough alone but not late in the full suite
+        # (failed 3 of 3 full runs 2026-10-29, pid file never written), so the
+        # window is 5 s and the bound on the kill stays 7 s past it.
+        timeout = 5
         with mock.patch.object(wt, "GIT_BIN", stub):
             t0 = time.monotonic()
             with self.assertRaises(wt.GitTimeout):
-                wt.git(["status"], cwd=self.repo, timeout=1)
-        self.assertLess(time.monotonic() - t0, 8)
+                wt.git(["status"], cwd=self.repo, timeout=timeout)
+        self.assertLess(time.monotonic() - t0, timeout + 7)
+        self.assertTrue(pidfile.exists(),
+                        f"the stub never started within {timeout} s; nothing was tested")
         child = int(pidfile.read_text())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and _alive(child):
