@@ -289,10 +289,18 @@ AGENTS = {
         "label": "Antigravity (Gemini)",
         "argv": [sys.executable, str(NATIVE_ANTIGRAVITY_LAUNCHER)],
         # The lane's own approval mode, applied at session/new; the vendor enforces it.
-        # Model: Gemini 3.1 Pro (High), not the vendor's Flash default — the operator
-        # 2026-10-03, for panels. If the id stops being offered, the lane notes
-        # it and stays on the vendor default rather than failing.
-        "default_config": {"mode": "yolo", "model": "gemini-pro-agent"},
+        "default_config": {"mode": "yolo"},
+        # Model: the Pro tier at High effort, not the vendor's default — the operator
+        # 2026-10-03, for panels. Pinned by INTENT, not by id: Antigravity renames
+        # ids (gemini-pro-agent vanished ~2026-10-16 and every pane fell back to
+        # gemini-4-argon-medium for two weeks). Each session resolves the intent
+        # against what the server offers (resolve_model_intent); if no Pro-class
+        # model is offered at all, the pane refuses to start rather than run a
+        # weaker tier. A pane's own explicit model choice always wins.
+        "model_intent": {"prefer": "gemini-4-argon-high",
+                         "exclude": ("flash", "lite", "nano"),
+                         "effort_rank": ("high", "medium", "low"),
+                         "says": "Gemini Pro-class at the highest effort offered"},
         "requires": (str(NATIVE_ANTIGRAVITY_LAUNCHER),
                      str(NATIVE_ANTIGRAVITY_BIN),
                      str(NATIVE_ANTIGRAVITY_HELPER)),
@@ -959,6 +967,37 @@ class Availability:
 
 AVAIL = Availability()
 
+
+
+def _version_key(model_id):
+    """Numeric parts of an id, for preferring the newest family (4 > 3.8)."""
+    return tuple(int(n) for n in re.findall(r"\d+", model_id))
+
+
+def resolve_model_intent(offered, intent):
+    """Pick the offered model id that best satisfies a lane's model intent, or None.
+
+    The preferred id wins when offered. Otherwise drop excluded families (flash,
+    lite...), keep only ids ending in a ranked effort, and take the highest effort,
+    then the newest version. None means nothing offered meets the intent.
+    """
+    offered = list(offered or [])
+    if intent.get("prefer") in offered:
+        return intent["prefer"]
+    ranks = list(intent.get("effort_rank") or ())
+    excl = tuple(intent.get("exclude") or ())
+    best = None
+    for mid in offered:
+        low = mid.lower()
+        if any(word in low for word in excl):
+            continue
+        effort = next((e for e in ranks if low.endswith("-" + e)), None)
+        if effort is None:
+            continue
+        key = (-ranks.index(effort), _version_key(mid))
+        if best is None or key > best[0]:
+            best = (key, mid)
+    return best[1] if best else None
 
 class Pane(_core.PaneBase):
     """One conversation: an agent process + its event history."""
@@ -1771,6 +1810,40 @@ class Pane(_core.PaneBase):
             except acp.AgentError as e:
                 self.emit("note", {"text": f"could not set lane default "
                                            f"{cid}={value}: {e}"})
+        self._apply_model_intent()
+
+    def _apply_model_intent(self):
+        """Put the session on the model the lane's intent names, whatever its id is today.
+
+        Skipped when the pane carries its own model choice (that is applied next and
+        wins). Raises acp.AgentError — a dead pane with the reason, never a silent
+        downgrade — when nothing offered satisfies the intent or the agent will not
+        take it.
+        """
+        intent = AGENTS[self.agent].get("model_intent")
+        want = getattr(self, "want_model", None)
+        if not intent or (want and want != "default"):
+            return
+        label = AGENTS[self.agent]["label"]
+        cfg = self.config.get("model") or {}
+        offered = [o["value"] for o in cfg.get("options", [])]
+        pick = resolve_model_intent(offered, intent)
+        if pick is None:
+            raise acp.AgentError(
+                f"{label} offers no model matching the lane intent "
+                f"({intent['says']}); it offers {sorted(offered) or 'nothing'}. "
+                f"Update model_intent in sessions.py, or open the pane with an "
+                f"explicit model.")
+        if cfg.get("value") != pick:
+            r = self.client.set_config(self.acp_session, cfg.get("realId", "model"), pick)
+            self._absorb_config((r or {}).get("configOptions") or [])
+        got = (self.config.get("model") or {}).get("value")
+        if got != pick:
+            raise acp.AgentError(f"asked {label} for model {pick!r} (lane intent: "
+                                 f"{intent['says']}); it reports {got!r}")
+        how = "" if pick == intent.get("prefer") else (
+            f", resolved from intent — {intent['prefer']!r} is no longer offered")
+        self.emit("note", {"text": f"model = {pick} (lane intent{how})"})
 
     def set_config(self, config_id, value):
         # `mode` is the lane's own approval-mode option, validated like the rest.
