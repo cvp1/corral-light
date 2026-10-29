@@ -475,7 +475,7 @@ class Link:
             if attempt == 0:
                 delay = 0.0
             else:
-                delay = min(BACKOFF_MAX_S, BACKOFF_FIRST_S * (2 ** (attempt - 1)))
+                delay = min(BACKOFF_MAX_S, BACKOFF_FIRST_S * (2 ** min(attempt - 1, 16)))
                 delay *= 0.5 + random.random() / 2
             if refused or (self.error and "no longer" in self.error):
                 delay = max(delay, REFUSED_BACKOFF_S)  # refused, not dropped
