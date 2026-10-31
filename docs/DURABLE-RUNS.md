@@ -184,16 +184,32 @@ fails on c30c880 and passes now (`TheKeeperAfterReview2`,
 | panel | The synthesizer was the caller's own lane, and the packet named the host | The CLI always sends the calling pane; its lane neither arms nor synthesizes. No host name in `packet.md`/`packet.json` |
 | panel r2 | Round 2 kept round 1's synthesis, and arm panes were titled with their prompt | Each round is synthesized afresh into `synthesis-rN.md`; panes are titled `panel <slug> · <lane>` (`PanelAfterReview3`) |
 
-**Deferred, with a plan: F7.** `KillMode=process` means `systemctl --user
-stop corral-light` also leaves every keeper running, until its six-hour
-orphan watch ends it. The hub cannot tell a stop from a restart (both send
-SIGTERM). Plan: a `corral-light stop` verb that closes every keeper (the
-same `{"keeper": "close"}` the hub sends on close) and then stops the
-service; the README tells Linux users to stop with it. Falsifier: after
-`corral-light stop`, `pgrep -f keeper.py` finds nothing within 10 s, and
-after `update --now` every kept pane is still `durable`. A connected hub that
-reads but sends nothing is a live hub, not an orphan; a hub that stops
-READING is already dropped once its queue fills (F3 of the first review).
+**F7, fixed: `corral-light stop`.** `KillMode=process` means `systemctl
+--user stop corral-light` also leaves every keeper running, until its
+six-hour orphan watch ends it, and the hub cannot tell a stop from a
+restart (both send SIGTERM). `corral-light stop` (`stop.py`) stops the
+service first, so the hub lets go of its agents as on a restart, then sends
+every recorded keeper the same `{"keeper": "close"}` the hub sends on close,
+and keeps each connection reading until that keeper exits. A keeper that
+does not answer its socket is signalled, but only once `ps` confirms the pid
+is still a `keeper.py`. It refuses from inside a pane, and while a hub that
+is not a service still runs. Tests (`test_stop.py`): every keeper and its
+agent are gone within 10 s; the service stops before any keeper is closed;
+both refusals; a reused pid is never signalled.
+
+**Deferred, with a plan: a close sent just before a hang-up can be lost.**
+Found while building the stop verb: a hub that sends `close` and hangs up at
+once loses the close in about one run in three, because the keeper's writer
+hits the broken pipe first, drops the connection (shutting the socket down)
+and the reader never reads the close. It predates the split reader. The hub
+is not exposed (its close also signals the process group) and `stop.py`
+keeps reading until the keeper exits, so nothing ships with the hole open.
+Plan: a hub that GOES keeps its reader to EOF (shut the socket down for
+writing only), and that reader may still apply a close or data lines until
+another hub attaches. Falsifier: connect, read the hello, send close and
+close the socket at once; in 50 runs the keeper exits within `TERM_WAIT_S`
++ 1 s every time (today about a third hang until the orphan watch). It
+moves the owner rule again, so it gets its own review.
 
 ## The panel (`panel.py`)
 

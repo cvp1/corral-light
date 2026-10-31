@@ -987,6 +987,8 @@ and both those lanes go dark in a way that looks like a vendor outage.
 
 The systemd unit uses `KillMode=process`: on a stop or restart only the hub is signalled. Each pane's agent runs under its own keeper (`keeper.py`, in its own session), which the next hub reattaches to: the running turn continues, pending permission cards come back, and anything the agent said in between is replayed. The hub's shutdown note in such a pane says the turn continues and names only what was still queued (that is not re-sent). A keeper the next hub cannot reach is stopped before the conversation is resumed, as a plain orphan was. See [docs/DURABLE-RUNS.md](docs/DURABLE-RUNS.md).
 
+**To stop everything, use `corral-light stop`.** A plain `systemctl --user stop corral-light` (or a launchd unload) stops only the hub, and the keepers keep their agents running until their orphan watch ends them, hours later. `corral-light stop` stops the service, then closes every keeper and its agent, and prints how to start the hub again. Run it from a terminal, not from inside a pane.
+
 ## Watching the hub
 
 `corral-light watch` checks the hub from outside it: it reads `/health`, judges how long ago the hub last checked its panes, and checks that the hub process is alive. When something is wrong it **pages** — it writes the reason to `~/.local/share/corral-light/DEAD` and shows a desktop notification (`notify-send` on Linux, `osascript` on macOS; never between 21:00 and 05:00, never over the network). It **never restarts** the hub, because a restart ends every running conversation; that decision stays with you. It notifies once per new problem and removes `DEAD` when the hub is healthy again. Exit status: 0 healthy, 2 paged.
