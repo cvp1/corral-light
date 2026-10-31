@@ -30,6 +30,14 @@ owner; one stdin-writer thread drains the queue to the adapter. No lock is
 ever held across a socket or pipe write, so a hub or an adapter that stops
 reading blocks only its own writer thread.
 
+BACKPRESSURE. Each hub connection has a reader and a drain thread. The
+reader applies control lines (ack, close) at once and puts every other line
+on the connection's inbound queue, up to STDIN_MAX_BYTES; the drain applies
+those, in order, under the owner check. So an agent that stops reading stdin
+delays acks and a close only once BOTH queues are full. A hub that hangs up
+has its inbound queue applied before it lets go of the agent; a REPLACED
+hub's inbound lines are dropped, as its waiting line always was.
+
 Wire, keeper -> hub (newline-delimited JSON):
     {"keeper": "hello", "version": 3, ...}       first, once
     {"keeper": "l", "s": N, "m": <adapter line>}  every numbered line
@@ -40,8 +48,8 @@ Wire, hub -> keeper:
 Bounds: one adapter line up to MAX_LINE (a line that is not a JSON object
 is dropped and counted); the outbox up to OUTBOX_MAX_BYTES (past it the
 oldest notifications not yet acked are dropped and counted -- never a card,
-a response or the exit); the stdin queue up to STDIN_MAX_BYTES (a hub past
-it waits); with no hub for ORPHAN_S the adapter is ended; after the exit the
+a response or the exit); the stdin queue and each hub's inbound queue up to
+STDIN_MAX_BYTES each (a hub past both waits); with no hub for ORPHAN_S the adapter is ended; after the exit the
 keeper lingers until a hub acks it, or LINGER_S.
 
 Stdlib only. Runs as the hub's user; the socket is 0600, unique to this
@@ -146,6 +154,9 @@ class Conn:
         self.held = held                    # [(seq, line)] unanswered cards <= acked
         self.next = start                   # next outbox seq to send
         self.closed = False
+        self.inq = collections.deque()      # non-control lines read, not yet applied
+        self.inq_bytes = 0
+        self.read_done = None               # why the reader ended, once it has
         self.thread = threading.Thread(target=self._run, daemon=True, name="hub-out")
 
     def _run(self):
@@ -453,6 +464,8 @@ class Keeper:
         _log("hub attached")
         c.thread.start()
         threading.Thread(target=self._read_hub, args=(c,), daemon=True, name="hub-in").start()
+        threading.Thread(target=self._drain_hub, args=(c,), daemon=True,
+                         name="hub-drain").start()
         return c
 
     def drop_conn_locked(self, why):
@@ -466,14 +479,25 @@ class Keeper:
         self.last_hub_seen = time.monotonic()
 
     def _read_hub(self, c):
+        """Control lines at once; the rest to the drain, in order. A clean
+        end hands the drop to the drain, so lines read before the hang-up
+        still reach the agent."""
         r = c.sock.makefile("rb")
         why = "hub closed the connection"
+        failed = False
         try:
             while True:
                 line = _read_line(r, MAX_LINE)
                 if line is None:
                     break
-                if line.strip() and not self.accept_from_hub(c, line):
+                if not line.strip():
+                    continue
+                msg = _parse(line)
+                if msg is not None and "keeper" in msg:
+                    ok = self.accept_from_hub(c, line)
+                else:
+                    ok = self.queue_from_hub(c, line)
+                if not ok:
                     break
         except (OSError, ValueError):
             pass
@@ -481,14 +505,56 @@ class Keeper:
             # A line nothing above expected must not leave a dead reader
             # owning the agent (the orphan watch would never fire).
             why = f"hub reader failed: {type(e).__name__}: {e}"
+            failed = True
         finally:
             with self.lock:
-                if self.conn is c:
+                c.read_done = why
+                if failed and self.conn is c:
                     self.drop_conn_locked(why)
+                self.stdin_cv.notify_all()
             try:
                 r.close()
             except OSError:
                 pass
+
+    def queue_from_hub(self, c, line):
+        """Put a non-control line on `c`'s inbound queue (the reader only).
+        -> False when `c` has been replaced."""
+        with self.lock:
+            while True:
+                if self.conn is not c:
+                    return False
+                if c.inq_bytes + len(line) <= STDIN_MAX_BYTES or not c.inq:
+                    break
+                self.stdin_cv.wait(1.0)
+            c.inq.append(line)
+            c.inq_bytes += len(line)
+            self.stdin_cv.notify_all()
+        return True
+
+    def _drain_hub(self, c):
+        """The one thread that applies `c`'s inbound lines, in order, each
+        under the owner check in accept_from_hub. Once the reader has ended
+        cleanly and the queue is empty, `c` lets go of the agent."""
+        try:
+            while True:
+                with self.lock:
+                    while not c.inq and c.read_done is None and self.conn is c:
+                        self.stdin_cv.wait(1.0)
+                    if self.conn is not c:
+                        return
+                    if not c.inq:
+                        self.drop_conn_locked(c.read_done)
+                        return
+                    line = c.inq.popleft()
+                    c.inq_bytes -= len(line)
+                    self.stdin_cv.notify_all()
+                if not self.accept_from_hub(c, line):
+                    return
+        except Exception as e:                       # noqa: BLE001
+            with self.lock:
+                if self.conn is c:
+                    self.drop_conn_locked(f"hub drain failed: {type(e).__name__}: {e}")
 
     def accept_from_hub(self, c, line):
         """Take one line from hub `c`: bookkeeping and the stdin queue, both
@@ -502,6 +568,10 @@ class Keeper:
                     return False
                 if msg is not None and "keeper" in msg:
                     break                                    # no stdin space needed
+                if self.closing:
+                    return False                             # the agent is being ended
+                if self.exit_rc is not None:
+                    break                                    # bookkeeping only, below
                 if self.stdin_bytes + len(line) <= STDIN_MAX_BYTES or not self.stdin_q:
                     break
                 self.stdin_cv.wait(1.0)                      # the agent is not reading

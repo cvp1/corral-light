@@ -1329,3 +1329,88 @@ class TheDeadPaneHasItsReason(KeeperCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StdinBackpressure(_InProc):
+    """Deferred from the 2026-10-31 panel (Grok): with the agent's stdin
+    blocked and the queue full, the hub's reader waited in accept_from_hub,
+    so a later ack or close on that connection waited too. Each test fails
+    on 35a67fb. Lines go through the real reader thread, over the socket."""
+
+    def _wedge(self):
+        """The agent stops reading; fill the queue so the next line waits."""
+        self.k.p.stdin.gate.clear()
+        threading.Thread(target=self.k._write_stdin, daemon=True).start()
+        patcher = mock.patch.object(self.km, "STDIN_MAX_BYTES", 100)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for i in range(3):
+            self.k.append(_note(i))
+        h = self.hub()
+        h.hello_and_backlog()                     # applied = 3, none acked
+        line = _j({"jsonrpc": "2.0", "method": "session/cancel",
+                   "params": {"pad": "x" * 64}})
+        h.sock.sendall(line)                      # the writer takes it, then blocks
+        self.assertTrue(wait_for(lambda: self.k.p.stdin.gate is not None
+                                 and not self.k.stdin_q and self.k.stdin_bytes == 0))
+        h.sock.sendall(line)                      # queued
+        self.assertTrue(wait_for(lambda: len(self.k.stdin_q) == 1))
+        h.sock.sendall(line)                      # waits for stdin space
+        time.sleep(0.3)
+        self.assertEqual(len(self.k.stdin_q), 1, "the third line did not wait")
+        return h
+
+    def test_bp_1_an_ack_after_a_waiting_line_lands_at_once(self):
+        h = self._wedge()
+        h.sock.sendall(_j({"keeper": "ack", "s": 3}))
+        self.assertTrue(wait_for(lambda: self.k.acked == 3, timeout=0.5),
+                        "an ack waited behind a line the agent is not reading")
+        self.assertEqual(self.k.base, 4, "the outbox did not trim")
+
+    def test_bp_2_a_close_after_a_waiting_line_ends_the_agent(self):
+        h = self._wedge()
+        with mock.patch.object(self.km.os, "killpg"):
+            h.sock.sendall(_j({"keeper": "close"}))
+            self.assertTrue(wait_for(lambda: self.k.p.terminated,
+                                     timeout=self.km.TERM_WAIT_S),
+                            "a close waited behind a line the agent is not reading")
+        self.assertTrue(self.k.closing)
+
+    def test_bp_3_order_holds_for_lines_that_reach_the_agent(self):
+        h = self._wedge()
+        nxt = _j({"jsonrpc": "2.0", "method": "session/cancel", "params": {"n": 4}})
+        h.sock.sendall(nxt)
+        h.sock.sendall(_j({"keeper": "ack", "s": 3}))
+        self.assertTrue(wait_for(lambda: self.k.acked == 3, timeout=0.5))
+        self.k.p.stdin.gate.set()                 # the agent reads again
+        self.assertTrue(wait_for(lambda: len(self.k.p.stdin.lines) == 4, timeout=3))
+        got = [json.loads(b)["params"] for b in self.k.p.stdin.lines]
+        self.assertEqual([p.get("n") for p in got], [None, None, None, 4],
+                         "lines reached the agent out of order")
+
+    def test_bp_4_a_replaced_hubs_waiting_lines_never_reach_the_agent(self):
+        h = self._wedge()
+        h.sock.sendall(_j({"jsonrpc": "2.0", "method": "x", "params": {"late": 1}}))
+        time.sleep(0.1)
+        h2 = self.hub()
+        h2.hello_and_backlog()
+        self.k.p.stdin.gate.set()
+        time.sleep(0.5)
+        late = [b for b in self.k.p.stdin.lines if b"late" in b]
+        self.assertEqual(late, [], "a replaced hub's waiting line reached the agent")
+        self.assertLessEqual(len(self.k.p.stdin.lines), 2,
+                             "a replaced hub's waiting line reached the agent")
+
+    def test_bp_5_lines_read_before_a_hang_up_still_reach_the_agent(self):
+        self.k.p.stdin.gate.clear()               # slow agent: the drain lags the reader
+        threading.Thread(target=self.k._write_stdin, daemon=True).start()
+        h = self.hub()
+        h.hello_and_backlog()
+        for n in range(5):
+            h.sock.sendall(_j({"jsonrpc": "2.0", "method": "session/cancel",
+                               "params": {"n": n}}))
+        h.sock.shutdown(__import__("socket").SHUT_WR)   # the hub hangs up
+        self.assertTrue(wait_for(lambda: self.k.conn is None, timeout=3))
+        self.k.p.stdin.gate.set()
+        self.assertTrue(wait_for(lambda: len(self.k.p.stdin.lines) == 5, timeout=3),
+                        "a line read before the hang-up was lost")

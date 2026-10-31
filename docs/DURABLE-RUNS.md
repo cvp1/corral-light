@@ -110,20 +110,22 @@ test that fails on 65f9ca0 (`KeeperAfterReview3`, `KeeperAfterReview3Grok`,
 | Dead before its reason (Grok) | The exit set `dead` before the reason was recorded, and the adopt path could set `ready` over an exit | `_dead` sets the state after the reason; both writes share one small lock |
 | Line cap (Grok) | A line at the keeper's 16 MiB cap was over the client's 16 MiB cap once framed | The keeper caps adapter lines 4 KiB lower |
 
-**Deferred, with a plan: stdin backpressure (Grok).** When the agent stops
-reading stdin and the queue is full, the hub's reader waits in
-`accept_from_hub`, so later acks and a `close` on that connection wait too.
-An attach is not blocked, and the client's close also signals the process
-group, so a pane still closes. The cost is that the outbox stops trimming
-and may drop notifications. Plan: split the hub reader. Control lines (ack,
-close) are applied at once, and other lines go into a per-connection inbound
-queue, bounded at `STDIN_MAX_BYTES`, that one thread drains into the stdin
-queue under the owner check. Falsifier: with the agent's stdin blocked and
-the queue full, an ack sent after a waiting line advances `acked` within
-0.5 s, and a `close` ends the agent within `TERM_WAIT_S`. Not done in this
-pass because it moves the ownership check onto a second thread, which is the
-kind of fix-layer change the earlier rounds punished. It should get its own
-review.
+**Stdin backpressure (Grok), fixed after the panel.** When the agent
+stopped reading stdin and the queue was full, the hub's reader waited in
+`accept_from_hub`, so later acks and a `close` on that connection waited
+too. The outbox stopped trimming and could drop notifications. Now each
+connection has a reader and a drain thread. The reader applies control
+lines (ack, close) at once and puts every other line on the connection's
+inbound queue, bounded at `STDIN_MAX_BYTES`. The drain is the one thread
+that applies those lines, in order, each under the owner check. A hub that
+hangs up has its inbound queue applied before it lets go of the agent; a
+replaced hub's inbound lines are dropped, as its waiting line always was.
+Acks and a close now wait only once both queues are full. Tests
+(`StdinBackpressure`): an ack after a waiting line lands within 0.5 s and a
+close ends the agent within `TERM_WAIT_S` (both fail on 35a67fb); lines
+reach the agent in order; a replaced hub's waiting lines never do; lines
+read before a hang-up still do. This moves the owner check onto a second
+thread, so it gets its own review panel before it merges.
 
 *The two reviews below record protocol 2's fixes. Protocol 3
 (above) replaced the mechanisms they describe: the spool, the carried hello
