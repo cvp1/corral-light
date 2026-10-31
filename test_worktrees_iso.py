@@ -59,7 +59,7 @@ class Isolation(unittest.TestCase):
                    CORRAL_WT_ISO_LOG=str(log), PYTHONPATH=str(ROOT))
         r = subprocess.run([sys.executable, "-W", "ignore", "-m", "unittest", *SUITES],
                            cwd=box / "tmp", env=env, capture_output=True, text=True,
-                           timeout=480)
+                           timeout=900)     # five suites; keeper-backed panes close slower
         self.assertEqual(r.returncode, 0, r.stderr[-3000:])
         cwds = [c for c in log.read_text().splitlines() if c] if log.exists() else []
         self.assertGreater(len(cwds), 100, "the spy saw almost no git calls; is it wired?")

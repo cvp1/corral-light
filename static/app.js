@@ -3344,6 +3344,57 @@ function render() {
     }
   }
 
+  // Panel runs (panel.py): running ones, and done ones until acknowledged.
+  // Click focuses the synthesis pane (its transcript is the readable packet),
+  // else the first arm; ✓ acknowledges.
+  const panels = (S.panels || []).filter(p => p.status === 'running' || p.needs_ack || p.status === 'failed');
+  if (panels.length) {
+    r.appendChild(el('div', 'lab', `Panels · ${panels.length}`));
+    for (const p of panels) {
+      const need = p.needs_ack || p.status === 'failed';
+      const it = el('div', 'rit arc' + (need ? ' needs-you' : '') + (p.status === 'failed' ? ' dead' : ''));
+      it.appendChild(el('span', 'dot'));
+      const t = el('div', 'txt');
+      t.appendChild(el('div', 't', p.topic || p.id));
+      const arms = (p.arms || []).map(a => {
+        const rs = Object.keys(a.rounds || {}).sort();
+        const last = rs.length ? a.rounds[rs[rs.length - 1]] : null;
+        return a.lane + (last ? ':' + (last.verdict || last.status) : '');
+      }).join(' · ');
+      const line = p.status === 'running'
+        ? `round ${p.round + 1} running · ${arms}`
+        : p.status === 'failed' ? `failed: ${p.error || ''}` : `done r${p.round} · ${arms}`;
+      t.appendChild(el('div', 's', line));
+      it.appendChild(t);
+      it.title = `${p.topic}\n${p.id} · ${p.status}` + (p.packet_path ? `\npacket: ${p.packet_path}` : '');
+      it.onclick = () => {
+        const target = (p.synth && p.synth.pane && S.panes.has(p.synth.pane)) ? p.synth.pane
+          : ((p.arms || []).map(a => a.pane).find(id => id && S.panes.has(id)));
+        if (target) focusPane(target);
+      };
+      const acts = el('div', 'acts');
+      if (need) {
+        const ok = el('button', 'a', '✓'); ok.title = 'acknowledge: the packet is read';
+        ok.onclick = async e => {
+          e.stopPropagation();
+          try { await api('/api/session/panels/ack', { id: p.id }); await refresh(); }
+          catch (err) { toast(err.message, true); }
+        };
+        acts.appendChild(ok);
+      } else {
+        const x = el('button', 'a', '✕'); x.title = 'cancel this panel';
+        x.onclick = async e => {
+          e.stopPropagation();
+          try { await api('/api/session/panels/cancel', { id: p.id }); await refresh(); }
+          catch (err) { toast(err.message, true); }
+        };
+        acts.appendChild(x);
+      }
+      it.appendChild(acts);
+      r.appendChild(it);
+    }
+  }
+
   // Scheduled jobs, plus failed or missed one-shots kept until dismissed.
   const jobs = S.schedule || [];
   if (jobs.length) {
@@ -3922,6 +3973,7 @@ async function refresh() {
   if ('archived' in d) S.archived = d.archived || [];
   S.notRestored = d.notRestored || 0;
   if ('schedule' in d) S.schedule = d.schedule || [];
+  if ('panels' in d) S.panels = d.panels || [];
   const next = new Map();
   const rxAt = Date.now();
   for (const np of (d.panes || [])) {

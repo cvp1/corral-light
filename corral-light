@@ -20,6 +20,9 @@
 #   corral-light consult ...    ask a lane from a script — the assistant's way to
 #                               get a second opinion on your subscriptions, not
 #                               an API key (consult.py --help for the verbs)
+#   corral-light consult panel start|await|next|ack|list|status|cancel
+#                               a durable cross-vendor review the hub runs and
+#                               reports as one packet (docs/DURABLE-RUNS.md)
 #   corral-light watch          probe the hub from OUTSIDE it; page (STATE/DEAD +
 #                               a desktop notification) when it is down or its
 #                               observer stalled. Never restarts it. Run by the

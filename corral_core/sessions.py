@@ -188,11 +188,11 @@ QUOTE_CHARS = 12_000           # of one pane's last answer quoted into another
 # any other value is refused. `rig` is a rig's hand-written opening prompt;
 # `challenge` is the hub's prompt to a blind reviewer (Corral Light's
 # "Challenge this change").
-TURN_VIAS = ("consult", "cli", "rig", "challenge")
+TURN_VIAS = ("consult", "cli", "rig", "challenge", "panel")
 
 # Turns the human did not start: when one ends the pane shows `idle`, not
 # `your-turn`, and it never answers an open ask_human question.
-AGENT_ORIGIN_VIAS = ("peer", "rig", "challenge")
+AGENT_ORIGIN_VIAS = ("peer", "rig", "challenge", "panel")
 
 # ask_human: one open question per pane from its agent to the human.
 MAX_ASK_CHARS = _seat_mcp.MAX_ASK_CHARS
@@ -506,6 +506,7 @@ class PaneBase:
     driven_by = None
     background = False
     pid = pgid = pid_start = None
+    keeper = None       # the keeper holding this pane's agent (Light); see Pane
     seat = None
     question = None     # the agent's open ask_human question, or None
     turn_via = None     # where the most recent turn came from (None = human)
@@ -683,6 +684,7 @@ class PaneBase:
             pass
         self.client = None
         self.pid = self.pgid = self.pid_start = None   # nothing left to reap
+        self.keeper = None
 
     # ── event plumbing ───────────────────────────────────────────────────
     def emit(self, kind, payload, activity=True):
@@ -893,6 +895,7 @@ class PaneBase:
             self.client.close()
         self.client = None
         self.pid = self.pgid = self.pid_start = None   # stopped on purpose
+        self.keeper = None
         self.error = None                 # paused is not a fault
         self._flush_text()                # nothing streamed is left unwritten
         self._flush_thought()
@@ -912,6 +915,7 @@ class PaneBase:
         if self.client:
             self.client.close()
         self.pid = self.pgid = self.pid_start = None   # stopped on purpose
+        self.keeper = None
         self._flush_text()                # before the log handle closes
         self._flush_thought()
         self.state = "dead"

@@ -754,6 +754,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"text": transcripts.digest(hours, live=live)})
         if p == "/api/session/schedule":
             return self._json({"jobs": MGR.schedule.list()})
+        if p == "/api/session/panels":
+            pid = (q.get("id") or [""])[0]
+            if pid:
+                import panel as _panel
+                try:
+                    rec = MGR.panels.get(pid)
+                except _panel.PanelError as e:
+                    return self._json({"error": str(e)}, 404)
+                return self._json({"panel": MGR.panels.view(rec), "findings": rec.get("findings") or [],
+                                   "synthPacket": (rec.get("synth") or {}).get("packet")})
+            return self._json({"panels": MGR.panels.list()})
         if p == "/api/session/roles":
             # Every role with the lanes it can start on; errors degrade in-payload.
             try:
@@ -1110,6 +1121,32 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/session/schedule/remove":
                 return self._json({"ok": True,
                                    "removed": MGR.schedule.remove(b.get("id", ""))})
+            if p in ("/api/session/panels/start", "/api/session/panels/next",
+                     "/api/session/panels/ack", "/api/session/panels/cancel"):
+                import panel as _panel
+                verb = p.rsplit("/", 1)[1]
+                try:
+                    if verb == "start":
+                        charge = b.get("charge")
+                        if not charge and b.get("chargeFile"):
+                            charge = Path(str(b["chargeFile"])).expanduser().read_text(encoding="utf-8")
+                        rec = MGR.panels.start(
+                            charge=charge, lanes=b.get("lanes") or [], cwd=b.get("cwd"),
+                            topic=b.get("topic") or "", rounds=b.get("rounds") or _panel.DEFAULT_ROUNDS,
+                            synth_lane=b.get("synthLane") or None, author=b.get("author") or None,
+                            out_dir=b.get("outDir") or None, model=b.get("model") or None,
+                            effort=b.get("effort") or None, brief_id=b.get("briefId") or None)
+                    elif verb == "next":
+                        rec = MGR.panels.next(b.get("id", ""), charge=b.get("charge"))
+                    elif verb == "ack":
+                        rec = MGR.panels.ack(b.get("id", ""))
+                    elif verb == "cancel":
+                        rec = MGR.panels.cancel(b.get("id", ""))
+                    else:
+                        return self._json({"error": "not found"}, 404)
+                except (_panel.PanelError, OSError) as e:
+                    return self._json({"error": str(e)[:400]}, 400)
+                return self._json({"ok": True, "panel": rec})
             if p == "/api/session/seen":
                 # A human surface showed this pane up to `seq` (sent only while
                 # the page is visible and focused). `seen: {pane: seq, ...}`
@@ -1240,7 +1277,8 @@ def _on_shutdown_signal(signum, frame):              # noqa: ARG001
         n = MGR.shutdown_notes(name)
     except Exception as e:                             # noqa: BLE001
         n = f"? ({e})"
-    print(f"corral-light: {name} — wrote {n} interrupted-turn note(s); exiting",
+    print(f"corral-light: {name} — wrote {n} shutdown note(s) (kept agents go on "
+          f"under their keepers); exiting",
           file=sys.stderr, flush=True)
     raise SystemExit(0)
 

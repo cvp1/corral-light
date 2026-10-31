@@ -468,7 +468,17 @@ hub.serve("127.0.0.1", 0)
 
 
 class ShutdownWritesNotesNotPauses(FakeLaneCase):
-    """SIGTERM writes a note naming the interrupted turn, not a pause."""
+    """SIGTERM writes a note naming the interrupted turn, not a pause.
+
+    With the keeper off (CORRAL_LIGHT_KEEPER=0): the adapter is the hub's own
+    child and a restart ends it. The keeper's contract (the turn goes on and
+    the next hub adopts it) is test_keeper.py's."""
+
+    def setUp(self):
+        super().setUp()
+        self._keeper = self.sessions.KEEPER_ENABLED
+        self.sessions.KEEPER_ENABLED = False
+        self.addCleanup(setattr, self.sessions, "KEEPER_ENABLED", self._keeper)
 
     def _busy_pane(self):
         p = self.mgr.create("fake", self.agent_dir)
@@ -496,7 +506,7 @@ class ShutdownWritesNotesNotPauses(FakeLaneCase):
     def test_a_real_hub_process_writes_the_note_on_sigterm_and_exits(self):
         import subprocess
         state = tmpdir(self, "corral-light-sigterm-")
-        env = {**os.environ, "CORRAL_LIGHT_STATE": state,
+        env = {**os.environ, "CORRAL_LIGHT_STATE": state, "CORRAL_LIGHT_KEEPER": "0",
                "CORRAL_LIGHT_CONFIG_DIR": os.path.join(state, "config"), "LIGHT_ROOT": str(ROOT),
                "FAKE": str(FAKE), "FAKE_ACP_DIR": self.agent_dir}
         pr = subprocess.Popen([sys.executable, "-c", HUB_SCRIPT], env=env,
@@ -527,7 +537,7 @@ class ShutdownWritesNotesNotPauses(FakeLaneCase):
                 except OSError:
                     pass
         self.assertEqual(rc, 0, err)
-        self.assertIn("wrote 1 interrupted-turn note", err)
+        self.assertIn("wrote 1 shutdown note", err)
         events = [json.loads(l) for l in
                   (Path(state) / "panes" / pane_id / "events.jsonl").read_text().splitlines()]
         notes = [e["data"] for e in events if e["kind"] == "note" and e["data"].get("shutdown")]
@@ -536,9 +546,11 @@ class ShutdownWritesNotesNotPauses(FakeLaneCase):
         self.assertEqual(notes[0]["queued"], ["queued behind it"])
         self.assertNotIn("paused", [e["kind"] for e in events])
 
-    def test_the_unit_signals_the_hub_before_its_children(self):
+    def test_the_unit_signals_the_hub_alone_so_keepers_survive(self):
         unit = (ROOT / "corral-light.service").read_text(encoding="utf-8")
-        self.assertIn("\nKillMode=mixed\n", unit)
+        self.assertIn("\nKillMode=process\n", unit)
+        import install_service
+        self.assertIn("KillMode=process", install_service.LINUX_UNIT)
 
 
 class TheObserverTickSurvivesABadPane(unittest.TestCase):
@@ -678,6 +690,10 @@ class TheTurnLedger(FakeLaneCase):
         self.assertNotIn("user", self.kinds(p))
 
     def test_a_dead_hubs_dispatched_turn_is_interrupted_and_noted_never_resent(self):
+        # Keeper off: the adapter died with the hub. With it on, the next hub
+        # adopts the dispatched turn instead (test_keeper K2/K7).
+        self.sessions.KEEPER_ENABLED = False
+        self.addCleanup(setattr, self.sessions, "KEEPER_ENABLED", True)
         p = self.mgr.create("fake", self.agent_dir)
         tid = p.send("sleep 30")
         self.assertTrue(wait_for(lambda: self.ledger(p)[tid]["state"] == "dispatched"))

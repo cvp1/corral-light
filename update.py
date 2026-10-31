@@ -186,6 +186,19 @@ def own_pane():
     return m.group(1) if m else None
 
 
+def _own_durable():
+    """Does a keeper hold the pane this command runs in (so the restart keeps it)?"""
+    pid = own_pane()
+    if not pid:
+        return False
+    try:
+        st = hub_state(os.environ.get("CORRAL_HUB_URL") or DEFAULT_URL) or {}
+    except Exception:                                  # noqa: BLE001
+        return False
+    return any(p.get("id") == pid and p.get("durable")
+               for p in st.get("panes") or [])
+
+
 def inside_hub():
     """Is this process a descendant of the hub (so a restart ends it)?"""
     if own_pane():
@@ -198,10 +211,14 @@ def inside_hub():
 
 def blockers(st, own=None):
     """Panes a restart would interrupt: mid-turn, or waiting on a permission
-    (pending requests die with the agent). `own` is never counted."""
+    (pending requests die with the agent). `own` is never counted. A pane
+    whose agent a keeper holds (`durable`) is not interrupted by a restart:
+    its turn goes on and the next hub picks it up, cards included."""
     out = []
     for p in (st or {}).get("panes") or []:
         if p.get("id") == own:
+            continue
+        if p.get("durable"):
             continue
         why = None
         if p.get("pending"):
@@ -332,7 +349,9 @@ def restart(inside):
         subprocess.Popen(["/bin/sh", "-c", "sleep 2; exec \"$@\"", "restart", *argv],
                          start_new_session=True, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True, "hub restart queued (this pane's turn ends with it)"
+        return True, ("hub restart queued (this pane picks its turn back up "
+                      "when the hub is back)" if _own_durable() else
+                      "hub restart queued (this pane's turn ends with it)")
     r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         return False, f"restart failed: {(r.stderr or r.stdout).strip()[:300]}"

@@ -422,7 +422,7 @@ The availability check is intentionally honest: an assistant is marked unavailab
 ./corral-light update --install-skill  # let Claude panes run it when you ask
 ```
 
-The update fast-forwards the checkout the running hub serves. Then it restarts the hub, but only when no pane is mid-turn or waiting on a permission, because a restart ends those turns. Paused panes resume on their next message. When panes are busy, it changes nothing, names them, and exits 3. `--wait 600` waits for them, and `--now` interrupts them. It refuses, changing nothing, when the checkout has local changes, commits of its own, or is on another branch. The adapters are reinstalled only when their lockfile changed, and a failed install puts the old commit back. It also notices a hub still serving older code after a pull without a restart. The timer records each run in `update-status.json` in the state folder, and `--check` shows the last one.
+The update fast-forwards the checkout the running hub serves. Then it restarts the hub. Since 2026-10-30 every pane's agent runs under a **keeper** (`keeper.py`), a small process of its own that holds the agent across a hub restart: a turn that was running goes on, its permission cards come back, and what the agent said while no hub was listening is replayed, so a restart no longer ends anything. Only a pane whose agent is NOT kept (the kill switch `CORRAL_LIGHT_KEEPER=0`, or a pane from before the keeper) still defers the restart while it is mid-turn or waiting on a permission; then `update` changes nothing, names them, and exits 3. `--wait 600` waits for them, and `--now` interrupts them. It refuses, changing nothing, when the checkout has local changes, commits of its own, or is on another branch. The adapters are reinstalled only when their lockfile changed, and a failed install puts the old commit back. It also notices a hub still serving older code after a pull without a restart. The timer records each run in `update-status.json` in the state folder, and `--check` shows the last one.
 
 On a Homebrew install the same verb runs `brew upgrade` in place of git, under the same rule: busy panes defer it and nothing changes. Homebrew's own cleanup is held off until the hub answers from the new version, because the running hub still loads code from the old one. `--check` reads the tap as of its last `brew update` and changes nothing. `lanes update` does not swap the Claude, ChatGPT or Gemini adapter inside a Homebrew install: those pins move with a release.
 
@@ -842,6 +842,44 @@ sandbox, and each such challenge says **not sandboxed**. What remains
 possible even sandboxed: the reviewer can read files outside the hidden set
 and send them to its own vendor's API, as any pane on that lane can.
 
+## Panels: a review the hub runs, across vendors, that survives you
+
+A **panel** is the blind challenge grown up: several reviewers from
+different vendors, run and archived by the hub, reported as one packet.
+
+```
+./corral-light consult panel start --charge-file charge.md \
+    --lane codex --lane grok --cwd ~/repo --topic "gate design"
+./corral-light consult panel await <id>          # prints the packet when done
+./corral-light consult panel next <id> --charge-file charge-v2.md
+./corral-light consult panel ack <id>
+```
+
+`start` returns at once. The hub opens one background pane per arm, sends
+the charge blind, and when each turn ends seals the **whole** answer to
+`reviews/<date>-<topic>/r1-<lane>.md` from the transcript on disk. A fresh
+pane on a lane that is neither an arm's nor yours then reads the sealed
+files only and writes the packet: verdict per arm per round, a findings
+table (severity, file:line, which arms, new or repeated), dissent quoted,
+one next action, and the paths to the raw files, never their bodies. Code,
+not the synthesizer, extracts the verdicts and findings from the sealed
+files, so a later consensus cannot erase an earlier dissent.
+
+From inside a pane an assistant has the same as tools (`panel_start`,
+`panel_status`, `panel_await`, `panel_next`, `panel_ack`); the pane that
+starts a panel is its author and gets the packet as a question on itself when
+the run is done, so the author's context never carries the arms' text.
+
+The run is the hub's: its state is on disk, its arms are kept panes, and on
+boot every running panel picks up where its arms are. It survives a hub
+restart and the author's `/clear`. The rail shows it under **Panels** until
+you acknowledge the packet.
+
+The brake: one round by default, two at most, and `panel next` is refused
+when neither the charge nor the tree changed since the last round. Four
+rounds is the cap. Votes are rows in a table, never grants. Details and the
+measurement this is held to: [docs/DURABLE-RUNS.md](docs/DURABLE-RUNS.md).
+
 ## Security
 
 The server listens only on your computer by default (`127.0.0.1`). To use it from another computer, create an encrypted SSH tunnel:
@@ -947,7 +985,7 @@ of the user who starts them. Do not point a service at a worktree —
 `spike/node_modules/` is gitignored, so a worktree has neither vendor adapter
 and both those lanes go dark in a way that looks like a vendor outage.
 
-The systemd unit uses `KillMode=mixed`: on a stop or restart the hub is signalled first and writes one note in every pane that had a turn running, naming the interrupted message and anything queued behind it. Nothing is re-sent automatically. If an agent process outlives the hub anyway (launchd), the next start stops it before any conversation is resumed.
+The systemd unit uses `KillMode=process`: on a stop or restart only the hub is signalled. Each pane's agent runs under its own keeper (`keeper.py`, in its own session), which the next hub reattaches to: the running turn continues, pending permission cards come back, and anything the agent said in between is replayed. The hub's shutdown note in such a pane says the turn continues and names only what was still queued (that is not re-sent). A keeper the next hub cannot reach is stopped before the conversation is resumed, as a plain orphan was. See [docs/DURABLE-RUNS.md](docs/DURABLE-RUNS.md).
 
 ## Watching the hub
 

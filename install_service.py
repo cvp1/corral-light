@@ -49,12 +49,11 @@ Environment=CORRAL_OLLAMA_URL={ollama}
 Restart=always
 RestartSec=3
 
-# mixed: on stop/restart, SIGTERM goes to the hub ALONE first; only after it
-# exits does systemd SIGKILL the rest of the cgroup (the agents). The default,
-# control-group, signals every process at once, so the hub's SIGTERM handler
-# ran beside dying children and could not reliably write its one job: a note
-# in each busy pane naming the turn being interrupted.
-KillMode=mixed
+# process: on stop/restart, SIGTERM goes to the hub ALONE and the rest of the
+# cgroup is left running. Each pane's agent runs under a keeper (keeper.py) in
+# its own session; the next hub reattaches to it, turn and permission cards
+# included. The default, control-group, would kill the keepers with the hub.
+KillMode=process
 
 [Install]
 WantedBy=default.target

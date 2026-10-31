@@ -113,6 +113,26 @@ def perm_digest(req):
     return len(blob), hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
 
 MAX_ROSTER = MAX_PANES * 5      # cap on all panes, live or detached
+
+# Each pane's agent runs under a keeper (keeper.py) so a hub restart does not
+# end it. CORRAL_LIGHT_KEEPER=0 forks adapters directly, as before.
+KEEPER_ENABLED = os.environ.get("CORRAL_LIGHT_KEEPER", "1") != "0"
+# AF_UNIX paths are short (104 bytes on macOS): a long state dir falls back
+# to a per-user dir under /tmp, 0700.
+KEEPER_SOCK_MAX = 100
+
+
+def keeper_sock_path(pane_id, pane_dir):
+    p = Path(pane_dir) / "keeper" / "s.sock"
+    if len(str(p).encode("utf-8", "replace")) <= KEEPER_SOCK_MAX:
+        return p
+    d = Path(f"/tmp/corral-light-{os.getuid()}")
+    d.mkdir(mode=0o700, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d / f"k-{pane_id}.sock"
 MAX_PROMPT = 200_000
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 
@@ -1014,8 +1034,13 @@ class Pane(_core.PaneBase):
     # never start again without it.
     META_KEYS = _core.PaneBase.META_KEYS + ("worktree_id", "review_at_end", "reviewed_digest",
                                             "challenges", "challenge_of", "review_tree",
-                                            "review_sandboxed", "title_named")
+                                            "review_sandboxed", "title_named",
+                                            # {sock, dir, pid}: the keeper that holds
+                                            # this pane's agent across a hub restart
+                                            # (keeper.py). None = the hub forked it.
+                                            "keeper")
     worktree_id = None
+    keeper = None
     review_at_end = False
     reviewed_digest = None
     challenges = ()
@@ -1142,8 +1167,11 @@ class Pane(_core.PaneBase):
                          error="the hub restarted while the reviewer worked; its pane "
                                "may still hold the answer")
             p.challenges.append(c)
-        # No process of its own yet.
+        # No process of its own yet. The keeper record stays: restore() tries
+        # to pick its agent back up before anything is reaped.
         p.pid = p.pgid = p.pid_start = None
+        k = meta.get("keeper")
+        p.keeper = k if isinstance(k, dict) and k.get("sock") and k.get("pid") else None
         p._init_runtime()
         p.state = "detached"
         p.dir = STATE / "panes" / p.id
@@ -1297,7 +1325,7 @@ class Pane(_core.PaneBase):
             self.dead_cause = self.dead_login = None
             argv, env, strip = self._launch(spec, env)
             self.client = acp.AcpClient(argv, self.cwd, env=env, strip_env=strip,
-                                        **self._bind(gen))
+                                        keeper=self._keeper_spec(), **self._bind(gen))
             self._record_pid()
             self.client.initialize()
             # The agent replays the whole transcript on load. We already have
@@ -1446,6 +1474,7 @@ class Pane(_core.PaneBase):
             except Exception:           # noqa: BLE001 — it is going away anyway
                 pass
         self.pid = self.pgid = self.pid_start = None
+        self.keeper = None
         self.acp_session = None
         self.usage = {}
         self.error = None
@@ -1485,6 +1514,24 @@ class Pane(_core.PaneBase):
         def show(t):
             return repr(t[:PARKED_PREVIEW_CHARS] +
                         ("…" if len(t) > PARKED_PREVIEW_CHARS else ""))
+        if self._durable():
+            # The keeper holds the agent: the running turn goes on and the
+            # next hub adopts it. Only what was still queued here is lost.
+            lg = self._turns()
+            for t in queued:
+                lg.mark(getattr(t, "turn", None), "interrupted",
+                        why=f"hub shutdown ({why}): queued, never sent", was="accepted")
+            parts = [f"the hub is restarting ({why})"]
+            if running is not None:
+                parts.append(f"this turn continues under its keeper: {show(running)}")
+            if queued:
+                parts.append(f"{len(queued)} queued message(s) were not sent: "
+                             + "; ".join(show(t) for t in queued))
+            text = " — ".join(parts)
+            self.emit("note", {"text": text, "shutdown": True, "durable": True,
+                               "continues": running, "queued": queued})
+            return text
+
         parts = [f"the hub is shutting down ({why})"]
         if running is not None:
             parts.append(f"this turn was interrupted: {show(running)}")
@@ -1500,12 +1547,145 @@ class Pane(_core.PaneBase):
 
     def _record_pid(self):
         """Persist the adapter's pid/pgid/start time before the handshake, so a
-        hub crash mid-handshake still leaves a record of the orphan."""
+        hub crash mid-handshake still leaves a record of the orphan. With a
+        keeper, the pid is the keeper's (the group leader) and the keeper
+        record is what a restarted hub reattaches through."""
         c = self.client
         self.pid = getattr(getattr(c, "p", None), "pid", None)
         self.pgid = getattr(c, "pgid", None)
         self.pid_start = getattr(c, "start_token", None)
+        k = getattr(c, "keeper", None)
+        self.keeper = ({"sock": str(k["sock"]), "dir": str(k.get("dir") or ""),
+                        "pid": self.pgid} if k and self.pgid else None)
         self.save_meta()
+
+    # ── the keeper: this pane's agent outlives a hub restart ────────────
+    def _keeper_spec(self):
+        """Where this pane's keeper listens, or None to fork the adapter
+        directly (CORRAL_LIGHT_KEEPER=0, or a pane with no dir)."""
+        if not KEEPER_ENABLED or getattr(self, "dir", None) is None:
+            return None
+        return {"sock": keeper_sock_path(self.id, self.dir), "dir": self.dir / "keeper"}
+
+    def _durable(self):
+        """Does a keeper hold this pane's agent (so a hub restart keeps it)?"""
+        c = self.client
+        return bool(c and c.alive and getattr(c, "keeper", None))
+
+    def reattach(self):
+        """Pick this pane's agent back up from the keeper a previous hub left
+        it with. Returns True when attached; False (and the keeper record
+        cleared) when the keeper is gone, so the caller may reap and the pane
+        stays detached as before."""
+        k = self.keeper
+        if not k or self.state not in self.RESUMABLE:
+            return False
+        if not os.path.exists(k["sock"]):
+            self.keeper = None
+            return False
+        self.mgr._reserve_live(self)
+        try:
+            if self._log is None:
+                self._log = (self.dir / "events.jsonl").open("a", encoding="utf-8")
+            with self._turn_lock:
+                self._generation += 1
+                gen = self._generation
+            self.error = None
+            self.dead_cause = self.dead_login = None
+            self._expect_exit = False
+            self.client = acp.AcpClient.reattach(k["sock"], k["pid"], self.cwd,
+                                                 **self._bind(gen))
+        except acp.AgentError as e:
+            print(f"corral-light: pane {self.id}: keeper did not answer ({e})",
+                  file=sys.stderr, flush=True)
+            self.client = None
+            self.state = "detached"
+            self.keeper = None
+            return False
+        except Exception:
+            if self.state == "starting":
+                self.state = "detached"
+            raise
+        self._record_pid()
+        prompt = next((o for o in self.client.adopted
+                       if o.get("method") == "session/prompt"), None)
+        others = [o for o in self.client.adopted if o is not prompt]
+        if others:
+            # Handshake-class requests from the old hub (set_config and the
+            # like): nobody waits on them now; let their answers drop.
+            for o in others:
+                self.client._pending.pop(o["id"], None)
+        if not self.client.alive:
+            # It died while no hub listened; the spool then its exit frame
+            # arrive through the reader, which marks the pane dead itself.
+            self.state = "busy" if prompt else "ready"
+        elif prompt:
+            self._adopt_turn(prompt["id"], gen)
+        else:
+            self.state = "needs-you" if self.pending else "ready"
+        self.emit("reattached", {"adoptedTurn": bool(prompt),
+                                 "spooled": (self.client.hello or {}).get("spooled") or 0,
+                                 "pid": self.pid}, activity=False)
+        self.save_meta()
+        return True
+
+    def _adopt_turn(self, rid, gen):
+        """A turn the previous hub dispatched is still running: own it. The
+        ledger's one `dispatched` turn is the one in flight; its answer lands
+        as a normal turn_end."""
+        lg = self._turns()
+        open_ = lg.open_turns()
+        running = [r for r in open_ if r.get("state") == "dispatched"]
+        tid = running[-1]["turn"] if running else None
+        text = (running[-1].get("text") or "") if running else ""
+        for r in open_:
+            if not running or r is not running[-1]:
+                # Queued behind it in the old hub's memory: gone with that hub.
+                lg.mark(r["turn"], "interrupted",
+                        why="the hub stopped before this queued message was sent",
+                        was=r.get("state"))
+        with self._turn_lock:
+            self._in_flight = _QueuedText(text, tid)
+            self._turn_running = True
+        self.state = "needs-you" if self.pending else "busy"
+
+        def wait():
+            try:
+                r = self.client.await_adopted(rid)
+            except acp.AgentError as e:
+                with self._turn_lock:
+                    if self._generation != gen:
+                        return
+                    self._turn_running = False
+                    self._in_flight = None
+                lg.mark(tid, "interrupted", why=str(e), was="dispatched")
+                if self.state != "dead" and not self._expect_exit:
+                    self._dead(str(e))
+                return
+            with self._turn_lock:
+                if self._generation != gen:
+                    return
+                self._in_flight = None
+            lg.mark(tid, "completed", stopReason=(r or {}).get("stopReason"),
+                    adopted=True)
+            self._flush_text()
+            self._flush_thought()
+            self.emit("turn_end", {"stopReason": (r or {}).get("stopReason"),
+                                   "usage": self.usage, "turn": tid,
+                                   "quota": getattr(self, "quota", None) or {},
+                                   "queued": len(self._queue), "adopted": True})
+            with self._turn_lock:
+                self._turn_running = False
+                more = bool(self._queue) and not self.held
+                if more:
+                    self._turn_running = True
+            if self.state != "dead":
+                self.state = "needs-you" if self.pending else ("busy" if more else "ready")
+            if more:
+                threading.Thread(target=self._drain, daemon=True).start()
+            if self.worktree_id:
+                self.mgr.worktree_turn_ended(self)
+        threading.Thread(target=wait, daemon=True, name=f"adopt-{self.id}").start()
 
     def _bind(self, gen):
         """Callbacks for one attachment; events from a superseded one are dropped."""
@@ -1540,6 +1720,11 @@ class Pane(_core.PaneBase):
             self.emit("tool", tool_event(data))
             if self.worktree_id and not self._replaying:
                 self._worktree_guard(data)
+        elif kind == "keeper_replayed":
+            if data.get("dropped"):
+                self.emit("note", {"text": f"{data['dropped']} line(s) the agent wrote "
+                                           f"while no hub was listening were dropped: "
+                                           f"the keeper's spool was full"})
         elif kind == "stall_notice":
             # Informational only: a clock can't tell a wedged agent from a slow one.
             self.emit("note", {"text": data.get("text") or "no output for a "
@@ -1580,7 +1765,12 @@ class Pane(_core.PaneBase):
             self._clear_pending("agent_exit")
             self._clear_question("dead")
             if data.get("closed"):
-                self.error = None                  # deliberate: not a fault
+                # Deliberate: not a fault. Unless the pane already recorded
+                # why it died (the drain closed the client AFTER an auth
+                # error): a keeper's exit frame lands late, and must not
+                # wipe that reason.
+                if not self.error:
+                    self.error = None
                 self.emit("closed", {"reason": data.get("reason")})
             else:
                 self._dead(data.get("reason"))
@@ -1659,6 +1849,7 @@ class Pane(_core.PaneBase):
             env["CORRAL_PANE_ID"] = self.id      # tools can tell which pane they run in
             argv, env, strip = self._launch(spec, env)
             self.client = acp.AcpClient(argv, self.cwd, env=env, strip_env=strip,
+                                        keeper=self._keeper_spec(),
                                         **self._bind(self._generation))
             self._record_pid()
             info = self.client.initialize()
@@ -2017,12 +2208,15 @@ class Pane(_core.PaneBase):
                     lg.mark(getattr(t, "turn", None), "interrupted",
                             why="the agent stopped before it was sent",
                             was="accepted")
-                # Prompts have no deadline, so the agent died or closed stdin. close()
-                # reaps any surviving members of the process group.
-                client.close()
+                # Prompts have no deadline, so the agent died or closed stdin.
+                # Record the death and its reason FIRST, then close(): the
+                # close's own exit event (late, under a keeper) is expected
+                # and must not overwrite the reason.
                 self._drop_held_peers("dead")
                 self._dead(str(e) + (
                     f" ({dropped} queued message(s) were not sent)" if dropped else ""))
+                self._expect_exit = True
+                client.close()           # reaps any surviving members of the group
                 return
             except Exception as e:              # noqa: BLE001
                 # A bug in us: fail loudly in the transcript and keep the pane usable.
@@ -2181,12 +2375,23 @@ class Pane(_core.PaneBase):
                 for c in list(self.challenges or ())]
 
     def _mcp_servers(self):
-        """The core's servers plus the flow progress tools (progress_mcp)."""
+        """The core's servers plus the flow progress tools (progress_mcp) and
+        the panel tools (panel_mcp). A blind reviewer gets neither."""
         servers = super()._mcp_servers()
-        mine = None if self.challenge_of else progress_mcp.descriptor(self)
-        if mine is None:
+        if self.challenge_of:
             return servers
-        return [d for d in servers if d.get("name") != mine["name"]] + [mine]
+        mine = [d for d in (progress_mcp.descriptor(self), self._panel_mcp()) if d]
+        names = {d["name"] for d in mine}
+        return [d for d in servers if d.get("name") not in names] + mine
+
+    def _panel_mcp(self):
+        """The panel tools descriptor: a fresh token, like the seat tools'."""
+        import panel_mcp
+        if not _core.PEER_HUB_URL or str(self.agent).startswith("host:"):
+            return None
+        if (AGENTS.get(self.agent) or {}).get("mcp") is False:
+            return None
+        return panel_mcp.descriptor(self, _core.PEER_HUB_URL, self.mgr.mint_pane_token(self))
 
     def _native_mcp(self):
         """A blind reviewer gets no seat tools: it must not message other panes."""
@@ -2577,6 +2782,8 @@ class Pane(_core.PaneBase):
             # Own branch (worktrees.py): None for an ordinary pane.
             "worktree": self.worktree_view(),
             "usage": self.usage, "alive": alive,
+            # A keeper holds the agent: a hub restart keeps this pane's turn.
+            "durable": self._durable(),
             "events": [e for e in self.events if e["seq"] > since],
             "seq": self.events[-1]["seq"] if self.events else 0,
         }
@@ -2699,7 +2906,7 @@ def _clear_pid_record(pane_dir):
     f = Path(pane_dir) / "meta.json"
     try:
         m = json.loads(f.read_text(encoding="utf-8"))
-        for k in ("pid", "pgid", "pid_start"):
+        for k in ("pid", "pgid", "pid_start", "keeper"):
             m[k] = None
         tmp = f.with_name("meta.json.tmp")
         tmp.write_text(json.dumps(m, indent=1), encoding="utf-8")
@@ -2722,10 +2929,14 @@ class Manager(_core.ManagerBase):
         self.orphans = {}          # pane id -> what restore() did to its old adapter
         import schedule               # scheduled prompts; the hub starts its ticker
         self.schedule = schedule.Scheduler(self, STATE / "schedule.json")
+        import panel                  # durable cross-vendor review runs (panel.py)
+        self.panels = panel.Panels(self, STATE / "panels")
         self._lock = threading.Lock()
         self.mcp = mcp.Registry()
         self.catalog = self._load_catalog()
         self.restore()
+        # Runs the previous hub left mid-flight go on from where their arms are.
+        self.panels.resume()
         # Probe in the background so startup never waits on a vendor.
         threading.Thread(target=self.seed_catalogs, daemon=True).start()
 
@@ -2824,6 +3035,44 @@ class Manager(_core.ManagerBase):
         pane.save_meta()
         return {"pane": pane, "delivered": True, "error": None}
 
+    # ── the panel tools' routes (panel_mcp.py), by pane token ──────────────
+    def peer_http(self, method, path, token, body=None):
+        if not path.startswith("/api/peer/panel/"):
+            return super().peer_http(method, path, token, body)
+        pane = self.pane_for_token(token)
+        if pane is None:
+            return 401, {"error": "unknown or expired pane token"}
+        panels = getattr(self, "panels", None)
+        if panels is None:
+            return 503, {"error": "panels are not available on this hub"}
+        import panel as _panel
+        b = body if isinstance(body, dict) else {}
+        try:
+            if method == "POST" and path == "/api/peer/panel/start":
+                charge = b.get("charge")
+                if not charge and b.get("charge_file"):
+                    p = Path(str(b["charge_file"])).expanduser()
+                    if not p.is_absolute():
+                        p = Path(pane.cwd) / p
+                    charge = p.read_text(encoding="utf-8")
+                return 200, {"result": "started", "panel": panels.start(
+                    charge=charge, lanes=b.get("lanes") or [], cwd=b.get("cwd") or pane.cwd,
+                    topic=b.get("topic") or "", rounds=b.get("rounds") or _panel.DEFAULT_ROUNDS,
+                    synth_lane=b.get("synth_lane") or None, author=pane.id,
+                    brief_id=b.get("brief_id") or None)}
+            if method == "GET" and path == "/api/peer/panel/status":
+                pid = str(b.get("id") or "")
+                if not pid:
+                    return 200, {"result": "list", "panels": panels.list()}
+                return 200, {"result": "status", "panel": panels.view(panels.get(pid))}
+            if method == "POST" and path == "/api/peer/panel/next":
+                return 200, {"result": "started", "panel": panels.next(str(b.get("id") or ""))}
+            if method == "POST" and path == "/api/peer/panel/ack":
+                return 200, {"result": "acked", "panel": panels.ack(str(b.get("id") or ""))}
+        except (_panel.PanelError, OSError) as e:
+            return 200, {"result": "refused", "why": str(e)[:400]}
+        return 404, {"error": "no such peer route"}
+
     def shutdown_notes(self, why):
         """Write a shutdown note on every pane with work in flight; returns the count.
 
@@ -2837,6 +3086,13 @@ class Manager(_core.ManagerBase):
             except Exception as e:             # noqa: BLE001
                 print(f"corral-light: shutdown note for {p.id} failed: {e}",
                       file=sys.stderr, flush=True)
+            # Let go of a kept agent without ending it: the keeper spools
+            # until the next hub reattaches.
+            try:
+                if p._durable():
+                    p.client.detach()
+            except Exception:                  # noqa: BLE001
+                pass
         return n
 
     def seed_catalogs(self):
@@ -3047,13 +3303,17 @@ class Manager(_core.ManagerBase):
                 print(f"corral-light: pane {d.name} not restored — "
                       f"meta.json unreadable: {e}", file=sys.stderr, flush=True)
                 continue
-            if m.get("pgid") and m.get("agent") in AGENTS:
+            kept = (isinstance(m.get("keeper"), dict) and m["keeper"].get("sock")
+                    and not m.get("closed") and m.get("id") and m.get("agent") in AGENTS)
+            if m.get("pgid") and m.get("agent") in AGENTS and not kept:
                 orphans.append((m.get("id") or d.name, m.get("pid"), m.get("pgid"),
                                 m.get("pid_start"), AGENTS[m["agent"]]["argv"][:2]))
             if m.get("closed") or not m.get("id"):
                 continue
             metas.append(m)
         # Reap the previous hub's orphaned adapters before any session/load.
+        # Agents a keeper holds are not orphans: those panes are reattached
+        # below, and only a keeper that no longer answers is reaped (late).
         reaped = acp.reap_orphans(orphans) if orphans else {}
         self.orphans = {k: v for k, v in reaped.items()}
         for key, outcome in reaped.items():
@@ -3073,6 +3333,28 @@ class Manager(_core.ManagerBase):
                       f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
                 continue
             self.panes[m["id"]] = p
+            if p.keeper:
+                attached = False
+                try:
+                    attached = p.reattach()
+                except Exception as e:       # noqa: BLE001
+                    print(f"corral-light: pane {m['id']}: reattach failed: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                    p.keeper = None
+                if attached:
+                    p.emit("note", {"text": "the hub restarted; this conversation's "
+                                            "agent kept running under its keeper and "
+                                            "was picked back up"}, activity=False)
+                    continue             # its ledger was settled by reattach()
+                # The keeper is gone (or did not answer): its group is the orphan.
+                if m.get("pgid"):
+                    late = acp.reap_orphans([(m["id"], m.get("pid"), m.get("pgid"),
+                                              m.get("pid_start"),
+                                              AGENTS[m["agent"]]["argv"][:2])])
+                    self.orphans.update(late)
+                    for key, outcome in late.items():
+                        print(f"corral-light: previous hub's keeper for pane {key}: "
+                              f"{outcome}", file=sys.stderr, flush=True)
             # Turns the previous hub left open were cut off: say so once, never re-send.
             try:
                 cut = p._turns().recover()
@@ -3822,8 +4104,11 @@ class Manager(_core.ManagerBase):
                                   tree=tree, tmp_dir=p.dir)
             # What _wt needs to recognise an index.lock this agent's git left;
             # with no live client, the agent is already gone.
-            stale = {"pid": (getattr(getattr(p.client, "p", None), "pid", None) or p.pid)
-                     if alive else p.pid,
+            cp = getattr(p.client, "p", None)
+            # Under a keeper, p.pid is the keeper's: the process whose git left
+            # a lock is the adapter, so name that one.
+            stale = {"pid": (getattr(cp, "adapter_pid", None) or getattr(cp, "pid", None)
+                             or p.pid) if alive else p.pid,
                      "start": p.pid_start,
                      "lock": _wt._index_path(e["path"]) + ".lock",
                      "stopped_at": time.time()}
@@ -3835,6 +4120,7 @@ class Manager(_core.ManagerBase):
                 p.client = None
                 stale["stopped_at"] = time.time()
             p.pid = p.pgid = p.pid_start = None
+            p.keeper = None
             p.state = "detached"
             r = _wt.discard(e, tree, registry=reg, tmp_dir=p.dir, stale_lock=stale)
             p.worktree_blocked = self._worktree_blocked_reason(self.worktree_entry(p))
@@ -3904,4 +4190,7 @@ class Manager(_core.ManagerBase):
                 # Scheduled prompts (schedule.py) — what will start on its own.
                 "schedule": (self.schedule.list()
                              if getattr(self, "schedule", None) else []),
+                # Panel runs (panel.py): running, and done ones until acknowledged.
+                "panels": (self.panels.list()
+                           if getattr(self, "panels", None) else []),
                 "at": int(time.time())}

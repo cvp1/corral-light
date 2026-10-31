@@ -298,7 +298,16 @@ def _pid_running(pid):
             state = f.read().rsplit(")", 1)[1].split()[0]
         return state != "Z"
     except OSError:
-        return True
+        pass
+    try:                                   # no /proc (macOS): ask ps the same question
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           capture_output=True, text=True, timeout=5)
+        st = r.stdout.strip()
+        if r.returncode == 0 and st:
+            return not st.startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return True
 
 
 # ── locations (D2) ────────────────────────────────────────────────────────────

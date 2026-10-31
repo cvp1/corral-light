@@ -12,7 +12,9 @@ import json
 import os
 import queue
 import signal
+import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -31,6 +33,13 @@ MAX_STDOUT_LINE = 16 * 1024 * 1024
 
 
 MAX_STDERR_LINE = 256 * 1024    # stderr carries log lines, not payloads
+
+# The keeper (keeper.py, beside corral_core/): a process in its own session
+# that owns the adapter's stdio and serves it over a Unix socket, so a hub
+# restart does not end the agent. The hub talks the same ACP through it.
+KEEPER_PY = Path(__file__).resolve().parent.parent / "keeper.py"
+KEEPER_CONNECT_S = 20           # for a freshly spawned keeper's socket to answer
+KEEPER_REATTACH_S = 5           # for a surviving keeper's socket to answer
 
 
 class AgentError(Exception):
@@ -86,6 +95,63 @@ def _spawn(fn, timeout=None):
             f"is stuck (every lane waits behind it); see the hub's log")
 
 
+class _KeeperProc:
+    """What AcpClient needs of a Popen, answered over a keeper's socket: the
+    adapter's stdio as text files, a pid (the keeper's, the group leader, so
+    killpg reaches the adapter too), and poll()/wait() fed by the keeper's
+    exit frame. terminate() asks the keeper to end the adapter."""
+
+    def __init__(self, sock, reader, hello, keeper_pid):
+        self.sock = sock
+        self.stdout = reader
+        self.stdin = sock.makefile("w", encoding="utf-8", newline="\n")
+        self.stderr = None                      # the keeper keeps it; see hello
+        self.pid = keeper_pid
+        self.adapter_pid = hello.get("adapter_pid")
+        self.rc = None
+        self._ended = threading.Event()
+        if not hello.get("alive", True):
+            self.exited(hello.get("rc"))
+
+    def poll(self):
+        return self.rc
+
+    def wait(self, timeout=None):
+        if not self._ended.wait(timeout):
+            raise subprocess.TimeoutExpired("keeper", timeout)
+        return self.rc
+
+    def exited(self, rc):
+        self.rc = -1 if rc is None else rc
+        self._ended.set()
+
+    def terminate(self):
+        try:
+            self.stdin.write(json.dumps({"keeper": "close"}) + "\n")
+            self.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
+    def kill(self):
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def close_socket(self):
+        """End the connection. shutdown() first: a readline() in progress on
+        another thread returns EOF at once, where closing its file would wait
+        for the read to finish (measured: a detach blocked until the agent's
+        next line, which then landed in the hub that was letting go). The
+        reader thread closes `stdout` itself when its loop ends."""
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        _close_quietly(self.stdin)
+        _close_quietly(self.sock)
+
+
 class AcpClient:
     """One agent subprocess. Thread-safe for one writer per method."""
 
@@ -102,9 +168,15 @@ class AcpClient:
         self.exit_reason = None
         self.stderr_tail = []
         self._closed = False       # set by close()
+        self._detached = False     # set by detach(): the hub lets go, the agent stays
+        self._stop_reading = False
+        self.keeper = None         # {sock, dir} when a keeper holds the adapter
+        self.kp = None             # the keeper Popen (None for a reattached one)
+        self.adopted = []          # reattach(): hub requests still outstanding
+        self.hello = None
 
     def __init__(self, argv, cwd, env=None, on_event=None, on_permission=None,
-                 strip_env=()):
+                 strip_env=(), keeper=None):
         self.argv = list(argv)
         self.cwd = str(cwd)
         self.on_event = on_event or (lambda kind, payload: None)
@@ -116,6 +188,10 @@ class AcpClient:
         full_env = {k: v for k, v in os.environ.items()
                     if not (strip_env and k.startswith(tuple(strip_env)))}
         full_env.update(env or {})
+        if keeper:
+            self.keeper = dict(keeper)
+            self._spawn_keeper(full_env)
+            return
         # Fork from a long-lived thread: PR_SET_PDEATHSIG fires when the
         # forking THREAD exits, and callers run on short-lived HTTP threads.
         try:
@@ -132,6 +208,137 @@ class AcpClient:
         self.alive = True
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
+
+    # ── the keeper: an adapter that outlives this hub ────────────────────
+    def _spawn_keeper(self, full_env):
+        """Start keeper.py around the adapter and attach to its socket."""
+        sock_path, work = str(self.keeper["sock"]), Path(self.keeper["dir"])
+        try:
+            work.mkdir(parents=True, exist_ok=True, mode=0o700)
+            Path(sock_path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                Path(sock_path).unlink()
+            except FileNotFoundError:
+                pass
+        except OSError as e:
+            raise AgentError(f"could not prepare the keeper's dir: {e}")
+        argv = [sys.executable, "-I", str(KEEPER_PY), "--sock", sock_path,
+                "--dir", str(work), "--cwd", self.cwd, "--", *self.argv]
+        try:
+            log = (work / "keeper.log").open("wb")
+        except OSError as e:
+            raise AgentError(f"could not open the keeper's log: {e}")
+        try:
+            self.kp = _spawn(lambda: subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                env=full_env, cwd=self.cwd, start_new_session=True))
+        except OSError as e:
+            raise AgentError(f"could not start the keeper: {e}")
+        finally:
+            _close_quietly(log)
+        self.pgid = self.kp.pid
+        self.start_token = process_start_token(self.kp.pid)
+        try:
+            self._connect_keeper(sock_path, self.kp.pid, KEEPER_CONNECT_S)
+        except AgentError:
+            try:
+                os.killpg(self.kp.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            raise
+        self.alive = self.p.rc is None
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+
+    def _connect_keeper(self, sock_path, keeper_pid, timeout):
+        """Connect to a keeper's socket and read its hello. Sets self.p."""
+        deadline = time.monotonic() + timeout
+        sock = None
+        while True:
+            if self.kp is not None and self.kp.poll() is not None:
+                raise AgentError(f"the keeper exited rc={self.kp.returncode} before "
+                                 f"its socket answered; see its keeper.log")
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(timeout)
+                s.connect(sock_path)
+                sock = s
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                _close_quietly(s)
+                if time.monotonic() >= deadline:
+                    raise AgentError(f"the keeper's socket did not answer within "
+                                     f"{timeout}s ({sock_path})")
+                time.sleep(0.05)
+            except OSError as e:
+                _close_quietly(s)
+                raise AgentError(f"could not reach the keeper: {e}")
+        reader = sock.makefile("r", encoding="utf-8", errors="replace")
+        try:
+            line = reader.readline()
+            hello = json.loads(line) if line.strip() else None
+        except (OSError, ValueError):
+            hello = None
+        if not isinstance(hello, dict) or hello.get("keeper") != "hello":
+            _close_quietly(reader)
+            _close_quietly(sock)
+            raise AgentError("the keeper did not say hello")
+        sock.settimeout(None)
+        self.hello = hello
+        self.p = _KeeperProc(sock, reader, hello, keeper_pid)
+        self.stderr_tail = [str(x)[:400] for x in (hello.get("stderr_tail") or [])][-40:]
+        with self._idlock:
+            self._id = max(self._id, int(hello.get("next_id") or 1) - 1)
+        return hello
+
+    @classmethod
+    def reattach(cls, sock_path, keeper_pid, cwd, on_event=None, on_permission=None):
+        """Adopt an adapter a keeper kept alive across a hub restart.
+
+        `adopted` lists the hub requests the previous hub never saw answered
+        (a `session/prompt` means a turn is still running: wait on it with
+        await_adopted). Permission requests the old hub left unanswered are
+        raised again through `on_permission`, then whatever the agent said
+        while no hub listened arrives through `on_event` in order.
+        """
+        c = cls.__new__(cls)
+        c.argv, c.cwd = [], str(cwd)
+        c.on_event = on_event or (lambda kind, payload: None)
+        c.on_permission = on_permission or (lambda req: None)
+        c._init_state()
+        c.keeper = {"sock": str(sock_path)}
+        hello = c._connect_keeper(str(sock_path), int(keeper_pid), KEEPER_REATTACH_S)
+        c.pgid = int(hello.get("pgid") or keeper_pid)
+        c.start_token = process_start_token(c.pgid)
+        for o in hello.get("outstanding") or []:
+            if isinstance(o, dict) and o.get("id") is not None:
+                c.adopted.append({"id": o["id"], "method": str(o.get("method") or "")})
+                c._pending[o["id"]] = {"ev": threading.Event(), "result": None,
+                                       "error": None}
+        c.alive = c.p.rc is None
+        # Cards the previous hub was shown and never answered come first:
+        # they predate anything in the spool.
+        for msg in hello.get("agent_requests") or []:
+            if isinstance(msg, dict) and "method" in msg and "id" in msg:
+                c._on_request(msg)
+        threading.Thread(target=c._read_stdout, daemon=True).start()
+        return c
+
+    def await_adopted(self, rid, method="session/prompt"):
+        """Wait for the answer to a request a previous hub sent."""
+        slot = self._pending.get(rid)
+        if slot is None:
+            raise AgentError(f"{method}: no such outstanding request")
+        return self._wait_slot(rid, slot, method, None)
+
+    def detach(self):
+        """Let go of a kept adapter without ending it: the socket closes, the
+        keeper spools, and no waiter here is told anything (the hub is
+        exiting). A client with no keeper is simply closed."""
+        if not isinstance(getattr(self, "p", None), _KeeperProc):
+            return self.close()
+        self._detached = True
+        self._stop_reading = True
+        self.p.close_socket()
 
     # ── wire ─────────────────────────────────────────────────────────────
     def _write(self, obj):
@@ -163,6 +370,9 @@ class AcpClient:
             with self._idlock:
                 self._pending.pop(rid, None)
             raise
+        return self._wait_slot(rid, slot, method, timeout)
+
+    def _wait_slot(self, rid, slot, method, timeout):
         # Poll in slices so silence can be reported without being acted on.
         noticed = False
         sent_at = time.monotonic()
@@ -206,6 +416,8 @@ class AcpClient:
         return slot["result"]
 
     def _read_stderr(self):
+        if getattr(self.p, "stderr", None) is None:
+            return                      # a keeper holds it; its tail rides the frames
         try:
             while True:
                 line = self._read_bounded_line(self.p.stderr, MAX_STDERR_LINE)
@@ -239,7 +451,7 @@ class AcpClient:
 
     def _read_stdout(self):
         try:
-            while True:
+            while not self._stop_reading:
                 line = self._read_bounded_line(self.p.stdout)
                 if line is None:
                     break
@@ -258,55 +470,102 @@ class AcpClient:
         except Exception as e:  # noqa: BLE001
             self.exit_reason = f"reader failed: {type(e).__name__}: {e}"
         finally:
-            self.alive = False
-            rc = self.p.poll()
-            if rc is None and self.exit_reason and not self._closed:
-                # The reader failed but the process lives; kill its group.
-                try:
-                    os.killpg(self.pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    try:
-                        self.p.kill()
-                    except Exception:       # noqa: BLE001
-                        pass
-                try:
-                    rc = self.p.wait(timeout=2)
-                except Exception:           # noqa: BLE001
-                    pass
-            if self._closed:
-                # rc=-15 is our own SIGTERM, not a failure.
-                self.exit_reason = "closed by you"
+            if self._detached:
+                # The hub let go on purpose; the agent runs on under its
+                # keeper, and nothing here is news to anyone. This thread
+                # owns stdout; it closes it.
+                _close_quietly(getattr(self.p, "stdout", None))
             else:
-                self.exit_reason = self.exit_reason or (
-                    f"agent exited rc={rc}" + (f": {self.stderr_tail[-1]}"
-                                               if self.stderr_tail else ""))
-            # Release every waiter on a dead process.
-            for slot in list(self._pending.values()):
-                slot["error"] = self.exit_reason
-                slot["ev"].set()
-            for key, slot in list(self._perm_answers.items()):
-                slot["ev"].set()
-                self.on_event("permission_expired",
-                              {"requestId": key, "reason": "agent exited"})
-            # This thread owns stdout; close it to avoid an fd leak.
-            _close_quietly(getattr(self.p, "stdout", None))
-            self.on_event("agent_exit", {"reason": self.exit_reason,
-                                         "closed": self._closed, "rc": rc})
+                self._reader_ended()
+
+    def _reader_ended(self):
+        """The adapter's stream ended: settle the process, release every
+        waiter, and report the exit."""
+        self.alive = False
+        rc = self.p.poll()
+        if self.kp is not None:
+            self.kp.poll()                       # reap a keeper that is gone (no zombie)
+        if rc is None and self.exit_reason and not self._closed:
+            # The reader failed but the process lives; kill its group.
+            try:
+                os.killpg(self.pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    self.p.kill()
+                except Exception:       # noqa: BLE001
+                    pass
+            try:
+                rc = self.p.wait(timeout=2)
+            except Exception:           # noqa: BLE001
+                pass
+        if self._closed:
+            # rc=-15 is our own SIGTERM, not a failure.
+            self.exit_reason = "closed by you"
+        else:
+            self.exit_reason = self.exit_reason or (
+                f"agent exited rc={rc}" + (f": {self.stderr_tail[-1]}"
+                                           if self.stderr_tail else ""))
+        # Release every waiter on a dead process. A slot already answered
+        # (a replayed completion, then the exit frame) keeps its answer.
+        for slot in list(self._pending.values()):
+            if slot["ev"].is_set():
+                continue
+            slot["error"] = self.exit_reason
+            slot["ev"].set()
+        for key, slot in list(self._perm_answers.items()):
+            slot["ev"].set()
+            self.on_event("permission_expired",
+                          {"requestId": key, "reason": "agent exited"})
+        # This thread owns stdout; close it to avoid an fd leak.
+        _close_quietly(getattr(self.p, "stdout", None))
+        close_sock = getattr(self.p, "close_socket", None)
+        if close_sock is not None:
+            close_sock()                     # the keeper then quits
+        self.on_event("agent_exit", {"reason": self.exit_reason,
+                                     "closed": self._closed, "rc": rc})
 
     def _dispatch(self, msg):
         # Any parsed message counts as activity for the stall notice.
         self._last_activity = time.monotonic()
+        if "keeper" in msg and isinstance(self.p, _KeeperProc):
+            return self._on_keeper_frame(msg)
         if "id" in msg and "method" not in msg:               # response to us
             slot = self._pending.get(msg["id"])
             if slot:
                 slot["result"], slot["error"] = msg.get("result"), msg.get("error")
                 slot["ev"].set()
+            if isinstance(self.p, _KeeperProc):
+                # Received, not merely flushed: the keeper may forget it now.
+                try:
+                    self._write({"keeper": "ack", "id": msg["id"]})
+                except AgentError:
+                    pass
             return
         if "method" in msg and "id" in msg:                    # agent asks us
             return self._on_request(msg)
         if msg.get("method") == "session/update":              # notification
             u = (msg.get("params") or {}).get("update") or {}
             self.on_event(u.get("sessionUpdate") or "unknown", u)
+
+    def _on_keeper_frame(self, msg):
+        kind = msg.get("keeper")
+        if kind == "replayed":
+            self.on_event("keeper_replayed", {"n": msg.get("n") or 0,
+                                              "dropped": msg.get("dropped") or 0})
+            if self.p.rc is not None:
+                # The adapter had already exited when we attached and its
+                # exit frame went to the previous hub: this is the end.
+                self._closed = self._closed or bool((self.hello or {}).get("closed"))
+                self.exit_reason = self.exit_reason or f"agent exited rc={self.p.rc}"
+                self._stop_reading = True
+        elif kind == "exit":
+            tail = [str(x)[:400] for x in (msg.get("stderr_tail") or [])][-40:]
+            if tail:
+                self.stderr_tail = tail
+            if msg.get("closed"):
+                self._closed = True
+            self.p.exited(msg.get("rc"))
+            self._stop_reading = True
 
     def _on_request(self, msg):
         method, rid, params = msg["method"], msg["id"], msg.get("params") or {}
@@ -442,6 +701,13 @@ class AcpClient:
             self.p.wait(timeout=3)
         except Exception:
             pass
+        if self.kp is not None:
+            # Reap the keeper we forked: until its parent waits on it, it is a
+            # zombie, and a zombie still answers for its process group below.
+            try:
+                self.kp.wait(timeout=3)
+            except Exception:               # noqa: BLE001
+                pass
         # Bounded: close() runs inside an HTTP handler.
         deadline = time.time() + 2
         while time.time() < deadline:
@@ -465,6 +731,12 @@ class AcpClient:
         except Exception:
             pass
         _close_quietly(getattr(self.p, "stdin", None))           # the writer end is ours
+        if isinstance(self.p, _KeeperProc):
+            self.p.close_socket()
+            try:
+                Path(self.keeper["sock"]).unlink()
+            except (OSError, KeyError, TypeError):
+                pass
 
 
 # ── orphans from a previous hub ─────────────────────────────────────────────
@@ -616,6 +888,7 @@ def reap_orphans(candidates, term_wait=None, kill_wait=None):
             out[key] = f"left alone: {e}"
     deadline = time.time() + term_wait
     while groups and time.time() < deadline:
+        _reap_own_children(groups.values())
         if not any(_group_alive(g) for g in groups.values()):
             break
         time.sleep(0.05)
@@ -629,9 +902,21 @@ def reap_orphans(candidates, term_wait=None, kill_wait=None):
             pass
         end = time.time() + kill_wait
         while time.time() < end and _group_alive(g):
+            _reap_own_children([g])
             time.sleep(0.05)
         out[key] = "killed" if not _group_alive(g) else "still running after SIGKILL"
     return out
+
+
+def _reap_own_children(pids):
+    """waitpid() each pid that is this process's own child, so a group leader
+    we forked ourselves (a keeper, in a test or a hub that restarted in
+    place) does not linger as a zombie that still answers for its group."""
+    for pid in pids:
+        try:
+            os.waitpid(int(pid), os.WNOHANG)
+        except (ChildProcessError, OSError, ValueError, TypeError):
+            pass
 
 
 def _close_quietly(stream):

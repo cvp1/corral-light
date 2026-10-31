@@ -803,6 +803,95 @@ def cmd_crossfeed(args):
 # turn is current, so callers only wait on turns they sent.
 
 
+# ── durable panels (panel.py): the hub runs the arms; you get the packet ──
+def _panel_line(p):
+    arms = ", ".join(f"{a['lane']}:" + "/".join(
+        f"r{k}={v.get('verdict') or v.get('status')}" for k, v in sorted((a.get("rounds") or {}).items()))
+        for a in p.get("arms") or [])
+    return (f"{p['id']}  {p['status']:<9} r{p.get('round', 0)}/{p.get('max_rounds', 1)}  "
+            f"{p.get('topic', '')[:40]:<40} {arms}"
+            + ("  [needs ack]" if p.get("needs_ack") else "")
+            + (f"  packet: {p['packet_path']}" if p.get("packet_path") else "")
+            + (f"  error: {p['error']}" if p.get("error") else ""))
+
+
+def _same_hub(url):
+    mine = (os.environ.get("CORRAL_HUB_URL") or "").rstrip("/")
+    return bool(mine) and mine == (url or "").rstrip("/")
+
+
+def cmd_panel(args):
+    hub = connect(args.url)
+    verb = args.verb
+    if verb == "start":
+        if not args.charge_file:
+            raise ConsultError("panel start needs --charge-file")
+        charge = Path(args.charge_file).expanduser().read_text(encoding="utf-8")
+        body = {"charge": charge, "lanes": [lane_key(x) for x in (args.lane or [])],
+                "cwd": str(Path(args.cwd).expanduser().resolve()), "topic": args.topic or "",
+                "rounds": args.rounds, "synthLane": lane_key(args.synth_lane) if args.synth_lane else None,
+                # This pane is the author only when the panel runs on ITS hub:
+                # a private hub on another port has no such pane.
+                "author": args.author or (os.environ.get("CORRAL_PANE_ID")
+                                          if _same_hub(args.url) else None),
+                "outDir": args.out, "model": args.model, "effort": args.effort,
+                "briefId": args.brief}
+        r = hub.post("/api/session/panels/start", body, timeout=HANDSHAKE_S)
+        p = r["panel"]
+        print(json.dumps(p, indent=2) if args.json else
+              f"started {p['id']}: {p['topic']} on {', '.join(a['lane'] for a in p['arms'])}; "
+              f"sealed under {p['out_dir']}\n"
+              f"follow with: corral-light consult panel await {p['id']}", flush=True)
+        return 0
+    if verb == "list":
+        ps = hub.get("/api/session/panels")["panels"]
+        if args.json:
+            print(json.dumps(ps, indent=2), flush=True)
+        else:
+            for p in ps:
+                print(_panel_line(p), flush=True)
+            if not ps:
+                print("no panels", flush=True)
+        return 0
+    if not args.id:
+        raise ConsultError(f"panel {verb} needs an id")
+    if verb == "status":
+        r = hub.get("/api/session/panels?id=" + urllib.parse.quote(args.id))
+        print(json.dumps(r, indent=2) if args.json else _panel_line(r["panel"]), flush=True)
+        return 0 if r["panel"]["status"] != "failed" else 1
+    if verb == "await":
+        t0 = time.time()
+        while True:
+            r = hub.get("/api/session/panels?id=" + urllib.parse.quote(args.id))
+            p = r["panel"]
+            if p["status"] in ("done", "failed", "cancelled"):
+                break
+            if time.time() - t0 > args.timeout:
+                print(f"consult: panel {args.id} still {p['status']} after {int(args.timeout)}s; "
+                      f"it keeps running on the hub", file=sys.stderr, flush=True)
+                print(json.dumps(p, indent=2) if args.json else _panel_line(p), flush=True)
+                return 3
+            time.sleep(3)
+        if args.json:
+            print(json.dumps(r, indent=2), flush=True)
+        else:
+            print(_panel_line(p), flush=True)
+            if p.get("packet_path"):
+                try:
+                    print(Path(p["packet_path"]).read_text(encoding="utf-8"), flush=True)
+                except OSError as e:
+                    print(f"(packet unreadable: {e})", flush=True)
+        return 0 if p["status"] == "done" else 1
+    if verb in ("next", "ack", "cancel"):
+        body = {"id": args.id}
+        if verb == "next" and args.charge_file:
+            body["charge"] = Path(args.charge_file).expanduser().read_text(encoding="utf-8")
+        r = hub.post(f"/api/session/panels/{verb}", body)
+        print(json.dumps(r["panel"], indent=2) if args.json else _panel_line(r["panel"]), flush=True)
+        return 0
+    raise ConsultError(f"unknown panel verb {verb!r}")
+
+
 def cmd_close(args):
     hub = connect(args.url)
     out = {}
@@ -882,6 +971,27 @@ def build_parser():
     p.add_argument("--pane", action="append", required=True)
     _prompt_args(p)
     p.set_defaults(fn=cmd_crossfeed)
+
+    p = sub.add_parser("panel", help="a durable cross-vendor review the hub runs; "
+                                      "you get one packet (panel.py)")
+    p.add_argument("verb", choices=("start", "list", "status", "await", "next", "ack", "cancel"))
+    p.add_argument("id", nargs="?", help="the run id (status/await/next/ack/cancel)")
+    p.add_argument("--charge-file", help="the review brief (start; next: a changed one)")
+    p.add_argument("--lane", action="append", help="an arm (repeat; each a different vendor)")
+    p.add_argument("--cwd", default=str(Path.cwd()))
+    p.add_argument("--topic", help="short name; also the sealed folder's name")
+    p.add_argument("--rounds", type=int, default=1, choices=(1, 2),
+                   help="1 (default) or 2 (one cross-feed round)")
+    p.add_argument("--synth-lane", help="who synthesizes (default: a lane that is neither an arm nor the author)")
+    p.add_argument("--author", help="the pane to raise the packet on (default: this pane, "
+                                    "when run from inside one)")
+    p.add_argument("--out", help="where to seal (default: <cwd>/reviews/<date>-<topic>)")
+    p.add_argument("--model")
+    p.add_argument("--effort")
+    p.add_argument("--brief", help="a session brief id to record on the run")
+    p.add_argument("--timeout", type=int, default=4 * 3600, help="await: seconds before giving up (exit 3)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_panel)
 
     p = sub.add_parser("close", help="close panes")
     p.add_argument("--pane", action="append", required=True)

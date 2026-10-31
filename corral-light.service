@@ -31,9 +31,12 @@ Environment=CORRAL_OLLAMA_URL=http://127.0.0.1:11434
 Restart=always
 RestartSec=3
 
-# mixed: SIGTERM reaches the hub alone first, so it can note interrupted turns
-# in busy panes before systemd kills the agents in the cgroup.
-KillMode=mixed
+# process: SIGTERM reaches the hub ALONE and nothing else in the cgroup is
+# signalled. Each pane's agent runs under a keeper (keeper.py) in its own
+# session; a restart leaves them running and the new hub picks them back up,
+# turns and permission cards included. (It was `mixed` before keepers: the
+# hub noted interrupted turns, then systemd killed the agents.)
+KillMode=process
 
 [Install]
 WantedBy=default.target
