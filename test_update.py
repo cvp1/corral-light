@@ -213,6 +213,17 @@ class Run(Repo):
         rs.assert_called_once_with(True)
         wh.assert_not_called()
 
+    def test_from_inside_a_kept_pane_it_is_not_told_its_turn_ends(self):
+        for durable, told in ((True, False), (False, True)):
+            self.push(text=f"v{durable}", msg=f"push {durable}")
+            with mock.patch.object(update, "inside_hub", return_value=True), \
+                    mock.patch.object(update, "_own_durable", return_value=durable), \
+                    mock.patch.object(update, "restart", return_value=(True, "queued")), \
+                    mock.patch.object(update, "wait_healthy"):
+                _, _, lines = self.run_update(self.hub())
+            self.assertEqual(any("turn ends now" in x for x in lines), told,
+                             (durable, lines))
+
     def test_a_stale_hub_is_restarted_even_when_the_checkout_is_current(self):
         st = self.hub(commit="0" * 40)
         with mock.patch.object(update, "inside_hub", return_value=False), \

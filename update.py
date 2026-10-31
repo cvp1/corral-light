@@ -687,7 +687,9 @@ def run(a, say):
         elif a.no_restart and p["behind"]:
             say("--no-restart: the running hub keeps the old code until it restarts")
         return EXIT_OK, res
-    if inside:
+    if inside and not _own_durable():
+        # A pane a keeper holds keeps its turn (restart() says so); only a
+        # plain one ends here (2026-10-31: a kept pane was told it would end).
         say("restarting the hub from inside it: this pane's turn ends now; "
             "it resumes on your next message")
     done, msg = restart(inside)
