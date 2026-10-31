@@ -59,7 +59,10 @@ import threading
 import time
 from pathlib import Path
 
-MAX_LINE = 16 * 1024 * 1024
+# The client reads at most 16 MiB per line; the envelope adds a few dozen
+# bytes, so an adapter line is capped below that (a cut line is not JSON and
+# is dropped, counted).
+MAX_LINE = 16 * 1024 * 1024 - 4096
 MAX_STDERR_LINE = 256 * 1024
 STDERR_TAIL = 40
 OUTBOX_MAX_BYTES = int(os.environ.get("CORRAL_KEEPER_OUTBOX_MAX") or 64 * 1024 * 1024)
@@ -102,9 +105,20 @@ def _read_line(stream, limit):
 def _parse(line):
     try:
         msg = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):        # RecursionError: nested too deep
         return None
     return msg if isinstance(msg, dict) else None
+
+
+def _key(rid):
+    """One key for a request id whatever its JSON type (1 and "1" alike)."""
+    return str(rid)
+
+
+def _valid_id(rid):
+    """A JSON-RPC id this keeper can key on: str, int or null (not bool)."""
+    return rid is None or isinstance(rid, str) or (
+        isinstance(rid, int) and not isinstance(rid, bool))
 
 
 def envelope(seq, line):
@@ -139,7 +153,12 @@ class Conn:
         caught_up_sent = False
         try:
             self.file.write(self.hello)
-            for seq, line in self.held:
+            with k.lock:
+                # Re-checked here, not at attach: a card answered since the
+                # snapshot is not re-sent. (The window from here to the write
+                # remains; the client drops a card it already answered.)
+                held = [(s, l) for s, l in self.held if s in k.held]
+            for seq, line in held:
                 self.file.write(envelope(seq, line))
             self.file.flush()
             while True:
@@ -198,8 +217,8 @@ class Keeper:
         self.acked = 0                      # cumulative ack from the hubs
         self.held = {}                      # seq -> line: unanswered cards at or below acked
         self.cards = {}                     # agent request id (str) -> seq, until answered
-        self.outstanding = {}               # hub request id -> method, until its response is acked
-        self.resp_seq = {}                  # hub request id -> seq of its response
+        self.outstanding = {}               # str(id) -> (id, method), until its response is acked
+        self.resp_seq = {}                  # str(id) -> seq of its response
         self.max_hub_id = 0
         self.exit_seq = None
         self.exit_rc = None
@@ -238,7 +257,7 @@ class Keeper:
             self.entries.append(Entry(line, kind, rid))
             self.bytes += len(line)
             if kind == RESP:
-                self.resp_seq[rid] = seq
+                self.resp_seq[_key(rid)] = seq
             elif kind == CARD:
                 self.cards[rid] = seq
             elif kind == EXIT:
@@ -275,10 +294,10 @@ class Keeper:
                 if e.kind == CARD and e.rid in self.cards:
                     self.held[self.base] = e.line          # unanswered: held for a re-raise
             self.base += 1
-        for rid, s in list(self.resp_seq.items()):
+        for key, s in list(self.resp_seq.items()):
             if s <= self.acked:
-                self.resp_seq.pop(rid, None)
-                self.outstanding.pop(rid, None)
+                self.resp_seq.pop(key, None)
+                self.outstanding.pop(key, None)
 
     # ── adapter ──────────────────────────────────────────────────────────
     def start_adapter(self):
@@ -317,8 +336,9 @@ class Keeper:
                     break
                 if line.strip():
                     self.append(line)
-        except (OSError, ValueError) as e:
-            _log(f"adapter stdout reader stopped: {e}")
+        except Exception as e:                       # noqa: BLE001
+            # Whatever stops the reader, the exit below is still appended.
+            _log(f"adapter stdout reader stopped: {type(e).__name__}: {e}")
         rc = None
         try:
             rc = self.p.wait(timeout=TERM_WAIT_S)
@@ -416,7 +436,8 @@ class Keeper:
                 "hello", version=VERSION, pid=os.getpid(),
                 adapter_pid=self.p.pid if self.p else None, pgid=os.getpgid(0),
                 alive=self.exit_rc is None, rc=self.exit_rc,
-                outstanding=[{"id": k, "method": v} for k, v in self.outstanding.items()],
+                outstanding=[{"id": rid, "method": m}
+                             for rid, m in self.outstanding.values()],
                 next_id=self.max_hub_id + 1, acked=self.acked, next_seq=self.next_seq,
                 held=len(self.held), dropped=self.dropped,
                 # What this attach replays before live lines: the unacked,
@@ -446,6 +467,7 @@ class Keeper:
 
     def _read_hub(self, c):
         r = c.sock.makefile("rb")
+        why = "hub closed the connection"
         try:
             while True:
                 line = _read_line(r, MAX_LINE)
@@ -455,16 +477,25 @@ class Keeper:
                     break
         except (OSError, ValueError):
             pass
-        with self.lock:
-            if self.conn is c:
-                self.drop_conn_locked("hub closed the connection")
+        except Exception as e:                       # noqa: BLE001
+            # A line nothing above expected must not leave a dead reader
+            # owning the agent (the orphan watch would never fire).
+            why = f"hub reader failed: {type(e).__name__}: {e}"
+        finally:
+            with self.lock:
+                if self.conn is c:
+                    self.drop_conn_locked(why)
+            try:
+                r.close()
+            except OSError:
+                pass
 
     def accept_from_hub(self, c, line):
         """Take one line from hub `c`: bookkeeping and the stdin queue, both
         under the lock and only while `c` owns the agent. -> False when `c`
         has been replaced (it drives nothing from then on)."""
         msg = _parse(line)
-        close = False
+        close = False                       # this hub's close, claimed under the lock
         with self.lock:
             while True:
                 if self.conn is not c:
@@ -479,13 +510,20 @@ class Keeper:
                 if cmd == "ack":
                     try:
                         self.ack_locked(msg.get("s"))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):   # 1e309 is inf
                         pass
                     self.cv.notify_all()
-                close = cmd == "close"
+                # Claimed in the same hold as the owner check: a hub
+                # replaced after this point cannot have its close run.
+                close = cmd == "close" and self.claim_close_locked()
             else:
+                if msg is not None and "id" in msg and not _valid_id(msg["id"]):
+                    self.dropped += 1                # JSON-RPC ids are str, int or null
+                    return True
                 if msg is not None and "id" in msg and "method" in msg:
-                    self.outstanding[msg["id"]] = msg["method"]
+                    # Keyed by str(id): a reply whose id is "1" for request 1
+                    # still clears it. The raw id goes back in the hello.
+                    self.outstanding[_key(msg["id"])] = (msg["id"], msg["method"])
                     if isinstance(msg["id"], int):
                         self.max_hub_id = max(self.max_hub_id, msg["id"])
                 elif msg is not None and "id" in msg:
@@ -501,7 +539,7 @@ class Keeper:
                     self.stdin_bytes += len(line)
                     self.stdin_cv.notify_all()
         if close:
-            self.close_adapter()
+            self.end_adapter()
         return True
 
     # ── lifecycle ────────────────────────────────────────────────────────

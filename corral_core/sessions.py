@@ -158,6 +158,19 @@ def _emit_perf_record(ms):
                 EMIT_STATS["over_ms"][str(b)] += 1
 
 
+def _hold(pane, tag):
+    """Tell a keeper-backed client the pane holds unemitted content."""
+    c = getattr(pane, "client", None)
+    if c is not None and hasattr(c, "hold"):
+        c.hold(tag)
+
+
+def _release(pane, tag):
+    c = getattr(pane, "client", None)
+    if c is not None and hasattr(c, "release"):
+        c.release(tag)
+
+
 def emit_perf_snapshot():
     """None when the switch is off; else counts, mean and max in ms."""
     if not EMIT_PERF:
@@ -731,6 +744,8 @@ class PaneBase:
             return
         lock = self.__dict__.setdefault("_text_lock", threading.Lock())
         with lock:
+            if not self._text_acc:
+                _hold(self, "text")
             self._text_acc += text
             now = time.monotonic()
             wait = TEXT_FLUSH_S - (now - self._text_last)
@@ -757,6 +772,7 @@ class PaneBase:
             timer.cancel()          # a no-op when this IS the timer firing
         if acc:
             self.emit("text", {"text": acc})
+        _release(self, "text")
 
     def _flush_thought(self):
         acc = getattr(self, "_thought_acc", "")
@@ -765,6 +781,12 @@ class PaneBase:
             self.emit("thought", {"text": acc})
         else:
             self._thought_acc = ""
+        _release(self, "thought")
+
+    def _flush_buffers(self):
+        """Write out buffered text and thought (a detach, before its ack)."""
+        self._flush_text()
+        self._flush_thought()
 
     def _clear_pending(self, reason):
         """Drop every pending permission, emitting `permission_expired` with `reason`."""

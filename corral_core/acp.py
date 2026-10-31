@@ -8,6 +8,7 @@ the process dying does. Stdlib only; every buffer is bounded.
 Must not import from `corral/` (asserted by test_no_corral_import).
 """
 import concurrent.futures
+import collections
 import json
 import os
 import queue
@@ -43,6 +44,8 @@ KEEPER_REATTACH_S = 5           # for a surviving keeper's socket to answer
 # Keeper protocol 3 (numbered outbox, cumulative acks): a card, a response
 # or the exit is acked the moment it is applied; anything else within this.
 KEEPER_ACK_EVERY_S = 0.2
+DETACH_APPLY_WAIT_S = 2         # detach waits this long for a line being applied
+ANSWERED_CARDS_MAX = 1024
 
 
 class AgentError(Exception):
@@ -181,6 +184,17 @@ class AcpClient:
         self._applied = 0          # v3: the last numbered line this hub applied
         self._acked_sent = 0
         self._ack_stop = threading.Event()
+        # Held by the reader while it applies one line; detach takes it so
+        # its final ack covers a line being applied as it lets go.
+        self._apply_lock = threading.Lock()
+        # Cards this client answered (bounded): a keeper re-sending one in
+        # the window between its re-check and its write is dropped here.
+        self._answered_cards = collections.OrderedDict()
+        # v3: lines the pane has taken in but not yet written out (buffered
+        # text, an open thought): tag -> the seq it started at. No ack passes
+        # them, so a restart replays what was never emitted.
+        self._holds = {}
+        self._cur_seq = 0
 
     def __init__(self, argv, cwd, env=None, on_event=None, on_permission=None,
                  strip_env=(), keeper=None):
@@ -265,8 +279,20 @@ class AcpClient:
         while not self._ack_stop.wait(KEEPER_ACK_EVERY_S):
             self._send_ack()
 
+    def hold(self, tag):
+        """The pane buffered line `_cur_seq` under `tag`: acks stop before it."""
+        if self._kv is not None and self._kv >= 3:
+            self._holds.setdefault(tag, self._cur_seq)
+
+    def release(self, tag):
+        """The pane wrote out what it held under `tag`."""
+        self._holds.pop(tag, None)
+
     def _send_ack(self):
         n = self._applied
+        holds = list(self._holds.values())
+        if holds:
+            n = min(n, min(holds) - 1)
         if n > self._acked_sent:
             try:
                 self._write({"keeper": "ack", "s": n})
@@ -375,16 +401,28 @@ class AcpClient:
             raise AgentError(f"{method}: no such outstanding request")
         return self._wait_slot(rid, slot, method, None)
 
-    def detach(self):
+    def detach(self, flush=None):
         """Let go of a kept adapter without ending it: the socket closes, the
         keeper spools, and no waiter here is told anything (the hub is
         exiting). A client with no keeper is simply closed."""
         if not isinstance(getattr(self, "p", None), _KeeperProc):
             return self.close()
-        self._send_ack()            # what this hub applied is not re-sent
-        self._ack_stop.set()
-        self._detached = True
-        self._stop_reading = True
+        # Wait (bounded) for a line being applied to finish, so the final
+        # ack covers it; after this the reader applies nothing more.
+        got = self._apply_lock.acquire(timeout=DETACH_APPLY_WAIT_S)
+        try:
+            self._detached = True
+            self._stop_reading = True
+            self._ack_stop.set()
+            if flush is not None:
+                try:
+                    flush()         # the pane writes out what it buffered...
+                except Exception:   # noqa: BLE001
+                    pass
+            self._send_ack()        # ...so the ack covers it, and no more
+        finally:
+            if got:
+                self._apply_lock.release()
         self.p.close_socket()
 
     # ── wire ─────────────────────────────────────────────────────────────
@@ -512,7 +550,10 @@ class AcpClient:
                     continue
                 if not isinstance(msg, dict):
                     continue            # valid JSON but not a message
-                self._dispatch(msg)
+                with self._apply_lock:
+                    if self._stop_reading:
+                        break           # detached: the next hub gets this line
+                    self._dispatch(msg)
         except (ValueError, OSError) as e:
             self.exit_reason = str(e)
         except Exception as e:  # noqa: BLE001
@@ -581,6 +622,10 @@ class AcpClient:
             if msg.get("keeper") == "l":                       # v3: one numbered line
                 inner = msg.get("m")
                 urgent = False
+                try:
+                    self._cur_seq = int(msg.get("s"))
+                except (TypeError, ValueError):
+                    pass
                 if isinstance(inner, dict):
                     urgent = "id" in inner or "keeper" in inner
                     self._dispatch_line(inner)
@@ -650,6 +695,9 @@ class AcpClient:
             # Refuse duplicates too: overwriting a live slot leaks its waiter.
             too_many = len(self._perm_answers) >= MAX_PENDING_PERMISSIONS
             duplicate = key in self._perm_answers
+            if (key in self._answered_cards
+                    and isinstance(getattr(self, "p", None), _KeeperProc)):
+                return                  # answered here already: never raised twice
             if duplicate and isinstance(getattr(self, "p", None), _KeeperProc):
                 # A keeper replaying a card this hub already holds (the hello
                 # raised it): the agent asked ONCE, so it gets ONE answer --
@@ -698,6 +746,10 @@ class AcpClient:
         try:
             self._write({"jsonrpc": "2.0", "id": rid, "result": {
                 "outcome": {"outcome": "selected", "optionId": option}}})
+            with self._permlock:
+                self._answered_cards[key] = True
+                while len(self._answered_cards) > ANSWERED_CARDS_MAX:
+                    self._answered_cards.popitem(last=False)
         except AgentError:
             pass                        # died mid-reply; exit path reports it
 

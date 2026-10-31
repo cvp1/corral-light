@@ -600,7 +600,8 @@ class _Hub:
                 pass
 
 
-class KeeperContract(unittest.TestCase):
+class _InProc(unittest.TestCase):
+    """An in-process keeper with a stub agent (setup only; no tests)."""
 
     def setUp(self):
         import keeper
@@ -631,6 +632,9 @@ class KeeperContract(unittest.TestCase):
     def stdin(self):
         """Lines accepted for the adapter's stdin (no writer thread here)."""
         return [json.loads(b) for b in self.k.stdin_q]
+
+
+class KeeperContract(_InProc):
 
     # C1
     def test_c1_lines_are_numbered_in_order(self):
@@ -708,7 +712,7 @@ class KeeperContract(unittest.TestCase):
         h = self.hub()
         h.hello_and_backlog()
         h.send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {}})
-        self.assertEqual(self.k.outstanding, {3: "session/prompt"})
+        self.assertEqual(self.k.outstanding, {"3": (3, "session/prompt")})
         self.k.append(_resp(3))
         s, _ = h.one()
         h2 = self.hub()                           # h crashed before acking
@@ -1116,6 +1120,211 @@ class TheExitedAgentsTurnSettles(KeeperCase):
         self.assertTrue(self.ends(q)[-1].get("adopted"))
         self.assertEqual(q._turns().turns()[meta_turn(q)]["state"], "completed")
         self.assertTrue(wait_for(lambda: q.state == "dead"), q.state)
+
+
+class KeeperAfterReview3(_InProc):
+    """The 2026-10-31 panel on protocol 3 (Codex + Grok). Each test fails
+    on 65f9ca0."""
+
+    # R3-1: a replaced hub's close
+    def test_r3_1_a_close_is_claimed_with_the_owner_check(self):
+        h = self.hub()
+        h.hello_and_backlog()
+        late, ends = [], []
+
+        def end_adapter():
+            ends.append(1)
+            # The window the review traced: the lock is released, a new hub
+            # attaches, then the old hub's close runs.
+            import socket
+            a, b = socket.socketpair()
+            self.addCleanup(b.close)
+            late.append(self.k.attach(a))
+        # Whichever runs after the owner check's lock is released (65f9ca0
+        # called close_adapter, which claimed the close only then).
+        self.k.end_adapter = self.k.close_adapter = end_adapter
+        self.assertTrue(h.send({"keeper": "close"}))
+        self.assertTrue(self.k.closing)
+        self.assertEqual(late, [None], "a hub attached to an agent already being closed")
+        h.send({"keeper": "close"})
+        self.assertEqual(len(ends), 1, "closed twice")
+
+    # R3-2: a held card answered after the attach snapshot
+    def test_r3_2_a_held_card_answered_before_its_resend_is_not_resent(self):
+        self.k.append(_card(7))
+        h = self.hub()
+        h.hello_and_backlog()
+        h.ack()
+        gate = threading.Event()
+        real = self.km.Conn._run
+
+        def gated(conn):
+            gate.wait(5)
+            return real(conn)
+        with mock.patch.object(self.km.Conn, "_run", gated):
+            h2 = self.hub()
+            self.assertTrue(h2.send({"jsonrpc": "2.0", "id": 7, "result": {"outcome": "x"}}))
+            gate.set()
+            _, lines = h2.hello_and_backlog()
+        self.assertEqual(lines, [], "an answered card was re-sent")
+
+    # R3-4: a hub line nobody expected
+    def test_r3_4_a_malformed_request_id_is_dropped_not_fatal(self):
+        h = self.hub()
+        h.hello_and_backlog()
+        for bad in ([], {}, 1.5, True):
+            self.assertTrue(h.send({"jsonrpc": "2.0", "id": bad, "method": "session/prompt"}))
+        self.assertEqual(self.k.outstanding, {})
+        self.assertEqual(self.stdin(), [])
+        self.assertEqual(self.k.dropped, 4)
+        self.assertTrue(h.send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt"}))
+        self.assertEqual(self.k.outstanding, {"3": (3, "session/prompt")})
+
+    def test_r3_4_a_reader_that_fails_still_lets_go_of_the_agent(self):
+        h = self.hub()
+        h.hello_and_backlog()
+        with mock.patch.object(self.k, "accept_from_hub", side_effect=TypeError("boom")):
+            h.sock.sendall(b'{"jsonrpc":"2.0","method":"x"}\n')
+            self.assertTrue(wait_for(lambda: self.k.conn is None, timeout=3),
+                            "a dead reader still owns the agent")
+
+
+class ClientAfterReview3(unittest.TestCase):
+
+    def _client(self):
+        from corral_core import acp
+        c = acp.AcpClient.__new__(acp.AcpClient)
+        c._init_state()
+        c._kv = 3
+        c.alive = True
+        written = []
+
+        class In:
+            def write(self, s):
+                written.append(json.loads(s))
+
+            def flush(self):
+                pass
+        c.p = acp._KeeperProc.__new__(acp._KeeperProc)
+        c.p.stdin = In()
+        c.p.close_socket = lambda: None
+        return c, written
+
+    # R3-3: detach while a line is being applied
+    def test_r3_3_detach_acks_the_line_being_applied(self):
+        c, written = self._client()
+        c._applied_line(1, False)
+        inside = threading.Event()
+
+        def reader():
+            with c._apply_lock:              # applying seq 2, as _read_stdout does
+                inside.set()
+                time.sleep(0.3)
+                c._applied_line(2, False)
+        t = threading.Thread(target=reader)
+        t.start()
+        inside.wait(2)
+        c.detach()
+        t.join(2)
+        acks = [m["s"] for m in written if m.get("keeper") == "ack"]
+        self.assertEqual(acks[-1:], [2], f"detach acked {acks}, not the line in hand")
+        self.assertTrue(c._stop_reading)
+
+    # R3-2, client side: a card this client answered is never raised again
+    def test_r3_2_a_card_answered_here_is_not_raised_again(self):
+        c, written = self._client()
+        raised = []
+        c.on_event = lambda *a: None
+        c.on_permission = lambda req: raised.append(req["requestId"])
+        msg = {"jsonrpc": "2.0", "id": 9, "method": "session/request_permission",
+               "params": {"options": [{"optionId": "allow"}]}}
+        c._on_request(msg)
+        self.assertTrue(c.answer_permission("9", "allow"))
+        self.assertTrue(wait_for(lambda: any(m.get("id") == 9 for m in written), timeout=3))
+        c._on_request(msg)                     # the keeper's late re-send
+        self.assertEqual(raised, ["9"], "an answered card was raised again")
+        self.assertEqual(len([m for m in written if m.get("id") == 9]), 1)
+
+
+class KeeperAfterReview3Grok(_InProc):
+    """Grok's arm of the 2026-10-31 panel."""
+
+    def test_g3_an_overflowing_ack_and_a_too_deep_line_are_survived(self):
+        h = self.hub()
+        h.hello_and_backlog()
+        self.k.append(_note(0))
+        h.one()
+        self.assertTrue(self.k.accept_from_hub(h.conn, b'{"keeper":"ack","s":1e309}\n'))
+        self.assertEqual(self.k.acked, 0)
+        self.assertIs(self.k.conn, h.conn)
+        deep = b"[" * 200000 + b"]" * 200000 + b"\n"
+        self.assertIsNone(self.k.append(deep), "a too-deep line was numbered")
+        self.assertTrue(h.send({"jsonrpc": "2.0", "method": "x"}))
+
+    def test_g4_a_reply_id_of_another_json_type_still_clears_the_request(self):
+        h = self.hub()
+        h.hello_and_backlog()
+        h.send({"jsonrpc": "2.0", "id": 1, "method": "session/prompt"})
+        self.k.append(_j({"jsonrpc": "2.0", "id": "1", "result": {}}))
+        h.one()
+        h.ack()
+        self.assertEqual(self.k.outstanding, {})
+        h2 = self.hub()
+        self.assertEqual(h2.hello_and_backlog()[0]["outstanding"], [])
+
+    def test_g7_a_capped_line_fits_the_clients_cap_once_framed(self):
+        from corral_core import acp
+        framed = self.km.envelope(10 ** 12, b"x" * self.km.MAX_LINE)
+        self.assertLessEqual(len(framed), acp.MAX_STDOUT_LINE)
+
+
+class ClientAfterReview3Grok(ClientAfterReview3):
+
+    def test_r3_2_a_card_answered_here_is_not_raised_again(self):
+        pass                                  # inherited; run once, above
+
+    def test_r3_3_detach_acks_the_line_being_applied(self):
+        pass
+
+    def test_g2_no_ack_passes_a_line_the_pane_has_not_written_out(self):
+        c, written = self._client()
+        acks = lambda: [m["s"] for m in written if m.get("keeper") == "ack"]  # noqa: E731
+        c._cur_seq = 5
+        c.hold("text")                         # seq 5's text is buffered
+        c._applied_line(7, False)
+        c._send_ack()
+        self.assertEqual(acks(), [4])
+        c.release("text")
+        c._send_ack()
+        self.assertEqual(acks(), [4, 7])
+
+    def test_g2_detach_writes_out_the_buffer_before_its_final_ack(self):
+        c, written = self._client()
+        c._cur_seq = 3
+        c.hold("thought")
+        c._applied_line(4, False)
+        order = []
+        c.detach(flush=lambda: (order.append("flush"), c.release("thought")))
+        self.assertEqual(order, ["flush"])
+        self.assertEqual([m["s"] for m in written if m.get("keeper") == "ack"], [4])
+
+
+class TheDeadPaneHasItsReason(KeeperCase):
+
+    def test_g5_dead_is_never_seen_before_its_reason(self):
+        p = self._pane()
+        seen = []
+        real = p._dead
+
+        def dead(reason):
+            seen.append(p.state)
+            return real(reason)
+        p._dead = dead
+        p.send("die")
+        self.assertTrue(wait_for(lambda: p.state == "dead"))
+        self.assertTrue(seen)
+        self.assertNotEqual(seen[0], "dead", f"dead was set before its reason: {seen}")
+        self.assertTrue(p.error)
 
 
 if __name__ == "__main__":

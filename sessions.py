@@ -123,6 +123,12 @@ KEEPER_ENABLED = os.environ.get("CORRAL_LIGHT_KEEPER", "1") != "0"
 KEEPER_SOCK_MAX = 100
 
 
+def _state_lock(pane):
+    """The lock for a pane's `dead` write and the adopt path's check-then-set
+    (nothing else is taken under it). setdefault is atomic in CPython."""
+    return pane.__dict__.setdefault("_state_lock", threading.Lock())
+
+
 def keeper_sock_path(pane_id, pane_dir, base="/tmp"):
     """Where pane `pane_id`'s keeper listens, or None to run it without one.
 
@@ -1709,8 +1715,9 @@ class Pane(_core.PaneBase):
                 more = bool(self._queue) and not self.held
                 if more:
                     self._turn_running = True
-            if self.state != "dead":
-                self.state = "needs-you" if self.pending else ("busy" if more else "ready")
+            with _state_lock(self):         # never over an exit landing now
+                if self.state != "dead":
+                    self.state = "needs-you" if self.pending else ("busy" if more else "ready")
             if more:
                 threading.Thread(target=self._drain, daemon=True).start()
             if self.worktree_id:
@@ -1744,6 +1751,8 @@ class Pane(_core.PaneBase):
         elif kind == "agent_thought_chunk":
             # Coalesced: buffered here and emitted once by _flush_thought when any other
             # event arrives, so thought fragments cannot flood the event ring.
+            if not getattr(self, "_thought_acc", ""):
+                _core._hold(self, "thought")
             self._thought_acc = (getattr(self, "_thought_acc", "") or "") + \
                 (data.get("content") or {}).get("text", "")
         elif kind in ("tool_call", "tool_call_update"):
@@ -1796,8 +1805,9 @@ class Pane(_core.PaneBase):
             self._drop_held_peers("dead")
             self._clear_pending("agent_exit")
             self._clear_question("dead")
-            self.state = "dead"
             if data.get("closed"):
+                with _state_lock(self):
+                    self.state = "dead"
                 # Deliberate: not a fault. Unless the pane already recorded
                 # why it died (the drain closed the client AFTER an auth
                 # error): a keeper's exit frame lands late, and must not
@@ -1868,7 +1878,8 @@ class Pane(_core.PaneBase):
         self.dead_cause = cause
         self.dead_login = (claude_auth.status().get("refreshExpiresAt")
                            if cause else None)
-        self.state = "dead"
+        with _state_lock(self):
+            self.state = "dead"
         self.emit("dead", {"reason": self.error, "cause": cause})
 
 
@@ -3123,7 +3134,8 @@ class Manager(_core.ManagerBase):
             # until the next hub reattaches.
             try:
                 if p._durable():
-                    p.client.detach()
+                    # Buffered text and thought go out before the final ack.
+                    p.client.detach(flush=p._flush_buffers)
             except Exception:                  # noqa: BLE001
                 pass
         return n

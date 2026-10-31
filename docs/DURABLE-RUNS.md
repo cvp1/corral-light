@@ -93,6 +93,38 @@ reattach and a clean close). Mutating the keeper (letting a second answer
 through, replaying an answered card, not holding an acked card, dropping the
 owner check) fails at least one of them.
 
+**Third review, 2026-10-31 (protocol 3).** A two-arm panel (Codex + Grok)
+on 65f9ca0 returned `amend` from both arms. A hub restart ran under the Grok
+arm's protocol-3 pane mid-review, and its turn was adopted. Each fix has a
+test that fails on 65f9ca0 (`KeeperAfterReview3`, `KeeperAfterReview3Grok`,
+`ClientAfterReview3`, `ClientAfterReview3Grok`, `TheDeadPaneHasItsReason`):
+
+| Finding | What was wrong | Fix |
+|---|---|---|
+| Close race (both arms) | The owner check and the close claim were two holds of the lock, so a replaced hub could still close the agent | The close is claimed in the same hold as the owner check |
+| Acked before written (Grok) | The pane buffers text (0.15 s) and thought (until the next event); acks covered lines whose content was still in the buffer, so a restart lost it | The pane tells the client which line its buffer starts at, and no ack passes it. Detach writes the buffers out before its final ack |
+| Detach mid-apply (Codex) | Detach acked before the reader finished the line in hand, so that line came again outside the crash window | The reader applies each line under a lock that detach takes (bounded, 2 s) before its final ack |
+| Held card re-sent (Codex) | Held cards were snapshotted at attach and written without a re-check | Re-checked under the lock just before writing. The window from there to the write remains, so the client also drops a card it already answered |
+| Malformed hub line (both) | An unhashable id, an ack of `1e309`, or a too-deep line raised past the reader, which then kept owning the agent | Ids must be str, int or null; the ack catches overflow; parse catches recursion; the reader's cleanup runs in `finally`, and the adapter reader always appends the exit |
+| Id type mismatch (Grok) | A reply id `"1"` for request `1` left the request outstanding forever | Requests and replies are keyed by `str(id)`; the hello returns the raw id |
+| Dead before its reason (Grok) | The exit set `dead` before the reason was recorded, and the adopt path could set `ready` over an exit | `_dead` sets the state after the reason; both writes share one small lock |
+| Line cap (Grok) | A line at the keeper's 16 MiB cap was over the client's 16 MiB cap once framed | The keeper caps adapter lines 4 KiB lower |
+
+**Deferred, with a plan: stdin backpressure (Grok).** When the agent stops
+reading stdin and the queue is full, the hub's reader waits in
+`accept_from_hub`, so later acks and a `close` on that connection wait too.
+An attach is not blocked, and the client's close also signals the process
+group, so a pane still closes. The cost is that the outbox stops trimming
+and may drop notifications. Plan: split the hub reader. Control lines (ack,
+close) are applied at once, and other lines go into a per-connection inbound
+queue, bounded at `STDIN_MAX_BYTES`, that one thread drains into the stdin
+queue under the owner check. Falsifier: with the agent's stdin blocked and
+the queue full, an ack sent after a waiting line advances `acked` within
+0.5 s, and a `close` ends the agent within `TERM_WAIT_S`. Not done in this
+pass because it moves the ownership check onto a second thread, which is the
+kind of fix-layer change the earlier rounds punished. It should get its own
+review.
+
 *The two reviews below record protocol 2's fixes. Protocol 3
 (above) replaced the mechanisms they describe: the spool, the carried hello
 lines, the in-flight requeue, `drive_lock` and the inode guard are gone. The
