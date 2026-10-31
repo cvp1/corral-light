@@ -379,6 +379,41 @@ class PanelCase(_PanelBase):
         self.assertEqual(d["name"], "corral-panel")
         self.assertIn({"name": "CORRAL_PANE_TOKEN", "value": "tok"}, d["env"])
 
+class PanelAfterReview3(_PanelBase):
+    """The 2026-10-31 round-2 run: it kept round 1's synthesis (a sealed one
+    stopped _synthesize), and its arms were titled with their prompt."""
+
+    def test_r3_round_2_writes_its_own_synthesis(self):
+        v = self._start()
+        pid = v["id"]
+        self.assertTrue(self._done(self.mgr.panels, pid))
+        charge2 = CHARGE.replace("a typo", "a typo, now a crash")
+        self.mgr.panels.next(pid, charge=charge2)
+        self.assertTrue(self._done(self.mgr.panels, pid))
+        rec = self.mgr.panels.get(pid)
+        self.assertEqual(rec["status"], "done", rec.get("error"))
+        out = Path(rec["out_dir"])
+        r1 = (out / "synthesis.md").read_text(encoding="utf-8")
+        r2 = (out / "synthesis-r2.md").read_text(encoding="utf-8")
+        self.assertNotIn("now a crash", r1)
+        self.assertIn("now a crash", r2, "round 2's synthesis did not read round 2")
+        syn = rec["synth"]
+        self.assertEqual((syn["status"], syn["round_done"]), ("sealed", 2), syn)
+        self.assertTrue(syn["file"].endswith("synthesis-r2.md"))
+        pk = (out / "packet.md").read_text(encoding="utf-8")
+        self.assertIn("synthesis-r2.md", pk, "the packet points at round 1's synthesis")
+        self.assertEqual(self.mgr.panes[syn["pane"]].title,
+                         f"panel {rec['slug']} · synthesis r2"[:60])
+
+    def test_r3_arm_panes_are_titled_by_panel_and_lane(self):
+        v = self._start()
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        rec = self.mgr.panels.get(v["id"])
+        for a in rec["arms"]:
+            pane = self.mgr.panes[a["pane"]]
+            self.assertEqual(pane.title, f"panel {rec['slug']} · {a['lane']}"[:60])
+            self.assertTrue(pane.title_locked)
+
 
 if __name__ == "__main__":
     unittest.main()

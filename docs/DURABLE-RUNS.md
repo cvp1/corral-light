@@ -15,11 +15,11 @@ pane was busy, and often deferred for hours.
 
 **Now.** Each pane's agent runs under a keeper: a small stdlib process in its
 own session that owns the adapter's stdio and serves it over a Unix socket.
-The hub connects to the socket and talks the same ACP through it. When the
-hub goes away the keeper spools what the agent says; when a hub connects
-again it says hello (which hub requests are still unanswered, which
-permission cards were never answered, how much was spooled), replays the
-spool in order, and goes live. The next hub adopts the running turn, and its
+The hub connects to the socket and talks the same ACP through it. Every
+line the agent writes is numbered and kept until a hub acknowledges it; when
+a hub connects it says hello (which hub requests are still unanswered, how
+much it is about to replay), re-sends the cards nobody answered and every
+unacknowledged line in order, and goes live. The next hub adopts the running turn, and its
 `turn_end` lands as if nothing happened.
 
 - `meta.json` carries a `keeper` record (`sock`, `dir`, `pid`); `restore()`
@@ -29,8 +29,9 @@ spool in order, and goes live. The next hub adopts the running turn, and its
   counts such a pane as a restart blocker, so the daily update runs.
 - The hub's SIGTERM note on a kept pane says the turn **continues**; only
   what was still queued in the hub's memory is marked interrupted.
-- Bounds: one adapter line up to 16 MiB; the spool up to 64 MiB (past it,
-  lines are dropped, counted, and the pane says so); a keeper with no hub
+- Bounds: one adapter line up to 16 MiB; the outbox up to 64 MiB (past it,
+  the oldest notifications are dropped, counted, and the pane says so; never
+  a card, a response or the exit); a keeper with no hub
   for `CORRAL_KEEPER_ORPHAN_S` (6 h) ends its agent; after the agent exits
   the keeper lingers 10 min for a hub to collect the exit, then quits.
 - Kill switch: `CORRAL_LIGHT_KEEPER=0` forks adapters directly, as before.
@@ -40,6 +41,62 @@ spool in order, and goes live. The next hub adopts the running turn, and its
 
 Tests: `test_keeper.py` (K1–K10 and the keeper alone). The legacy
 "a restart interrupts the turn" tests pin `CORRAL_LIGHT_KEEPER=0`.
+
+### The keeper's delivery contract (protocol 3, 2026-10-31)
+
+Three review rounds of protocol 2 showed each fix opening the next hole
+(spool, carried lines, in-flight requeue, `drive_lock`, the inode guard).
+Protocol 3 replaces all of them with one structure.
+
+- **One numbered outbox.** Every line the adapter writes gets a sequence
+  number; the adapter's exit is the last one. A line that is not a JSON
+  object is dropped and counted.
+- **Cumulative acks.** `{"keeper": "ack", "s": N}` means the hub has APPLIED
+  every line up to N, and those lines leave the outbox. The client acks a
+  card, a response or the exit at once, anything else within 0.2 s, and
+  acks before a deliberate detach.
+- **Attach.** A new hub gets `hello`, then the held cards, then every line
+  after the last ack, in order, then `caught-up`, then live lines. So a line
+  reaches the hubs exactly once, except the lines a hub had applied but not
+  yet acked when it crashed: those come again to the next hub.
+- **Cards are held until answered, not until acked.** An acked, unanswered
+  card is re-sent first to every hub that attaches. Once an answer for its
+  id passes through the keeper it is never sent again, acked or not, and a
+  second answer for that id is dropped there: the agent gets one reply per
+  question.
+- **A request is outstanding until its response is acked**, and the hello
+  lists what is outstanding, so the next hub adopts a running turn.
+- **Ownership without a lock across a write.** A newer connection replaces
+  the older, whose socket is shut down. A hub's line is accepted (owner
+  check, bookkeeping, the stdin queue) in one hold of the lock; a
+  per-connection writer thread and one stdin-writer thread do the I/O. A hub
+  or an agent that stops reading blocks only its own thread, never an
+  attach.
+- **The exit and the linger.** After the exit the keeper waits until a hub
+  has acked it and left (or 10 min). The v3 client ties `alive` to the
+  stream, so an adopted turn of an agent that already exited still settles.
+- **A socket name per keeper** (`s-<token>.sock`): no successor shares a
+  path, so the client unlinks its own socket without an inode check (that
+  check failed on Linux CI, where tmpfs reuses inode numbers).
+- **Compatibility.** Keepers already running speak protocol 2. The client
+  reads the hello's `version` and keeps the v2 paths for them, so every live
+  pane survives the update that ships protocol 3. `testkit/keeper_v2.py` is
+  the deployed v2 keeper, vendored as a fixture.
+
+Tests: `KeeperContract` (C1–C12, an in-process keeper with a stub agent),
+`KeeperProperty` (seeded random runs of notes, cards, hub requests,
+responses, answers, acks, attaches, detaches and crashes, checked against
+the invariants above), `KeeperProcess` (a replaced hub gets EOF; a stalled
+hub does not block a new attach, and the new hub gets all 3000 lines), and
+`V2KeeperCompat` (the new client drives a v2 keeper through a mid-turn
+reattach and a clean close). Mutating the keeper (letting a second answer
+through, replaying an answered card, not holding an acked card, dropping the
+owner check) fails at least one of them.
+
+*The two reviews below record protocol 2's fixes. Protocol 3
+(above) replaced the mechanisms they describe: the spool, the carried hello
+lines, the in-flight requeue, `drive_lock` and the inode guard are gone. The
+findings stay covered by the contract tests.*
 
 **Reviewed by its own feature.** The first real panel run was a one-arm
 Codex review of the keeper (sealed files kept in the operator's vault, not
@@ -79,6 +136,7 @@ fails on c30c880 and passes now (`TheKeeperAfterReview2`,
 | F8 | An old client's close could unlink a successor keeper's socket | The client unlinks only the socket inode it connected to |
 | F11 | The `/tmp` fallback dir was taken on trust | `lstat`: a real dir, ours, mode 0700, or no keeper for that pane (it still works; a restart ends it), said loudly |
 | panel | The synthesizer was the caller's own lane, and the packet named the host | The CLI always sends the calling pane; its lane neither arms nor synthesizes. No host name in `packet.md`/`packet.json` |
+| panel r2 | Round 2 kept round 1's synthesis, and arm panes were titled with their prompt | Each round is synthesized afresh into `synthesis-rN.md`; panes are titled `panel <slug> · <lane>` (`PanelAfterReview3`) |
 
 **Deferred, with a plan: F7.** `KillMode=process` means `systemctl --user
 stop corral-light` also leaves every keeper running, until its six-hour

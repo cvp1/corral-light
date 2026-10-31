@@ -27,6 +27,7 @@ back up from its meta.json, as restore() does.
 
 Collected by test_corral_light.py.
 """
+import collections
 import json
 import os
 import signal
@@ -345,8 +346,8 @@ def meta_turn(q):
     return next(iter(turns))
 
 
-class TheKeeperAlone(unittest.TestCase):
-    """keeper.py driven directly, without a hub: the parts a Manager hides."""
+class _Spawn:
+    """Start a real keeper process over the fake agent (a mixin: no tests)."""
 
     def _start(self, work, env=None):
         sock = str(Path(work) / "s.sock")
@@ -371,6 +372,10 @@ class TheKeeperAlone(unittest.TestCase):
         except Exception:                        # noqa: BLE001
             pass
 
+
+class TheKeeperAlone(_Spawn, unittest.TestCase):
+    """keeper.py driven directly, without a hub: the parts a Manager hides."""
+
     def test_a_keeper_with_no_hub_for_orphan_s_ends_its_agent(self):
         work = tmpdir(self, "keeper-alone-")
         kp, sock = self._start(work, {"CORRAL_KEEPER_ORPHAN_S": "1"})
@@ -392,128 +397,24 @@ class TheKeeperAlone(unittest.TestCase):
         self.assertEqual(hello["keeper"], "hello")
         self.assertTrue(hello["alive"])
         self.assertEqual(hello["outstanding"], [])
-        self.assertEqual(json.loads(r.readline())["keeper"], "replayed")
+        self.assertEqual(hello["version"], 3)
+        self.assertEqual(json.loads(r.readline())["keeper"], "caught-up")
         c.sendall(b'{"jsonrpc":"2.0","id":5,"method":"initialize","params":{}}\n')
         resp = json.loads(r.readline())
-        self.assertEqual(resp["id"], 5)
+        self.assertEqual((resp["keeper"], resp["s"], resp["m"]["id"]), ("l", 1, 5))
         c.sendall(b'{"keeper":"close"}\n')
         exit_frame = json.loads(r.readline())
-        self.assertEqual(exit_frame["keeper"], "exit")
-        self.assertTrue(exit_frame["closed"])
+        self.assertEqual(exit_frame["m"]["keeper"], "exit")
+        self.assertTrue(exit_frame["m"]["closed"])
         c.close()
         self.assertTrue(wait_for(lambda: kp.poll() is not None))
         self.assertFalse(os.path.exists(sock))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
-class TheKeeperAfterReview(TheKeeperAlone):
-    """The five findings of the 2026-10-30 Codex panel on the keeper
-    (reviews/2026-10-30-keeper-review), each with the trace it gave."""
-
-    def _connect(self, sock):
-        import socket
-        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        c.connect(sock)
-        r = c.makefile("rb")
-        hello = json.loads(r.readline())
-        self.assertEqual(hello["keeper"], "hello")
-        return c, r, hello
-
-    def _until_replayed(self, r):
-        lines = []
-        while True:
-            raw = r.readline()
-            self.assertTrue(raw, "stream ended before `replayed`")
-            msg = json.loads(raw)
-            if msg.get("keeper") == "replayed":
-                return lines, msg
-            lines.append(msg)
-
-    def test_f5_a_reused_dir_does_not_replay_a_previous_keepers_spool(self):
-        work = tmpdir(self, "keeper-alone-")
-        (Path(work) / "spool.jsonl").write_bytes(b'{"jsonrpc":"2.0","id":1,"result":{"stale":true}}\n')
-        kp, sock = self._start(work)
-        c, r, hello = self._connect(sock)
-        self.assertEqual(hello["spooled"], 0)
-        lines, rep = self._until_replayed(r)
-        self.assertEqual((lines, rep["n"]), ([], 0))
-        c.close()
-
-    def test_f4_a_replaced_hub_gets_eof_and_drives_nothing(self):
-        work = tmpdir(self, "keeper-alone-")
-        kp, sock = self._start(work)
-        a, ra, _ = self._connect(sock)
-        self._until_replayed(ra)
-        b, rb, hello_b = self._connect(sock)
-        self._until_replayed(rb)
-        # The stale hub's reader sees EOF at once...
-        a.settimeout(5)
-        self.assertEqual(ra.readline(), b"", "the replaced hub still had a live stream")
-        # ...and nothing it sends reaches the adapter: B never sees a response.
-        try:
-            a.sendall(b'{"jsonrpc":"2.0","id":77,"method":"initialize","params":{}}\n')
-        except OSError:
-            pass
-        b.sendall(b'{"jsonrpc":"2.0","id":78,"method":"initialize","params":{}}\n')
-        got = json.loads(rb.readline())
-        self.assertEqual(got["id"], 78)
-        b.settimeout(1.5)
-        with self.assertRaises(OSError):
-            rb.readline()                 # no second response (id 77) ever comes
-        b.close()
-
-    def test_f2_a_response_the_hub_never_read_is_replayed_to_the_next_hub(self):
-        work = tmpdir(self, "keeper-alone-")
-        kp, sock = self._start(work)
-        a, ra, _ = self._connect(sock)
-        self._until_replayed(ra)
-        a.sendall(b'{"jsonrpc":"2.0","id":5,"method":"initialize","params":{}}\n')
-        time.sleep(0.5)                   # the adapter answers; the hub dies unread
-        a.close()
-        b, rb, hello = self._connect(sock)
-        self.assertEqual(hello["outstanding"], [{"id": 5, "method": "initialize"}])
-        self.assertEqual(hello["next_id"], 6)
-        lines, rep = self._until_replayed(rb)
-        self.assertEqual([m.get("id") for m in lines], [5], lines)
-        self.assertEqual(rep["n"], 1)
-        # Acknowledged: a third hub is told nothing is outstanding.
-        b.sendall(b'{"keeper":"ack","id":5}\n')
-        time.sleep(0.3)
-        b.close()
-        c, rc, hello3 = self._connect(sock)
-        self.assertEqual(hello3["outstanding"], [])
-        lines, rep = self._until_replayed(rc)
-        self.assertEqual(lines, [])
-        c.close()
-
-    def test_f3_a_hub_that_stops_reading_is_dropped_not_waited_on(self):
-        work = tmpdir(self, "keeper-alone-")
-        kp, sock = self._start(work, {"CORRAL_KEEPER_QUEUE_MAX": "20000"})
-        a, ra, _ = self._connect(sock)
-        self._until_replayed(ra)
-        a.sendall(b'{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}\n')
-        sid = json.loads(ra.readline())["result"]["sessionId"]
-        # Big answers nobody reads: the fake echoes its prompt.
-        big = "x" * 6000
-        for i in range(2, 12):
-            try:
-                a.sendall(json.dumps({"jsonrpc": "2.0", "id": i, "method": "session/prompt",
-                                      "params": {"sessionId": sid, "prompt": [{"type": "text", "text": big}]}}).encode() + b"\n")
-            except OSError:
-                break                     # dropped already: the keeper gave up on us
-            time.sleep(0.05)
-        # Meanwhile a new hub can attach (the lock was never held across a blocked write).
-        t0 = time.time()
-        b, rb, hello = self._connect(sock)
-        self.assertLess(time.time() - t0, 5, "attach blocked behind a hub that stopped reading")
-        self.assertTrue(hello["spooled"] >= 1 or hello["unacked"] >= 1, hello)
-        lines, rep = self._until_replayed(rb)
-        self.assertTrue(rep["n"] >= 1)
-        b.close()
-        a.close()
+class ClientEdges(unittest.TestCase):
+    """Client-side guarantees, without a keeper process."""
 
     def test_f1_an_adopted_completion_survives_the_exit_frame(self):
         from corral_core import acp
@@ -539,77 +440,6 @@ class TheKeeperAfterReview(TheKeeperAlone):
         self.assertEqual(c.await_adopted(7), {"stopReason": "end_turn"})
 
 
-class TheKeeperAfterReview2(unittest.TestCase):
-    _kill = staticmethod(TheKeeperAlone._kill)
-    """The 2026-10-31 two-arm panel (Codex + Grok) on the keeper: one test per
-    fixed finding. In-process Keeper objects over socketpairs where a race
-    must be pinned down, real processes where it need not."""
-
-    def _keeper(self, work=None):
-        import keeper
-        work = work or tmpdir(self, "keeper-unit-")
-        k = keeper.Keeper(["true"], work, str(Path(work) / "s.sock"), work)
-
-        class P:                      # what _attach and _drive read of the adapter
-            pid = os.getpid()
-            stdin = None
-
-            @staticmethod
-            def poll():
-                return None
-        k.p = P()
-        return keeper, k
-
-    @staticmethod
-    def _pair():
-        import socket
-        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        return a, b
-
-    def _attach_and_read(self, k, keeper):
-        """Attach a new hub; -> (hello, every line until `replayed`)."""
-        hub_side, keeper_side = self._pair()
-        k._attach(keeper_side)
-        r = hub_side.makefile("rb")
-        hub_side.settimeout(5)
-        hello = json.loads(r.readline())
-        lines = []
-        while True:
-            msg = json.loads(r.readline())
-            if msg.get("keeper") == "replayed":
-                break
-            lines.append(msg)
-        self.addCleanup(hub_side.close)
-        return hello, lines
-
-    def _stalled_conn(self, k, keeper):
-        """A connected hub whose writer never runs (it stopped reading)."""
-        _, keeper_side = self._pair()
-        c = keeper._Conn(keeper_side, k)
-        k.conn = c
-        return c
-
-    CARD = (b'{"jsonrpc":"2.0","id":41,"method":"session/request_permission",'
-            b'"params":{"sessionId":"s","options":[]}}\n')
-
-    # F4/F5: one card, raised once, never cancelled
-    def test_r2_f4_a_card_queued_for_a_stalled_hub_reaches_the_next_hub_once(self):
-        keeper, k = self._keeper()
-        self._stalled_conn(k, keeper)
-        with mock.patch.object(keeper, "QUEUE_MAX_BYTES", 400):
-            k._deliver(b'{"jsonrpc":"2.0","method":"session/update","params":{"n":1}}\n')
-            k._deliver(self.CARD)
-            k._deliver(b'{"jsonrpc":"2.0","method":"session/update","params":{"pad":"'
-                       + b"x" * 500 + b'"}}\n')       # overflows: the hub is dropped
-        self.assertIsNone(k.conn)
-        hello, lines = self._attach_and_read(k, keeper)
-        ids = [m["id"] for m in hello["agent_requests"]] + \
-              [m["id"] for m in lines if m.get("method") == "session/request_permission"]
-        self.assertEqual(ids, [41], "the card reached the next hub other than exactly once")
-        # The rest of what the stalled hub never read is replayed, in order.
-        self.assertEqual([m["params"].get("n", "pad") for m in lines
-                          if m.get("method") == "session/update"], [1, "pad"])
-
     def test_r2_f4_a_replayed_duplicate_card_is_dropped_not_cancelled(self):
         from corral_core import acp
         c = acp.AcpClient.__new__(acp.AcpClient)
@@ -628,145 +458,6 @@ class TheKeeperAfterReview2(unittest.TestCase):
         self.assertNotIn("permission_expired", seen)
         self.assertEqual(written, [], "the agent was answered on a card the human holds")
 
-    # F2/F3: a replaced hub's queue and in-flight line go to the next hub, in order
-    def test_r2_f2_a_replaced_hubs_queue_reaches_the_new_hub_in_order(self):
-        keeper, k = self._keeper()
-        c = self._stalled_conn(k, keeper)
-        with k.lock:
-            c.inflight = b'{"jsonrpc":"2.0","method":"session/update","params":{"n":0}}\n'
-            for n in (1, 2):
-                c.enqueue_locked(b'{"jsonrpc":"2.0","method":"session/update","params":{"n":%d}}\n' % n)
-        hello, lines = self._attach_and_read(k, keeper)
-        self.assertEqual([m["params"]["n"] for m in lines], [0, 1, 2])
-        self.assertTrue(c.closed)
-        self.assertEqual((list(c.q), c.inflight), ([], None))
-
-    # F1: a replaced hub drives nothing, even with a line already read
-    def test_r2_f1_a_replaced_hubs_already_read_line_is_refused(self):
-        keeper, k = self._keeper()
-        wrote = []
-
-        class In:
-            def write(self, b):
-                wrote.append(b)
-
-            def flush(self):
-                pass
-        k.p.stdin = In()
-        old = self._stalled_conn(k, keeper)
-        self.assertTrue(k._drive(old, b'{"jsonrpc":"2.0","id":1,"method":"x"}\n'))
-        self._attach_and_read(k, keeper)       # a new hub takes over
-        self.assertFalse(k._drive(old, b'{"jsonrpc":"2.0","id":2,"method":"x"}\n'))
-        self.assertFalse(k._drive(old, b'{"keeper":"close"}\n'))
-        self.assertEqual(len(wrote), 1)
-        self.assertFalse(k.closing, "a replaced hub closed the agent")
-
-    def test_r2_f1_attach_waits_for_a_write_in_progress(self):
-        keeper, k = self._keeper()
-        k.drive_lock.acquire()                 # a write to the adapter is under way
-        hub_side, keeper_side = self._pair()
-        t = threading.Thread(target=k._attach, args=(keeper_side,), daemon=True)
-        t.start()
-        time.sleep(0.3)
-        self.assertTrue(t.is_alive(), "attach swapped owners mid-write")
-        k.drive_lock.release()
-        t.join(5)
-        self.assertFalse(t.is_alive())
-        hub_side.close()
-
-    # F10: the orphan watch and an attach cannot cross
-    def test_r2_f10_an_attach_after_the_orphan_claim_is_refused(self):
-        keeper, k = self._keeper()
-        k._end_adapter = lambda: None
-        k.last_hub_seen = time.monotonic() - keeper.ORPHAN_S - 10
-        self.assertTrue(k._watch_once())
-        hub_side, keeper_side = self._pair()
-        k._attach(keeper_side)
-        hub_side.settimeout(2)
-        self.assertEqual(hub_side.recv(100), b"", "a hub attached to an agent being ended")
-        self.assertIsNone(k.conn)
-
-    def test_r2_f10_an_attach_before_the_watch_keeps_the_agent(self):
-        keeper, k = self._keeper()
-        ended = []
-        k._end_adapter = lambda: ended.append(1)
-        k.last_hub_seen = time.monotonic() - keeper.ORPHAN_S - 10
-        self._attach_and_read(k, keeper)
-        self.assertFalse(k._watch_once())
-        self.assertEqual(ended, [])
-
-    # F9: an exit queued for a hub that stalled and was dropped reached nobody
-    def test_r2_f9_an_exit_queued_for_a_dropped_hub_keeps_the_keeper_lingering(self):
-        keeper, k = self._keeper()
-        c = self._stalled_conn(k, keeper)
-        k.exit_rc = 3
-        k._deliver(k._frame("exit", rc=3, stderr_tail=[], closed=False), exit_frame=True)
-        with k.lock:
-            k._drop_conn_locked("not reading")
-            self.assertFalse(k._linger_done_locked(), "quit with the exit unheard")
-        hello, _ = self._attach_and_read(k, keeper)
-        self.assertFalse(hello["alive"])
-        self.assertEqual(hello["rc"], 3)
-        self.assertTrue(k._drive(k.conn, b'{"keeper":"ack-exit"}\n'))
-        with k.lock:
-            k._drop_conn_locked("hub closed")
-            self.assertTrue(k._linger_done_locked())
-
-    # F9 (end to end): the keeper lingers until a hub acks the exit
-    def test_r2_f9_an_exit_read_but_not_acked_stays_collectable(self):
-        work = tmpdir(self, "keeper-alone-")
-        kp, sock = TheKeeperAlone._start(self, work)
-        import socket
-        a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        a.connect(sock)
-        ra = a.makefile("rb")
-        while json.loads(ra.readline()).get("keeper") != "replayed":
-            pass
-        a.sendall(b'{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}\n')
-        sid = json.loads(ra.readline())["result"]["sessionId"]
-        a.sendall(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
-                              "params": {"sessionId": sid,
-                                         "prompt": [{"type": "text", "text": "die"}]}}).encode() + b"\n")
-        while True:
-            m = json.loads(ra.readline())
-            if m.get("keeper") == "exit":
-                break
-        # Read it, never acked it, gone. (Close the reader too: a socket
-        # with a makefile still open keeps its descriptor, and the keeper
-        # would never see this hub leave.)
-        ra.close()
-        a.close()
-        self.assertFalse(wait_for(lambda: kp.poll() is not None, timeout=2),
-                         "the keeper quit before any hub acked the exit")
-        b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        b.connect(sock)
-        rb = b.makefile("rb")
-        hello = json.loads(rb.readline())
-        self.assertFalse(hello["alive"])
-        b.sendall(b'{"keeper":"ack-exit"}\n')
-        time.sleep(0.3)
-        rb.close()
-        b.close()
-        self.assertTrue(wait_for(lambda: kp.poll() is not None, timeout=10),
-                        "the keeper lingered after the exit was acked")
-
-    # F8: an old client never unlinks a successor's socket
-    def test_r2_f8_closing_an_old_client_leaves_a_successors_socket(self):
-        from corral_core import acp
-        work = Path(tmpdir(self, "keeper-unit-"))
-        path = work / "s.sock"
-        path.write_text("old")
-        c = acp.AcpClient.__new__(acp.AcpClient)
-        c.keeper = {"sock": str(path)}
-        c._sock_ino = os.stat(path).st_ino
-        path.unlink()
-        path.write_text("successor")           # a new keeper's door, same path
-        c._unlink_own_socket()
-        self.assertTrue(path.exists(), "the old client removed the successor's socket")
-        c._sock_ino = os.stat(path).st_ino
-        c._unlink_own_socket()
-        self.assertFalse(path.exists())
-
     # F11: the /tmp fallback fails closed
     def test_r2_f11_a_planted_fallback_dir_means_no_keeper(self):
         import sessions
@@ -782,8 +473,627 @@ class TheKeeperAfterReview2(unittest.TestCase):
         os.chmod(open_dir, 0o777)
         self.assertIsNone(sessions.keeper_sock_path("p1", long_dir, base=str(base)))
         os.chmod(open_dir, 0o700)
-        self.assertEqual(sessions.keeper_sock_path("p1", long_dir, base=str(base)),
-                         open_dir / "k-p1.sock")
+        got = sessions.keeper_sock_path("p1", long_dir, base=str(base))
+        self.assertEqual(got.parent, open_dir)
+        self.assertRegex(got.name, r"^k-p1-[0-9a-f]{8}\.sock$")
+        # A name of its own per keeper: a second call never shares the path.
+        self.assertNotEqual(got, sessions.keeper_sock_path("p1", long_dir, base=str(base)))
+
+
+
+# ── protocol 3: the keeper's delivery contract ───────────────────────────
+# docs/DURABLE-RUNS.md "The keeper's delivery contract". An in-process
+# Keeper with a stub adapter; hubs are socketpairs read synchronously, so
+# every frame a hub gets is known before the next step.
+
+class _StubIn:
+    """The adapter's stdin. `gate` unset: a write blocks (the agent is not
+    reading)."""
+
+    def __init__(self):
+        self.lines = []
+        self.gate = threading.Event()
+        self.gate.set()
+
+    def write(self, b):
+        self.gate.wait()
+        self.lines.append(b)
+
+    def flush(self):
+        pass
+
+
+class _StubP:
+    pid = 999999
+
+    def __init__(self):
+        self.stdin = _StubIn()
+        self.rc = None
+        self.terminated = False
+
+    def poll(self):
+        return self.rc
+
+    def terminate(self):
+        self.terminated = True
+        self.rc = -15
+
+    def wait(self, timeout=None):
+        return self.rc
+
+    def kill(self):
+        self.rc = -9
+
+
+def _j(obj):
+    return (json.dumps(obj) + "\n").encode("utf-8")
+
+
+def _note(n):
+    return _j({"jsonrpc": "2.0", "method": "session/update", "params": {"n": n}})
+
+
+def _card(rid):
+    return _j({"jsonrpc": "2.0", "id": rid, "method": "session/request_permission",
+               "params": {"options": []}})
+
+
+def _resp(rid):
+    return _j({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+
+
+class _Hub:
+    """One hub connection to an in-process keeper, read synchronously."""
+
+    def __init__(self, k):
+        import socket
+        a, b = socket.socketpair()
+        b.settimeout(5)
+        self.k, self.sock, self.r = k, b, b.makefile("rb")
+        self.conn = k.attach(a)
+        self.applied = 0
+        self.got = []                       # (seq, inner message) in arrival order
+
+    def frame(self):
+        line = self.r.readline()
+        return json.loads(line) if line else None
+
+    def hello_and_backlog(self):
+        """-> (hello, [(seq, msg)] up to caught-up)."""
+        hello = self.frame()
+        assert hello["keeper"] == "hello", hello
+        out = []
+        while True:
+            f = self.frame()
+            assert f is not None, "EOF before caught-up"
+            if f["keeper"] == "caught-up":
+                return hello, out
+            out.append(self._apply(f))
+
+    def one(self):
+        return self._apply(self.frame())
+
+    def _apply(self, f):
+        assert f["keeper"] == "l", f
+        self.applied = max(self.applied, f["s"])
+        self.got.append((f["s"], f["m"]))
+        return f["s"], f["m"]
+
+    def send(self, obj):
+        return self.k.accept_from_hub(self.conn, _j(obj))
+
+    def ack(self, n=None):
+        return self.send({"keeper": "ack", "s": self.applied if n is None else n})
+
+    def eof(self, timeout=3):
+        self.sock.settimeout(timeout)
+        try:
+            return self.r.read() == b""     # a shut-down peer: what is left, then EOF
+        except OSError:
+            return False
+
+    def close(self):
+        for x in (self.r, self.sock):
+            try:
+                x.close()
+            except OSError:
+                pass
+
+
+class KeeperContract(unittest.TestCase):
+
+    def setUp(self):
+        import keeper
+        self.km = keeper
+        work = Path(tmpdir(self, "keeper-v3-"))
+        self.k = keeper.Keeper(["true"], str(work), str(work / "s.sock"), str(work))
+        self.k.p = _StubP()
+        self.hubs = []
+        # The keeper logs to stderr; keep the test output readable.
+        patcher = mock.patch.object(keeper, "_log", lambda msg: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._down)              # runs first: still quiet
+
+    def _down(self):
+        self.k.p.stdin.gate.set()
+        self.k.stop.set()
+        with self.k.lock:
+            self.k.drop_conn_locked("test over")
+        for h in self.hubs:
+            h.close()
+
+    def hub(self):
+        h = _Hub(self.k)
+        self.hubs.append(h)
+        return h
+
+    def stdin(self):
+        """Lines accepted for the adapter's stdin (no writer thread here)."""
+        return [json.loads(b) for b in self.k.stdin_q]
+
+    # C1
+    def test_c1_lines_are_numbered_in_order(self):
+        for i in range(3):
+            self.k.append(_note(i))
+        h = self.hub()
+        hello, lines = h.hello_and_backlog()
+        self.assertEqual(hello["version"], 3)
+        self.assertEqual([s for s, _ in lines], [1, 2, 3])
+        self.assertEqual([m["params"]["n"] for _, m in lines], [0, 1, 2])
+        self.assertEqual(hello["spooled"], 3)
+        self.k.append(_note(3))
+        self.assertEqual(h.one()[0], 4, "a live line after the backlog")
+
+    # C2
+    def test_c2_an_ack_trims_and_a_new_hub_gets_acked_plus_one_onward(self):
+        for i in range(4):
+            self.k.append(_note(i))
+        h = self.hub()
+        h.hello_and_backlog()
+        h.ack(2)
+        self.assertEqual((self.k.acked, self.k.base, len(self.k.entries)), (2, 3, 2))
+        h2 = self.hub()
+        hello, lines = h2.hello_and_backlog()
+        self.assertEqual(hello["acked"], 2)
+        self.assertEqual([s for s, _ in lines], [3, 4])
+        self.assertTrue(h.eof(), "the replaced hub was not shut down")
+
+    # C3
+    def test_c3_held_cards_come_first_and_an_answered_one_never_again(self):
+        self.k.append(_card(9))
+        self.k.append(_note(0))
+        self.k.append(_card(10))
+        h = self.hub()
+        h.hello_and_backlog()
+        h.ack()                                   # all three acked; 9 and 10 unanswered
+        self.assertEqual(sorted(self.k.held), [1, 3])
+        self.assertTrue(h.send({"jsonrpc": "2.0", "id": 10, "result": {"outcome": "x"}}))
+        self.assertEqual(sorted(self.k.held), [1], "an answered card is held no more")
+        self.k.append(_note(1))                   # seq 4, unacked
+        h2 = self.hub()
+        hello, lines = h2.hello_and_backlog()
+        self.assertEqual(hello["held"], 1)
+        self.assertEqual([(s, m.get("id")) for s, m in lines], [(1, 9), (4, None)])
+
+    # C4
+    def test_c4_an_unacked_answered_card_is_skipped_on_replay(self):
+        self.k.append(_card(9))
+        self.k.append(_note(0))
+        h = self.hub()
+        h.hello_and_backlog()
+        h.send({"jsonrpc": "2.0", "id": 9, "result": {"outcome": "x"}})   # answered, never acked
+        h2 = self.hub()
+        hello, lines = h2.hello_and_backlog()
+        self.assertEqual([s for s, _ in lines], [2], "the answered card came back")
+        self.assertEqual(hello["spooled"], 1)
+
+    # C5
+    def test_c5_a_second_answer_for_one_card_is_dropped(self):
+        self.k.append(_card(9))
+        h = self.hub()
+        h.hello_and_backlog()
+        ans = {"jsonrpc": "2.0", "id": 9, "result": {"outcome": "allow"}}
+        self.assertTrue(h.send(ans))
+        self.assertTrue(h.send(ans))
+        h2 = self.hub()
+        h2.hello_and_backlog()
+        self.assertTrue(h2.send(ans))             # nor from the next hub
+        self.assertEqual(len([m for m in self.stdin() if m.get("id") == 9]), 1)
+        self.assertTrue(h2.send({"jsonrpc": "2.0", "id": 77, "result": {}}))
+        self.assertEqual(len(self.stdin()), 1, "an answer to a card never asked reached the agent")
+
+    # C6
+    def test_c6_a_request_is_outstanding_until_its_response_is_acked(self):
+        h = self.hub()
+        h.hello_and_backlog()
+        h.send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {}})
+        self.assertEqual(self.k.outstanding, {3: "session/prompt"})
+        self.k.append(_resp(3))
+        s, _ = h.one()
+        h2 = self.hub()                           # h crashed before acking
+        hello, lines = h2.hello_and_backlog()
+        self.assertEqual(hello["outstanding"], [{"id": 3, "method": "session/prompt"}])
+        self.assertEqual(hello["next_id"], 4)
+        self.assertEqual(lines[-1][1]["id"], 3, "the response is replayed")
+        h2.ack()
+        self.assertEqual(self.k.outstanding, {})
+        h3 = self.hub()
+        self.assertEqual(h3.hello_and_backlog()[0]["outstanding"], [])
+
+    # C7
+    def test_c7_a_replaced_hub_drives_nothing(self):
+        h = self.hub()
+        h.hello_and_backlog()
+        h2 = self.hub()
+        h2.hello_and_backlog()
+        self.assertFalse(h.send({"jsonrpc": "2.0", "id": 5, "method": "x"}))
+        self.assertFalse(h.ack(0))
+        self.assertEqual(self.k.outstanding, {})
+        self.assertEqual(self.stdin(), [])
+        self.assertTrue(h.eof())
+
+    # C8
+    def test_c8_a_blocked_stdin_does_not_block_an_attach(self):
+        self.k.p.stdin.gate.clear()               # the agent stops reading
+        threading.Thread(target=self.k._write_stdin, daemon=True).start()
+        line = {"jsonrpc": "2.0", "method": "session/cancel", "params": {"pad": "x" * 64}}
+        with mock.patch.object(self.km, "STDIN_MAX_BYTES", 100):
+            h = self.hub()
+            h.hello_and_backlog()
+            self.assertTrue(h.send(line))         # the writer takes it, then blocks
+            self.assertTrue(wait_for(lambda: not self.k.stdin_q))
+            self.assertTrue(h.send(line))         # queued
+            res = []
+            t = threading.Thread(target=lambda: res.append(h.send(line)), daemon=True)
+            t.start()                             # waits for stdin space
+            time.sleep(0.3)
+            self.assertTrue(t.is_alive(), "the third line did not wait for space")
+            t0 = time.monotonic()
+            h2 = self.hub()
+            h2.hello_and_backlog()
+            self.assertLess(time.monotonic() - t0, 1.0, "a wedged agent blocked the attach")
+            t.join(3)
+            self.assertEqual(res, [False], "the replaced hub's waiting line was accepted")
+            self.assertEqual(len(self.k.stdin_q), 1)
+
+    # C9
+    def test_c9_overflow_drops_notes_only(self):
+        with mock.patch.object(self.km, "OUTBOX_MAX_BYTES", 400):
+            self.k.append(_card(1))
+            self.k.append(_resp(2))
+            for i in range(20):
+                self.k.append(_note(i))
+            self.k.append(self.k.frame("exit", rc=0, stderr_tail=[], closed=False),
+                          kind=self.km.EXIT)
+        kept = [e.kind for e in self.k.entries if e is not None]
+        self.assertEqual(kept.count("card"), 1)
+        self.assertEqual(kept.count("resp"), 1)
+        self.assertEqual(kept.count("exit"), 1)
+        self.assertGreater(self.k.dropped, 0)
+        self.assertLessEqual(self.k.bytes, 400)
+        h = self.hub()
+        hello, lines = h.hello_and_backlog()
+        self.assertEqual(hello["dropped"], self.k.dropped)
+        seqs = [s for s, _ in lines]
+        self.assertEqual(seqs, sorted(seqs))
+        self.assertEqual(lines[-1][1]["keeper"], "exit", "the exit is the last line")
+
+    # C10
+    def test_c10_a_line_that_is_not_a_json_object_is_dropped(self):
+        for bad in (b"not json\n", b"[1, 2]\n", b'"str"\n'):
+            self.assertIsNone(self.k.append(bad))
+        self.assertEqual((self.k.dropped, self.k.next_seq), (3, 1))
+        self.assertEqual(self.k.append(_note(0)), 1)
+
+    # C11
+    def test_c11_after_the_exit_the_keeper_lingers_until_a_hub_acked_it_and_left(self):
+        self.k.append(_note(0))
+        seq = self.k.append(self.k.frame("exit", rc=0, stderr_tail=[], closed=False),
+                            kind=self.km.EXIT)
+        self.assertEqual(self.k.exit_seq, seq)
+        with self.k.lock:
+            self.assertFalse(self.k.linger_done_locked(), "no hub has it yet")
+        h = self.hub()
+        h.hello_and_backlog()
+        with self.k.lock:
+            self.assertFalse(self.k.linger_done_locked(), "received is not acked")
+        h.ack()
+        with self.k.lock:
+            self.assertFalse(self.k.linger_done_locked(), "the hub is still attached")
+            self.k.drop_conn_locked("hub left")
+            self.assertTrue(self.k.linger_done_locked())
+
+    # C12
+    def test_c12_the_orphan_watch_and_an_attach_never_both_win(self):
+        with mock.patch.object(self.km, "ORPHAN_S", 1), \
+                mock.patch.object(self.km.os, "killpg") as killpg:
+            h = self.hub()
+            h.hello_and_backlog()
+            self.assertFalse(self.k.watch_once(time.monotonic() + 100), "a hub is attached")
+            with self.k.lock:
+                self.k.drop_conn_locked("hub left")
+            self.assertTrue(self.k.watch_once(time.monotonic() + 100))
+            self.assertTrue(self.k.p.terminated)
+            self.assertTrue(killpg.called)
+            import socket
+            a, b = socket.socketpair()
+            self.addCleanup(b.close)
+            self.assertIsNone(self.k.attach(a), "an attach after the close was claimed")
+            b.settimeout(2)
+            self.assertEqual(b.recv(10), b"", "the refused hub was not hung up on")
+            self.assertFalse(self.k.watch_once(time.monotonic() + 100), "claimed twice")
+
+
+class KeeperProperty(unittest.TestCase):
+    """Seeded random runs against the contract's invariants."""
+
+    SEEDS = (20261031, 1, 2, 3, 4, 5, 6, 7)
+    STEPS = 250
+
+    def test_random_runs_hold_the_invariants(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                self._run(seed)
+
+    def _run(self, seed):
+        import random
+        import keeper
+        rng = random.Random(seed)
+        work = Path(tmpdir(self, "keeper-prop-"))
+        k = keeper.Keeper(["true"], str(work), str(work / "s.sock"), str(work))
+        k.p = _StubP()
+        hubs = []
+        with mock.patch.object(keeper, "_log", lambda msg: None):
+            try:
+                self._drive(rng, k, hubs, keeper)
+            finally:
+                k.stop.set()
+                with k.lock:
+                    k.drop_conn_locked("test over")
+                for h in hubs:
+                    h.close()
+
+    def _drive(self, rng, k, hubs, keeper):
+        kinds = {}                  # seq -> kind ("note", "card", "resp", "exit")
+        card_of = {}                # seq -> card id
+        answered = set()            # card ids answered (accepted by the keeper)
+        answers_to_stdin = collections.Counter()
+        cards_asked = []
+        hub_reqs = {}               # hub request id -> has a response line
+        resp_at = {}                # hub request id -> seq of its response
+        next_card, next_req = 1, 1
+        windows = []                # (acked, applied] of each hub that crashed
+        h = None
+
+        def attach():
+            nonlocal h
+            nh = _Hub(k)
+            hubs.append(nh)
+            hello, lines = nh.hello_and_backlog()
+            h = nh
+            return hello, lines
+
+        def drain_stdin():
+            while k.stdin_q:
+                m = json.loads(k.stdin_q.popleft())
+                k.stdin_bytes = 0
+                if "id" in m and "method" not in m:
+                    answers_to_stdin[str(m["id"])] += 1
+
+        attach()
+        for _ in range(self.STEPS):
+            op = rng.choice(["note", "note", "card", "req", "resp", "answer", "answer",
+                             "ack", "attach", "detach", "crash"])
+            before = k.next_seq
+            if op == "note":
+                s = k.append(_note(rng.random()))
+                kinds[s] = "note"
+            elif op == "card":
+                s = k.append(_card(next_card))
+                kinds[s], card_of[s] = "card", next_card
+                cards_asked.append(next_card)
+                next_card += 1
+            elif op == "req" and h is not None:
+                self.assertTrue(h.send({"jsonrpc": "2.0", "id": next_req, "method": "m"}))
+                hub_reqs[next_req] = False
+                next_req += 1
+            elif op == "resp":
+                open_ = [r for r, done in hub_reqs.items() if not done]
+                if open_:
+                    r = rng.choice(open_)
+                    s = k.append(_resp(r))
+                    kinds[s], hub_reqs[r] = "resp", True
+                    resp_at[r] = s
+            elif op == "answer" and h is not None:
+                seen = [m["id"] for _, m in h.got if "method" in m and "id" in m]
+                if seen:
+                    cid = rng.choice(seen)
+                    for _ in range(rng.choice([1, 1, 2])):          # sometimes twice
+                        self.assertTrue(h.send({"jsonrpc": "2.0", "id": cid,
+                                                "result": {"outcome": "x"}}))
+                    answered.add(cid)
+            elif op == "ack" and h is not None:
+                h.ack()
+            elif op == "attach":
+                if h is not None:
+                    windows.append((k.acked, h.applied))            # replaced = crashed
+                attach()
+            elif op == "detach" and h is not None:
+                h.ack()
+                with k.lock:
+                    if k.conn is h.conn:
+                        k.drop_conn_locked("detached")
+                h = None
+            elif op == "crash" and h is not None:
+                windows.append((k.acked, h.applied))
+                h.close()
+                with k.lock:
+                    if k.conn is h.conn:
+                        k.drop_conn_locked("crashed")
+                h = None
+            # A hub reads what the keeper sends it live: one frame per line
+            # appended this step (the backlog was read at attach).
+            if h is not None and k.next_seq > before:
+                for _ in range(k.next_seq - before):
+                    h.one()
+            drain_stdin()
+
+        # The exit, and a final hub.
+        s = k.append(k.frame("exit", rc=0, stderr_tail=[], closed=False), kind=keeper.EXIT)
+        kinds[s] = "exit"
+        if h is not None:
+            windows.append((k.acked, h.applied))
+        hello, final = attach()
+        drain_stdin()
+
+        # I1: no answer reaches the agent twice for one card.
+        self.assertTrue(all(n == 1 for n in answers_to_stdin.values()), answers_to_stdin)
+        self.assertEqual(set(answers_to_stdin), {str(c) for c in answered})
+        # I2: the final hub gets exactly the unanswered cards, once each.
+        final_cards = [m["id"] for _, m in final if "method" in m and "id" in m]
+        self.assertEqual(sorted(final_cards), sorted(set(cards_asked) - answered))
+        # I3: every note, response and exit reached some hub at least once.
+        applied = collections.Counter(s for hub in hubs for s, _ in hub.got)
+        for s, kind in kinds.items():
+            if kind != "card":
+                self.assertGreaterEqual(applied[s], 1, f"seq {s} ({kind}) never applied")
+        self.assertEqual(final[-1][1].get("keeper"), "exit", "the exit is the last line")
+        # I4: a non-card line comes twice only from a crashed hub's (acked, applied].
+        for s, n in applied.items():
+            if kinds[s] != "card" and n > 1:
+                self.assertTrue(any(a < s <= b for a, b in windows),
+                                f"seq {s} duplicated outside every crash window")
+        # I5: per hub, seqs strictly increase (held cards, all <= acked, first).
+        for hub in hubs:
+            seqs = [s for s, _ in hub.got]
+            self.assertEqual(seqs, sorted(set(seqs)), "a hub saw seqs out of order")
+        # I6: outstanding is every hub request whose response is not acked.
+        self.assertEqual({o["id"] for o in hello["outstanding"]},
+                         {r for r in hub_reqs if resp_at.get(r, k.acked + 1) > k.acked})
+
+
+class KeeperProcess(_Spawn, unittest.TestCase):
+    """The contract through a real keeper process and real sockets."""
+
+    def _connect(self, sock):
+        import socket
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.settimeout(10)
+        c.connect(sock)
+        self.addCleanup(c.close)
+        return c, c.makefile("rb")
+
+    def test_a_replaced_hub_gets_eof(self):
+        work = tmpdir(self, "keeper-proc-")
+        kp, sock = self._start(work)
+        c1, r1 = self._connect(sock)
+        self.assertEqual(json.loads(r1.readline())["keeper"], "hello")
+        c2, r2 = self._connect(sock)
+        self.assertEqual(json.loads(r2.readline())["keeper"], "hello")
+        rest = r1.read()
+        self.assertTrue(all(json.loads(x)["keeper"] == "caught-up"
+                            for x in rest.splitlines() if x.strip()), rest)
+        c2.sendall(b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n')
+        while True:
+            f = json.loads(r2.readline())
+            if f["keeper"] == "l":
+                break
+        self.assertEqual(f["m"]["id"], 1, "the new hub drives the agent")
+
+    def test_a_stalled_hub_does_not_block_a_new_attach(self):
+        work = Path(tmpdir(self, "keeper-proc-"))
+        n = 3000
+        upd = json.dumps({"sessionUpdate": "agent_message_chunk",
+                          "content": {"type": "text", "text": "z" * 1000}})
+        (work / "big.jsonl").write_text((upd + "\n") * n, encoding="utf-8")
+        kp, sock = self._start(work, {"FAKE_ACP_REPLAY": str(work)})
+        c1, r1 = self._connect(sock)
+        c1.sendall(b'{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/","mcpServers":[]}}\n')
+        sid = None
+        while sid is None:
+            f = json.loads(r1.readline())
+            if f["keeper"] == "l" and f["m"].get("id") == 1:
+                sid = f["m"]["result"]["sessionId"]
+        c1.sendall(_j({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+                       "params": {"sessionId": sid,
+                                  "prompt": [{"type": "text", "text": "replay big"}]}}))
+        time.sleep(1.5)                          # c1 reads no more: its writer wedges
+        t0 = time.monotonic()
+        c2, r2 = self._connect(sock)
+        self.assertEqual(json.loads(r2.readline())["keeper"], "hello")
+        self.assertLess(time.monotonic() - t0, 2.0, "a stalled hub blocked the attach")
+        chunks, done = 0, False
+        while not done:
+            f = json.loads(r2.readline())
+            if f["keeper"] != "l":
+                continue
+            m = f["m"]
+            if m.get("id") == 2:
+                done = True
+            elif "zzzz" in json.dumps(m):
+                chunks += 1
+        self.assertEqual(chunks, n, "the new hub lost lines")
+
+
+class V2KeeperCompat(_Spawn, unittest.TestCase):
+    """The new client drives a keeper still speaking protocol 2 (every live
+    pane at the first update after this ships)."""
+
+    def _start_v2(self, work):
+        sock = str(Path(work) / "s.sock")
+        full = {**os.environ, "FAKE_ACP_DIR": str(work)}
+        kp = subprocess.Popen([sys.executable, "-I", str(ROOT / "testkit" / "keeper_v2.py"),
+                               "--sock", sock, "--dir", str(work), "--cwd", str(work), "--",
+                               sys.executable, str(FAKE)],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, env=full, start_new_session=True)
+        self.addCleanup(self._kill, kp)
+        self.assertTrue(wait_for(lambda: os.path.exists(sock)), "no socket")
+        return kp, sock
+
+    def test_the_new_client_drives_a_v2_keeper_through_a_reattach(self):
+        from corral_core import acp
+        work = tmpdir(self, "keeper-v2-")
+        kp, sock = self._start_v2(work)
+        events = []
+        on_event = lambda kind, payload: events.append((kind, payload))  # noqa: E731
+        c1 = acp.AcpClient.reattach(sock, kp.pid, work, on_event=on_event,
+                                    on_permission=lambda req: None)
+        self.assertEqual(c1._kv, 2)
+        c1.initialize()
+        sid = c1.new_session(work)
+        r = c1.prompt(sid, "remember pear")
+        self.assertEqual(r["stopReason"], "end_turn")
+        # Mid-turn: the hub lets go, the next one adopts the turn.
+        box = {}
+        threading.Thread(target=lambda: box.setdefault(
+            "r", _swallow(lambda: c1.prompt(sid, "sleep 1"))), daemon=True).start()
+        self.assertTrue(wait_for(lambda: any(o for o in [c1._pending] if len(o) >= 1)))
+        time.sleep(0.3)
+        c1.detach()
+        c2 = acp.AcpClient.reattach(sock, kp.pid, work, on_event=on_event,
+                                    on_permission=lambda req: None)
+        self.assertEqual(c2._kv, 2)
+        prompt = [o for o in c2.adopted if o["method"] == "session/prompt"]
+        self.assertEqual(len(prompt), 1, c2.adopted)
+        self.assertEqual(c2.await_adopted(prompt[0]["id"])["stopReason"], "end_turn")
+        r = c2.prompt(sid, "what word did I ask you to remember?")
+        self.assertEqual(r["stopReason"], "end_turn")
+        text = "".join(str(p) for k_, p in events if k_ != "keeper_replayed")
+        self.assertIn("pear", text)
+        # A clean exit.
+        c2._write({"keeper": "close"})
+        self.assertTrue(wait_for(lambda: kp.poll() is not None), "the v2 keeper kept running")
+        self.assertTrue(wait_for(lambda: not c2.alive))
+        self.assertTrue(c2._closed, "a requested close read as a crash")
+
+
+def _swallow(fn):
+    try:
+        return fn()
+    except Exception as e:                     # noqa: BLE001
+        return e
 
 
 class TheExitedAgentsTurnSettles(KeeperCase):
@@ -806,3 +1116,7 @@ class TheExitedAgentsTurnSettles(KeeperCase):
         self.assertTrue(self.ends(q)[-1].get("adopted"))
         self.assertEqual(q._turns().turns()[meta_turn(q)]["state"], "completed")
         self.assertTrue(wait_for(lambda: q.state == "dead"), q.state)
+
+
+if __name__ == "__main__":
+    unittest.main()

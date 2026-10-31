@@ -709,9 +709,10 @@ class Panels:
             if spec.get("unavailable"):
                 raise PanelError(f"{a['lane']}: {spec['unavailable']}")
             p = self.mgr.create(a["lane"], rec["cwd"], "strict", rec.get("model"), rec.get("effort"),
-                                title=f"panel {rec['slug']} · {a['lane']}", background=True)
+                                background=True)
             if p.state == "dead":
                 raise PanelError(f"{a['lane']} did not start: {p.error}")
+            _name(p, f"panel {rec['slug']} · {a['lane']}")
             a["pane"] = p.id
             cfg = (getattr(sessions, "REVIEWER_CONFIG", None) or READ_ONLY_CONFIG).get(a["lane"]) or {}
             for cid, val in cfg.items():
@@ -806,8 +807,12 @@ class Panels:
     def _synthesize(self, rec):
         import sessions
         syn = rec.setdefault("synth", {"lane": None, "pane": None})
-        if syn.get("status") == "sealed":
-            return
+        if syn.get("status") == "sealed" and syn.get("round_done") == rec["round"]:
+            return                         # this round is synthesized already
+        if syn.get("round_done") != rec["round"]:
+            # A new round needs a new synthesis (2026-10-31: round 2 kept
+            # round 1's, because a sealed one stopped it here).
+            syn.update({"status": None, "turn": None, "packet": None})
         lane = syn.get("lane") or choose_synth_lane(
             [a["lane"] for a in rec["arms"]], rec.get("author_lane"),
             available_lanes(self.mgr))
@@ -851,9 +856,10 @@ class Panels:
             if p is None or syn.get("round_done") != rec["round"]:
                 # A fresh pane every time: it must not remember a previous synthesis.
                 p = self.mgr.create(lane, rec["out_dir"], "strict", None, None,
-                                    title=f"panel {rec['slug']} · synthesis", background=True)
+                                    background=True)
                 if p.state == "dead":
                     raise PanelError(f"{lane} did not start: {p.error}")
+                _name(p, f"panel {rec['slug']} · synthesis r{rec['round']}")
                 syn["pane"] = p.id
             if not syn.get("turn") or syn.get("round_done") != rec["round"]:
                 syn["turn"] = p.send(prompt, via=VIA)
@@ -874,7 +880,8 @@ class Panels:
             if led.get("state") != "completed":
                 raise PanelError(f"synthesis turn {led.get('state')}")
             text = turn_text(p, tid)
-            path = Path(rec["out_dir"]) / "synthesis.md"
+            path = Path(rec["out_dir"]) / (f"synthesis-r{rec['round']}.md"
+                                           if rec["round"] > 1 else "synthesis.md")
             path.write_text(f"---\npanel: {rec['id']}\nlane: {lane}\npane: {p.id}\nturn: {tid}\n"
                             f"sealed: {_now()}\n---\n\n" + text[:SEAL_CAP], encoding="utf-8")
             syn.update({"status": "sealed", "file": str(path), "packet": parse_packet(text),
@@ -914,6 +921,19 @@ class Panels:
                 ap.ask(summary[:1900], source="panel")
             except Exception:                             # noqa: BLE001
                 pass
+
+
+def _name(pane, title):
+    """Title a panel's pane. Manager.create's `title` names an own branch
+    only, never the pane (2026-10-31: arms were titled with their prompt).
+    Not rename(): that marks a name the operator typed."""
+    try:
+        pane.title = title[:60]
+        pane.title_locked = True
+        pane.save_meta()
+        pane.emit("renamed", {"title": pane.title}, activity=False)
+    except Exception:                                     # noqa: BLE001
+        pass
 
 
 def available_lanes(mgr):

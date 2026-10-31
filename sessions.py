@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import queue
+import secrets
 import shutil
 import subprocess
 import sys
@@ -130,7 +131,10 @@ def keeper_sock_path(pane_id, pane_dir, base="/tmp"):
     the socket. It is used only when lstat says it is a real directory,
     owned by us, mode 0700; anything else fails closed to no keeper (the
     pane works, a restart just ends it, as before keepers), said loudly."""
-    p = Path(pane_dir) / "keeper" / "s.sock"
+    # A name of its own per keeper: no successor ever shares a path, so no
+    # cleanup can remove another keeper's door (and no inode check is needed).
+    tag = secrets.token_hex(4)
+    p = Path(pane_dir) / "keeper" / f"s-{tag}.sock"
     if len(str(p).encode("utf-8", "replace")) <= KEEPER_SOCK_MAX:
         return p
     import stat as _stat
@@ -156,7 +160,7 @@ def keeper_sock_path(pane_id, pane_dir, base="/tmp"):
               f"others) -- refusing to put the agent's socket there",
               file=sys.stderr, flush=True)
         return None
-    return d / f"k-{pane_id}.sock"
+    return d / f"k-{pane_id}-{tag}.sock"
 MAX_PROMPT = 200_000
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 
@@ -1645,7 +1649,7 @@ class Pane(_core.PaneBase):
             # while no hub listened has its answer in the unacked replay, and
             # it must settle (ledger, turn_end) before the exit is reported.
             self._adopt_turn(prompt["id"], gen)
-        elif self.client.alive and self.state != "dead":
+        elif self.client.p.poll() is None and self.state != "dead":
             self.state = "needs-you" if self.pending else "ready"
         # (Not alive and nothing to adopt: the reader marks it dead itself.)
         self.emit("reattached", {"adoptedTurn": bool(prompt),
@@ -1786,10 +1790,13 @@ class Pane(_core.PaneBase):
             # A deliberate kill (pause) reports its exit asynchronously; ignore it.
             if self._expect_exit:
                 return
-            self.state = "dead"
+            # Settle first, then say `dead`: anyone who sees dead must also
+            # see its question closed and its cards gone (CI 2026-10-31: a
+            # reader saw dead with the question still open).
             self._drop_held_peers("dead")
             self._clear_pending("agent_exit")
             self._clear_question("dead")
+            self.state = "dead"
             if data.get("closed"):
                 # Deliberate: not a fault. Unless the pane already recorded
                 # why it died (the drain closed the client AFTER an auth

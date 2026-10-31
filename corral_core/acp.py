@@ -40,6 +40,9 @@ MAX_STDERR_LINE = 256 * 1024    # stderr carries log lines, not payloads
 KEEPER_PY = Path(__file__).resolve().parent.parent / "keeper.py"
 KEEPER_CONNECT_S = 20           # for a freshly spawned keeper's socket to answer
 KEEPER_REATTACH_S = 5           # for a surviving keeper's socket to answer
+# Keeper protocol 3 (numbered outbox, cumulative acks): a card, a response
+# or the exit is acked the moment it is applied; anything else within this.
+KEEPER_ACK_EVERY_S = 0.2
 
 
 class AgentError(Exception):
@@ -174,6 +177,10 @@ class AcpClient:
         self.kp = None             # the keeper Popen (None for a reattached one)
         self.adopted = []          # reattach(): hub requests still outstanding
         self.hello = None
+        self._kv = None            # the keeper's protocol version (2 or 3)
+        self._applied = 0          # v3: the last numbered line this hub applied
+        self._acked_sent = 0
+        self._ack_stop = threading.Event()
 
     def __init__(self, argv, cwd, env=None, on_event=None, on_permission=None,
                  strip_env=(), keeper=None):
@@ -246,8 +253,38 @@ class AcpClient:
             except OSError:
                 pass
             raise
-        self.alive = self.p.rc is None
+        self.alive = self.p.rc is None or self._kv >= 3
         threading.Thread(target=self._read_stdout, daemon=True).start()
+        self._start_acks()
+
+    def _start_acks(self):
+        if self._kv >= 3:
+            threading.Thread(target=self._ack_loop, daemon=True, name="keeper-ack").start()
+
+    def _ack_loop(self):
+        while not self._ack_stop.wait(KEEPER_ACK_EVERY_S):
+            self._send_ack()
+
+    def _send_ack(self):
+        n = self._applied
+        if n > self._acked_sent:
+            try:
+                self._write({"keeper": "ack", "s": n})
+                self._acked_sent = n
+            except AgentError:
+                pass
+
+    def _applied_line(self, seq, urgent):
+        """v3: this hub has applied numbered line `seq` (emitted, raised,
+        settled). Urgent lines are acked now, so a crash cannot repeat them."""
+        try:
+            seq = int(seq)
+        except (TypeError, ValueError):
+            return
+        if seq > self._applied:
+            self._applied = seq
+        if urgent:
+            self._send_ack()
 
     def _connect_keeper(self, sock_path, keeper_pid, timeout):
         """Connect to a keeper's socket and read its hello. Sets self.p."""
@@ -285,9 +322,9 @@ class AcpClient:
         sock.settimeout(None)
         self.hello = hello
         try:
-            self._sock_ino = os.stat(sock_path).st_ino   # the door we came in by
-        except OSError:
-            self._sock_ino = None
+            self._kv = int(hello.get("version") or 2)
+        except (TypeError, ValueError):
+            self._kv = 2
         self.p = _KeeperProc(sock, reader, hello, keeper_pid)
         self.stderr_tail = [str(x)[:400] for x in (hello.get("stderr_tail") or [])][-40:]
         with self._idlock:
@@ -318,13 +355,17 @@ class AcpClient:
                 c.adopted.append({"id": o["id"], "method": str(o.get("method") or "")})
                 c._pending[o["id"]] = {"ev": threading.Event(), "result": None,
                                        "error": None}
-        c.alive = c.p.rc is None
-        # Cards the previous hub was shown and never answered come first:
-        # they predate anything in the spool.
+        # v3: alive is the STREAM (it ends after the exit line, which follows
+        # every answer the agent gave), so a waiter on an adopted turn of an
+        # agent that already exited still gets the replayed answer.
+        c.alive = c.p.rc is None or c._kv >= 3
+        # v2 only: cards the previous hub never answered, from the hello. (v3
+        # re-sends them as numbered lines, first.)
         for msg in hello.get("agent_requests") or []:
             if isinstance(msg, dict) and "method" in msg and "id" in msg:
                 c._on_request(msg)
         threading.Thread(target=c._read_stdout, daemon=True).start()
+        c._start_acks()
         return c
 
     def await_adopted(self, rid, method="session/prompt"):
@@ -340,6 +381,8 @@ class AcpClient:
         exiting). A client with no keeper is simply closed."""
         if not isinstance(getattr(self, "p", None), _KeeperProc):
             return self.close()
+        self._send_ack()            # what this hub applied is not re-sent
+        self._ack_stop.set()
         self._detached = True
         self._stop_reading = True
         self.p.close_socket()
@@ -486,6 +529,8 @@ class AcpClient:
     def _reader_ended(self):
         """The adapter's stream ended: settle the process, release every
         waiter, and report the exit."""
+        self._send_ack()                 # the exit line, if it was the last one
+        self._ack_stop.set()
         self.alive = False
         rc = self.p.poll()
         if self.kp is not None:
@@ -533,14 +578,27 @@ class AcpClient:
         # Any parsed message counts as activity for the stall notice.
         self._last_activity = time.monotonic()
         if "keeper" in msg and isinstance(self.p, _KeeperProc):
+            if msg.get("keeper") == "l":                       # v3: one numbered line
+                inner = msg.get("m")
+                urgent = False
+                if isinstance(inner, dict):
+                    urgent = "id" in inner or "keeper" in inner
+                    self._dispatch_line(inner)
+                self._applied_line(msg.get("s"), urgent)
+                return
             return self._on_keeper_frame(msg)
+        return self._dispatch_line(msg)
+
+    def _dispatch_line(self, msg):
+        if "keeper" in msg and isinstance(self.p, _KeeperProc):
+            return self._on_keeper_frame(msg)                  # the exit, numbered (v3)
         if "id" in msg and "method" not in msg:               # response to us
             slot = self._pending.get(msg["id"])
             if slot:
                 slot["result"], slot["error"] = msg.get("result"), msg.get("error")
                 slot["ev"].set()
-            if isinstance(self.p, _KeeperProc):
-                # Received, not merely flushed: the keeper may forget it now.
+            if isinstance(self.p, _KeeperProc) and self._kv == 2:
+                # v2: received, not merely flushed: the keeper may forget it.
                 try:
                     self._write({"keeper": "ack", "id": msg["id"]})
                 except AgentError:
@@ -554,7 +612,7 @@ class AcpClient:
 
     def _on_keeper_frame(self, msg):
         kind = msg.get("keeper")
-        if kind == "replayed":
+        if kind in ("replayed", "caught-up"):                  # v2 / v3
             self.on_event("keeper_replayed", {"n": msg.get("n") or 0,
                                               "dropped": msg.get("dropped") or 0})
             if self.p.rc is not None:
@@ -562,7 +620,8 @@ class AcpClient:
                 # exit frame went to the previous hub: this is the end.
                 self._closed = self._closed or bool((self.hello or {}).get("closed"))
                 self.exit_reason = self.exit_reason or f"agent exited rc={self.p.rc}"
-                self._ack_exit()
+                if self._kv == 2:
+                    self._ack_exit()
                 self._stop_reading = True
         elif kind == "exit":
             tail = [str(x)[:400] for x in (msg.get("stderr_tail") or [])][-40:]
@@ -571,11 +630,12 @@ class AcpClient:
             if msg.get("closed"):
                 self._closed = True
             self.p.exited(msg.get("rc"))
-            self._ack_exit()
+            if self._kv == 2:
+                self._ack_exit()               # v3 acks the numbered line instead
             self._stop_reading = True
 
     def _ack_exit(self):
-        """Tell the keeper this hub has the exit, so it may quit now."""
+        """v2: tell the keeper this hub has the exit, so it may quit now."""
         try:
             self._write({"keeper": "ack-exit"})
         except AgentError:
@@ -756,13 +816,12 @@ class AcpClient:
             self._unlink_own_socket()
 
     def _unlink_own_socket(self):
-        """Remove the keeper's socket file only if it is still the one we
-        connected to: a successor keeper may already listen on that path."""
+        """Remove this keeper's socket file. Each keeper has its own name
+        (sessions.keeper_sock_path), so no successor ever shares the path;
+        the inode guard this replaced could not tell a successor apart on
+        Linux, where tmpfs reuses inode numbers (CI, 2026-10-31)."""
         try:
-            path = Path(self.keeper["sock"])
-            ino = getattr(self, "_sock_ino", None)
-            if ino is not None and os.stat(path).st_ino == ino:
-                path.unlink()
+            Path(self.keeper["sock"]).unlink()
         except (OSError, KeyError, TypeError):
             pass
 
