@@ -615,6 +615,7 @@ class Service:
             "paired": p.get("paired"),
             "lastSeen": (cache.get(pid) or {}).get("at"),
             "lastError": (cache.get(pid) or {}).get("error"),
+            "lastErrorAt": (cache.get(pid) or {}).get("errorAt"),
         } for pid, p in sorted(self.peers().items(), key=lambda kv: kv[1].get("name", ""))]
         out["inbox"] = [self._offer_view(o) for o in self._doc("inbox.json", {}).values()]
         out["outbox"] = list(self._doc("outbox.json", {}).values())

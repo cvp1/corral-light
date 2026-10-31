@@ -1,10 +1,16 @@
 # Runs the outside watcher every ten minutes, and once shortly after boot.
+#
+# A wall-clock trigger, on purpose. With only OnBootSec + OnUnitActiveSec the
+# timer counts from the watcher's last run, and once that run goes missing it
+# sits "elapsed" with no next run at all; `enable --now` does not re-arm it.
+# One host's watcher stayed silent that way for twelve days. OnCalendar always
+# has a next run.
 [Unit]
 Description=Corral Light — outside watcher every 10 minutes
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnCalendar=*:0/10
 Persistent=true
 
 [Install]

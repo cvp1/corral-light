@@ -50,9 +50,10 @@ def _q(**kw):
 def _age(iso):
     if not iso:
         return "never"
+    import calendar
     import time
     try:
-        t = time.mktime(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+        t = calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
     except ValueError:
         return iso
     s = int(time.time() - t)
@@ -60,6 +61,22 @@ def _age(iso):
         if s >= n:
             return f"{s // n}{unit} ago"
     return f"{s}s ago"
+
+
+def peer_seen(p):
+    """'seen …' and the last failed call, from the roster CACHE — not a probe.
+
+    A failure carries its own age and the live check; one that an answer has
+    since superseded is not shown (a weeks-old 'did not answer' read as live)."""
+    seen = f"seen {_age(p.get('lastSeen'))}"
+    err, at, last = p.get("lastError"), p.get("lastErrorAt"), p.get("lastSeen")
+    if not err:
+        return seen
+    if at and last and at <= last:            # same ISO-8601 Z form: text order is time order
+        return seen
+    when = _age(at) if at else "(time not recorded)"
+    return (f"{seen}  ! last call failed {when}: {err}  "
+            f"(cached; `corral-light hubs ls {p.get('name') or p.get('id')}` asks it now)")
 
 
 def v_status(c, a):
@@ -78,9 +95,8 @@ def v_status(c, a):
     if peers:
         c.say("\npeers:")
         for p in peers:
-            err = f"  ! {p['lastError']}" if p.get("lastError") else ""
             c.say(f"  {p['name']:<16} {p['id']}  {p['addr']}:{p['port']}  "
-                  f"seen {_age(p.get('lastSeen'))}{err}")
+                  f"{peer_seen(p)}")
             c.say(f"  {'':<16} it may here: {', '.join(p.get('theyMay') or []) or 'nothing'}"
                   f"   we may there: {', '.join(p.get('weMay') or []) if p.get('weMay') is not None else '?'}")
     inbox = [o for o in st.get("inbox") or [] if o.get("state") == "offered"]

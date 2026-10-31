@@ -37,7 +37,9 @@ unacknowledged line in order, and goes live. The next hub adopts the running tur
 - Kill switch: `CORRAL_LIGHT_KEEPER=0` forks adapters directly, as before.
 - macOS: launchd leaves a detached grandchild alone on `kickstart -k` and
   `bootout` (measured 2026-10-30). Linux: the unit is `KillMode=process`
-  now, so systemd signals the hub alone. The watch timer is unchanged.
+  now, so systemd signals the hub alone. An installed unit is never
+  rewritten by update, so update refuses to restart a hub whose installed
+  unit is not `KillMode=process` and prints the fix (2026-10-31).
 
 Tests: `test_keeper.py` (K1–K10 and the keeper alone). The legacy
 "a restart interrupts the turn" tests pin `CORRAL_LIGHT_KEEPER=0`.

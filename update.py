@@ -330,6 +330,31 @@ def service_manager():
     return "systemd", r.stdout.strip() == "active"
 
 
+def killmode_problem():
+    """Why a restart would kill every kept agent here, or None.
+
+    systemd's default KillMode signals the service's whole cgroup, keepers
+    included; only KillMode=process sends SIGTERM to the hub alone. The
+    INSTALLED unit is what counts, and update never rewrites it. Unknown
+    resolves to refusal: a guess here costs every live turn."""
+    mgr, active = service_manager()
+    if mgr != "systemd" or not active:
+        return None
+    r = subprocess.run(["systemctl", "--user", "show", UNIT, "-p", "KillMode", "--value"],
+                       capture_output=True, text=True)
+    km = (r.stdout or "").strip() if r.returncode == 0 else ""
+    if km == "process":
+        return None
+    return (f"not restarting: the installed {UNIT} has KillMode={km or 'unknown'}, "
+            f"so a restart would end every pane's agent, kept ones included. "
+            f"Rewrite the unit, reload it, and run update again:\n"
+            f"    corral-light install-service --force\n"
+            f"    systemctl --user daemon-reload\n"
+            f"    systemctl --user show {UNIT} -p KillMode    (expect KillMode=process)\n"
+            f"(--force writes the defaults; pass --bind/--port/--ollama-url if yours differ. "
+            f"The installer's drop-in with PATH and CORRAL_NODE_BIN is left alone.)")
+
+
 def restart(inside):
     """Restart the hub's service. From inside the hub it is queued, so this
     process can finish speaking first. -> (done, message)."""
@@ -337,6 +362,9 @@ def restart(inside):
     if not active:
         return False, ("the hub is not running as a service here — restart it "
                        "by hand to load the new code")
+    why = killmode_problem()
+    if why:
+        return False, why
     if mgr == "systemd":
         argv = ["systemctl", "--user", "restart", UNIT]
         if inside:
@@ -658,6 +686,9 @@ def run(a, say):
     if a.check:
         res["action"] = ("update" if p["behind"] else
                          "restart" if need_restart else "none")
+        why = killmode_problem()
+        if why:
+            say(why.replace("not restarting:", "an update here would refuse:", 1))
         last = None
         try:
             last = json.loads(STATUS_FILE.read_text(encoding="utf-8"))
@@ -672,6 +703,13 @@ def run(a, say):
         return EXIT_OK, res
 
     own, inside = own_pane(), inside_hub()
+    # Before settle and before the pull: --now does not override this, and a
+    # refused update leaves the checkout where it was.
+    why = killmode_problem() if need_restart else None
+    if why:
+        say(why)
+        res["outcome"] = "refused"
+        return EXIT_REFUSED, res
     if need_restart and not a.now and settle(a, st, own, say, res):
         return EXIT_DEFERRED, res
 

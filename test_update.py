@@ -558,6 +558,58 @@ class Homebrew(unittest.TestCase):
                       text)
 
 
+class KillModeGuard(Repo):
+    """A Linux hub whose INSTALLED unit is not KillMode=process loses every
+    kept agent on restart (systemd signals the whole cgroup). update refuses
+    to restart it and names the fix (2026-10-31: a linked host still had mixed)."""
+
+    def systemd(self, killmode):
+        calls, real = [], subprocess.run
+
+        def run(argv, *a, **kw):
+            if not argv or argv[0] != "systemctl":
+                return real(argv, *a, **kw)          # git and the rest stay real
+            calls.append(list(argv))
+            out = f"{killmode}\n" if "show" in argv else ""
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        mock.patch.object(update, "service_manager", lambda: ("systemd", True)).start()
+        mock.patch.object(update.subprocess, "run", side_effect=run).start()
+        return calls
+
+    def restarts(self, calls):
+        return [c for c in calls if "restart" in c]
+
+    def test_restart_refuses_a_unit_that_is_not_killmode_process(self):
+        for km in ("mixed", "control-group", ""):
+            calls = self.systemd(km)
+            done, msg = update.restart(False)
+            mock.patch.stopall()
+            self.assertFalse(done, km)
+            self.assertEqual(self.restarts(calls), [], km)
+            self.assertIn("install-service --force", msg)
+            self.assertIn("systemctl --user daemon-reload", msg)
+
+    def test_restart_goes_ahead_with_killmode_process(self):
+        calls = self.systemd("process")
+        done, _ = update.restart(False)
+        self.assertTrue(done)
+        self.assertEqual(len(self.restarts(calls)), 1)
+
+    def test_update_now_with_mixed_changes_nothing_and_does_not_restart(self):
+        self.push()
+        before = self.head()
+        calls = self.systemd("mixed")
+        with mock.patch.object(update, "inside_hub", return_value=False), \
+                mock.patch.object(update, "wait_healthy", return_value=True):
+            code, res, lines = self.run_update(
+                {"hub": {"root": str(self.inst), "commit": before}, "panes": []}, now=True)
+        mock.patch.stopall()
+        self.assertEqual(code, update.EXIT_REFUSED)
+        self.assertEqual(self.head(), before, "nothing is pulled")
+        self.assertEqual(self.restarts(calls), [])
+        self.assertTrue(any("KillMode" in x for x in lines), lines)
+
+
 class Installers(unittest.TestCase):
     def test_skill_link_and_refusal(self):
         home = Path(tmpdir(self, "update-home-"))
@@ -584,6 +636,15 @@ class Installers(unittest.TestCase):
         self.assertIn("SuccessExitStatus=3", service)
         self.assertIn("Persistent=true", timer)
         self.assertIn("/opt/cl/update.py", update.launchd_plist(Path("/opt/cl")))
+
+    def test_the_watch_timer_has_a_wall_clock_trigger(self):
+        # Monotonic triggers alone (OnBootSec + OnUnitActiveSec) strand the
+        # timer with no next run once a run goes missing; one host's sat silent
+        # from 2026-10-19 to 2026-10-31. A calendar trigger always re-arms.
+        timer = (HERE / "corral-light-watch.timer").read_text(encoding="utf-8")
+        lines = [x.strip() for x in timer.splitlines() if not x.lstrip().startswith("#")]
+        self.assertTrue(any(x.startswith("OnCalendar=") for x in lines), timer)
+        self.assertFalse(any(x.startswith("OnUnitActiveSec=") for x in lines), timer)
 
     def test_the_launcher_routes_update(self):
         text = (HERE / "corral-light").read_text(encoding="utf-8")

@@ -987,6 +987,8 @@ and both those lanes go dark in a way that looks like a vendor outage.
 
 The systemd unit uses `KillMode=process`: on a stop or restart only the hub is signalled. Each pane's agent runs under its own keeper (`keeper.py`, in its own session), which the next hub reattaches to: the running turn continues, pending permission cards come back, and anything the agent said in between is replayed. The hub's shutdown note in such a pane says the turn continues and names only what was still queued (that is not re-sent). A keeper the next hub cannot reach is stopped before the conversation is resumed, as a plain orphan was. See [docs/DURABLE-RUNS.md](docs/DURABLE-RUNS.md).
 
+**An older unit file does not have this.** `corral-light update` never rewrites an installed unit, so a host installed before the keeper still has `KillMode=mixed`, and a restart there ends every agent. `corral-light update` checks the installed unit and refuses to restart a hub whose unit is not `KillMode=process`, `--now` included; `update --check` says so too. To fix it, run `corral-light install-service --force` (pass `--bind`, `--port` or `--ollama-url` if yours differ from the defaults; the installer's drop-in is left alone), then `systemctl --user daemon-reload`.
+
 **To stop everything, use `corral-light stop`.** A plain `systemctl --user stop corral-light` (or a launchd unload) stops only the hub, and the keepers keep their agents running until their orphan watch ends them, hours later. `corral-light stop` stops the service, then closes every keeper and its agent, and prints how to start the hub again. Run it from a terminal, not from inside a pane.
 
 ## Watching the hub
@@ -1000,6 +1002,8 @@ sed "s|%HERE%|$PWD|" corral-light-watch.service > ~/.config/systemd/user/corral-
 cp corral-light-watch.timer ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now corral-light-watch.timer
 ```
+
+The timer runs on the wall clock (`OnCalendar=*:0/10`). An older copy that counted from the last run (`OnUnitActiveSec`) can stop with no next run; `systemctl --user list-timers --all | grep corral` shows a `-` in NEXT. Copy the new timer over it, then `systemctl --user daemon-reload && systemctl --user restart corral-light-watch.timer`.
 
 macOS: save as `~/Library/LaunchAgents/com.cvp1.corral-light-watch.plist` (fix the two paths), then `launchctl load` it:
 

@@ -639,6 +639,57 @@ class HubLinkTest(unittest.TestCase):
                          {"declined", "withdrawn"})
 
 
+class PeerStatusLine(unittest.TestCase):
+    """`hubs status` renders a CACHE (roster-cache.json), not a probe. A failure
+    it shows must carry its age, and one an answer has since superseded must not
+    show at all (2026-10-31: a 14-day-old 'Host is down' read as live)."""
+
+    def render(self, peer):
+        import hubs_cli
+        said = []
+
+        class C:
+            def get(self, path):
+                return {"enabled": True, "name": "here", "id": "h", "bind": "127.0.0.1",
+                        "port": 8097, "listening": True, "fingerprint": "f",
+                        "peers": [dict({"name": "office", "id": "p", "addr": "10.0.0.2",
+                                        "port": 8097, "theyMay": [], "weMay": []}, **peer)]}
+
+            def say(self, line):
+                said.append(line)
+        hubs_cli.v_status(C(), type("A", (), {"json": False})())
+        return "\n".join(said)
+
+    def iso(self, ago):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))
+
+    def test_an_error_older_than_the_last_answer_is_not_shown(self):
+        out = self.render({"lastSeen": self.iso(7), "lastError": "did not answer (Host is down)",
+                           "lastErrorAt": self.iso(14 * 86400)})
+        self.assertNotIn("did not answer", out)
+        self.assertIn("seen 7s ago", out)
+
+    def test_a_current_error_carries_its_age_and_the_live_check(self):
+        out = self.render({"lastSeen": self.iso(3 * 86400), "lastError": "did not answer (x)",
+                           "lastErrorAt": self.iso(2 * 3600)})
+        self.assertIn("failed 2h ago: did not answer (x)", out)
+        self.assertIn("corral-light hubs ls office", out)
+
+    def test_an_error_with_no_recorded_time_says_so(self):
+        out = self.render({"lastSeen": None, "lastError": "did not answer (x)"})
+        self.assertIn("time not recorded", out)
+
+    def test_status_carries_the_error_time(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = hublink.Service(FakeMgr(), d)
+            s._seen("p", error="did not answer (x)")
+            s._save_peers({"p": {"name": "office", "addr": "a", "port": 1,
+                                 "fp": "", "grants": []}})
+            peer = s.status()["peers"][0]
+            self.assertEqual(peer["lastError"], "did not answer (x)")
+            self.assertRegex(peer["lastErrorAt"] or "", r"^\d{4}-\d\d-\d\dT")
+
+
 class HelpersTest(unittest.TestCase):
     def test_strip_userinfo(self):
         self.assertEqual(hublink._strip_userinfo("https://u:tok@github.com/x/y.git"),
