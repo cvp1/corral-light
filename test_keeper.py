@@ -1183,7 +1183,9 @@ class KeeperAfterReview3(_InProc):
     def test_r3_4_a_reader_that_fails_still_lets_go_of_the_agent(self):
         h = self.hub()
         h.hello_and_backlog()
-        with mock.patch.object(self.k, "accept_from_hub", side_effect=TypeError("boom")):
+        # Data lines take offer_from_hub since the split reader; both paths.
+        with mock.patch.object(self.k, "accept_from_hub", side_effect=TypeError("boom")), \
+                mock.patch.object(self.k, "offer_from_hub", side_effect=TypeError("boom")):
             h.sock.sendall(b'{"jsonrpc":"2.0","method":"x"}\n')
             self.assertTrue(wait_for(lambda: self.k.conn is None, timeout=3),
                             "a dead reader still owns the agent")
@@ -1414,3 +1416,80 @@ class StdinBackpressure(_InProc):
         self.k.p.stdin.gate.set()
         self.assertTrue(wait_for(lambda: len(self.k.p.stdin.lines) == 5, timeout=3),
                         "a line read before the hang-up was lost")
+
+
+class StdinBackpressureAfterReview(StdinBackpressure):
+    """The panel on c4fe8f5 (Codex). Each test fails on c4fe8f5."""
+
+    def _hang_up_with_a_waiting_prompt(self, rid=7):
+        h = self._wedge()
+        h.sock.sendall(_j({"jsonrpc": "2.0", "id": rid, "method": "session/prompt",
+                           "params": {}}))
+        h.sock.shutdown(__import__("socket").SHUT_WR)    # a clean hang-up
+        conn = h.conn
+        self.assertTrue(wait_for(lambda: conn.read_done is not None, timeout=3))
+        return h
+
+    def test_bpr_1_a_write_failure_after_a_hang_up_keeps_the_pending_lines(self):
+        h = self._hang_up_with_a_waiting_prompt()
+        h.close()                                 # the hub is gone for good
+        self.k.append(_note(99))                  # the writer fails on this
+        time.sleep(0.3)
+        self.k.p.stdin.gate.set()
+        self.assertTrue(wait_for(lambda: any(b"session/prompt" in b
+                                             for b in self.k.p.stdin.lines), timeout=3),
+                        "a prompt sent before a clean hang-up was lost")
+        self.assertEqual(list(self.k.outstanding), ["7"])
+
+    def test_bpr_2_a_hung_up_hub_does_not_block_the_orphan_watch(self):
+        self._hang_up_with_a_waiting_prompt()
+        self.assertTrue(wait_for(lambda: self.k.conn is None, timeout=3),
+                        "a hub that hung up still owns the agent")
+        with mock.patch.object(self.km.os, "killpg"):
+            self.assertTrue(self.k.watch_once(
+                now=time.monotonic() + self.km.ORPHAN_S + 1))
+        self.assertTrue(self.k.p.terminated)
+
+    def test_bpr_3_a_new_hub_drops_a_gone_hubs_leftover_lines(self):
+        self._hang_up_with_a_waiting_prompt()
+        h2 = self.hub()
+        h2.hello_and_backlog()
+        self.k.p.stdin.gate.set()
+        time.sleep(0.5)
+        self.assertFalse(any(b"session/prompt" in b for b in self.k.p.stdin.lines),
+                         "a gone hub's line reached the agent after a new hub attached")
+        self.assertEqual(self.k.outstanding, {})
+        self.assertTrue(h2.send({"jsonrpc": "2.0", "id": 8, "method": "session/prompt"}))
+        self.assertEqual(list(self.k.outstanding), ["8"], "the new hub drives")
+
+    # The panel on c4fe8f5 (Grok)
+    def test_bpr_4_a_line_read_while_stdin_has_room_is_accepted_as_read(self):
+        """A drain that never runs: on c4fe8f5 the answer sat unapplied in
+        the inbound queue, and a replacement dropped it and re-raised the
+        card."""
+        self.k.append(_card(9))
+        with mock.patch.object(self.km.Keeper, "_drain_hub", lambda k, c: None):
+            h = self.hub()
+            h.hello_and_backlog()
+            h.ack()
+            h.sock.sendall(_j({"jsonrpc": "2.0", "id": 9, "result": {"outcome": "allow"}}))
+            self.assertTrue(wait_for(lambda: "9" not in self.k.cards, timeout=1),
+                            "a line read with stdin room was not accepted")
+            h2 = self.hub()
+            hello, lines = h2.hello_and_backlog()
+        self.assertEqual(hello["held"], 0, "an answered card was raised again")
+        self.assertEqual([m.get("id") for m in self.stdin()], [9])
+
+    def test_bpr_5_a_close_lets_a_waiting_drain_go_at_once(self):
+        h = self._wedge()
+        conn = h.conn
+        h.sock.sendall(_j({"jsonrpc": "2.0", "id": 7, "result": {"outcome": "x"}}))
+        self.assertTrue(wait_for(lambda: len(conn.inq) == 2, timeout=1))
+        with mock.patch.object(self.km.os, "killpg"):
+            h.sock.sendall(_j({"keeper": "close"}))
+            self.assertTrue(wait_for(lambda: self.k.closing, timeout=0.5))
+            self.assertTrue(wait_for(lambda: not conn.inq, timeout=0.5),
+                            "the drain did not see the close")
+        h.sock.shutdown(__import__("socket").SHUT_RDWR)
+        self.assertTrue(wait_for(lambda: self.k.conn is None, timeout=1),
+                        "a closed, hung-up hub still owns the agent")

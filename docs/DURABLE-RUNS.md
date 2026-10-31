@@ -115,17 +115,29 @@ stopped reading stdin and the queue was full, the hub's reader waited in
 `accept_from_hub`, so later acks and a `close` on that connection waited
 too. The outbox stopped trimming and could drop notifications. Now each
 connection has a reader and a drain thread. The reader applies control
-lines (ack, close) at once and puts every other line on the connection's
-inbound queue, bounded at `STDIN_MAX_BYTES`. The drain is the one thread
-that applies those lines, in order, each under the owner check. A hub that
-hangs up has its inbound queue applied before it lets go of the agent; a
-replaced hub's inbound lines are dropped, as its waiting line always was.
-Acks and a close now wait only once both queues are full. Tests
-(`StdinBackpressure`): an ack after a waiting line lands within 0.5 s and a
-close ends the agent within `TERM_WAIT_S` (both fail on 35a67fb); lines
-reach the agent in order; a replaced hub's waiting lines never do; lines
-read before a hang-up still do. This moves the owner check onto a second
-thread, so it gets its own review panel before it merges.
+lines (ack, close) at once. Another line is accepted as it is read while
+the stdin queue has room; only once it is full do lines wait, in order, on
+the connection's inbound queue (`INBOUND_MAX_BYTES`), which the drain
+accepts from as room appears. Acks and a close wait only once both queues
+are full. A hub that goes (a hang-up, or a failed write to it) lets go of
+the agent at once, so the orphan watch and the linger see no hub, but its
+waiting lines still drain; it drives nothing else. A hub that attaches, or
+a close, drops waiting lines, as the old reader's one waiting line always
+was. Tests: `StdinBackpressure` (an ack lands within 0.5 s and a close
+ends the agent within `TERM_WAIT_S` behind a waiting line, both fail on
+35a67fb; order; a replaced hub's waiting lines never reach the agent; lines
+read before a hang-up do).
+
+Its own panel (Codex + Grok, on c4fe8f5, both `amend`) found four defects
+in the first cut, each now with a test that fails on c4fe8f5
+(`StdinBackpressureAfterReview`):
+
+| Finding | What was wrong | Fix |
+|---|---|---|
+| Lost on a write failure (Codex) | A failed write after a clean hang-up dropped the lines the hub had already sent | A hub that goes keeps draining its waiting lines |
+| Orphan watch blocked (both) | A hung-up hub whose drain waited on a wedged agent kept owning it, so the orphan watch never fired | A hub that goes lets go of the agent at once |
+| Answer lost on a replace (Grok) | Every data line went through the inbound queue, so an answer already read could be dropped by a replacement on a healthy agent and its card raised again (19 of 100 runs) | A line is accepted as it is read while stdin has room; only lines read while it is full wait |
+| Close left the hub owning (Grok) | A close never woke the waiting drain and never let the connection go | The close claim notifies the drain, which drops the waiting lines; the reader's clean end lets go |
 
 *The two reviews below record protocol 2's fixes. Protocol 3
 (above) replaced the mechanisms they describe: the spool, the carried hello

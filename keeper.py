@@ -31,12 +31,16 @@ ever held across a socket or pipe write, so a hub or an adapter that stops
 reading blocks only its own writer thread.
 
 BACKPRESSURE. Each hub connection has a reader and a drain thread. The
-reader applies control lines (ack, close) at once and puts every other line
-on the connection's inbound queue, up to STDIN_MAX_BYTES; the drain applies
-those, in order, under the owner check. So an agent that stops reading stdin
-delays acks and a close only once BOTH queues are full. A hub that hangs up
-has its inbound queue applied before it lets go of the agent; a REPLACED
-hub's inbound lines are dropped, as its waiting line always was.
+reader applies control lines (ack, close) at once. Another line is ACCEPTED
+as it is read while the stdin queue has room; only once it is full do lines
+wait, in order, on the connection's inbound queue (up to INBOUND_MAX_BYTES),
+which the drain accepts from as room appears. So an agent that stops
+reading delays acks and a close only once BOTH queues are full, and a line
+read while there was room is never lost to a replacement. A hub that GOES
+(a hang-up, or a failed write to it) lets go of the agent at once, so the
+orphan watch and the linger see no hub, but its waiting lines still drain
+(it is `draining`; it drives nothing else). A hub that attaches, or a
+close, drops waiting lines, as the old reader's one waiting line always was.
 
 Wire, keeper -> hub (newline-delimited JSON):
     {"keeper": "hello", "version": 3, ...}       first, once
@@ -48,9 +52,10 @@ Wire, hub -> keeper:
 Bounds: one adapter line up to MAX_LINE (a line that is not a JSON object
 is dropped and counted); the outbox up to OUTBOX_MAX_BYTES (past it the
 oldest notifications not yet acked are dropped and counted -- never a card,
-a response or the exit); the stdin queue and each hub's inbound queue up to
-STDIN_MAX_BYTES each (a hub past both waits); with no hub for ORPHAN_S the adapter is ended; after the exit the
-keeper lingers until a hub acks it, or LINGER_S.
+a response or the exit); the stdin queue up to STDIN_MAX_BYTES and each
+hub's inbound queue up to INBOUND_MAX_BYTES (a hub past both waits); with
+no hub for ORPHAN_S the adapter is ended; after the exit the keeper lingers
+until a hub acks it, or LINGER_S.
 
 Stdlib only. Runs as the hub's user; the socket is 0600, unique to this
 keeper (the hub names it), in a 0700 dir.
@@ -75,6 +80,7 @@ MAX_STDERR_LINE = 256 * 1024
 STDERR_TAIL = 40
 OUTBOX_MAX_BYTES = int(os.environ.get("CORRAL_KEEPER_OUTBOX_MAX") or 64 * 1024 * 1024)
 STDIN_MAX_BYTES = 16 * 1024 * 1024
+INBOUND_MAX_BYTES = 16 * 1024 * 1024    # per hub connection, lines waiting for stdin room
 WRITE_BATCH = 256                      # lines per socket write
 ORPHAN_S = int(os.environ.get("CORRAL_KEEPER_ORPHAN_S") or 6 * 3600)
 LINGER_S = 600
@@ -196,7 +202,7 @@ class Conn:
         except (OSError, ValueError) as e:
             with k.lock:
                 if k.conn is self:
-                    k.drop_conn_locked(f"write failed: {e}")
+                    k.drop_conn_locked(f"write failed: {e}", keep_inbound=True)
 
     def shutdown(self):
         try:
@@ -235,6 +241,7 @@ class Keeper:
         self.exit_rc = None
         self.stderr_tail = []
         self.conn = None
+        self.draining = None                # a gone hub whose read lines still drain
         self.gen = 0
         self.stdin_q = collections.deque()
         self.stdin_bytes = 0
@@ -442,6 +449,7 @@ class Keeper:
                     pass
                 return None
             self.drop_conn_locked("replaced by a new connection")
+            self._end_draining_locked()
             self.gen += 1
             hello = self.frame(
                 "hello", version=VERSION, pid=os.getpid(),
@@ -468,20 +476,40 @@ class Keeper:
                          name="hub-drain").start()
         return c
 
-    def drop_conn_locked(self, why):
+    def drop_conn_locked(self, why, keep_inbound=False):
+        """The owner lets go. `keep_inbound`: the hub went (it was not
+        replaced), so the lines it already sent still drain."""
         c, self.conn = self.conn, None
         if c is not None:
             _log(f"hub disconnected: {why}")
             c.closed = True
             c.shutdown()
+            if keep_inbound and c.inq:
+                self._end_draining_locked()
+                self.draining = c
+            else:
+                c.inq.clear()
+                c.inq_bytes = 0
             self.cv.notify_all()
             self.stdin_cv.notify_all()
         self.last_hub_seen = time.monotonic()
 
+    def _end_draining_locked(self):
+        d, self.draining = self.draining, None
+        if d is not None:
+            d.inq.clear()
+            d.inq_bytes = 0
+            self.stdin_cv.notify_all()
+
+    def drives_locked(self, c, control=False):
+        """May `c` apply a line: the owner, or (data lines only) the gone
+        hub still draining what it sent."""
+        return self.conn is c or (not control and self.draining is c)
+
     def _read_hub(self, c):
-        """Control lines at once; the rest to the drain, in order. A clean
-        end hands the drop to the drain, so lines read before the hang-up
-        still reach the agent."""
+        """Control lines at once. Other lines are accepted as they are read
+        while stdin has room, else wait for the drain, in order. A clean end
+        lets go of the agent at once and leaves the waiting lines to drain."""
         r = c.sock.makefile("rb")
         why = "hub closed the connection"
         failed = False
@@ -496,7 +524,7 @@ class Keeper:
                 if msg is not None and "keeper" in msg:
                     ok = self.accept_from_hub(c, line)
                 else:
-                    ok = self.queue_from_hub(c, line)
+                    ok = self.offer_from_hub(c, line)
                 if not ok:
                     break
         except (OSError, ValueError):
@@ -509,73 +537,112 @@ class Keeper:
         finally:
             with self.lock:
                 c.read_done = why
-                if failed and self.conn is c:
-                    self.drop_conn_locked(why)
+                if self.conn is c:
+                    self.drop_conn_locked(why, keep_inbound=not failed)
                 self.stdin_cv.notify_all()
             try:
                 r.close()
             except OSError:
                 pass
 
-    def queue_from_hub(self, c, line):
-        """Put a non-control line on `c`'s inbound queue (the reader only).
-        -> False when `c` has been replaced."""
+    def _room_locked(self, line):
+        """Whether the stdin queue takes `line` now (after the exit, a line
+        is bookkeeping only and always fits)."""
+        return (self.exit_rc is not None or not self.stdin_q
+                or self.stdin_bytes + len(line) <= STDIN_MAX_BYTES)
+
+    def offer_from_hub(self, c, line):
+        """The reader's path for a non-control line. With stdin room and
+        nothing already waiting, it is accepted here, as it is read; else it
+        waits on `c`'s inbound queue for the drain. -> False once `c` is
+        not the owner."""
         with self.lock:
             while True:
                 if self.conn is not c:
                     return False
-                if c.inq_bytes + len(line) <= STDIN_MAX_BYTES or not c.inq:
-                    break
-                self.stdin_cv.wait(1.0)
-            c.inq.append(line)
-            c.inq_bytes += len(line)
-            self.stdin_cv.notify_all()
-        return True
+                if self.closing:
+                    return True                      # the agent is being ended
+                if not c.inq and self._room_locked(line):
+                    self._accept_data_locked(_parse(line), line)
+                    return True
+                if not c.inq or c.inq_bytes + len(line) <= INBOUND_MAX_BYTES:
+                    c.inq.append(line)
+                    c.inq_bytes += len(line)
+                    self.stdin_cv.notify_all()
+                    return True
+                self.stdin_cv.wait(1.0)              # both queues are full
 
     def _drain_hub(self, c):
-        """The one thread that applies `c`'s inbound lines, in order, each
-        under the owner check in accept_from_hub. Once the reader has ended
-        cleanly and the queue is empty, `c` lets go of the agent."""
+        """The one thread that accepts `c`'s waiting lines, in order, as
+        stdin room appears, each under the owner check. A gone hub (see
+        drop_conn_locked) still drains; a replaced one, or a close, ends it."""
         try:
             while True:
                 with self.lock:
-                    while not c.inq and c.read_done is None and self.conn is c:
+                    while (self.drives_locked(c) and not self.closing
+                           and not (c.inq and self._room_locked(c.inq[0]))):
+                        if not c.inq and self.conn is not c:
+                            break                    # gone, and nothing left
                         self.stdin_cv.wait(1.0)
-                    if self.conn is not c:
-                        return
-                    if not c.inq:
-                        self.drop_conn_locked(c.read_done)
+                    if not c.inq or self.closing or not self.drives_locked(c):
+                        c.inq.clear()
+                        c.inq_bytes = 0
+                        if self.draining is c:
+                            self.draining = None
                         return
                     line = c.inq.popleft()
                     c.inq_bytes -= len(line)
-                    self.stdin_cv.notify_all()
-                if not self.accept_from_hub(c, line):
-                    return
+                    self._accept_data_locked(_parse(line), line)
         except Exception as e:                       # noqa: BLE001
             with self.lock:
                 if self.conn is c:
                     self.drop_conn_locked(f"hub drain failed: {type(e).__name__}: {e}")
+                if self.draining is c:
+                    self._end_draining_locked()
+
+    def _accept_data_locked(self, msg, line):
+        """Bookkeeping for one non-control hub line, then the stdin queue."""
+        if msg is not None and "id" in msg and not _valid_id(msg["id"]):
+            self.dropped += 1                        # JSON-RPC ids are str, int or null
+            return
+        if msg is not None and "id" in msg and "method" in msg:
+            # Keyed by str(id): a reply whose id is "1" for request 1
+            # still clears it. The raw id goes back in the hello.
+            self.outstanding[_key(msg["id"])] = (msg["id"], msg["method"])
+            if isinstance(msg["id"], int):
+                self.max_hub_id = max(self.max_hub_id, msg["id"])
+        elif msg is not None and "id" in msg:
+            seq = self.cards.pop(str(msg["id"]), None)
+            if seq is None:
+                # This card was answered already (or never asked):
+                # the agent gets one reply per question.
+                return
+            self.held.pop(seq, None)
+        if self.exit_rc is None:
+            self.stdin_q.append(line)
+            self.stdin_bytes += len(line)
+            self.stdin_cv.notify_all()
 
     def accept_from_hub(self, c, line):
-        """Take one line from hub `c`: bookkeeping and the stdin queue, both
-        under the lock and only while `c` owns the agent. -> False when `c`
-        has been replaced (it drives nothing from then on)."""
+        """Take one line from hub `c`, waiting for stdin room if it is not a
+        control line: bookkeeping and the stdin queue, under the lock and
+        only while `c` drives. The reader sends control lines here; tests
+        drive it directly. -> False when `c` drives nothing any more."""
         msg = _parse(line)
+        control = msg is not None and "keeper" in msg
         close = False                       # this hub's close, claimed under the lock
         with self.lock:
             while True:
-                if self.conn is not c:
+                if not self.drives_locked(c, control):
                     return False
-                if msg is not None and "keeper" in msg:
+                if control:
                     break                                    # no stdin space needed
                 if self.closing:
                     return False                             # the agent is being ended
-                if self.exit_rc is not None:
-                    break                                    # bookkeeping only, below
-                if self.stdin_bytes + len(line) <= STDIN_MAX_BYTES or not self.stdin_q:
+                if self._room_locked(line):
                     break
                 self.stdin_cv.wait(1.0)                      # the agent is not reading
-            if msg is not None and "keeper" in msg:
+            if control:
                 cmd = msg.get("keeper")
                 if cmd == "ack":
                     try:
@@ -587,27 +654,7 @@ class Keeper:
                 # replaced after this point cannot have its close run.
                 close = cmd == "close" and self.claim_close_locked()
             else:
-                if msg is not None and "id" in msg and not _valid_id(msg["id"]):
-                    self.dropped += 1                # JSON-RPC ids are str, int or null
-                    return True
-                if msg is not None and "id" in msg and "method" in msg:
-                    # Keyed by str(id): a reply whose id is "1" for request 1
-                    # still clears it. The raw id goes back in the hello.
-                    self.outstanding[_key(msg["id"])] = (msg["id"], msg["method"])
-                    if isinstance(msg["id"], int):
-                        self.max_hub_id = max(self.max_hub_id, msg["id"])
-                elif msg is not None and "id" in msg:
-                    rid = str(msg["id"])
-                    seq = self.cards.pop(rid, None)
-                    if seq is None:
-                        # This card was answered already (or never asked):
-                        # the agent gets one reply per question.
-                        return True
-                    self.held.pop(seq, None)
-                if self.exit_rc is None:
-                    self.stdin_q.append(line)
-                    self.stdin_bytes += len(line)
-                    self.stdin_cv.notify_all()
+                self._accept_data_locked(msg, line)
         if close:
             self.end_adapter()
         return True
@@ -617,6 +664,7 @@ class Keeper:
         if self.closing:
             return False
         self.closing = True
+        self.stdin_cv.notify_all()          # a waiting drain or reader lets go
         return True
 
     def close_adapter(self):
