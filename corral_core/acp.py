@@ -284,6 +284,10 @@ class AcpClient:
             raise AgentError("the keeper did not say hello")
         sock.settimeout(None)
         self.hello = hello
+        try:
+            self._sock_ino = os.stat(sock_path).st_ino   # the door we came in by
+        except OSError:
+            self._sock_ino = None
         self.p = _KeeperProc(sock, reader, hello, keeper_pid)
         self.stderr_tail = [str(x)[:400] for x in (hello.get("stderr_tail") or [])][-40:]
         with self._idlock:
@@ -342,7 +346,8 @@ class AcpClient:
 
     # ── wire ─────────────────────────────────────────────────────────────
     def _write(self, obj):
-        if not self.alive:
+        if not self.alive and not (isinstance(obj, dict) and "keeper" in obj
+                                   and isinstance(getattr(self, "p", None), _KeeperProc)):
             raise AgentError("agent is not running")
         try:
             with self._wlock:
@@ -557,6 +562,7 @@ class AcpClient:
                 # exit frame went to the previous hub: this is the end.
                 self._closed = self._closed or bool((self.hello or {}).get("closed"))
                 self.exit_reason = self.exit_reason or f"agent exited rc={self.p.rc}"
+                self._ack_exit()
                 self._stop_reading = True
         elif kind == "exit":
             tail = [str(x)[:400] for x in (msg.get("stderr_tail") or [])][-40:]
@@ -565,7 +571,15 @@ class AcpClient:
             if msg.get("closed"):
                 self._closed = True
             self.p.exited(msg.get("rc"))
+            self._ack_exit()
             self._stop_reading = True
+
+    def _ack_exit(self):
+        """Tell the keeper this hub has the exit, so it may quit now."""
+        try:
+            self._write({"keeper": "ack-exit"})
+        except AgentError:
+            pass
 
     def _on_request(self, msg):
         method, rid, params = msg["method"], msg["id"], msg.get("params") or {}
@@ -576,6 +590,12 @@ class AcpClient:
             # Refuse duplicates too: overwriting a live slot leaks its waiter.
             too_many = len(self._perm_answers) >= MAX_PENDING_PERMISSIONS
             duplicate = key in self._perm_answers
+            if duplicate and isinstance(getattr(self, "p", None), _KeeperProc):
+                # A keeper replaying a card this hub already holds (the hello
+                # raised it): the agent asked ONCE, so it gets ONE answer --
+                # the human's. Answering "cancelled" here would refuse a card
+                # still on screen and give the agent two replies.
+                return
             if too_many or duplicate:
                 reason = (f"permission request id {key} is already pending"
                           if duplicate else
@@ -733,10 +753,18 @@ class AcpClient:
         _close_quietly(getattr(self.p, "stdin", None))           # the writer end is ours
         if isinstance(self.p, _KeeperProc):
             self.p.close_socket()
-            try:
-                Path(self.keeper["sock"]).unlink()
-            except (OSError, KeyError, TypeError):
-                pass
+            self._unlink_own_socket()
+
+    def _unlink_own_socket(self):
+        """Remove the keeper's socket file only if it is still the one we
+        connected to: a successor keeper may already listen on that path."""
+        try:
+            path = Path(self.keeper["sock"])
+            ino = getattr(self, "_sock_ino", None)
+            if ino is not None and os.stat(path).st_ino == ino:
+                path.unlink()
+        except (OSError, KeyError, TypeError):
+            pass
 
 
 # ── orphans from a previous hub ─────────────────────────────────────────────

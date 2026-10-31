@@ -122,16 +122,40 @@ KEEPER_ENABLED = os.environ.get("CORRAL_LIGHT_KEEPER", "1") != "0"
 KEEPER_SOCK_MAX = 100
 
 
-def keeper_sock_path(pane_id, pane_dir):
+def keeper_sock_path(pane_id, pane_dir, base="/tmp"):
+    """Where pane `pane_id`'s keeper listens, or None to run it without one.
+
+    The fallback for a long state dir is a per-user dir in /tmp, which any
+    local user could pre-create (or plant as a symlink) to sit in front of
+    the socket. It is used only when lstat says it is a real directory,
+    owned by us, mode 0700; anything else fails closed to no keeper (the
+    pane works, a restart just ends it, as before keepers), said loudly."""
     p = Path(pane_dir) / "keeper" / "s.sock"
     if len(str(p).encode("utf-8", "replace")) <= KEEPER_SOCK_MAX:
         return p
-    d = Path(f"/tmp/corral-light-{os.getuid()}")
-    d.mkdir(mode=0o700, exist_ok=True)
+    import stat as _stat
+    d = Path(base) / f"corral-light-{os.getuid()}"
     try:
-        os.chmod(d, 0o700)
-    except OSError:
+        d.mkdir(mode=0o700)
+    except FileExistsError:
         pass
+    except OSError as e:
+        print(f"corral-light: no keeper for pane {pane_id}: cannot make {d}: {e}",
+              file=sys.stderr, flush=True)
+        return None
+    try:
+        st = os.lstat(d)
+    except OSError as e:
+        print(f"corral-light: no keeper for pane {pane_id}: {d}: {e}",
+              file=sys.stderr, flush=True)
+        return None
+    if (not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid()
+            or _stat.S_IMODE(st.st_mode) & 0o077):
+        print(f"corral-light: no keeper for pane {pane_id}: {d} is not a private "
+              f"directory of this user (a symlink, another owner, or open to "
+              f"others) -- refusing to put the agent's socket there",
+              file=sys.stderr, flush=True)
+        return None
     return d / f"k-{pane_id}.sock"
 MAX_PROMPT = 200_000
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
@@ -1565,7 +1589,8 @@ class Pane(_core.PaneBase):
         directly (CORRAL_LIGHT_KEEPER=0, or a pane with no dir)."""
         if not KEEPER_ENABLED or getattr(self, "dir", None) is None:
             return None
-        return {"sock": keeper_sock_path(self.id, self.dir), "dir": self.dir / "keeper"}
+        sock = keeper_sock_path(self.id, self.dir)
+        return {"sock": sock, "dir": self.dir / "keeper"} if sock else None
 
     def _durable(self):
         """Does a keeper hold this pane's agent (so a hub restart keeps it)?"""
@@ -1615,14 +1640,14 @@ class Pane(_core.PaneBase):
             # like): nobody waits on them now; let their answers drop.
             for o in others:
                 self.client._pending.pop(o["id"], None)
-        if not self.client.alive:
-            # It died while no hub listened; the spool then its exit frame
-            # arrive through the reader, which marks the pane dead itself.
-            self.state = "busy" if prompt else "ready"
-        elif prompt:
+        if prompt:
+            # Adopted whether or not the agent still runs: a turn that ended
+            # while no hub listened has its answer in the unacked replay, and
+            # it must settle (ledger, turn_end) before the exit is reported.
             self._adopt_turn(prompt["id"], gen)
-        else:
+        elif self.client.alive and self.state != "dead":
             self.state = "needs-you" if self.pending else "ready"
+        # (Not alive and nothing to adopt: the reader marks it dead itself.)
         self.emit("reattached", {"adoptedTurn": bool(prompt),
                                  "spooled": (self.client.hello or {}).get("spooled") or 0,
                                  "pid": self.pid}, activity=False)
@@ -1647,7 +1672,8 @@ class Pane(_core.PaneBase):
         with self._turn_lock:
             self._in_flight = _QueuedText(text, tid)
             self._turn_running = True
-        self.state = "needs-you" if self.pending else "busy"
+        if self.state != "dead":         # the reader may have seen the exit already
+            self.state = "needs-you" if self.pending else "busy"
 
         def wait():
             try:

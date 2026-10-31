@@ -816,8 +816,13 @@ def _panel_line(p):
 
 
 def _same_hub(url):
-    mine = (os.environ.get("CORRAL_HUB_URL") or "").rstrip("/")
-    return bool(mine) and mine == (url or "").rstrip("/")
+    """Is `url` the hub this pane runs on? localhost and 127.0.0.1 are one."""
+    def norm(u):
+        p = urllib.parse.urlsplit((u or "").rstrip("/"))
+        host = "127.0.0.1" if p.hostname in ("localhost", "127.0.0.1", "::1") else p.hostname
+        return (p.scheme or "http", host, p.port)
+    mine = os.environ.get("CORRAL_HUB_URL") or ""
+    return bool(mine) and norm(mine) == norm(url)
 
 
 def cmd_panel(args):
@@ -835,7 +840,9 @@ def cmd_panel(args):
                 "author": args.author or (os.environ.get("CORRAL_PANE_ID")
                                           if _same_hub(args.url) else None),
                 "outDir": args.out, "model": args.model, "effort": args.effort,
-                "briefId": args.brief}
+                "briefId": args.brief,
+                # Always sent: the hub excludes this pane's lane from synthesis.
+                "callerPane": os.environ.get("CORRAL_PANE_ID") or None}
         r = hub.post("/api/session/panels/start", body, timeout=HANDSHAKE_S)
         p = r["panel"]
         print(json.dumps(p, indent=2) if args.json else

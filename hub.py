@@ -1135,7 +1135,8 @@ class Handler(BaseHTTPRequestHandler):
                             topic=b.get("topic") or "", rounds=b.get("rounds") or _panel.DEFAULT_ROUNDS,
                             synth_lane=b.get("synthLane") or None, author=b.get("author") or None,
                             out_dir=b.get("outDir") or None, model=b.get("model") or None,
-                            effort=b.get("effort") or None, brief_id=b.get("briefId") or None)
+                            effort=b.get("effort") or None, brief_id=b.get("briefId") or None,
+                            caller=b.get("callerPane") or None)
                     elif verb == "next":
                         rec = MGR.panels.next(b.get("id", ""), charge=b.get("charge"))
                     elif verb == "ack":

@@ -63,6 +63,34 @@ the same afternoon with a regression test each (`TheKeeperAfterReview`):
 5. A reused keeper dir kept the previous keeper's spool and replayed it
    into the new session. Now the spool is truncated on start.
 
+**Second review, 2026-10-31.** A two-arm panel (Codex + Grok) on the fixed
+keeper returned `amend` with eleven findings. Each fix below has a test that
+fails on c30c880 and passes now (`TheKeeperAfterReview2`,
+`TheExitedAgentsTurnSettles`, `PanelAfterReview2`):
+
+| Finding | What was wrong | Fix |
+|---|---|---|
+| F4/F5 | A card queued for a stalled hub was spooled AND carried in the next hello, so the next hub raised it, saw the spooled copy as a duplicate, and answered the agent "cancelled" | A line the hello carries (an unanswered card, an unacked response) is never spooled or replayed again. A keeper-backed client drops a replayed duplicate card silently |
+| F2/F3 | A replaced hub's queue and in-flight line were lost or landed behind the new hub's replay | Dropping a hub moves its in-flight line, then its queue, into the spool in order, before the next hello |
+| F1 | A replaced hub could still write one already-read command, or close the agent | The owner check and the write to the agent share `drive_lock`; attach takes it before swapping owners |
+| F6 | A turn that finished while no hub listened, then the agent died, was never settled | The outstanding prompt is adopted whether or not the agent still runs; `dead` is never overwritten |
+| F9 | The keeper quit once an exit frame was QUEUED, even if no hub read it | The hub acks the exit (`ack-exit`); the keeper lingers until an ack arrives and that hub has gone |
+| F10 | The orphan watch could end an agent a hub had just reattached to | The decision and the close claim are one hold of the lock; attach refuses once a close is claimed |
+| F8 | An old client's close could unlink a successor keeper's socket | The client unlinks only the socket inode it connected to |
+| F11 | The `/tmp` fallback dir was taken on trust | `lstat`: a real dir, ours, mode 0700, or no keeper for that pane (it still works; a restart ends it), said loudly |
+| panel | The synthesizer was the caller's own lane, and the packet named the host | The CLI always sends the calling pane; its lane neither arms nor synthesizes. No host name in `packet.md`/`packet.json` |
+
+**Deferred, with a plan: F7.** `KillMode=process` means `systemctl --user
+stop corral-light` also leaves every keeper running, until its six-hour
+orphan watch ends it. The hub cannot tell a stop from a restart (both send
+SIGTERM). Plan: a `corral-light stop` verb that closes every keeper (the
+same `{"keeper": "close"}` the hub sends on close) and then stops the
+service; the README tells Linux users to stop with it. Falsifier: after
+`corral-light stop`, `pgrep -f keeper.py` finds nothing within 10 s, and
+after `update --now` every kept pane is still `durable`. A connected hub that
+reads but sends nothing is a live hub, not an orphan; a hub that stops
+READING is already dropped once its queue fills (F3 of the first review).
+
 ## The panel (`panel.py`)
 
 A durable, hub-owned review run across several vendors:

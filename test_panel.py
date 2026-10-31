@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from testkit.scratch import default_state, tmpdir  # noqa: E402
@@ -55,7 +56,9 @@ def wait_for(pred, timeout=WAIT_S, step=0.1):
     return bool(pred())
 
 
-class PanelCase(unittest.TestCase):
+class _PanelBase(unittest.TestCase):
+    """Setup and helpers only; the tests are in the subclasses."""
+
     def setUp(self):
         import sessions
         import panel
@@ -112,6 +115,8 @@ class PanelCase(unittest.TestCase):
     def _done(self, panels, pid):
         return wait_for(lambda: panels.get(pid)["status"] in ("done", "failed", "cancelled"))
 
+
+class PanelCase(_PanelBase):
     # ── P1 ───────────────────────────────────────────────────────────────
     def test_p1_a_run_seals_synthesizes_and_reports_to_the_author(self):
         author = self.mgr.create("fake3", str(self.work))
@@ -377,3 +382,39 @@ class PanelCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PanelAfterReview2(_PanelBase):
+    """The 2026-10-31 run: synthesized by the CALLER's own lane, because the
+    command line named no author; and a packet that named the host."""
+
+    def test_r2_the_callers_lane_never_synthesizes_without_an_author(self):
+        caller = self.mgr.create("fake4", str(self.work))
+        self.assertEqual(caller.state, "ready", caller.error)
+        v = self._start(caller=caller.id)
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        rec = self.mgr.panels.get(v["id"])
+        self.assertEqual(rec["status"], "done", rec.get("error"))
+        self.assertIsNone(rec["author"], "a caller is excluded, not reported to")
+        self.assertNotEqual(rec["synth"]["lane"], "fake4", rec["synth"])
+        self.assertEqual(rec["synth"]["lane"], "fake3")
+        self.assertIsNone(caller.question)
+        with self.assertRaises(self.panel.PanelError):
+            self._start(caller=caller.id, lanes=["fake4", "fake"])   # nor arms
+
+    def test_r2_the_packet_names_no_host(self):
+        import socket
+        v = self._start()
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        out = Path(self.mgr.panels.get(v["id"])["out_dir"])
+        host = socket.gethostname()
+        for name in ("packet.md", "packet.json"):
+            body = (out / name).read_text(encoding="utf-8")
+            self.assertNotIn(host, body, f"{name} names this host")
+            self.assertNotIn('"home"', body)
+
+    def test_r2_same_hub_treats_localhost_as_loopback(self):
+        import consult
+        with unittest.mock.patch.dict(os.environ, {"CORRAL_HUB_URL": "http://127.0.0.1:8098"}):
+            self.assertTrue(consult._same_hub("http://localhost:8098/"))
+            self.assertFalse(consult._same_hub("http://127.0.0.1:8199"))

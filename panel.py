@@ -358,7 +358,8 @@ def render_packet(rec):
                 L.append(f"- {a['lane']} r{r}: `{x['file']}`")
     if (rec.get("synth") or {}).get("file"):
         L.append(f"- synthesis: `{rec['synth']['file']}`")
-    L += ["", f"_Written {_now()} by the hub on {rec.get('home') or 'this host'}. "
+    # No host name here: packets are often committed beside the code they review.
+    L += ["", f"_Written {_now()} by the hub. "
              f"Acknowledge with `corral-light consult panel ack {rec['id']}`._", ""]
     return "\n".join(L)
 
@@ -447,7 +448,12 @@ class Panels:
             "packet_path": rec.get("packet_path")}
 
     def start(self, *, charge, lanes, cwd, topic, rounds=DEFAULT_ROUNDS, synth_lane=None,
-              author=None, out_dir=None, model=None, effort=None, brief_id=None):
+              author=None, out_dir=None, model=None, effort=None, brief_id=None,
+              caller=None):
+        """`caller`: the pane that ran the command, when it is on this hub. Its
+        lane never synthesizes (and never arms), author or not: the
+        2026-10-31 panel was synthesized by the caller's own lane because the
+        CLI had named no author."""
         import sessions
         charge = str(charge or "")
         if not charge.strip():
@@ -482,9 +488,11 @@ class Panels:
             if ap is None:
                 raise PanelError(f"no pane {author} to report to")
             author_lane = ap.agent
-            if author_lane in lanes:
-                raise PanelError(f"the author's own lane ({author_lane}) cannot be an arm: "
-                                 f"a review from the same model shares its blind spots")
+        elif caller and caller in self.mgr.panes:
+            author_lane = self.mgr.panes[caller].agent      # excluded, not reported to
+        if author_lane and author_lane in lanes:
+            raise PanelError(f"the author's own lane ({author_lane}) cannot be an arm: "
+                             f"a review from the same model shares its blind spots")
         if synth_lane and (synth_lane in lanes or synth_lane == author_lane):
             raise PanelError("the synthesizer must be neither an arm's lane nor the author's")
         with self._lock:
@@ -882,7 +890,8 @@ class Panels:
             out = Path(rec["out_dir"])
             md = render_packet(rec)
             (out / "packet.md").write_text(md, encoding="utf-8")
-            (out / "packet.json").write_text(json.dumps(self.view(rec) | {
+            (out / "packet.json").write_text(json.dumps({k: v for k, v in self.view(rec).items()
+                                                         if k != "home"} | {
                 "findings": rec["findings"], "synth_packet": (rec.get("synth") or {}).get("packet")},
                 indent=1), encoding="utf-8")
             rec["packet_path"] = str(out / "packet.md")
