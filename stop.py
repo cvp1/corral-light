@@ -213,13 +213,13 @@ def main(argv=None):
                     help="close every keeper; leave the service alone (no hub may run)")
     a = ap.parse_args(argv)
     try:
-        return run(a, print)
+        return run(a, lambda msg: print(msg, flush=True))
     except Refused as e:
-        print(f"corral-light stop: {e}", file=sys.stderr)
+        print(f"corral-light stop: {e}", file=sys.stderr, flush=True)
         return 2
     except subprocess.CalledProcessError as e:
         print(f"corral-light stop: {' '.join(e.cmd)} failed (rc={e.returncode})",
-              file=sys.stderr)
+              file=sys.stderr, flush=True)
         return 2
 
 
