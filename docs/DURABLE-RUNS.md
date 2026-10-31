@@ -213,6 +213,14 @@ moves the owner rule again, so it gets its own review.
 
 ## The panel (`panel.py`)
 
+**Where sealed files go.** By default `<cwd>/reviews/<date>-<slug>`. A
+caller's `out_dir` wins; otherwise `~/.config/corral-light/panels.json`
+(`CORRAL_PANELS_CONFIG`) can send panels run under a path prefix somewhere
+else, so a repo whose reviews name local paths never holds them:
+`{"out_roots": [{"cwd": "~/src/repo", "root": "~/private/panels"}]}`. A
+config that exists but cannot be read refuses the panel rather than fall
+back into the repo (`PanelOutRoots`).
+
 A durable, hub-owned review run across several vendors:
 
 ```

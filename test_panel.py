@@ -379,6 +379,52 @@ class PanelCase(_PanelBase):
         self.assertEqual(d["name"], "corral-panel")
         self.assertIn({"name": "CORRAL_PANE_TOKEN", "value": "tok"}, d["env"])
 
+class PanelOutRoots(_PanelBase):
+    """Sealed files go where panels.json says for that cwd, else <cwd>/reviews."""
+
+    def _config(self, body):
+        cfg = Path(tmpdir(self, "panels-cfg-")) / "panels.json"
+        cfg.write_text(body, encoding="utf-8")
+        real = self.panel.PANELS_CONFIG
+        self.panel.PANELS_CONFIG = cfg
+        self.addCleanup(setattr, self.panel, "PANELS_CONFIG", real)
+        return cfg
+
+    def test_a_matching_rule_moves_the_sealed_files_out_of_the_repo(self):
+        root = Path(tmpdir(self, "panels-root-"))
+        self._config(json.dumps({"out_roots": [
+            {"cwd": str(self.work.parent / "nope"), "root": "/nowhere"},
+            {"cwd": str(self.work), "root": str(root)}]}))
+        sub = self.work / "pkg"
+        sub.mkdir()
+        v = self._start(cwd=str(sub))
+        out = Path(self.mgr.panels.get(v["id"])["out_dir"])
+        self.assertEqual(out.parent, root)
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        self.assertTrue((out / "packet.md").exists())
+        self.assertFalse((sub / "reviews").exists(), "a sealed file landed in the repo")
+
+    def test_no_match_keeps_the_repo_default(self):
+        self._config(json.dumps({"out_roots": [{"cwd": "/elsewhere", "root": "/x"}]}))
+        v = self._start()
+        self.assertEqual(Path(self.mgr.panels.get(v["id"])["out_dir"]).parent,
+                         self.work / "reviews")
+        self._done(self.mgr.panels, v["id"])
+
+    def test_a_broken_config_refuses_rather_than_writing_into_the_repo(self):
+        self._config("{not json")
+        with self.assertRaises(self.panel.PanelError):
+            self._start()
+        self.assertFalse((self.work / "reviews").exists())
+
+    def test_an_explicit_out_dir_wins(self):
+        self._config(json.dumps({"out_roots": [{"cwd": str(self.work), "root": "/x"}]}))
+        mine = Path(tmpdir(self, "panels-mine-")) / "here"
+        v = self._start(out_dir=str(mine))
+        self.assertEqual(self.mgr.panels.get(v["id"])["out_dir"], str(mine))
+        self._done(self.mgr.panels, v["id"])
+
+
 class PanelAfterReview3(_PanelBase):
     """The 2026-10-31 round-2 run: it kept round 1's synthesis (a sealed one
     stopped _synthesize), and its arms were titled with their prompt."""

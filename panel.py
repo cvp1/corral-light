@@ -77,6 +77,14 @@ TOPIC_RE = re.compile(r"[^a-z0-9]+")
 VIA = "panel"
 STATUSES = ("running", "done", "failed", "cancelled")
 
+# Where sealed panel files go when the caller names no out_dir. Rules match
+# the panel's cwd by path prefix; the first match wins; no match keeps the
+# default, `<cwd>/reviews/<date>-<slug>`. For a repo whose reviews must not
+# be committed (they name local paths), point it at a private folder:
+#   {"out_roots": [{"cwd": "~/src/myrepo", "root": "~/notes/panels"}]}
+PANELS_CONFIG = Path(os.environ.get("CORRAL_PANELS_CONFIG")
+                     or Path.home() / ".config" / "corral-light" / "panels.json")
+
 # Lanes that can be told to be read-only on the wire (sessions.REVIEWER_CONFIG
 # is the authority; this is the fallback when the hub has none).
 READ_ONLY_CONFIG = {"codex": {"mode": "read-only"}}
@@ -365,6 +373,26 @@ def render_packet(rec):
 
 
 # ── the run ───────────────────────────────────────────────────────────────────
+def out_root_for(cwd, config=None):
+    """The configured root for panels run in `cwd`, or None (the default).
+    A config that exists but cannot be read fails loudly: sealed files must
+    not land in a repo the operator meant to keep them out of."""
+    path = Path(config or PANELS_CONFIG)
+    if not path.exists():
+        return None
+    try:
+        rules = json.loads(path.read_text(encoding="utf-8")).get("out_roots") or []
+        here = Path(cwd).expanduser().resolve()
+        for r in rules:
+            prefix = Path(str(r["cwd"])).expanduser().resolve()
+            if here == prefix or prefix in here.parents:
+                return Path(str(r["root"])).expanduser()
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+        raise PanelError(f"{path}: cannot read the panel out_roots ({e}); fix it or "
+                         f"pass out_dir")
+    return None
+
+
 class Panels:
     """Owned by the Manager, like the scheduler: one JSON per run under
     STATE/panels, one thread per running run."""
@@ -502,7 +530,11 @@ class Panels:
             pid = "p" + secrets.token_hex(5)
             sl = slug(topic)
             date = datetime.now().strftime("%Y-%m-%d")
-            out = Path(out_dir).expanduser() if out_dir else cwd / "reviews" / f"{date}-{sl}"
+            if out_dir:
+                out = Path(out_dir).expanduser()
+            else:
+                root = out_root_for(cwd)
+                out = (root if root else cwd / "reviews") / f"{date}-{sl}"
             oid, dirty = tree_oid(cwd)
             rec = {"id": pid, "topic": str(topic or sl)[:80], "slug": sl,
                    "created": _now(), "updated": _now(), "status": "running",
