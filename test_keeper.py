@@ -1040,57 +1040,33 @@ class KeeperProcess(_Spawn, unittest.TestCase):
         self.assertEqual(chunks, n, "the new hub lost lines")
 
 
-class V2KeeperCompat(_Spawn, unittest.TestCase):
-    """The new client drives a keeper still speaking protocol 2 (every live
-    pane at the first update after this ships)."""
+class RetiredV2Keeper(unittest.TestCase):
+    """Protocol 2 is retired: a keeper that says hello with version 2 is
+    refused loudly, never driven (its acks mean something else)."""
 
-    def _start_v2(self, work):
-        sock = str(Path(work) / "s.sock")
-        full = {**os.environ, "FAKE_ACP_DIR": str(work)}
-        kp = subprocess.Popen([sys.executable, "-I", str(ROOT / "testkit" / "keeper_v2.py"),
-                               "--sock", sock, "--dir", str(work), "--cwd", str(work), "--",
-                               sys.executable, str(FAKE)],
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, env=full, start_new_session=True)
-        self.addCleanup(self._kill, kp)
-        self.assertTrue(wait_for(lambda: os.path.exists(sock)), "no socket")
-        return kp, sock
-
-    def test_the_new_client_drives_a_v2_keeper_through_a_reattach(self):
+    def test_a_v2_keeper_is_refused_with_a_reason(self):
+        import socket
         from corral_core import acp
-        work = tmpdir(self, "keeper-v2-")
-        kp, sock = self._start_v2(work)
-        events = []
-        on_event = lambda kind, payload: events.append((kind, payload))  # noqa: E731
-        c1 = acp.AcpClient.reattach(sock, kp.pid, work, on_event=on_event,
-                                    on_permission=lambda req: None)
-        self.assertEqual(c1._kv, 2)
-        c1.initialize()
-        sid = c1.new_session(work)
-        r = c1.prompt(sid, "remember pear")
-        self.assertEqual(r["stopReason"], "end_turn")
-        # Mid-turn: the hub lets go, the next one adopts the turn.
-        box = {}
-        threading.Thread(target=lambda: box.setdefault(
-            "r", _swallow(lambda: c1.prompt(sid, "sleep 1"))), daemon=True).start()
-        self.assertTrue(wait_for(lambda: any(o for o in [c1._pending] if len(o) >= 1)))
-        time.sleep(0.3)
-        c1.detach()
-        c2 = acp.AcpClient.reattach(sock, kp.pid, work, on_event=on_event,
-                                    on_permission=lambda req: None)
-        self.assertEqual(c2._kv, 2)
-        prompt = [o for o in c2.adopted if o["method"] == "session/prompt"]
-        self.assertEqual(len(prompt), 1, c2.adopted)
-        self.assertEqual(c2.await_adopted(prompt[0]["id"])["stopReason"], "end_turn")
-        r = c2.prompt(sid, "what word did I ask you to remember?")
-        self.assertEqual(r["stopReason"], "end_turn")
-        text = "".join(str(p) for k_, p in events if k_ != "keeper_replayed")
-        self.assertIn("pear", text)
-        # A clean exit.
-        c2._write({"keeper": "close"})
-        self.assertTrue(wait_for(lambda: kp.poll() is not None), "the v2 keeper kept running")
-        self.assertTrue(wait_for(lambda: not c2.alive))
-        self.assertTrue(c2._closed, "a requested close read as a crash")
+        work = Path(tmpdir(self, "keeper-v2-"))
+        path = str(work / "s.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        got = {}
+
+        def serve():
+            c, _ = srv.accept()
+            c.sendall(b'{"keeper": "hello", "version": 2, "pid": 1, "pgid": 1}\n')
+            got["eof"] = c.recv(100) == b""      # the client hung up, sent nothing
+            c.close()
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        with self.assertRaises(acp.AgentError) as cm:
+            acp.AcpClient.reattach(path, os.getpid(), str(work))
+        self.assertIn("protocol 2", str(cm.exception))
+        t.join(3)
+        self.assertTrue(got.get("eof"), "the client wrote to a v2 keeper")
 
 
 def _swallow(fn):

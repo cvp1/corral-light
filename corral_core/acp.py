@@ -41,6 +41,7 @@ MAX_STDERR_LINE = 256 * 1024    # stderr carries log lines, not payloads
 KEEPER_PY = Path(__file__).resolve().parent.parent / "keeper.py"
 KEEPER_CONNECT_S = 20           # for a freshly spawned keeper's socket to answer
 KEEPER_REATTACH_S = 5           # for a surviving keeper's socket to answer
+KEEPER_PROTOCOL = 3              # the oldest keeper protocol this client drives
 # Keeper protocol 3 (numbered outbox, cumulative acks): a card, a response
 # or the exit is acked the moment it is applied; anything else within this.
 KEEPER_ACK_EVERY_S = 0.2
@@ -180,7 +181,7 @@ class AcpClient:
         self.kp = None             # the keeper Popen (None for a reattached one)
         self.adopted = []          # reattach(): hub requests still outstanding
         self.hello = None
-        self._kv = None            # the keeper's protocol version (2 or 3)
+        self._kv = None            # the keeper's protocol version (3), None with no keeper
         self._applied = 0          # v3: the last numbered line this hub applied
         self._acked_sent = 0
         self._ack_stop = threading.Event()
@@ -267,13 +268,12 @@ class AcpClient:
             except OSError:
                 pass
             raise
-        self.alive = self.p.rc is None or self._kv >= 3
+        self.alive = True          # the stream: it ends after the exit line
         threading.Thread(target=self._read_stdout, daemon=True).start()
         self._start_acks()
 
     def _start_acks(self):
-        if self._kv >= 3:
-            threading.Thread(target=self._ack_loop, daemon=True, name="keeper-ack").start()
+        threading.Thread(target=self._ack_loop, daemon=True, name="keeper-ack").start()
 
     def _ack_loop(self):
         while not self._ack_stop.wait(KEEPER_ACK_EVERY_S):
@@ -281,7 +281,7 @@ class AcpClient:
 
     def hold(self, tag):
         """The pane buffered line `_cur_seq` under `tag`: acks stop before it."""
-        if self._kv is not None and self._kv >= 3:
+        if self._kv is not None:
             self._holds.setdefault(tag, self._cur_seq)
 
     def release(self, tag):
@@ -345,12 +345,21 @@ class AcpClient:
             _close_quietly(reader)
             _close_quietly(sock)
             raise AgentError("the keeper did not say hello")
+        try:
+            kv = int(hello.get("version") or 2)
+        except (TypeError, ValueError):
+            kv = 2
+        if kv < KEEPER_PROTOCOL:
+            # Protocol 2 was retired once no keeper ran it. A keeper this old
+            # cannot be driven safely (its acks mean something else): refuse,
+            # loudly, and leave the keeper to its orphan watch.
+            _close_quietly(reader)
+            _close_quietly(sock)
+            raise AgentError(f"the keeper speaks protocol {kv}; this hub needs "
+                             f"{KEEPER_PROTOCOL} or later (restart that agent)")
         sock.settimeout(None)
         self.hello = hello
-        try:
-            self._kv = int(hello.get("version") or 2)
-        except (TypeError, ValueError):
-            self._kv = 2
+        self._kv = kv
         self.p = _KeeperProc(sock, reader, hello, keeper_pid)
         self.stderr_tail = [str(x)[:400] for x in (hello.get("stderr_tail") or [])][-40:]
         with self._idlock:
@@ -381,15 +390,11 @@ class AcpClient:
                 c.adopted.append({"id": o["id"], "method": str(o.get("method") or "")})
                 c._pending[o["id"]] = {"ev": threading.Event(), "result": None,
                                        "error": None}
-        # v3: alive is the STREAM (it ends after the exit line, which follows
+        # alive is the STREAM (it ends after the exit line, which follows
         # every answer the agent gave), so a waiter on an adopted turn of an
-        # agent that already exited still gets the replayed answer.
-        c.alive = c.p.rc is None or c._kv >= 3
-        # v2 only: cards the previous hub never answered, from the hello. (v3
-        # re-sends them as numbered lines, first.)
-        for msg in hello.get("agent_requests") or []:
-            if isinstance(msg, dict) and "method" in msg and "id" in msg:
-                c._on_request(msg)
+        # agent that already exited still gets the replayed answer. Cards the
+        # previous hub never answered come first, as numbered lines.
+        c.alive = True
         threading.Thread(target=c._read_stdout, daemon=True).start()
         c._start_acks()
         return c
@@ -642,12 +647,6 @@ class AcpClient:
             if slot:
                 slot["result"], slot["error"] = msg.get("result"), msg.get("error")
                 slot["ev"].set()
-            if isinstance(self.p, _KeeperProc) and self._kv == 2:
-                # v2: received, not merely flushed: the keeper may forget it.
-                try:
-                    self._write({"keeper": "ack", "id": msg["id"]})
-                except AgentError:
-                    pass
             return
         if "method" in msg and "id" in msg:                    # agent asks us
             return self._on_request(msg)
@@ -657,7 +656,7 @@ class AcpClient:
 
     def _on_keeper_frame(self, msg):
         kind = msg.get("keeper")
-        if kind in ("replayed", "caught-up"):                  # v2 / v3
+        if kind == "caught-up":
             self.on_event("keeper_replayed", {"n": msg.get("n") or 0,
                                               "dropped": msg.get("dropped") or 0})
             if self.p.rc is not None:
@@ -665,8 +664,6 @@ class AcpClient:
                 # exit frame went to the previous hub: this is the end.
                 self._closed = self._closed or bool((self.hello or {}).get("closed"))
                 self.exit_reason = self.exit_reason or f"agent exited rc={self.p.rc}"
-                if self._kv == 2:
-                    self._ack_exit()
                 self._stop_reading = True
         elif kind == "exit":
             tail = [str(x)[:400] for x in (msg.get("stderr_tail") or [])][-40:]
@@ -674,17 +671,8 @@ class AcpClient:
                 self.stderr_tail = tail
             if msg.get("closed"):
                 self._closed = True
-            self.p.exited(msg.get("rc"))
-            if self._kv == 2:
-                self._ack_exit()               # v3 acks the numbered line instead
+            self.p.exited(msg.get("rc"))       # acked as a numbered line
             self._stop_reading = True
-
-    def _ack_exit(self):
-        """v2: tell the keeper this hub has the exit, so it may quit now."""
-        try:
-            self._write({"keeper": "ack-exit"})
-        except AgentError:
-            pass
 
     def _on_request(self, msg):
         method, rid, params = msg["method"], msg["id"], msg.get("params") or {}

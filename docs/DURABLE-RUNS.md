@@ -78,10 +78,10 @@ Protocol 3 replaces all of them with one structure.
 - **A socket name per keeper** (`s-<token>.sock`): no successor shares a
   path, so the client unlinks its own socket without an inode check (that
   check failed on Linux CI, where tmpfs reuses inode numbers).
-- **Compatibility.** Keepers already running speak protocol 2. The client
-  reads the hello's `version` and keeps the v2 paths for them, so every live
-  pane survives the update that ships protocol 3. `testkit/keeper_v2.py` is
-  the deployed v2 keeper, vendored as a fixture.
+- **Compatibility.** Protocol 2's client paths and its vendored fixture were
+  retired on 2026-10-31, once no keeper running protocol 2 was left. A
+  keeper that says hello with an older version is refused with a reason
+  (`RetiredV2Keeper`), never driven; its orphan watch ends it.
 
 Tests: `KeeperContract` (C1–C12, an in-process keeper with a stub agent),
 `KeeperProperty` (seeded random runs of notes, cards, hub requests,

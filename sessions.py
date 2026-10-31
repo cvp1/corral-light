@@ -1763,7 +1763,7 @@ class Pane(_core.PaneBase):
             if data.get("dropped"):
                 self.emit("note", {"text": f"{data['dropped']} line(s) the agent wrote "
                                            f"while no hub was listening were dropped: "
-                                           f"the keeper's spool was full"})
+                                           f"the keeper's outbox was full"})
         elif kind == "stall_notice":
             # Informational only: a clock can't tell a wedged agent from a slow one.
             self.emit("note", {"text": data.get("text") or "no output for a "
