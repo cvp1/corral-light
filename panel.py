@@ -688,6 +688,16 @@ class Panels:
             return
         self._packet(rec)
 
+    @staticmethod
+    def _charge_changed(rec):
+        """Did `next` bring a new charge for this round? A run started with
+        rounds=2 has one history entry (only `next` appends), and its round 2
+        reuses round 1's charge, so there is nothing new to carry."""
+        hist = rec.get("history") or []
+        if len(hist) < 2:
+            return False
+        return rec["charge"]["sha256"] != hist[-2]["charge"]
+
     def _round(self, rec, rn, charge):
         """One round: send to every arm that has not got this round's turn yet,
         then wait for each and seal. Idempotent across a restart: an arm with
@@ -710,8 +720,8 @@ class Panels:
                 else:
                     text = ROUND2_PREAMBLE.format(
                         topic=rec["topic"], id=rec["id"], round=rn,
-                        inputs=self._crossfeed_inputs(rec, a, rn - 1, charge if rec["charge"]["sha256"]
-                                                      != rec["history"][-2]["charge"] else None),
+                        inputs=self._crossfeed_inputs(rec, a, rn - 1, charge if self._charge_changed(rec)
+                                                      else None),
                         shape=ANSWER_SHAPE)
                 if len(text) > sessions.MAX_PROMPT:
                     raise PanelError(f"round {rn} prompt for {a['lane']} is {len(text)} chars; "

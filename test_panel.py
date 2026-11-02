@@ -429,6 +429,24 @@ class PanelAfterReview3(_PanelBase):
     """The 2026-10-31 round-2 run: it kept round 1's synthesis (a sealed one
     stopped _synthesize), and its arms were titled with their prompt."""
 
+    def test_r3_start_with_rounds_2_runs_round_2(self):
+        # Measured 2026-11-02 (p1f0975136b): start --rounds 2 failed round 2 on
+        # every arm with IndexError, because only `next` appends to history.
+        v = self._start(rounds=2)
+        pid = v["id"]
+        self.assertTrue(self._done(self.mgr.panels, pid))
+        rec = self.mgr.panels.get(pid)
+        self.assertEqual(rec["status"], "done", rec.get("error"))
+        self.assertEqual(rec["round"], 2)
+        self.assertEqual(len(rec["history"]), 1)
+        for a in rec["arms"]:
+            r2 = a["rounds"]["2"]
+            self.assertEqual(r2["status"], "sealed", r2)
+            body = Path(r2["file"]).read_text(encoding="utf-8")
+            other = "fake2" if a["lane"] == "fake" else "fake"
+            self.assertIn(f'lane="{other}" round="1"', body)
+            self.assertNotIn("The charge changed", body)
+
     def test_r3_round_2_writes_its_own_synthesis(self):
         v = self._start()
         pid = v["id"]
