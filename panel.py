@@ -590,6 +590,15 @@ class Panels:
                              "went to zero; change the charge (new acceptance criteria, a "
                              "new class of defect to look for) or the code, then try again")
         for a in rec["arms"]:
+            # A finished panel closed its arms (_release); round 2 reopens each
+            # from the archive, detached, and _arm_pane resumes it with its
+            # round-1 conversation intact.
+            if a.get("pane") and a["pane"] not in self.mgr.panes:
+                try:
+                    self.mgr.reopen(a["pane"])
+                except Exception as e:                # noqa: BLE001
+                    raise PanelError(f"arm {a['lane']}'s pane could not be reopened ({e}); "
+                                     f"start a new panel")
             if not a.get("pane") or a["pane"] not in self.mgr.panes:
                 raise PanelError(f"arm {a['lane']}'s pane is gone; start a new panel")
         try:
@@ -629,7 +638,30 @@ class Panels:
                     pass
         rec["status"], rec["error"], rec["updated"] = "cancelled", "cancelled by the operator", _now()
         self._save(rec)
+        self._release(rec)
         return self.view(rec)
+
+    def _release(self, rec):
+        """A run that has ended closes every pane it opened: the arms and the
+        synthesizer. Close archives the transcript (reopenable; `next`
+        reopens the arms). Measured 2026-11-01: finished runs left their
+        panes live until two later panels failed every arm on the
+        MAX_PANES cap; on 2026-11-05 six of ten live panes were leftovers.
+        Never the author's pane: the panel did not open it."""
+        ids = [a.get("pane") for a in rec.get("arms") or []]
+        ids.append((rec.get("synth") or {}).get("pane"))
+        closed = []
+        for pane_id in dict.fromkeys(i for i in ids if i):
+            if pane_id == rec.get("author") or pane_id not in self.mgr.panes:
+                continue
+            try:
+                self.mgr.close(pane_id, by=f"panel {rec['id']}")
+                closed.append(pane_id)
+            except Exception as e:                        # noqa: BLE001
+                print(f"corral-light: panel {rec['id']} could not close pane {pane_id}: {e}",
+                      file=sys.stderr, flush=True)
+        rec["released"] = list(dict.fromkeys((rec.get("released") or []) + closed))
+        self._save(rec)
 
     def resume(self):
         """Boot: every running run goes on from where its arms are."""
@@ -658,10 +690,18 @@ class Panels:
         try:
             self._run_inner(rec)
         except Exception as e:                        # noqa: BLE001
+            # Release BEFORE the status is visible: a caller that sees
+            # `failed` may `next` at once, and next reopens only archived panes.
+            self._release(rec)
             rec["status"], rec["error"] = "failed", f"{type(e).__name__}: {e}"[:400]
             rec["updated"] = _now()
             self._save(rec)
             print(f"corral-light: panel {pid} failed: {rec['error']}", file=sys.stderr, flush=True)
+        finally:
+            # Cancelled while this thread was mid-step: it may have opened a
+            # pane after cancel() released. Idempotent.
+            if rec["status"] == "cancelled":
+                self._release(rec)
 
     def _cancelled(self, rec):
         ev = self._cancel.get(rec["id"])
@@ -844,7 +884,8 @@ class Panels:
                   "parsed": parsed is not None, "model": p.model or r.get("model")})
         rec["updated"] = _now()
         self._save(rec)
-        # An arm's pane stays open (minimized) for round 2 or `panel next`.
+        # An arm's pane stays open (minimized) through the run's rounds; the
+        # run closes it when it ends (_release), and `next` reopens it.
 
     def _synthesize(self, rec):
         import sessions
@@ -933,6 +974,8 @@ class Panels:
         self._save(rec)
 
     def _packet(self, rec):
+        # Before `done` is visible, for the same reason as the failed path.
+        self._release(rec)
         rec["status"] = "done"
         rec["updated"] = _now()
         try:

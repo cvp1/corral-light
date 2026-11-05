@@ -112,6 +112,19 @@ class _PanelBase(unittest.TestCase):
         args.update(kw)
         return self.mgr.panels.start(**args)
 
+    def _meta(self, pane_id):
+        return json.loads((self.state / "panes" / pane_id / "meta.json").read_text(encoding="utf-8"))
+
+    def _assert_released(self, rec):
+        ids = [a["pane"] for a in rec["arms"] if a.get("pane")]
+        if (rec.get("synth") or {}).get("pane"):
+            ids.append(rec["synth"]["pane"])
+        self.assertTrue(ids)
+        self.assertTrue(wait_for(lambda: not any(i in self.mgr.panes for i in ids)),
+                        f"panel panes still live: {[i for i in ids if i in self.mgr.panes]}")
+        for i in ids:
+            self.assertTrue(self._meta(i)["closed"], f"pane {i} was not archived")
+
     def _done(self, panels, pid):
         return wait_for(lambda: panels.get(pid)["status"] in ("done", "failed", "cancelled"))
 
@@ -140,7 +153,7 @@ class PanelCase(_PanelBase):
             self.assertIn("the gate can be skipped", body, "the sealed file lacks the answer")
             self.assertEqual(r["verdict"], "build-narrower")
             self.assertEqual(len(r["findings"]), 2)
-            self.assertTrue(self.mgr.panes[a["pane"]].minimized, "an arm came up on the wall")
+            self.assertTrue(self._meta(a["pane"])["minimized"], "an arm came up on the wall")
         # Code-side table: two findings, both arms for each.
         table = rec["findings"]
         self.assertEqual([f["severity"] for f in table], ["high", "low"])
@@ -165,9 +178,11 @@ class PanelCase(_PanelBase):
         self.assertEqual(author.question.get("source"), "panel")
         self.assertEqual(author.snapshot()["display"], "needs-you")
         # The arms' turns were the panel's, not the human's.
-        arm = self.mgr.panes[rec["arms"][0]["pane"]]
-        self.assertEqual(arm.turn_via, "panel")
-        self.assertEqual(arm.snapshot()["display"], "idle")
+        self.assertIn('"panel"', (self.state / "panes" / rec["arms"][0]["pane"] / "events.jsonl")
+                      .read_text(encoding="utf-8"))
+        # The run released every pane it opened; the author's stays.
+        self._assert_released(rec)
+        self.assertIn(author.id, self.mgr.panes)
         # Ack clears the rail entry; the wire view carries no bodies.
         view = self.mgr.panels.ack(pid)
         self.assertFalse(view["needs_ack"])
@@ -207,6 +222,10 @@ class PanelCase(_PanelBase):
         self.assertEqual(len(rec["history"]), 2)
         pk = (Path(rec["out_dir"]) / "packet.md").read_text(encoding="utf-8")
         self.assertIn("| r1 | r2 |", pk)
+        # Round 2 ran on the SAME arm panes, reopened from the archive.
+        self.assertEqual([a["rounds"]["2"]["file"].endswith(f"r2-{a['lane']}.md") for a in rec["arms"]],
+                         [True, True])
+        self._assert_released(rec)
         # The cap.
         rec["round"] = self.panel.MAX_ROUNDS
         with self.assertRaises(self.panel.PanelError) as cm:
@@ -341,6 +360,7 @@ class PanelCase(_PanelBase):
         self.assertEqual(rec["status"], "cancelled")
         self.assertFalse(rec["needs_ack"])
         self.assertFalse((Path(rec["out_dir"]) / "packet.md").exists())
+        self._assert_released(rec)
         with self.assertRaises(self.panel.PanelError):
             self.mgr.panels.next(pid)
 
@@ -466,17 +486,18 @@ class PanelAfterReview3(_PanelBase):
         self.assertTrue(syn["file"].endswith("synthesis-r2.md"))
         pk = (out / "packet.md").read_text(encoding="utf-8")
         self.assertIn("synthesis-r2.md", pk, "the packet points at round 1's synthesis")
-        self.assertEqual(self.mgr.panes[syn["pane"]].title,
+        self.assertEqual(self._meta(syn["pane"])["title"],
                          f"panel {rec['slug']} · synthesis r2"[:60])
+        self._assert_released(rec)
 
     def test_r3_arm_panes_are_titled_by_panel_and_lane(self):
         v = self._start()
         self.assertTrue(self._done(self.mgr.panels, v["id"]))
         rec = self.mgr.panels.get(v["id"])
         for a in rec["arms"]:
-            pane = self.mgr.panes[a["pane"]]
-            self.assertEqual(pane.title, f"panel {rec['slug']} · {a['lane']}"[:60])
-            self.assertTrue(pane.title_locked)
+            m = self._meta(a["pane"])
+            self.assertEqual(m["title"], f"panel {rec['slug']} · {a['lane']}"[:60])
+            self.assertTrue(m["title_locked"])
 
 
 if __name__ == "__main__":
@@ -517,3 +538,41 @@ class PanelAfterReview2(_PanelBase):
         with unittest.mock.patch.dict(os.environ, {"CORRAL_HUB_URL": "http://127.0.0.1:8098"}):
             self.assertTrue(consult._same_hub("http://localhost:8098/"))
             self.assertFalse(consult._same_hub("http://127.0.0.1:8199"))
+
+
+class PanelReleasesPanes(_PanelBase):
+    """2026-11-01: finished panels kept their panes live, so two later panels
+    failed every arm with "12 live panes is the cap". A run that ends must
+    give its slots back."""
+
+    def test_back_to_back_panels_fit_under_a_cap_one_panel_fills(self):
+        live = lambda: [p for p in self.mgr.panes.values() if p.state not in ("dead", "detached")]
+        before = len(live())
+        # Room for exactly one panel: two arms plus the synthesizer.
+        with unittest.mock.patch.object(self.sessions, "MAX_PANES", before + 3):
+            for n in range(3):
+                v = self._start(topic=f"run {n}")
+                self.assertTrue(self._done(self.mgr.panels, v["id"]))
+                rec = self.mgr.panels.get(v["id"])
+                self.assertEqual(rec["status"], "done", rec.get("error"))
+                for a in rec["arms"]:
+                    self.assertEqual(a["rounds"]["1"]["status"], "sealed", a)
+                self.assertEqual(rec["synth"]["status"], "sealed", rec["synth"])
+                self._assert_released(rec)
+                self.assertEqual(len(live()), before, f"run {n} left panes live")
+
+    def test_a_failed_run_releases_too(self):
+        v = self._start()
+        pid = v["id"]
+        self.assertTrue(self._done(self.mgr.panels, pid))
+        rec = self.mgr.panels.get(pid)
+        # Simulate a later failure path: a run that raises mid-way.
+        self._assert_released(rec)
+        with unittest.mock.patch.object(self.mgr.panels, "_synthesize",
+                                        side_effect=RuntimeError("boom")):
+            v2 = self._start(topic="fails")
+            self.assertTrue(self._done(self.mgr.panels, v2["id"]))
+        rec2 = self.mgr.panels.get(v2["id"])
+        self.assertEqual(rec2["status"], "failed")
+        self.assertIn("boom", rec2["error"])
+        self._assert_released(rec2)
