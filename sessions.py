@@ -1175,6 +1175,10 @@ class Pane(_core.PaneBase):
         p.ephemeral = bool(meta.get("ephemeral"))
         # None = unaddressable.
         p.seat = meta.get("seat")
+        # The spawn its agent (under a keeper) is still running: its pane
+        # token derives from this, so the seat and panel tools keep working
+        # across a hub restart.
+        p.spawn_nonce = meta.get("spawn_nonce") or None
         p.question = _core.PaneBase.restore_question(meta)   # ask_human
         d = meta.get("driven_by")
         p.driven_by = d if isinstance(d, dict) and d.get("hub") and d.get("gen") else None
@@ -1588,6 +1592,9 @@ class Pane(_core.PaneBase):
         self.pid = getattr(getattr(c, "p", None), "pid", None)
         self.pgid = getattr(c, "pgid", None)
         self.pid_start = getattr(c, "start_token", None)
+        # A new spawn: its descriptors (built right after this) get a new
+        # pane token; the previous spawn's stops working.
+        self.spawn_nonce = secrets.token_urlsafe(16)
         k = getattr(c, "keeper", None)
         self.keeper = ({"sock": str(k["sock"]), "dir": str(k.get("dir") or ""),
                         "pid": self.pgid} if k and self.pgid else None)
@@ -3085,7 +3092,8 @@ class Manager(_core.ManagerBase):
             return super().peer_http(method, path, token, body)
         pane = self.pane_for_token(token)
         if pane is None:
-            return 401, {"error": "unknown or expired pane token"}
+            return 401, {"error": "unknown or expired pane token — a token is good "
+                                  "for one spawn of its pane"}
         panels = getattr(self, "panels", None)
         if panels is None:
             return 503, {"error": "panels are not available on this hub"}

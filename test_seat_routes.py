@@ -149,9 +149,48 @@ class Routes(unittest.TestCase):
     def test_a_previous_spawns_token_is_refused(self):
         p = self.mgr.panes["aaa"]
         old = self.mgr.mint_pane_token(p)
+        p.rotate_spawn_nonce()                      # what a respawn does
         new = self.mgr.mint_pane_token(p)
+        self.assertNotEqual(old, new)
         self.assertEqual(self.req("GET", "/api/peer/seats", token=old)[0], 401)
         self.assertEqual(self.req("GET", "/api/peer/seats", token=new)[0], 200)
+
+    def test_one_spawn_one_token_for_both_descriptors(self):
+        """The seat and panel descriptors each mint; within a spawn both must
+        get the same token, or the second mint would revoke the first."""
+        p = self.mgr.panes["aaa"]
+        a, b = self.mgr.mint_pane_token(p), self.mgr.mint_pane_token(p)
+        self.assertEqual(a, b)
+        self.assertEqual(self.req("GET", "/api/peer/seats", token=a)[0], 200)
+
+    def test_a_token_survives_a_hub_restart(self):
+        """Panes outlive the hub under the keeper: a new Manager over the same
+        state dir must still know the token the pane was spawned with."""
+        p = self.mgr.panes["aaa"]
+        tok = self.mgr.mint_pane_token(p)
+        self.assertTrue(p.spawn_nonce)
+        self.assertEqual(json.loads((self.root / "panes" / "aaa" / "meta.json")
+                                    .read_text())["spawn_nonce"], p.spawn_nonce)
+        m2 = sessions.Manager.__new__(sessions.Manager)
+        m2.panes, m2.subscribers, m2.not_restored = {}, [], 0
+        m2._lock = threading.Lock()
+        m2.catalog, m2.mcp, m2.orphans = {}, None, {}
+        m2.restore()
+        found = m2.pane_for_token(tok)
+        self.assertIsNotNone(found, "the token died with the hub")
+        self.assertEqual(found.id, "aaa")
+        self.assertIsNone(m2.pane_for_token(tok[:-1] + ("0" if tok[-1] != "0" else "1")))
+
+    def test_the_token_key_is_private_and_per_state_dir(self):
+        p = self.mgr.panes["aaa"]
+        tok = self.mgr.mint_pane_token(p)
+        kf = self.root / sessions._core.PANE_KEYFILE
+        self.assertTrue(kf.is_file())
+        self.assertEqual(kf.stat().st_mode & 0o777, 0o600)
+        other = Path(tmpdir(self, "seat-routes-other-"))
+        with mock.patch.object(sessions._core, "STATE", other):
+            # Same pane id and nonce, another hub's key: a different token.
+            self.assertNotEqual(sessions._core._pane_token(p), tok)
 
     def test_a_closed_panes_token_is_refused(self):
         p = self.mgr.panes["ccc"]

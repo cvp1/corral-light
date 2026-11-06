@@ -6,6 +6,7 @@ roster, its grouping and the state directory, then subclass `PaneBase` to
 override what differs. Must not import from `corral/`.
 """
 import hashlib
+import hmac
 import json
 import secrets
 import os
@@ -480,6 +481,45 @@ def agent_groups():
     return out
 
 
+PANE_KEYFILE = "pane-token.key"   # under STATE; 0600; random; created on first use
+_PANE_KEY_FALLBACK = []           # process-local key when STATE is unset (unit tests)
+
+
+def _pane_key():
+    """The HMAC key pane tokens derive from. On disk under STATE so every hub
+    over this state dir (before and after a restart) derives the same tokens;
+    a replaced or deleted file revokes every pane token at once."""
+    if STATE is None:
+        if not _PANE_KEY_FALLBACK:
+            _PANE_KEY_FALLBACK.append(secrets.token_bytes(32))
+        return _PANE_KEY_FALLBACK[0]
+    f = Path(STATE) / PANE_KEYFILE
+    try:
+        key = f.read_bytes()
+        if len(key) >= 32:
+            return key
+    except OSError:
+        pass
+    Path(STATE).mkdir(parents=True, exist_ok=True)
+    key = secrets.token_bytes(32)
+    tmp = f.with_name(f.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, key)
+    finally:
+        os.close(fd)
+    os.replace(tmp, f)
+    try:                                   # another hub wrote first: use its key
+        return f.read_bytes()
+    except OSError:
+        return key
+
+
+def _pane_token(pane):
+    msg = f"{pane.id}\n{pane.spawn_nonce}".encode("utf-8")
+    return hmac.new(_pane_key(), msg, hashlib.sha256).hexdigest()[:40]
+
+
 class PaneBase:
     """Pane behaviour shared by both products.
 
@@ -502,6 +542,10 @@ class PaneBase:
                  # Last spawned adapter process (pid, group, start token), so
                  # a restarted hub can reap an orphan. None = nothing to reap.
                  "pid", "pgid", "pid_start",
+                 # Random per-spawn value the pane token is derived from
+                 # (mint_pane_token); rotated by rotate_spawn_nonce() at every
+                 # spawn, persisted so the token outlives a hub restart.
+                 "spawn_nonce",
                  # Human-chosen address; None = unaddressable. Loaders must
                  # read it, or save_meta blanks it.
                  "seat",
@@ -518,6 +562,16 @@ class PaneBase:
     ephemeral = False
     driven_by = None
     background = False
+    spawn_nonce = None
+
+    def rotate_spawn_nonce(self):
+        """A new spawn of this pane's agent: the previous spawn's token stops
+        working, the next mint derives a fresh one. Persisted when the pane
+        has a directory (a stub in tests may not)."""
+        self.spawn_nonce = secrets.token_urlsafe(16)
+        if getattr(self, "dir", None) is not None:
+            self.save_meta()
+        return self.spawn_nonce
     pid = pgid = pid_start = None
     keeper = None       # the keeper holding this pane's agent (Light); see Pane
     seat = None
@@ -1684,23 +1738,29 @@ class ManagerBase:
     # ── seat tools, hub side ──────────────────────────────────────────────
 
     def mint_pane_token(self, pane):
-        """A fresh in-memory token for this pane's current spawn, revoking its
-        previous one. Never persisted, so a restart revokes all tokens."""
-        import secrets
+        """The token for this pane's current spawn: an HMAC of the pane id and
+        its spawn nonce under a key in the state dir, so the same spawn gets
+        the same token from every mint (the seat and panel descriptors share
+        it) and a hub restart does not revoke it -- panes outlive the hub under
+        the keeper. A new spawn (rotate_spawn_nonce) revokes the previous one;
+        a closed pane's token is refused because the pane is gone."""
         with self._lock:
-            book = self.__dict__.setdefault("_pane_tokens", {})
-            for t in [t for t, pid in book.items() if pid == pane.id]:
-                del book[t]
-            token = secrets.token_urlsafe(24)
-            book[token] = pane.id
-        return token
+            if not getattr(pane, "spawn_nonce", None):
+                rotate = getattr(pane, "rotate_spawn_nonce", None)
+                if rotate is not None:
+                    rotate()
+                else:                       # a pane stub without PaneBase (tests)
+                    pane.spawn_nonce = secrets.token_urlsafe(16)
+            return _pane_token(pane)
 
     def pane_for_token(self, token):
-        """The open pane a current token was minted for, or None."""
+        """The open pane whose current spawn this token was derived for, or None."""
         if not isinstance(token, str) or not token:
             return None
-        pid = self.__dict__.get("_pane_tokens", {}).get(token)
-        return self.panes.get(pid) if pid else None
+        for p in list(self.panes.values()):
+            if getattr(p, "spawn_nonce", None) and hmac.compare_digest(_pane_token(p), token):
+                return p
+        return None
 
     def seat_list(self):
         """Seat, display state, lane and seat-tool availability of seated panes
@@ -1741,9 +1801,10 @@ class ManagerBase:
         the sender; hubs route here before (and without) their cookie check."""
         pane = self.pane_for_token(token)
         if pane is None:
-            return 401, {"error": "unknown or expired pane token — tokens are "
-                                  "minted per spawn and do not survive a "
-                                  "restart of the pane or the hub"}
+            return 401, {"error": "unknown or expired pane token — a token is "
+                                  "good for one spawn of its pane; a respawned "
+                                  "or closed pane needs the token its new spawn "
+                                  "was given"}
         if method == "GET" and path == "/api/peer/seats":
             return 200, {"you": pane.seat, "seats": self.seat_list()}
         if method == "POST" and path == "/api/peer/send":

@@ -521,14 +521,27 @@ class TheDescriptor(unittest.TestCase):
                       self.mgr.panes["p1"])
 
     def test_every_spawn_gets_a_fresh_token_and_the_old_one_dies(self):
-        """Two spawns, two tokens; the first is refused."""
+        """Two spawns, two tokens; the first is refused. A spawn rotates the
+        pane's nonce (Light does it in _record_pid) before its descriptors."""
         p = _Pane("p1")
         tok = lambda d: {e["name"]: e["value"] for e in d[-1]["env"]}["CORRAL_PANE_TOKEN"]
         t1 = tok(self.servers(p))
+        p.rotate_spawn_nonce()
         t2 = tok(self.servers(p))
         self.assertNotEqual(t1, t2)
         self.assertIsNone(self.mgr.pane_for_token(t1), "a previous spawn's token still works")
         self.assertIs(self.mgr.pane_for_token(t2), p)
+
+    def test_one_spawn_s_descriptors_share_the_token(self):
+        """The seat and panel descriptors are built one after the other for
+        the same spawn; a second mint must not revoke the first (it did, when
+        tokens were a per-pane book entry)."""
+        p = _Pane("p1")
+        tok = lambda d: {e["name"]: e["value"] for e in d[-1]["env"]}["CORRAL_PANE_TOKEN"]
+        t1 = tok(self.servers(p))
+        t2 = tok(self.servers(p))
+        self.assertEqual(t1, t2)
+        self.assertIs(self.mgr.pane_for_token(t1), p)
 
     def test_a_closed_pane_s_token_is_refused(self):
         p = _Pane("p1")
