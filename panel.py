@@ -67,6 +67,7 @@ DEFAULT_ROUNDS = 1           # the method panel: one independent round pays
 CHARGE_CAP = 60_000          # chars of charge sent to an arm
 SEAL_CAP = 400_000           # chars of one sealed answer
 CROSSFEED_CAP = 40_000       # chars of each other arm's answer shown in round 2
+MAX_SYNTH_FALLBACKS = 3      # unpinned synthesizer lanes skipped for not starting, at most
 INLINE_CAP = 60_000          # chars of each sealed file inlined for a tool-less synthesizer
 ARM_TIMEOUT_S = int(os.environ.get("CORRAL_PANEL_ARM_TIMEOUT_S") or 90 * 60)
 POLL_S = 1.5
@@ -504,6 +505,7 @@ class Panels:
         cwd = Path(cwd or Path.home()).expanduser()
         if not cwd.is_dir():
             raise PanelError(f"not a directory: {cwd}")
+        sessions.apply_lanes_off()
         for lane in lanes + ([synth_lane] if synth_lane else []):
             spec = sessions.AGENTS.get(lane)
             if not spec:
@@ -544,7 +546,7 @@ class Panels:
                    "charge": {"sha256": charge_digest(charge), "chars": len(charge)},
                    "tree": {"oid": oid, "dirty": dirty},
                    "arms": [{"lane": x, "pane": None, "rounds": {}} for x in lanes],
-                   "synth": {"lane": synth_lane, "pane": None},
+                   "synth": {"lane": synth_lane, "pane": None, "pinned": bool(synth_lane)},
                    "model": model, "effort": effort,
                    "findings": [], "packet_path": None, "needs_ack": False,
                    "acked_at": None, "error": None,
@@ -896,11 +898,22 @@ class Panels:
             # A new round needs a new synthesis (2026-10-31: round 2 kept
             # round 1's, because a sealed one stopped it here).
             syn.update({"status": None, "turn": None, "packet": None})
+        # A lane the caller named is pinned: if it can't start, the synthesis
+        # fails and says why. A lane chosen here is not: one that can't start
+        # (2026-11-07: Antigravity offered only Flash, the gemini lane refuses
+        # Flash, and two panels in a row lost their synthesis) is skipped for
+        # the next candidate, and the record says which and why. A record from
+        # before "pinned" existed, with a lane set, counts as pinned.
+        sessions.apply_lanes_off()        # the availability cache can be older than the file
+        pinned = syn.get("pinned", bool(syn.get("lane")))
+        tried = list(syn.get("skipped_lanes") or [])
         lane = syn.get("lane") or choose_synth_lane(
             [a["lane"] for a in rec["arms"]], rec.get("author_lane"),
-            available_lanes(self.mgr))
+            [x for x in available_lanes(self.mgr) if x not in {t["lane"] for t in tried}
+             and not sessions.AGENTS.get(x, {}).get("unavailable")])
         if not lane:
-            syn.update({"status": "skipped", "why": "no lane free of the arms and the author"})
+            syn.update({"status": "skipped", "why": "no lane free of the arms and the author"
+                        + (f" that would start (tried {', '.join(t['lane'] for t in tried)})" if tried else "")})
             self._save(rec)
             return
         syn["lane"] = lane
@@ -941,6 +954,15 @@ class Panels:
                 p = self.mgr.create(lane, rec["out_dir"], "strict", None, None,
                                     background=True)
                 if p.state == "dead":
+                    if not pinned and len(tried) < MAX_SYNTH_FALLBACKS:
+                        tried.append({"lane": lane, "why": str(p.error)[:200]})
+                        syn.update({"lane": None, "pane": None, "skipped_lanes": tried})
+                        self._save(rec)
+                        try:
+                            self.mgr.close(p.id)          # the dead pane, not left behind
+                        except Exception:                 # noqa: BLE001
+                            pass
+                        return self._synthesize(rec)
                     raise PanelError(f"{lane} did not start: {p.error}")
                 _name(p, f"panel {rec['slug']} · synthesis r{rec['round']}")
                 syn["pane"] = p.id
