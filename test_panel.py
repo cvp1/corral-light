@@ -576,3 +576,104 @@ class PanelReleasesPanes(_PanelBase):
         self.assertEqual(rec2["status"], "failed")
         self.assertIn("boom", rec2["error"])
         self._assert_released(rec2)
+
+
+class PanelSynthFallback(_PanelBase):
+    """2026-11-07: Antigravity offered only Flash, the gemini lane refuses
+    Flash, and two panels in a row lost their synthesis to a lane the hub
+    chose itself. A chosen lane that can't start is skipped for the next;
+    a lane the caller pinned still fails, and says why."""
+
+    def _break(self, lane):
+        import sys as _sys
+        self.sessions.AGENTS[lane] = dict(self.sessions.AGENTS[lane],
+                                          argv=[_sys.executable, "-c", "raise SystemExit(3)"])
+
+    def test_s1_a_chosen_lane_that_cannot_start_is_skipped(self):
+        self._break("fake3")
+        v = self._start()
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        rec = self.mgr.panels.get(v["id"])
+        syn = rec["synth"]
+        self.assertEqual(rec["status"], "done", rec.get("error"))
+        self.assertEqual(syn["status"], "sealed", syn)
+        self.assertEqual(syn["lane"], "fake4", syn)
+        self.assertEqual([t["lane"] for t in syn["skipped_lanes"]], ["fake3"], syn)
+        self.assertTrue(syn["skipped_lanes"][0]["why"], syn)
+        self.assertFalse(syn["pinned"])
+
+    def test_s2_a_pinned_lane_that_cannot_start_fails_without_falling_back(self):
+        self._break("fake3")
+        v = self._start(synth_lane="fake3")
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        syn = self.mgr.panels.get(v["id"])["synth"]
+        self.assertEqual(syn["status"], "failed", syn)
+        self.assertEqual(syn["lane"], "fake3", syn)
+        self.assertIn("did not start", syn["why"])
+        self.assertFalse(syn.get("skipped_lanes"), syn)
+
+    def test_s3_every_candidate_broken_is_skipped_and_says_so(self):
+        for lane in ("fake3", "fake4"):
+            self._break(lane)
+        v = self._start()
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        syn = self.mgr.panels.get(v["id"])["synth"]
+        # fake3 and fake4 are skipped; then an arm's lane (choose_synth_lane's
+        # second tier) synthesizes, as it would have with no third lane at all.
+        self.assertEqual([t["lane"] for t in syn["skipped_lanes"]], ["fake3", "fake4"], syn)
+        self.assertIn(syn["lane"], ("fake", "fake2"), syn)
+        self.assertEqual(syn["status"], "sealed", syn)
+
+
+class PanelLanesOff(_PanelBase):
+    """2026-11-07: the operator takes a lane out (lanes-off.json). It is
+    refused as an arm, as a pinned synthesizer and by create; a panel never
+    picks it to synthesize; taken off the list, it comes back without a
+    restart. An unreadable file switches nothing off."""
+
+    def setUp(self):
+        super().setUp()
+        self.off = Path(tmpdir(self, "lanes-off-")) / "lanes-off.json"
+        real = self.sessions.LANES_OFF
+        self.sessions.LANES_OFF = self.off
+        self.addCleanup(setattr, self.sessions, "LANES_OFF", real)
+        self.addCleanup(self._clear)
+
+    def _clear(self):
+        for spec in self.sessions.AGENTS.values():
+            if spec.pop("_off", False):
+                spec.pop("unavailable", None)
+
+    def _set(self, off):
+        self.off.write_text(json.dumps({"off": off}), encoding="utf-8")
+
+    def test_o1_an_off_lane_is_refused_everywhere_and_never_synthesizes(self):
+        self._set({"fake3": "no subscription"})
+        with self.assertRaises(self.panel.PanelError) as e:
+            self._start(lanes=["fake", "fake3"])
+        self.assertIn("switched off by the operator: no subscription", str(e.exception))
+        with self.assertRaises(self.panel.PanelError):
+            self._start(synth_lane="fake3")
+        with self.assertRaises(ValueError):
+            self.mgr.create("fake3", str(self.work))
+        av = {a["key"]: a for a in self.sessions.available_agents()}
+        self.assertFalse(av["fake3"]["available"], av["fake3"])
+        v = self._start()
+        self.assertTrue(self._done(self.mgr.panels, v["id"]))
+        syn = self.mgr.panels.get(v["id"])["synth"]
+        self.assertEqual(syn["lane"], "fake4", syn)       # fake3 is skipped, not tried
+        self.assertFalse(syn.get("skipped_lanes"), syn)
+
+    def test_o2_taken_off_the_list_it_comes_back(self):
+        self._set(["fake3"])
+        with self.assertRaises(ValueError):
+            self.mgr.create("fake3", str(self.work))
+        self._set({})
+        p = self.mgr.create("fake3", str(self.work))
+        self.assertEqual(p.state, "ready", p.error)
+
+    def test_o3_an_unreadable_file_switches_nothing_off(self):
+        self.off.write_text("{not json", encoding="utf-8")
+        self.assertEqual(self.sessions.apply_lanes_off(), {})
+        p = self.mgr.create("fake3", str(self.work))
+        self.assertEqual(p.state, "ready", p.error)

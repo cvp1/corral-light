@@ -810,14 +810,57 @@ agent_groups = _core.agent_groups
 
 
 
+LANES_OFF = Path(os.environ.get("CORRAL_LIGHT_CONFIG_DIR",
+                                Path.home() / ".config/corral-light")) / "lanes-off.json"
+
+
+def apply_lanes_off(path=None):
+    """Lanes the operator switched off: {"off": {"<lane>": "why"}} in
+    ~/.config/corral-light/lanes-off.json. Each named lane is marked
+    unavailable (the picker, consult, panels and create all refuse it, and a
+    panel never picks it to synthesize); a lane taken off the list comes back.
+    Read on every call, so editing the file needs no restart. An unreadable
+    file switches nothing off and says so in the log (the lanes stay as they
+    are: this file only ever removes a lane, never adds one).
+    2026-11-07: the operator took gemini out after Antigravity offered only Flash."""
+    path = Path(path or LANES_OFF)
+    off = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = data.get("off") if isinstance(data, dict) else None
+        if isinstance(raw, dict):
+            off = {str(k): str(v or "") for k, v in raw.items()}
+        elif isinstance(raw, list):
+            off = {str(k): "" for k in raw}
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as e:
+        print(f"corral-light: lanes-off: {path} unreadable ({type(e).__name__}); no lane switched off by it",
+              file=sys.stderr, flush=True)
+    for key, spec in AGENTS.items():
+        if key in off:
+            spec["unavailable"] = "switched off by the operator" + (f": {off[key]}" if off[key] else "") \
+                + f" ({path.name})"
+            spec["_off"] = True
+        elif spec.pop("_off", False):
+            spec.pop("unavailable", None)
+    return off
+
+
 def available_agents():
     """The picker's lane list: only what can actually run on this host."""
     # Re-read the host file on every render so new hosts appear without a restart.
     refresh_host_lanes()
+    apply_lanes_off()
     out = []
     # Reported on every lane so the operator sees it when choosing.
     stripped = vendor_env_present()
     for key, spec in AGENTS.items():
+        if spec.get("_off"):
+            out.append({"key": key, "label": spec["label"], "available": False,
+                        "why": spec["unavailable"], "postureEnforced": False,
+                        "tools": bool(spec.get("tools"))})
+            continue
         exe = Path(spec["argv"][0])
         # `requires` covers files beyond argv[0] (e.g. the script an interpreter runs).
         missing = [p for p in spec.get("requires", ()) if not Path(p).exists()]
@@ -3224,6 +3267,7 @@ class Manager(_core.ManagerBase):
             refresh_host_lanes()
         if agent not in AGENTS:
             raise ValueError(f"unknown agent {agent!r}")
+        apply_lanes_off()
         spec = AGENTS[agent]
         if spec.get("unavailable"):
             raise ValueError(f"{spec['label']}: {spec['unavailable']}")
