@@ -66,7 +66,7 @@ def _alive(pid):
         return True
 
 
-class KeeperCase(unittest.TestCase):
+class _KeeperFixture(unittest.TestCase):
     """Two Managers over one state dir: the hub that dies and the one after."""
 
     def setUp(self):
@@ -140,6 +140,10 @@ class KeeperCase(unittest.TestCase):
     @staticmethod
     def ends(p):
         return [e["data"] for e in p.events if e["kind"] == "turn_end"]
+
+class KeeperCase(_KeeperFixture):
+    """K1-K10. Other keeper classes build on _KeeperFixture, not this class, so
+    these ten run once and not again under every subclass."""
 
     # ── K1 ───────────────────────────────────────────────────────────────
     def test_k1_a_new_pane_runs_under_a_keeper(self):
@@ -1076,7 +1080,7 @@ def _swallow(fn):
         return e
 
 
-class TheExitedAgentsTurnSettles(KeeperCase):
+class TheExitedAgentsTurnSettles(_KeeperFixture):
     """F6: a turn that finished while no hub listened, after which the agent
     died, settles on reattach (ledger completed, turn_end) and stays dead."""
 
@@ -1287,7 +1291,7 @@ class ClientAfterReview3Grok(ClientAfterReview3):
         self.assertEqual([m["s"] for m in written if m.get("keeper") == "ack"], [4])
 
 
-class TheDeadPaneHasItsReason(KeeperCase):
+class TheDeadPaneHasItsReason(_KeeperFixture):
 
     def test_g5_dead_is_never_seen_before_its_reason(self):
         p = self._pane()
@@ -1309,11 +1313,9 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class StdinBackpressure(_InProc):
-    """Deferred from the 2026-10-31 panel (Grok): with the agent's stdin
-    blocked and the queue full, the hub's reader waited in accept_from_hub,
-    so a later ack or close on that connection waited too. Each test fails
-    on 35a67fb. Lines go through the real reader thread, over the socket."""
+class _BackpressureFixture(_InProc):
+    """The wedged-stdin harness the backpressure classes share."""
+
 
     def _wedge(self):
         """The agent stops reading; fill the queue so the next line waits."""
@@ -1337,6 +1339,13 @@ class StdinBackpressure(_InProc):
         time.sleep(0.3)
         self.assertEqual(len(self.k.stdin_q), 1, "the third line did not wait")
         return h
+
+
+class StdinBackpressure(_BackpressureFixture):
+    """Deferred from the 2026-10-31 panel (Grok): with the agent's stdin
+    blocked and the queue full, the hub's reader waited in accept_from_hub,
+    so a later ack or close on that connection waited too. Each test fails
+    on 35a67fb. Lines go through the real reader thread, over the socket."""
 
     def test_bp_1_an_ack_after_a_waiting_line_lands_at_once(self):
         h = self._wedge()
@@ -1394,7 +1403,7 @@ class StdinBackpressure(_InProc):
                         "a line read before the hang-up was lost")
 
 
-class StdinBackpressureAfterReview(StdinBackpressure):
+class StdinBackpressureAfterReview(_BackpressureFixture):
     """The panel on c4fe8f5 (Codex). Each test fails on c4fe8f5."""
 
     def _hang_up_with_a_waiting_prompt(self, rid=7):
