@@ -3329,7 +3329,18 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
     def test_edge_live(self):
         import hub
         import auth
+        import sessions
+        import threading
         from corral_core import edge_live
+        # An empty manager of its own: the edge checks are about auth, and a
+        # pane another test left in hub.MGR (whose lane that test's cleanup
+        # removed) would crash /api/state and fail this for the wrong reason.
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes, m.subscribers, m.not_restored = {}, [], 0
+        m._lock = threading.Lock()
+        m.catalog, m.mcp, m.orphans = {}, None, {}
+        old, hub.MGR = hub.MGR, m
+        self.addCleanup(setattr, hub, "MGR", old)
         self.assertEqual(edge_live.run(hub, auth), [])
 
 
