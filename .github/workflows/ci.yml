@@ -13,25 +13,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  # The main suite split four ways by measured class duration
+  # (tests/ci_shard.py), each shard on its own runner.
+  shard:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 12   # a shard takes ~3 min; a hang fails fast
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
       - name: Vendor ACP adapters
         run: npm ci --prefix spike
-      - name: Main suite
-        run: python3 test_corral_light.py
+      - name: Main suite, one shard
+        run: python3 tests/ci_shard.py run ${{ matrix.shard }} ${{ strategy.job-total }}
       - name: Core suite
+        if: matrix.shard == 1
         run: python3 -m unittest discover -s corral_core -t . -p 'test_*.py'
       - name: Container suite
+        if: matrix.shard == 1
         run: python3 -m unittest discover -s tests/container -p 'test_*.py'
+
+  # The required check: green only when every shard passed.
+  test:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: test "${{ needs.shard.result }}" = success
 
   # The module sandbox on macOS (Seatbelt; docs/finops-macos-sandbox.md §6).
   # It must be available here: the sandboxed tests skip without it, so the
@@ -44,9 +61,9 @@ jobs:
       matrix:
         python: ["system", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - if: matrix.python != 'system'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Pick the interpreter
@@ -64,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@v2

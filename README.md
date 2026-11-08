@@ -1115,6 +1115,9 @@ Key files:
   `test_progress_mcp.py` and `selftest_agents.mjs` are its tests
 - `static/` — browser interface
 - `test_corral_light.py` — automated tests
+- `tests/ci_shard.py` — CI runs that suite in four shards split by measured
+  class time (`tests/ci_durations.json`); `plan 4` shows the split, and
+  `gh run view <id> --log | python3 tests/ci_shard.py refresh` re-measures it
 
 This repo is the window. It does not import Seed’s `_lib`, fleet, scheduler, or vault, and it does not add hub routes for `/status`. Contributions should keep the project lightweight, local by default, and explicit about what an assistant can access or do.
 

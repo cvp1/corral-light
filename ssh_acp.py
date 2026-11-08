@@ -81,6 +81,10 @@ class Shell:
                     break
                 out_queue.put(line)
         finally:
+            try:
+                proc.stdout.close()  # the reader owns this pipe; see kill()
+            except (OSError, ValueError):
+                pass
             out_queue.put(None)      # EOF marker
 
     def kill(self):
@@ -90,7 +94,11 @@ class Shell:
             return
         if proc.poll() is None:
             proc.kill()
-        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        # Not stdout: the reader thread is blocked reading it, and closing it
+        # here would wait for that read, i.e. until every child still holding
+        # the pipe exits (a cancelled `sleep 30` held cancel for 30 s). The
+        # reader closes it at EOF.
+        for pipe in (proc.stdin, proc.stderr):
             try:
                 if pipe is not None:
                     pipe.close()

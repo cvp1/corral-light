@@ -2664,6 +2664,9 @@ class SshShellIsBounded(unittest.TestCase):
             def readline(self, _limit):
                 raise ValueError("I/O operation on closed file")
 
+            def close(self):
+                pass
+
         output = queue.Queue()
         ssh_acp.Shell._reader(
             types.SimpleNamespace(stdout=ClosedStdout()), output)
@@ -2752,9 +2755,12 @@ class SshShellIsBounded(unittest.TestCase):
             time.sleep(0.4)
             sh.cancelled = True
         threading.Thread(target=cancel_soon, daemon=True).start()
+        t0 = time.monotonic()
         with self.assertRaises(ssh_acp.ShellError) as cm:
             sh.run("sleep 30", 30, lambda t: None)
         self.assertIn("cancelled", str(cm.exception))
+        # A child still holding the output pipe must not hold the cancel.
+        self.assertLess(time.monotonic() - t0, 5, "cancel waited for the command")
 
 
 class SshLaneHasNoPermissionRail(unittest.TestCase):
@@ -3323,7 +3329,18 @@ class TheEdgeGuardsHoldOnARealSocket(unittest.TestCase):
     def test_edge_live(self):
         import hub
         import auth
+        import sessions
+        import threading
         from corral_core import edge_live
+        # An empty manager of its own: the edge checks are about auth, and a
+        # pane another test left in hub.MGR (whose lane that test's cleanup
+        # removed) would crash /api/state and fail this for the wrong reason.
+        m = sessions.Manager.__new__(sessions.Manager)
+        m.panes, m.subscribers, m.not_restored = {}, [], 0
+        m._lock = threading.Lock()
+        m.catalog, m.mcp, m.orphans = {}, None, {}
+        old, hub.MGR = hub.MGR, m
+        self.addCleanup(setattr, hub, "MGR", old)
         self.assertEqual(edge_live.run(hub, auth), [])
 
 
