@@ -323,6 +323,10 @@ AGENTS = {
         "posture_via_config_dir": False,
         "tools": True,
         "needs": "needs ChatGPT login (device-auth) — see codex_launcher.py",
+        # The model list is OpenAI's server catalog: probe it, so a new release
+        # (gpt-6.2-*, 2026-11-18) reaches the dialog without a pane opening first.
+        "catalog_probe": lambda: __import__("lane_probe").catalog_probe("codex"),
+        "probe_config": lambda a: __import__("lane_probe").full_config(a),
     },
     "grok": {
         # Grok CLI's own ACP stdio mode; the CLI owns auth.
@@ -336,6 +340,10 @@ AGENTS = {
         "posture_via_argv": __import__("grok_launcher").POSTURE_REALIZED,
         "tools": True,
         "needs": "needs Grok CLI authentication",
+        # Grok CLI 1.0.89 advertises its models over ACP (older CLIs sent null,
+        # which froze the dialog on a display-only model with no picker).
+        "catalog_probe": lambda: __import__("lane_probe").catalog_probe("grok"),
+        "probe_config": lambda a: __import__("lane_probe").full_config(a),
     },
     "gemini": {
         # Native antigravity-acp server. Do not seed the catalog from `agy models`:
@@ -2888,6 +2896,8 @@ class Pane(_core.PaneBase):
 # adapter accepts `<model><sep><anything>` (even "opus!!!") and echoes the base
 # model, while "opusXYZ" is refused; acceptance does not prove an alias is real.
 MODEL_EXTRAS = {}
+# How often a running hub re-probes the lanes' model lists (seed_catalogs).
+CATALOG_REFRESH_S = 6 * 3600
 
 
 
@@ -3031,8 +3041,20 @@ class Manager(_core.ManagerBase):
         self.restore()
         # Runs the previous hub left mid-flight go on from where their arms are.
         self.panels.resume()
-        # Probe in the background so startup never waits on a vendor.
-        threading.Thread(target=self.seed_catalogs, daemon=True).start()
+        # Probe in the background so startup never waits on a vendor; re-probe on
+        # a slow cadence so a long-lived hub picks up new model releases.
+        if os.environ.get("CORRAL_LIGHT_NO_CATALOG_PROBE") != "1":
+            threading.Thread(target=self._catalog_loop, daemon=True,
+                             name="catalog-refresh").start()
+
+    def _catalog_loop(self):
+        while True:
+            try:
+                self.seed_catalogs()
+            except Exception as e:  # noqa: BLE001 — a refresh never kills the hub
+                print(f"corral-light: catalog refresh failed: {e}",
+                      file=sys.stderr, flush=True)
+            time.sleep(CATALOG_REFRESH_S)
 
 
     # ── the Claude login, watched ────────────────────────────────────────
@@ -3192,16 +3214,17 @@ class Manager(_core.ManagerBase):
         return n
 
     def seed_catalogs(self):
-        """Seed model lists for never-seen lanes via their catalog probes.
+        """Refresh model lists via the lanes' catalog probes.
 
-        A list remembered from a real session wins; failures leave the empty state.
+        A probe is the same session/new handshake a pane runs, so a fresh answer
+        replaces the remembered list (the remembered one froze a lane on its old
+        models until someone happened to open a pane: gpt-6.2 and Grok's picker,
+        2026-11-18). A failed or empty probe leaves the remembered list alone.
         """
         for agent, spec in list(AGENTS.items()):
             probe = spec.get("catalog_probe")
             if not probe:
                 continue
-            if ((self.catalog.get(agent) or {}).get("model") or {}).get("options"):
-                continue                      # already known from a real session
             try:
                 got = probe()
             except Exception as e:  # noqa: BLE001 — never break startup

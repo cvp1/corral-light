@@ -1104,6 +1104,44 @@ class DialogIsUsableOnDayOne(unittest.TestCase):
         self.assertTrue(spec.get("live_probe"))
         self.assertTrue(spec.get("catalog_probe"))
 
+    def test_codex_and_grok_lists_are_probed_too(self):
+        """New releases (gpt-6.2, grok-4.7) must reach the dialog without a pane."""
+        import sessions
+        for lane in ("codex", "grok"):
+            self.assertTrue(sessions.AGENTS[lane].get("catalog_probe"), lane)
+
+    def _seed(self, remembered, probed):
+        import sessions
+        mgr = sessions.Manager.__new__(sessions.Manager)
+        mgr.catalog = {"codex": remembered}
+        saved = {}
+        mgr.remember_catalog = lambda a, c: saved.__setitem__(a, c)
+        only = {"codex": dict(sessions.AGENTS["codex"],
+                              catalog_probe=lambda: probed,
+                              probe_config=lambda a: {})}
+        from unittest import mock
+        with mock.patch.object(sessions, "AGENTS", only):
+            mgr.seed_catalogs()
+        return saved
+
+    def test_a_fresh_probe_replaces_a_remembered_list(self):
+        old = {"model": {"value": "gpt-6.1-sol",
+                         "options": [{"value": "gpt-6.1-sol"}]}}
+        saved = self._seed(old, (["gpt-6.2-sol", "gpt-6.2-astra"], "gpt-6.2-sol"))
+        self.assertEqual([o["value"] for o in saved["codex"]["model"]["options"]],
+                         ["gpt-6.2-sol", "gpt-6.2-astra"])
+
+    def test_test_hubs_never_probe_the_real_vendors(self):
+        import os
+        self.assertEqual(os.environ.get("CORRAL_LIGHT_NO_CATALOG_PROBE"), "1",
+                         "testkit.scratch.default_state must switch the "
+                         "catalog probes off for every test hub")
+
+    def test_a_failed_probe_keeps_the_remembered_list(self):
+        old = {"model": {"value": "gpt-6.1-sol",
+                         "options": [{"value": "gpt-6.1-sol"}]}}
+        self.assertEqual(self._seed(old, None), {})
+
     def test_the_probe_answers_both_questions_from_one_handshake(self):
         import lane_probe, inspect
         src = inspect.getsource(lane_probe._handshake)
