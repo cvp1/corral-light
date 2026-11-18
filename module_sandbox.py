@@ -149,6 +149,17 @@ def build_argv(argv, *, read_only=(), feed_dir=None, data_dir, file_binds=(), en
         for r in reads + ([feed] if feed else []):
             if _overlaps(w, r):
                 raise SandboxError(f"writable dir and read path overlap: {w!r} / {r!r}")
+    # The interpreter's own files, when they live outside /usr (a toolcache,
+    # pyenv or venv Python): without them bwrap cannot even exec it. Read-only,
+    # and never a dir that would bring HOME or a writable dir into view.
+    py_roots = _linux_python_roots()
+    home = os.path.realpath(os.path.expanduser("~"))
+    for p in py_roots:
+        if home == p or home.startswith(p.rstrip("/") + "/"):
+            raise SandboxError(f"interpreter dir would expose HOME: {p!r}")
+        for w in [data] + rw:
+            if _overlaps(w, p):
+                raise SandboxError(f"interpreter dir and writable dir overlap: {p!r} / {w!r}")
     binds = []
     for src, dst in file_binds:
         s = _real(src, "bound file")
@@ -168,6 +179,8 @@ def build_argv(argv, *, read_only=(), feed_dir=None, data_dir, file_binds=(), en
     for f in ETC_FILES:
         if os.path.exists(f):
             a += ["--ro-bind", f, f]
+    for p in py_roots:
+        a += ["--ro-bind", p, p]
     a += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
     for r in reads:
         a += ["--ro-bind", r, r]
@@ -220,6 +233,20 @@ def _python_roots():
     roots = {os.path.dirname(exe), os.path.realpath(sys.base_prefix),
              os.path.realpath(sys.prefix)}
     return sorted(r for r in roots if r and r != "/")
+
+
+def _linux_python_roots():
+    """_python_roots() minus what the Linux profile already binds (/usr and the
+    system tops), outermost only: a toolcache Python's bin/ sits in its prefix."""
+    covered = ["/usr"] + [t for t in SYSTEM_TOPS if os.path.isdir(t)]
+    out = []
+    for r in _python_roots():
+        if any(r == c or r.startswith(c + "/") for c in covered):
+            continue
+        if any(r.startswith(o + "/") for o in out):
+            continue
+        out = [o for o in out if not o.startswith(r + "/")] + [r]
+    return sorted(out)
 
 
 _OTOOL = "/usr/bin/otool"
