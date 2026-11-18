@@ -72,12 +72,13 @@ class Base(unittest.TestCase):
     """A private state dir, config dir and home for each test."""
 
     def setUp(self):
-        # Under $HOME, not /tmp: the sandbox binds by real path either way,
-        # but $HOME is where a real install lives.
-        self.tmp = Path(tempfile.mkdtemp(prefix="corral-mod-test-",
-                                         dir=os.path.expanduser("~/.cache")
-                                         if os.path.isdir(os.path.expanduser("~/.cache"))
-                                         else None))
+        # Under $HOME, not /tmp: $HOME is where a real install lives, and the
+        # sandbox's own /tmp is a private writable tmpfs, so a state dir under
+        # /tmp made a write into that private copy read as "OPENED" (fresh CI
+        # runners have no ~/.cache, and this used to fall back to /tmp).
+        cache = Path(os.path.expanduser("~/.cache"))
+        cache.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(prefix="corral-mod-test-", dir=cache))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.state = self.tmp / "state"
         self.config = self.tmp / "config"
@@ -641,6 +642,9 @@ class Isolation(Base):
             self.skipTest("no bubblewrap on this host")
         ok, why = module_sandbox.available(refresh=True)
         self.assertTrue(ok, f"bubblewrap is installed but the sandbox fails: {why}")
+        self.assertFalse(str(self.state.resolve()).startswith("/tmp/"),
+                         "under /tmp a write lands in the sandbox's private tmpfs "
+                         "and reads as OPENED: the test would not measure the host")
         self.install()
         feed = modules.feed_dir()
         feed.mkdir(parents=True, exist_ok=True)
@@ -972,6 +976,46 @@ class TheDispatch(Base):
         ri.assert_called_once_with("probe", "cli", ["a", "b"])
         modules.set_enabled("probe", False, out=quiet)
         self.assertEqual(modules.dispatch(["probe"]), 2)
+
+
+class LinuxInterpreterOutsideUsr(unittest.TestCase):
+    """A Python outside /usr (CI's toolcache, pyenv, a venv) must be bound
+    read-only into the bubblewrap profile, or bwrap cannot exec it — the
+    ubuntu-26.04 runner failure, 2026-11-18. Runs on any host: argv only."""
+
+    TC = "/opt/hostedtoolcache/Python/3.14.10/x64"
+
+    def argv(self, roots, data=None, **kw):
+        data = data or tempfile.mkdtemp(prefix="msbx-argv-", dir=os.path.expanduser("~"))
+        self.addCleanup(shutil.rmtree, data, True)
+        with mock.patch.object(sys, "platform", "linux"), \
+                mock.patch.object(module_sandbox, "_python_roots", lambda: sorted(roots)):
+            return module_sandbox.build_argv(["/x/python", "-I"], data_dir=data, **kw)
+
+    def ro_binds(self, a):
+        return [a[i + 1] for i, t in enumerate(a) if t == "--ro-bind"]
+
+    def test_a_toolcache_prefix_is_bound_read_only_once(self):
+        a = self.argv([self.TC, self.TC + "/bin"])
+        self.assertEqual(self.ro_binds(a).count(self.TC), 1)
+        self.assertNotIn(self.TC + "/bin", self.ro_binds(a), "nested root bound twice")
+        self.assertNotIn(self.TC, [a[i + 1] for i, t in enumerate(a) if t == "--bind"],
+                         "the interpreter must never be writable")
+
+    def test_a_system_python_adds_nothing(self):
+        a = self.argv(["/usr", "/usr/bin"])
+        self.assertEqual(self.ro_binds(a).count("/usr"), 1)    # the profile's own
+
+    def test_a_root_that_would_expose_home_is_refused(self):
+        home = os.path.realpath(os.path.expanduser("~"))
+        for root in (home, os.path.dirname(home)):
+            with self.assertRaises(module_sandbox.SandboxError, msg=root):
+                self.argv([root])
+
+    def test_a_root_overlapping_the_writable_dir_is_refused(self):
+        data = tempfile.mkdtemp(prefix="msbx-argv-", dir=os.path.expanduser("~"))
+        with self.assertRaises(module_sandbox.SandboxError):
+            self.argv([os.path.realpath(data)], data=data)
 
 
 if __name__ == "__main__":
