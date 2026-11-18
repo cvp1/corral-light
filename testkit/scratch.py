@@ -52,4 +52,7 @@ def default_state(prefix="corral-light-test-"):
         os.environ["CORRAL_LIGHT_STATE"] = process_tmpdir(prefix)
     if "CORRAL_LIGHT_CONFIG_DIR" not in os.environ:
         os.environ["CORRAL_LIGHT_CONFIG_DIR"] = process_tmpdir(prefix + "config-")
+    # A test hub must not handshake the real vendors for its model lists
+    # (Manager._catalog_loop): that spawned live claude/codex/grok processes.
+    os.environ.setdefault("CORRAL_LIGHT_NO_CATALOG_PROBE", "1")
     return os.environ["CORRAL_LIGHT_STATE"]

@@ -264,6 +264,29 @@ class HubEventOrder(unittest.TestCase):
         self.assertFalse(any(p == "/api/session/send" for p, _ in hub.posts))
 
 
+class PinsAreCheckedNotAssumed(unittest.TestCase):
+    """A --model the lane does not offer must not silently run the default."""
+
+    def test_a_pin_the_lane_ignored_refuses_before_sending(self):
+        hub = StubHub([{"state": "ready", "model": "gpt-6.2-sol", "events": []}])
+        with self.assertRaises(consult.ConsultError) as cm:
+            consult.send_and_wait(hub, "P1", "q", timeout_s=0,
+                                  pins={"model": "gpt-9-bogus"})
+        self.assertIn("gpt-6.2-sol", str(cm.exception))
+        self.assertFalse(any(p == "/api/session/send" for p, _ in hub.posts))
+
+    def test_matching_and_unset_pins_pass(self):
+        consult.check_pins({"model": "gpt-6.2-astra", "effort": "high"},
+                           {"model": "gpt-6.2-astra", "effort": "high"})
+        consult.check_pins({"model": "grok-4.7", "effort": "high"},
+                           {"model": "grok-4.7", "effort": None})
+        consult.check_pins({"model": "x"}, {"model": None, "effort": "default"})
+
+    def test_an_effort_the_lane_ignored_refuses(self):
+        with self.assertRaises(consult.ConsultError):
+            consult.check_pins({"model": "m", "effort": "medium"}, {"effort": "high"})
+
+
 class CookieScope(unittest.TestCase):
     def test_cached_cookie_only_goes_to_its_own_hub(self):
         import tempfile

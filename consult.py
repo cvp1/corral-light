@@ -593,9 +593,27 @@ def _await_ready(hub, pid, timeout_s, label=""):
         _nap(hub, pid, last_poll)
 
 
-def send_and_wait(hub, pid, text, timeout_s, label=""):
+def check_pins(p, pins):
+    """An ack is not adoption: a lane handed an unknown --model (a typo, a model
+    the account lacks) silently runs its default, and `ok` would still be true.
+    Refuse when the pane's echoed value differs from the pin. A lane that echoes
+    nothing is not proof either way: warn, and let the caller see it."""
+    for key, want in (pins or {}).items():
+        if not want or want == "default":
+            continue
+        got = p.get(key)
+        if got is None:
+            print(f"consult: {key}={want} asked; the lane echoes no {key}, "
+                  f"so the pin is unconfirmed", file=sys.stderr, flush=True)
+        elif got != want:
+            raise ConsultError(f"asked for {key}={want}; the pane is running "
+                               f"{got!r} (not offered by this lane?); prompt not sent")
+
+
+def send_and_wait(hub, pid, text, timeout_s, label="", pins=None):
     t0 = time.time()
     p = _await_ready(hub, pid, timeout_s, label)
+    check_pins(p, pins)
     seq0 = int(p.get("seq") or 0)
     # `via` marks the turn as script-originated; older hubs ignore it.
     hub.post("/api/session/send", {"pane": pid, "text": text, "via": "consult"})
@@ -656,7 +674,8 @@ def cmd_ask(args):
     pane = open_pane(hub, args.lane, args.cwd, args.title, args.model, args.effort,
                      args.posture, args.config, background=not args.foreground)
     try:
-        rec = send_and_wait(hub, pane["id"], text, args.timeout, args.title or args.lane)
+        rec = send_and_wait(hub, pane["id"], text, args.timeout, args.title or args.lane,
+                            pins={"model": args.model, "effort": args.effort})
     except BaseException:
         # Cancel and close a pane we opened but could not use.
         for verb in ("cancel", "close"):
