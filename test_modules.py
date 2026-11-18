@@ -72,12 +72,13 @@ class Base(unittest.TestCase):
     """A private state dir, config dir and home for each test."""
 
     def setUp(self):
-        # Under $HOME, not /tmp: the sandbox binds by real path either way,
-        # but $HOME is where a real install lives.
-        self.tmp = Path(tempfile.mkdtemp(prefix="corral-mod-test-",
-                                         dir=os.path.expanduser("~/.cache")
-                                         if os.path.isdir(os.path.expanduser("~/.cache"))
-                                         else None))
+        # Under $HOME, not /tmp: $HOME is where a real install lives, and the
+        # sandbox's own /tmp is a private writable tmpfs, so a state dir under
+        # /tmp made a write into that private copy read as "OPENED" (fresh CI
+        # runners have no ~/.cache, and this used to fall back to /tmp).
+        cache = Path(os.path.expanduser("~/.cache"))
+        cache.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(prefix="corral-mod-test-", dir=cache))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.state = self.tmp / "state"
         self.config = self.tmp / "config"
@@ -641,6 +642,9 @@ class Isolation(Base):
             self.skipTest("no bubblewrap on this host")
         ok, why = module_sandbox.available(refresh=True)
         self.assertTrue(ok, f"bubblewrap is installed but the sandbox fails: {why}")
+        self.assertFalse(str(self.state.resolve()).startswith("/tmp/"),
+                         "under /tmp a write lands in the sandbox's private tmpfs "
+                         "and reads as OPENED: the test would not measure the host")
         self.install()
         feed = modules.feed_dir()
         feed.mkdir(parents=True, exist_ok=True)
