@@ -174,8 +174,11 @@ MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 # Lanes that passed the Phase 0 matrix ON THIS PLATFORM: Linux in
 # docs/worktree-phase0.md; macOS in docs/worktree-phase0-macos.md (its own run
 # on the Mac host: Codex's sandbox there is Seatbelt, a different mechanism, so
-# a Linux pass never carries over). Gemini is held: its lane runs `yolo` whatever the
-# posture. Never host:* (cwd ignored) or ollama (no tools). Override with
+# a Linux pass never carries over). Gemini is held: with its 2026-11-21 lane
+# default (mode `default`, `yolo` forbidden) it has not passed the Phase 0
+# matrix on either platform (Linux recorded its missing approval rail under the
+# old default; macOS never ran it). Removing `yolo` is not a reason to lift this.
+# Never host:* (cwd ignored) or ollama (no tools). Override with
 # CORRAL_LIGHT_WORKTREE_LANES=a,b; kill switch CORRAL_LIGHT_WORKTREES_ENABLED=0
 # refuses new worktree panes (existing ones still resume and can be discarded).
 WORKTREE_LANES = {"linux": ("claude", "codex", "grok"),
@@ -351,7 +354,14 @@ AGENTS = {
         "label": "Antigravity (Gemini)",
         "argv": [sys.executable, str(NATIVE_ANTIGRAVITY_LAUNCHER)],
         # The lane's own approval mode, applied at session/new; the vendor enforces it.
-        "default_config": {"mode": "yolo"},
+        # 2026-11-21: was "yolo" (no permission request, so no card, whatever the
+        # posture). Now "default", confirmed from the vendor's reply on every
+        # attachment; "yolo" is forbidden (refused at start, resume and set_config).
+        "default_config": {"mode": "default"},
+        "forbidden_modes": ("yolo",),
+        # No keeper: a kept agent is picked back up without re-checking its mode,
+        # so a hub restart ends a Gemini agent and resume re-verifies it.
+        "keeper": False,
         # Model: the Pro tier at High effort, not the vendor's default — the operator
         # 2026-10-03, for panels. Pinned by INTENT, not by id: Antigravity renames
         # ids (gemini-pro-agent vanished ~2026-10-16 and every pane fell back to
@@ -1660,6 +1670,8 @@ class Pane(_core.PaneBase):
         directly (CORRAL_LIGHT_KEEPER=0, or a pane with no dir)."""
         if not KEEPER_ENABLED or getattr(self, "dir", None) is None:
             return None
+        if (AGENTS.get(self.agent) or {}).get("keeper") is False:
+            return None                # the lane opts out (see its spec)
         sock = keeper_sock_path(self.id, self.dir)
         return {"sock": sock, "dir": self.dir / "keeper"} if sock else None
 
@@ -2083,7 +2095,11 @@ class Pane(_core.PaneBase):
 
     def _apply_lane_defaults(self):
         """Apply this lane's default config if the agent advertised it; note either way."""
-        for cid, value in (AGENTS[self.agent].get("default_config") or {}).items():
+        spec = AGENTS[self.agent]
+        for cid, value in (spec.get("default_config") or {}).items():
+            if cid == "mode" and spec.get("forbidden_modes"):
+                self._verify_lane_mode(value)
+                continue
             if value in self.FORBIDDEN_DEFAULTS.get(cid, set()):
                 self.emit("note", {"text": f"refusing lane default {cid}={value} "
                                            f"— not allowed as a default"})
@@ -2107,6 +2123,40 @@ class Pane(_core.PaneBase):
                 self.emit("note", {"text": f"could not set lane default "
                                            f"{cid}={value}: {e}"})
         self._apply_model_intent()
+
+    def _verify_lane_mode(self, want):
+        """Put a lane with `forbidden_modes` on its default permission mode, and
+        prove it from the vendor's own reply, on every attachment (start,
+        resume, /clear). Always sends the setter, whatever the cached config
+        says: a cached value can be a previous attachment's. Raises
+        acp.AgentError — the pane dies before ready — when the mode is not
+        offered, the set fails, or the reply does not report `want`."""
+        label = AGENTS[self.agent]["label"]
+        forbidden = tuple(AGENTS[self.agent].get("forbidden_modes") or ())
+        cfg = self.config.get("mode") or {}
+        allowed = {o["value"] for o in cfg.get("options", [])}
+        if want in forbidden:
+            raise acp.AgentError(f"{label}: lane default mode {want!r} is itself forbidden")
+        if want not in allowed:
+            raise acp.AgentError(
+                f"{label} does not offer permission mode {want!r} (offers "
+                f"{sorted(allowed) or 'nothing'}); this lane never runs in "
+                f"{', '.join(forbidden)} and will not start without {want!r}")
+        real = cfg.get("realId", "mode")
+        try:
+            r = self.client.set_config(self.acp_session, real, want)
+        except acp.AgentError as e:
+            raise acp.AgentError(f"could not set {label} permission mode {want!r}: {e}")
+        opts = (r or {}).get("configOptions") or []
+        got = next((o.get("currentValue") for o in opts
+                    if isinstance(o, dict) and o.get("id") == real), None)
+        self._absorb_config(opts)
+        if got != want:
+            raise acp.AgentError(
+                f"asked {label} for permission mode {want!r}; its reply reports "
+                f"{got!r}. Refusing to run: this lane never runs in "
+                f"{', '.join(forbidden)}, and only the vendor's reply proves the mode")
+        self.emit("note", {"text": f"mode = {got} (lane default, confirmed by {label})"})
 
     def _apply_model_intent(self):
         """Put the session on the model the lane's intent names, whatever its id is today.
@@ -2148,6 +2198,9 @@ class Pane(_core.PaneBase):
         held = REVIEWER_CONFIG.get(self.agent, {}).get(config_id) if self.challenge_of else None
         if held is not None and value != held:
             raise ValueError(f"a blind reviewer stays at {config_id}={held}")
+        if config_id == "mode" and value in (AGENTS.get(self.agent) or {}).get("forbidden_modes", ()):
+            raise ValueError(f"{AGENTS[self.agent]['label']} never runs in permission "
+                             f"mode {value!r}: it asks for nothing, so Corral shows no card")
         if self.review_at_end and config_id == "mode" and value not in REVIEW_AT_END_MODES:
             raise ValueError(f"Review at the end keeps the lane asking before shell "
                              f"commands: mode stays one of {list(REVIEW_AT_END_MODES)}")

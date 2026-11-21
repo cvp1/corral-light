@@ -4082,7 +4082,8 @@ from test_panel import *                         # noqa: F401,F403,E402
 # 2026-11-21: the Gemini lane's model pin, and vendor error frames are failed
 # turns, never answers (consult ok, panel arms, synthesis).
 from test_lane_pin import (TheResolverPicksTheIntendedTier,  # noqa: F401,E402
-                           ThePaneLandsOnTheIntendedModel)
+                           ThePaneLandsOnTheIntendedModel, TheLaneNeverRunsInYolo,
+                           LaterSwitchesAndKeepers)
 from test_vendor_errors import (TheDetector, ConsultOk,  # noqa: F401,E402
                                 PanelRefusesVendorErrors)
 from test_stop_and_clear import *                # noqa: F401,F403,E402
