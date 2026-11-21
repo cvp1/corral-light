@@ -15,7 +15,7 @@
 # What it pins (so two machines installed a month apart get the same thing):
 #   Corral Light     git ref  $CORRAL_LIGHT_REF  (default: master; set a commit for an exact repeat —
 #                    the commit actually installed is written to the receipt)
-#   AI-OS Seed       git tag  $AIOS_SEED_REF     (default: v0.4.9-alpha)
+#   AI-OS Seed       git tag  $AIOS_SEED_REF     (default: v0.4.15-alpha)
 #   Node.js          v24.21.0 LTS, SHA-256 checked, private copy (never touches a system Node)
 #   Claude + ChatGPT adapters   spike/package-lock.json in the Corral Light checkout (npm ci)
 #   Grok CLI         @xai-official/grok 1.0.46 from npm, into a private prefix
@@ -48,7 +48,7 @@ INSTALLER_VERSION="1.1.4"
 CORRAL_LIGHT_REPO="${CORRAL_LIGHT_REPO:-https://github.com/cvp1/corral-light}"
 CORRAL_LIGHT_REF="${CORRAL_LIGHT_REF:-master}"
 AIOS_SEED_REPO="${AIOS_SEED_REPO:-https://github.com/cvp1/ai-os-seed}"
-AIOS_SEED_REF="${AIOS_SEED_REF:-v0.4.9-alpha}"
+AIOS_SEED_REF="${AIOS_SEED_REF:-v0.4.15-alpha}"
 NODE_VERSION="v24.21.0"
 NODE_SHA256_X64="fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6"
 NODE_SHA256_ARM64="6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2"
@@ -98,7 +98,7 @@ changes anything, so a second run repairs or updates and never duplicates.
 What it pins (so two machines installed a month apart get the same thing):
   Corral Light     git ref  $CORRAL_LIGHT_REF  (default: master; set a commit for an exact repeat —
                    the commit actually installed is written to the receipt)
-  AI-OS Seed       git tag  $AIOS_SEED_REF     (default: v0.4.9-alpha)
+  AI-OS Seed       git tag  $AIOS_SEED_REF     (default: v0.4.15-alpha)
   Node.js          v24.21.0 LTS, SHA-256 checked, private copy (never touches a system Node)
   Claude + ChatGPT adapters   spike/package-lock.json in the Corral Light checkout (npm ci)
   Grok CLI         @xai-official/grok 1.0.46 from npm, into a private prefix

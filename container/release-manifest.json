@@ -45,9 +45,9 @@
     }
   },
   "seed": {
-    "tag": "v0.4.9-alpha",
+    "tag": "v0.4.15-alpha",
     "repo": "https://github.com/cvp1/ai-os-seed",
-    "commit": "c006e90df7a05e53c08f4fbf6ab775a8feb3412a"
+    "commit": "fefb3634454e1f4b5bc653fe5953f52837a3c163"
   },
   "notes": "null default_model/default_effort = the vendor's own default, which is what the native hub uses today (parity, C4). Fill pins with: python3 container/pin.py --write"
 }
