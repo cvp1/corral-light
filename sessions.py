@@ -359,7 +359,10 @@ AGENTS = {
         # against what the server offers (resolve_model_intent); if no Pro-class
         # model is offered at all, the pane refuses to start rather than run a
         # weaker tier. A pane's own explicit model choice always wins.
-        "model_intent": {"prefer": "gemini-4-argon-high",
+        # 2026-11-21: Neon (gemini-4-neon-*) added; the operator made it the lane
+        # default on trial, to see if Gemini earns its panel seat back. Argon
+        # stays offered and is the intent's fallback if Neon is withdrawn.
+        "model_intent": {"prefer": "gemini-4-neon-high",
                          "exclude": ("flash", "lite", "nano"),
                          "effort_rank": ("high", "medium", "low"),
                          "says": "Gemini Pro-class at the highest effort offered"},

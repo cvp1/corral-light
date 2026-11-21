@@ -14,13 +14,23 @@ import acp
 import sessions
 
 INTENT = sessions.AGENTS["gemini"]["model_intent"]
-TODAY = ["gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium",
-         "gemini-4-argon-high", "gemini-4-argon-low", "gemini-4-argon-medium"]
+# The catalog the live server offered on 2026-11-21 (Neon added).
+TODAY = ["gemini-4-neon-high", "gemini-4-neon-xhigh", "gemini-4-neon-medium",
+         "gemini-4-neon-low", "gemini-4-argon-medium", "gemini-4-argon-high",
+         "gemini-4-argon-low", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh",
+         "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low", "gemini-3.8-flash-high",
+         "gemini-3.8-flash-medium", "gemini-3.8-flash-low"]
+BEFORE_NEON = ["gemini-3.8-flash-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium",
+               "gemini-4-argon-high", "gemini-4-argon-low", "gemini-4-argon-medium"]
 
 
 class TheResolverPicksTheIntendedTier(unittest.TestCase):
-    def test_todays_catalog_resolves_to_argon_high(self):
+    def test_todays_catalog_resolves_to_neon_high(self):
         self.assertEqual(sessions.resolve_model_intent(TODAY, INTENT),
+                         "gemini-4-neon-high")
+
+    def test_neon_withdrawn_falls_back_to_argon_high(self):
+        self.assertEqual(sessions.resolve_model_intent(BEFORE_NEON, INTENT),
                          "gemini-4-argon-high")
 
     def test_a_rename_still_lands_on_the_pro_tier_at_high(self):
@@ -41,9 +51,9 @@ class TheResolverPicksTheIntendedTier(unittest.TestCase):
                          "gemini-4.1-zinc-high")
 
     def test_the_preferred_id_wins_while_it_is_offered(self):
-        offered = ["gemini-4.1-argon-high", "gemini-4-argon-high"]
+        offered = ["gemini-4.1-argon-high", "gemini-4-neon-high"]
         self.assertEqual(sessions.resolve_model_intent(offered, INTENT),
-                         "gemini-4-argon-high")
+                         "gemini-4-neon-high")
 
     def test_flash_is_never_picked(self):
         offered = ["gemini-3.8-flash-high", "gemini-9-flash-lite-high"]
@@ -81,8 +91,8 @@ class ThePaneLandsOnTheIntendedModel(unittest.TestCase):
     def test_the_vendor_default_is_replaced(self):
         p = _pane(TODAY, "gemini-4-argon-medium")
         p._apply_lane_defaults()
-        self.assertEqual(p.config["model"]["value"], "gemini-4-argon-high")
-        self.assertIn(("model", "gemini-4-argon-high"), p.sets)
+        self.assertEqual(p.config["model"]["value"], "gemini-4-neon-high")
+        self.assertIn(("model", "gemini-4-neon-high"), p.sets)
 
     def test_a_resolved_rename_says_so_in_the_pane(self):
         p = _pane(["gemini-5-zinc-high", "gemini-5-zinc-medium"], "gemini-5-zinc-medium")
