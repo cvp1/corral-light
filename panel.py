@@ -867,6 +867,12 @@ class Panels:
             self._save(rec)
             return
         text = turn_text(p, tid)
+        import vendor_errors
+        err = vendor_errors.vendor_error(text)
+        if err:                # the vendor failed; its error is not this arm's answer
+            r.update({"status": "failed", "why": err})
+            self._save(rec)
+            return
         parsed = parse_answer(text)
         path = Path(rec["out_dir"]) / f"r{rn}-{a['lane']}.md"
         head = (f"---\npanel: {rec['id']}\ntopic: {rec['topic']}\nround: {rn}\nlane: {a['lane']}\n"
@@ -985,6 +991,10 @@ class Panels:
             if led.get("state") != "completed":
                 raise PanelError(f"synthesis turn {led.get('state')}")
             text = turn_text(p, tid)
+            import vendor_errors
+            err = vendor_errors.vendor_error(text)
+            if err:
+                raise PanelError(f"synthesis failed: {err}")
             path = Path(rec["out_dir"]) / (f"synthesis-r{rec['round']}.md"
                                            if rec["round"] > 1 else "synthesis.md")
             path.write_text(f"---\npanel: {rec['id']}\nlane: {lane}\npane: {p.id}\nturn: {tid}\n"

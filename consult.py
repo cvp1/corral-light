@@ -655,6 +655,18 @@ def _parallel(items, fn):
 
 
 # -------------------------------------------------------------------- verbs
+def answer_ok(rec):
+    """Set rec["ok"]: a complete, non-empty answer that is not a vendor error
+    frame (vendor_errors.py). A vendor error is a failure with its own words
+    in `why`, never an answer."""
+    import vendor_errors
+    err = vendor_errors.vendor_error(rec.get("text"))
+    if err:
+        rec["why"] = err
+    rec["ok"] = bool(rec.get("complete") and rec.get("text")) and not err
+    return rec["ok"]
+
+
 def cmd_lanes(args):
     hub = connect(args.url)
     rows = lanes(hub)
@@ -685,7 +697,7 @@ def cmd_ask(args):
                 pass
         raise
     rec["config_applied"] = pane.get("config_applied", [])
-    rec["ok"] = bool(rec["complete"] and rec["text"])
+    answer_ok(rec)
     if args.close:
         hub.post("/api/session/close", {"pane": pane["id"]})
         rec["closed"] = True
@@ -697,7 +709,7 @@ def cmd_send(args):
     hub = connect(args.url)
     text = read_prompt(args)
     rec = send_and_wait(hub, args.pane, text, args.timeout)
-    rec["ok"] = bool(rec["complete"] and rec["text"])
+    answer_ok(rec)
     print(json.dumps(rec, indent=2), flush=True)
     return 0 if rec["ok"] else 1
 
@@ -743,7 +755,8 @@ def cmd_fanout(args):
                 where[i] = pid
             rec = send_and_wait(hub, pid, text, args.timeout,
                                 name if kind == "lane" else pid)
-            rec.setdefault("ok", bool(rec.get("complete") and rec.get("text")))
+            if "ok" not in rec:
+                answer_ok(rec)
             done.put((i, rec))
         except Exception as e:                          # noqa: BLE001
             done.put((i, {"pane": where.get(i), "ok": False, "complete": False,
@@ -812,7 +825,7 @@ def cmd_crossfeed(args):
             rec.update({"ok": False, "why": r["results"][pid], "complete": False, "text": ""})
         else:
             rec.update(results[pid])
-            rec["ok"] = bool(rec["complete"] and rec["text"])
+            answer_ok(rec)
         out.append(rec)
     print(json.dumps({"arms": out}, indent=2), flush=True)
     return 0 if sum(1 for x in out if x["ok"]) >= 1 else 1
