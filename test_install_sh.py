@@ -20,6 +20,22 @@ SCRIPT = HERE / "install.sh"
 TEXT = SCRIPT.read_text(encoding="utf-8")
 
 
+def _bash_major():
+    try:
+        out = subprocess.run(["bash", "-c", "echo ${BASH_VERSINFO[0]}"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return int(out.strip() or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+# install.sh is a Linux installer written for bash >= 4; macOS's /bin/bash is
+# 3.2 and misparses it (2026-11-21: 9/22 failed identically on master). CI
+# runs these on Linux; a Mac skips them, saying why, instead of failing.
+NEEDS_BASH4 = unittest.skipIf(_bash_major() < 4,
+                              "install.sh needs bash >= 4 (Linux); this bash is older")
+
+
 def _stub(dirpath, name, body):
     p = Path(dirpath) / name
     p.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
@@ -69,6 +85,7 @@ class Static(unittest.TestCase):
         # fully redirected and exec the hub, or tee waits on it forever.
         self.assertIn('nohup "$CL/corral-light" serve ) >> "$STATE/hub.log" 2>&1 </dev/null &', TEXT)
 
+    @NEEDS_BASH4
     def test_bash_syntax(self):
         r = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -124,6 +141,7 @@ class Static(unittest.TestCase):
             self.assertNotIn(key, TEXT)
 
 
+@NEEDS_BASH4
 class Behaviour(_Run):
     def test_help_and_version(self):
         r = self.run_sh("--help")
