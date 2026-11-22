@@ -328,6 +328,25 @@ class PortAConversation(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: self.case.turn_ends(dst) == 1))
         self.assertEqual(dst.snapshot()["portedFrom"]["agent"], "fake")
 
+    def test_the_carry_asks_for_the_exact_model_picked(self):
+        # Without this the new pane ran the lane's default (fable), not the
+        # opus the source pane and the operator's pick named.
+        src = self._src()
+        pack = self.mgr.port_preview(src.id, "fake")
+        r = self.mgr.port(src.id, "fake", sha=pack["sha"], model=" opus ", effort="high")
+        snap = r["pane"].snapshot()
+        self.assertEqual((snap["wantModel"], snap["wantEffort"]), ("opus", "high"))
+        # The fake lane offers no models: the pane says so, never pretends.
+        self.assertTrue(self.wait_for(lambda: any(
+            "model" in (e.get("data") or {}).get("text", "")
+            for e in r["pane"].events if e["kind"] == "note")))
+
+    def test_no_pick_leaves_the_lane_default(self):
+        src = self._src()
+        pack = self.mgr.port_preview(src.id, "fake")
+        snap = self.mgr.port(src.id, "fake", sha=pack["sha"], model="", effort=None)["pane"].snapshot()
+        self.assertEqual((snap["wantModel"], snap["wantEffort"]), (None, None))
+
     def test_a_stale_or_missing_sha_refuses(self):
         src = self._src()
         pack = self.mgr.port_preview(src.id, "fake")

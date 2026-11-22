@@ -1182,7 +1182,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, **pack})
             if p == "/api/session/port":
                 r = MGR.port(b.get("pane", ""), b.get("agent", ""),
-                             sha=b.get("sha") or "", cwd=b.get("cwd") or None)
+                             sha=b.get("sha") or "", cwd=b.get("cwd") or None,
+                             model=b.get("model") or None, effort=b.get("effort") or None)
                 return self._json({"ok": r["delivered"], "delivered": r["delivered"],
                                    "error": r["error"], "pane": r["pane"].snapshot()})
             if p == "/api/session/schedule/add":

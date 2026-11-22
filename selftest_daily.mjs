@@ -219,5 +219,51 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(!/innerHTML/.test(sw), 'T-DD-6 the worker parses no HTML');
 }
 
+// T-DD-7 carry picks the exact model, defaulting to what the source runs.
+{
+  const cd = load('carryDefaults');
+  const sp = { id: 's', agent: 'claude', model: 'opus', effort: 'high', state: 'ready' };
+  eq(cd(sp, 'claude', [sp], null), { model: 'opus', effort: 'high', from: 'this pane' },
+     'T-DD-7 same lane keeps the source pane\'s model (not the adapter default)');
+  const detached = { id: 'd', agent: 'claude', model: null, wantModel: 'opus', state: 'detached' };
+  eq(cd(detached, 'claude', [], null).model, 'opus',
+     'T-DD-7 a detached source still carries the model it asked for');
+  eq(cd(sp, 'codex', [sp], { agent: 'codex', model: 'gpt-6.2-astra', effort: 'high' }),
+     { model: 'gpt-6.2-astra', effort: 'high', from: '⚡ preset' },
+     'T-DD-7 another lane takes the ⚡ preset for that lane');
+  const other = { id: 'o', agent: 'codex', model: 'gpt-6.2-sol', title: 'Build', state: 'ready' };
+  const dead = { id: 'x', agent: 'codex', model: 'gpt-5.6-luna', state: 'dead' };
+  eq(cd(sp, 'codex', [other, dead], null).model, 'gpt-6.2-sol',
+     'T-DD-7 else the newest live pane on that lane, never a dead one');
+  eq(cd(sp, 'grok', [sp], null), { model: '', effort: '', from: '' },
+     'T-DD-7 else the agent decides, and the dialog says nothing came from anywhere');
+
+  const opt = () => { const o = mk('option'); return o; };
+  const mkSel = () => {
+    const n = { kids: [], value: '', disabled: false, closest: () => ({ style: {} }),
+                replaceChildren() { this.kids = []; }, appendChild(k) { this.kids.push(k); return k; } };
+    return n;
+  };
+  const elx = (tag, cls, text) => { const o = mk(tag, cls, text); o.value = ''; return o; };
+  const fill = load('fillCarryPick', [], { el: elx });
+  const m = mkSel();
+  fill(m, { options: [{ value: 'default', name: 'default' }, { value: 'opus', name: 'opus' },
+                      { value: 'fable', name: 'fable' }], value: 'fable' }, 'opus');
+  eq(m.value, 'opus', 'T-DD-7 the picker lands on the wanted model, not the catalog\'s current value');
+  eq(m.kids.map(k => k.value), ['default', 'opus', 'fable'],
+     'T-DD-7 a list with its own default gets no second one');
+  const m2 = mkSel();
+  fill(m2, { options: [{ value: 'opus', name: 'opus' }] }, 'claude-opus-5-5');
+  eq([m2.value, m2.kids.map(k => k.value)], ['claude-opus-5-5', ['', 'opus', 'claude-opus-5-5']],
+     'T-DD-7 a live model the catalog has not listed still shows and is sent');
+  const m3 = mkSel();
+  const hint = fill(m3, { value: 'grok-4.7', options: [] }, '');
+  check(m3.disabled && /grok-4\.7/.test(hint), 'T-DD-7 a fixed model is named, not offered');
+  check(/id="p-model"/.test(html) && /id="p-effort"/.test(html), 'T-DD-7 the carry dialog has both pickers');
+  check(/api\('\/api\/session\/port', \{[^}]*model: \$\('#p-model'\)\.value/.test(src),
+        'T-DD-7 Send posts the picked model');
+  void opt;
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick');

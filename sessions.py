@@ -2904,6 +2904,9 @@ class Pane(_core.PaneBase):
             "titleLocked": self.title_locked,
             "order": self.order, "pinned": self.pinned,
             "model": self.model, "effort": self.effort, "config": self.config,
+            # What it was asked for: a detached pane has no live model yet.
+            "wantModel": getattr(self, "want_model", None),
+            "wantEffort": getattr(self, "want_effort", None),
             "commands": self.commands,
             # Seconds since anything came out of this pane.
             "idleS": int(idle),
@@ -3174,11 +3177,14 @@ class Manager(_core.ManagerBase):
         pack["label"] = (AGENTS.get(to_agent) or {}).get("label") or to_agent
         return pack
 
-    def port(self, from_id, to_agent, *, sha, cwd=None, posture=None):
+    def port(self, from_id, to_agent, *, sha, cwd=None, posture=None,
+             model=None, effort=None):
         """Carry a conversation's transcript to a new pane on another lane.
 
         `sha` must match the freshly recomposed pack, so a transcript that grew
         since the preview is refused. Delivery is reported separately.
+        `model`/`effort` pin the new pane exactly like the New dialog; None is
+        the agent's own default (which need not match the source pane's).
         """
         import socket
         import port as port_mod
@@ -3189,7 +3195,8 @@ class Manager(_core.ManagerBase):
         if not sha or pack["sha"] != sha:
             raise ValueError("the preview is out of date — reopen and check it")
         src = self.get(from_id)
-        pane = self.create(to_agent, cwd or src.cwd, posture or src.posture)
+        pane = self.create(to_agent, cwd or src.cwd, posture or src.posture,
+                           (model or "").strip() or None, (effort or "").strip() or None)
         pane.ported_from = {"pane": src.id, "agent": src.agent,
                             "host": socket.gethostname()[:64], "at": _now(),
                             "turns": pack["turns_carried"],
