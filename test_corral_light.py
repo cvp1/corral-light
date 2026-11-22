@@ -4150,5 +4150,72 @@ from test_progress_mcp import (KeptInput, ToolEvent,                   # noqa: F
                                WallDerivation as AgentsWall)
 
 
+# 2026-11-22: ten modules and three classes had never run in CI, test_consult
+# among them; EveryTestClassRunsInCI below keeps the next one from slipping.
+# Explicit names, not *: a star import would rebind ROOT, FAKE and wait_for.
+from test_consult import (WaitTurn, Attribution, HubEventOrder,  # noqa: F401,E402
+                          PinsAreCheckedNotAssumed, CookieScope,
+                          PairingAgainstAnotherStore, HubErrors, LaneNames,
+                          AnUnsetPostureIsNotAClaim, AScriptedTurnSaysSo)
+from test_claude_login import (Launcher, RealLauncherPath,  # noqa: F401,E402
+                               Route as LoginRoute, Tick, FindsTheCli,
+                               TheBrowserHalf)
+from test_drive import DriveTest                           # noqa: F401,E402
+from test_drive_e2e import DriveE2E                        # noqa: F401,E402
+from test_key_pairing import (T71_SameAssertionTwice,  # noqa: F401,E402
+                              T711_ConcurrentFinishes, T72_Expiry, T73_Cap,
+                              T74_RateLimits, T75_FirstEnrollment,
+                              T76_LaterEnrollment, T77_KeyOnly, T78_Corrupt,
+                              T710_FileDiscipline, T712_BeginNeedsTheLiveCode,
+                              T714_VerifierUnavailable, T715_Recover,
+                              BindingsTheMutantsFound, T91_SecurityNotices,
+                              T91_TheBannerIsSilentAndLocal, T10_SessionLifetime,
+                              Routes as KeyPairingRoutes)
+from test_lanes import (AFailingProbe, APassingProbe, TheLiveHub,  # noqa: F401,E402
+                        AlreadyCurrent, Grok as LanesGrok,
+                        Antigravity as LanesAntigravity, TheCheck as LanesCheck,
+                        TheCliVerb as LanesCliVerb, TheProbeReadsTheFullState)
+from test_launch import PairedUrl, HubUrl, BrowserSide     # noqa: F401,E402
+from test_perf_paths import (HubContracts, AvailabilityWorker,  # noqa: F401,E402
+                             EmitPerf, CookieKey, ConsultPaths)
+from test_stop import TheStopVerb                          # noqa: F401,E402
+from test_text_coalesce import (TextCoalescing,  # noqa: F401,E402
+                                ProbeCacheNeverBlocksARequest)
+from test_hublink import PeerStatusLine                    # noqa: F401,E402
+from test_modules import LinuxInterpreterOutsideUsr        # noqa: F401,E402
+from test_vendor_reports import FindBinary as GrokFindBinary  # noqa: F401,E402
+
+
+def orphan_test_classes(namespace, root=ROOT):
+    """Every root test_*.py class with tests that `namespace` does not hold.
+    CI runs this module and nothing else at the root (tests/ci_shard.py), so
+    a class missing here never runs in CI and nothing says so."""
+    import importlib
+    held = {id(v) for v in namespace.values() if isinstance(v, type)}
+    names = unittest.defaultTestLoader.getTestCaseNames
+    out = []
+    for f in sorted(root.glob("test_*.py")):
+        if f.stem == "test_corral_light":
+            continue
+        mod = importlib.import_module(f.stem)
+        for k, v in vars(mod).items():
+            if (isinstance(v, type) and issubclass(v, unittest.TestCase)
+                    and v.__module__ == mod.__name__ and names(v)
+                    and id(v) not in held):
+                out.append(f"{f.stem}.{k}")
+    return out
+
+
+class EveryTestClassRunsInCI(unittest.TestCase):
+    def test_every_root_test_class_is_collected_here(self):
+        self.assertEqual(orphan_test_classes(globals()), [],
+                         "import these into test_corral_light.py or CI never runs them")
+
+    def test_the_guard_sees_a_class_that_was_left_out(self):
+        # Negative control: drop one collected class and the guard must name it.
+        ns = {k: v for k, v in globals().items() if v is not WaitTurn}
+        self.assertEqual(orphan_test_classes(ns), ["test_consult.WaitTurn"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
