@@ -1840,7 +1840,8 @@ function openPaneMenu(p, at) {
   if (p.worktree && p.worktree.phase === 'active') {
     item('Review changes…', () => openReview(p), { key: 'r' });
   }
-  if (!isTerm(p)) item('Carry to another lane…', () => openPort(p));
+  if (!isTerm(p)) item('Carry to a fresh pane…', () => openPort(p),
+                        { title: 'start a new pane, on any agent, that reads this transcript' });
   if (!isNarrow()) item(S.wide === p.id ? 'Back to the whole wall' : 'Focus — this pane alone',
                         () => toggleWide(p), { key: 'f', on: S.wide === p.id });
   if (!isTerm(p)) {
