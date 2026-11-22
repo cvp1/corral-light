@@ -194,6 +194,64 @@ class RolesOverTheCli(HubCase):
             self.cli("close", line.split()[0])
 
 
+class TaskFirstOverTheCli(HubCase):
+    """New with a task sends it at once (the dialog and `open --task` share the
+    hub path) and pins the goal; a role's instructions ride ahead of it."""
+
+    def _wait_events(self, pid, needle, timeout=15):
+        f = self.tmp / "state" / "panes" / pid / "events.jsonl"
+        end = time.time() + timeout
+        while time.time() < end:
+            if f.exists() and needle in f.read_text(encoding="utf-8"):
+                return f.read_text(encoding="utf-8")
+            time.sleep(0.1)
+        self.fail(f"{needle!r} never reached {pid}'s transcript")
+
+    def test_open_with_a_task_sends_it_and_pins_the_goal(self):
+        rc, out, err = self.cli("open", "--lane", "fake", "--cwd", str(self.tmp / "agent"),
+                                "--task", "count the  walnuts", "--done", "a number is printed")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("NOT sent", err)
+        pid = out.strip()
+        evs = self._wait_events(pid, "count the  walnuts")
+        users = [json.loads(l)["data"]["text"] for l in evs.splitlines()
+                 if l and json.loads(l).get("kind") == "user"]
+        self.assertEqual(users, ["count the  walnuts\n\nDone when: a number is printed"],
+                         "what was sent is not the task plus its finish line")
+        meta = json.loads((self.tmp / "state" / "panes" / pid / "meta.json").read_text())
+        self.assertEqual(meta["goal"], {"task": "count the walnuts",
+                                        "done": "a number is printed"})
+        snap = [p for p in json.loads(self.cli("panes", "--json")[1]) if p["id"] == pid][0]
+        self.assertEqual(snap["goal"]["task"], "count the walnuts")
+        self.cli("close", pid)
+
+    def test_a_role_rides_ahead_of_the_task_in_one_turn(self):
+        import roles
+        roles.create({"id": "counter", "description": "counts things", "personality": "terse",
+                      "does": "count", "expects": "a number", "data_class": "public"},
+                     rdir=self.tmp / "roles")
+        rc, out, err = self.cli("open", "--role", "counter", "--lane", "fake",
+                                "--cwd", str(self.tmp / "agent"), "--task", "count pecans")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("NOT sent", err, "a task-carrying role must not be held back")
+        evs = self._wait_events(out.strip(), "count pecans")
+        users = [json.loads(l)["data"]["text"] for l in evs.splitlines()
+                 if l and json.loads(l).get("kind") == "user"]
+        self.assertEqual(len(users), 1)
+        self.assertTrue(users[0].startswith("You are working as `counter`"), users[0][:80])
+        self.assertTrue(users[0].endswith("---\n\ncount pecans"), users[0][-80:])
+        self.cli("close", out.strip())
+
+    def test_no_task_sends_nothing(self):
+        pid = self.open()
+        time.sleep(0.5)
+        f = self.tmp / "state" / "panes" / pid / "events.jsonl"
+        self.assertNotIn('"kind": "user"', f.read_text(encoding="utf-8") if f.exists() else "")
+        meta = json.loads((self.tmp / "state" / "panes" / pid / "meta.json").read_text())
+        self.assertIsNone(meta.get("goal"))
+        self.cli("close", pid)
+
+
 class LaterOverTheCli(HubCase):
     def test_add_list_rm(self):
         rc, out, err = self.cli("later", "add", "--at", "2099-01-01T06:00", "--lane", "fake",

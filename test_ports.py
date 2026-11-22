@@ -388,3 +388,26 @@ class PortAConversation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ComposeTask(unittest.TestCase):
+    """sessions.compose_task: New's first message and its pinned goal."""
+
+    def test_task_done_and_preamble(self):
+        import sessions
+        self.assertEqual(sessions.compose_task("", "x"), ("", None))
+        self.assertEqual(sessions.compose_task("  \n ", None), ("", None))
+        text, goal = sessions.compose_task(" fix it \n", "  tests\n pass ")
+        self.assertEqual(text, "fix it\n\nDone when: tests pass")
+        self.assertEqual(goal, {"task": "fix it", "done": "tests pass"})
+        text, goal = sessions.compose_task("fix it", "", preamble="ROLE\n")
+        self.assertEqual(text, "ROLE\n\n---\n\nfix it")
+        self.assertIsNone(goal["done"])
+
+    def test_the_goal_is_bounded_and_an_oversize_task_refused(self):
+        import sessions
+        _, goal = sessions.compose_task("x" * 1000, "y" * 1000)
+        self.assertEqual((len(goal["task"]), len(goal["done"])),
+                         (sessions.GOAL_TASK_CHARS, sessions.GOAL_DONE_CHARS))
+        with self.assertRaises(ValueError):
+            sessions.compose_task("x" * (sessions.TASK_MAX + 1))

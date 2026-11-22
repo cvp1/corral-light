@@ -537,6 +537,9 @@ class PaneBase:
                  # Transcript was carried here from another lane/host (the
                  # model does not remember it). Optional.
                  "ported_from",
+                 # What the operator asked for in New: {task, done}. Display
+                 # only (pinned under the title). Optional.
+                 "goal",
                  # A seat a script opened for one answer. Absent = False.
                  "ephemeral",
                  # Last spawned adapter process (pid, group, start token), so

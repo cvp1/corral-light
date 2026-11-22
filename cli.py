@@ -383,7 +383,7 @@ def v_panes(c, a):
         c.say(json.dumps([{k: p.get(k) for k in ("id", "state", "agent", "model",
                                                  "effort", "title", "cwd", "pending",
                                                  "resumable", "seat", "seatWithheld",
-                                                 "remote", "drivenBy")}
+                                                 "remote", "drivenBy", "goal")}
                           for p in rows],
                          indent=2))
         return 0
@@ -418,11 +418,19 @@ def v_open(c, a):
             body[k] = getattr(a, k)
     if a.background:
         body["background"] = True
+    if getattr(a, "task", None):
+        # Same path as the New dialog: sent at once, goal pinned under the title.
+        body["task"] = a.task
+        if getattr(a, "done", None):
+            body["doneWhen"] = a.done
     r = c.post("/api/session/new", body, timeout=consult.HANDSHAKE_S)
     p = r["pane"]
     if p.get("state") == "dead":
         c.say(f"{p['id']} dead: {p.get('error')}")
         return 1
+    if body.get("task") and not r.get("sent"):
+        print(f"corral-light: the task was NOT sent: {r.get('error')}",
+              file=sys.stderr, flush=True)
     if a.title:
         c.post("/api/session/rename", {"pane": p["id"], "title": a.title[:60]})
     for n in r.get("notes") or []:
@@ -709,6 +717,9 @@ def main(argv=None):
                                  "this ask as the first turn, and follow it")
     s.add_argument("--background", action="store_true",
                    help="start minimized; it restores itself when it needs you")
+    s.add_argument("--task", help="send this as the first turn now (a role's "
+                                  "instructions ride ahead of it)")
+    s.add_argument("--done", help="with --task: how you will know it is finished")
     s.add_argument("--host", help="a paired hub that lets this one drive it: the pane "
                                   "runs there, as you, in a folder under its home")
     s.add_argument("--json", action="store_true")

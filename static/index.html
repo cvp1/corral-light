@@ -101,7 +101,15 @@
 <dialog id="newdlg">
   <form method="dialog" class="dlg">
     <h2>New conversation</h2>
-    <!-- A role presets lane / effort / posture and fills the composer; it sends nothing. -->
+    <!-- Task first: Start sends it at once (with a role's instructions ahead of
+         it). Empty = open the pane and send nothing. -->
+    <label>Task<textarea id="f-task" rows="3" spellcheck="true"
+      placeholder="what should it do? — sent when you press Start (⌘↵)"></textarea></label>
+    <label>Done when<input id="f-done" spellcheck="true" autocomplete="off"
+      placeholder="optional — how you'll know it's finished"></label>
+    <!-- Everything below is how it runs; folded behind one line that says it. -->
+    <details id="f-cfg"><summary id="f-cfgsum">settings</summary>
+    <!-- A role presets lane / effort / posture; its instructions ride ahead of the task. -->
     <label>Role<select id="f-role"><option value="">None</option></select></label>
     <!-- Rigs: seated panes saved by name. -->
     <button type="button" class="btn" id="rigsbtn">Rigs…</button>
@@ -142,12 +150,13 @@
       </select>
     </label>
     <p class="hint" id="posturehint"></p>
-    <!-- With a time set, Start arms the conversation instead of opening it. -->
+    </details>
+    <!-- With a time set, Start arms the conversation instead of opening it; the
+         task above is what it will be asked. -->
     <details id="f-later"><summary>Later…</summary>
       <label>Start at<input id="f-when" type="datetime-local"></label>
       <label>Repeat<select id="f-repeat"><option value="">once</option>
         <option value="daily">daily</option><option value="weekly">weekly</option></select></label>
-      <label>Ask<textarea id="f-prompt" rows="3" placeholder="what it will be asked"></textarea></label>
     </details>
     <!-- Saves these fields as what the ⚡ quick button starts. -->
     <label class="checkrow"><input type="checkbox" id="f-quick">

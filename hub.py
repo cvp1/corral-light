@@ -1050,11 +1050,22 @@ class Handler(BaseHTTPRequestHandler):
                 if b.get("role") or b.get("worktree") or b.get("reviewAtEnd"):
                     raise ValueError("roles, own branches and review at the end are "
                                      "not available yet for a pane on another hub")
+                text, _goal = sessions.compose_task(b.get("task"), b.get("doneWhen"))
                 snap = REMOTE.open(b["host"], {
                     "lane": b.get("agent", ""), "cwd": b.get("cwd") or "~",
                     "model": b.get("model"), "effort": b.get("effort"),
                     "posture": b.get("posture"), "title": b.get("title")})
-                return self._json({"ok": True, "pane": snap, "preamble": "", "notes": []})
+                sent, err = False, None
+                if text:
+                    # The goal is not pinned for a remote pane (its meta is
+                    # the other hub's); the task itself is sent.
+                    try:
+                        REMOTE.call(snap["id"], "send", {"text": text})
+                        sent = True
+                    except (ValueError, KeyError) as e:
+                        err = str(e)[:300]
+                return self._json({"ok": True, "pane": snap, "preamble": "", "notes": [],
+                                   "sent": sent, "error": err})
             if p == "/api/session/new":
                 agent = b.get("agent", "")
                 posture = b.get("posture") or sessions.DEFAULT_POSTURE
@@ -1073,6 +1084,9 @@ class Handler(BaseHTTPRequestHandler):
                     agent, effort = r.agent, r.effort
                     posture = r.posture or sessions.DEFAULT_POSTURE
                     role_sha, preamble, notes = r.sha256, r.preamble, r.notes
+                # Refuse an oversize task before a process is spent on it.
+                text, goal = sessions.compose_task(b.get("task"), b.get("doneWhen"),
+                                                   preamble)
                 try:
                     pane = MGR.create(agent, b.get("cwd") or str(sessions.default_cwd()),
                                       posture, (b.get("model") or "").strip() or None,
@@ -1087,9 +1101,22 @@ class Handler(BaseHTTPRequestHandler):
                     # that just failed: recheck now rather than in a period.
                     sessions.AVAIL.invalidate()
                     raise
-                # The preamble is returned to the composer, not sent from here.
+                # With a task, New sends it at once (the role's instructions
+                # ride ahead of it). Without one, the preamble goes back to the
+                # composer and nothing is sent.
+                sent, err = False, None
+                if text:
+                    pane.goal = goal
+                    pane.save_meta()
+                    try:
+                        pane.send(text)
+                        sent = True
+                    except (sessions.acp.AgentError, ValueError) as e:
+                        err = str(e)[:300]
+                        pane.emit("note", {"text": f"the task was not sent: {err}"})
                 return self._json({"ok": True, "pane": pane.snapshot(),
-                                   "preamble": preamble, "notes": notes})
+                                   "preamble": "" if text else preamble, "notes": notes,
+                                   "sent": sent, "error": err})
             if p == "/api/content/attach":
                 # Composer text only, nothing is sent. A lane with tools gets
                 # the path (it reads the file through its own permission gate);
@@ -1187,9 +1214,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": r["delivered"], "delivered": r["delivered"],
                                    "error": r["error"], "pane": r["pane"].snapshot()})
             if p == "/api/session/schedule/add":
+                # The dialog's task + "Done when", composed the same way New
+                # sends them; a plain `prompt` (CLI) is taken as typed.
+                prompt = (sessions.compose_task(b.get("task"), b.get("doneWhen"))[0]
+                          if b.get("task") else b.get("prompt", ""))
                 job = MGR.schedule.add(
                     b.get("agent", ""), b.get("cwd") or str(sessions.default_cwd()),
-                    b.get("prompt", ""), b.get("when", ""),
+                    prompt, b.get("when", ""),
                     repeat=b.get("repeat") or "", posture=b.get("posture") or None,
                     model=(b.get("model") or "").strip() or None,
                     effort=(b.get("effort") or "").strip() or None,

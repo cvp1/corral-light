@@ -54,6 +54,26 @@ from corral_core import sessions as _core                        # noqa: E402
 REOPEN_GATE = None
 
 DEFAULT_POSTURE = _core.DEFAULT_POSTURE
+
+TASK_MAX = 20000        # a task is typed, not pasted logs; bounded like a prompt
+GOAL_TASK_CHARS, GOAL_DONE_CHARS = 300, 200
+
+
+def compose_task(task, done_when=None, preamble=""):
+    """The first message New sends: a role's instructions (if any), the task,
+    then its finish line. ("", None) when there is no task. Pure."""
+    task = (task or "").strip()
+    done = " ".join((done_when or "").split())
+    if not task:
+        return "", None
+    if len(task) > TASK_MAX:
+        raise ValueError(f"the task is {len(task)} characters; the limit is {TASK_MAX}")
+    text = task + (f"\n\nDone when: {done}" if done else "")
+    if preamble:
+        text = preamble.rstrip() + "\n\n---\n\n" + text
+    flat = " ".join(task.split())
+    goal = {"task": flat[:GOAL_TASK_CHARS], "done": done[:GOAL_DONE_CHARS] or None}
+    return text, goal
 DISPLAY_STATES = _core.DISPLAY_STATES
 IDLE_DISPLAY_S = _core.IDLE_DISPLAY_S
 display_state = _core.display_state
@@ -1235,6 +1255,7 @@ class Pane(_core.PaneBase):
         p.want_effort = meta.get("want_effort")
         # Unused by Light, but restored so save_meta() does not erase it.
         p.ported_from = meta.get("ported_from")
+        p.goal = meta.get("goal")
         # Restored so a Corral seat resumed here stays reapable.
         p.ephemeral = bool(meta.get("ephemeral"))
         # None = unaddressable.
@@ -2937,6 +2958,7 @@ class Pane(_core.PaneBase):
             "role": getattr(self, "role", None),
             # Set when the transcript was carried from another lane (port.py).
             "portedFrom": getattr(self, "ported_from", None),
+            "goal": getattr(self, "goal", None),
             # Opened from a paired hub with `drive` ({hub, name, at}); None = here.
             "drivenBy": ({k: v for k, v in self.driven_by.items() if k != "gen"}
                          if self.driven_by else None),
