@@ -24,6 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DURATIONS = Path(__file__).with_name("ci_durations.json")
 DEFAULT = 5.0   # seconds for a class with no recorded time
+# Shard 1 also runs the core and container suites (ci.yml): ~20 s measured
+# 2026-11-22. It starts the split carrying them so it ends with the others.
+SHARD1_EXTRA = 20.0
 
 
 def tests_by_class():
@@ -49,7 +52,7 @@ def tests_by_class():
 
 def split(keys, n):
     secs = json.loads(DURATIONS.read_text()) if DURATIONS.exists() else {}
-    shards = [[0.0, []] for _ in range(n)]
+    shards = [[SHARD1_EXTRA if i == 0 else 0.0, []] for i in range(n)]
     for k in sorted(set(keys), key=lambda x: (-secs.get(x, DEFAULT), x)):
         load = min(range(n), key=lambda i: (shards[i][0], i))
         shards[load][0] += secs.get(k, DEFAULT)
@@ -58,19 +61,30 @@ def split(keys, n):
 
 
 def refresh(log):
-    per, prev = Counter(), None
+    # `gh run view --log` prefixes each line with its job ("shard (2)\t...").
+    # Time a line only against the line before it in the same job: across a
+    # job boundary the gap is two runners' clocks, not a class's duration.
+    per, prev = Counter(), {}
     for line in log.splitlines():
         m = re.search(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6})\d*Z\s+\S+ \(([\w.]+)\.\w+\) \.\.\. ", line)
         if not m:
             continue
+        job = line.split("\t", 1)[0] if "\t" in line[:m.start()] else ""
         t = datetime.datetime.fromisoformat(m[1])
-        if prev:
-            per[m[2].replace("__main__", "test_corral_light")] += (t - prev).total_seconds()
-        prev = t
+        if job in prev:
+            per[m[2].replace("__main__", "test_corral_light")] += (t - prev[job]).total_seconds()
+        prev[job] = t
     if not per:
         sys.exit("no verbose unittest lines with timestamps on stdin")
-    DURATIONS.write_text(json.dumps({k: round(v, 1) for k, v in sorted(per.items())}, indent=0) + "\n")
-    print(f"{len(per)} class durations written to {DURATIONS.name}")
+    # A shard's first class has no line before it to time against, so a log
+    # never times every class. Keep the last known value for the ones it
+    # missed: dropped, the balancer counts a 160 s class at DEFAULT (5 s).
+    old = json.loads(DURATIONS.read_text()) if DURATIONS.exists() else {}
+    kept = {k: v for k, v in old.items() if k not in per and k in tests_by_class()}
+    merged = {**kept, **{k: round(v, 1) for k, v in per.items()}}
+    DURATIONS.write_text(json.dumps(dict(sorted(merged.items())), indent=0) + "\n")
+    print(f"{len(per)} class durations written to {DURATIONS.name}, "
+          f"{len(kept)} kept from before")
 
 
 def main(argv):
