@@ -137,3 +137,51 @@ is the falsifier, and `CORRAL_LIGHT_WORKTREES_ENABLED=0` is the kill switch.
 3. **Driver note.** The deny list first matched `rm ` inside "confirm the", so
    one harmless `unittest` card on the Claude commit turn was refused. It
    changed no result.
+
+## 2026-11-22: Gemini (Antigravity ACP, `mode = default`)
+
+Same method: a private hub on port 8199 with its own temp state and config
+dirs, `CORRAL_LIGHT_WORKTREE_LANES=gemini`, code at `ea40ede`, driven through
+the hub API. The live hub was never touched. Model `gemini-4-neon-high`. One
+step was added for this lane, before any other: the trial's stop condition.
+
+**Verdict.** Gemini meets the bar the other three lanes were enabled on, and
+under `mode = default` it asks before every write and every shell command.
+Enabled on macOS. It stays held on Linux, whose matrix ran only under the old
+`yolo` default.
+
+| Step | Gemini |
+|---|---|
+| Starts on its own branch; mode read back | pass (6.3 s); `default` |
+| **Every card rejected: the file must not change** | **pass**: 3 cards (`edit_file`, `python3 -m unittest`, then `create_file` with `Overwrite: true` on `calc.py`), all denied; `calc.py` unchanged, worktree clean |
+| Shell commands reach the rail; a rejected one does not run | pass: `unittest` allowed and ran; `touch` rejected, marker not created |
+| Fix, tests pass, agent's own `git commit` | pass: 4 cards (edit, unittest, `git commit -am`, `git rev-parse`), all on the branch |
+| Publish to a local bare remote; `main` unmoved; main checkout untouched | pass |
+| Pause, restart the hub, resume on the branch, turn works | pass: detached after restart (no keeper), resume OK, same branch |
+| Mode after every turn and after resume | `default` every time |
+| Discard, restore, purge; recovery refs kept | pass; 2 refs kept |
+| Tool locations outside the worktree | none |
+
+### Findings
+
+1. **A denied edit is retried as a whole-file overwrite.** After `edit_file`
+   was refused, Gemini tried `create_file` with `Overwrite: true` on the same
+   file. It was carded and refused too. The rail holds, but a human at the
+   wall sees a second card for the same change, and approving the second one
+   rewrites the whole file.
+2. **Reads are not carded.** `list_directory` and `view_file` ran without a
+   card, as with the other lanes.
+3. **No Review at the end.** Gemini is not in `REVIEW_AT_END_LANES`; whether it
+   belongs there (it cards every write) is a separate decision.
+
+4. **Gemini asks even under posture `auto`.** Its posture is not mapped, so
+   `mode = default` holds whatever the pane's posture says: in the three-lane
+   run it carded its edit, its test and a `git status`. Safe, but `auto` does
+   not mean unattended for this lane.
+
+**Three lanes at once.** One repo, three files, Gemini (`mod_a`), Claude
+(`mod_b`) and Codex (`mod_c`) in parallel under posture `auto`. Each branch
+changed only its own file, all three were published to the bare remote, and
+`main` did not move. Gemini's mode read `default` after its turn.
+
+Not run, as for the other lanes: a PR via `gh` (an outward step).
