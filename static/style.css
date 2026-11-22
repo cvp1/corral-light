@@ -1432,6 +1432,10 @@ dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh 
 .rit .ini{display:none}
 .rit .flag{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);white-space:nowrap}
 .rit .flag.warn{color:var(--gold)}
+.rit .flag.quiet{color:var(--gold)}
+/* The now-line: what a working pane is doing, one muted line under the title. */
+.rit .now{font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;font-family:var(--mono)}
 .rit .flag.ctxf.unk{opacity:.6}
 .roster > .rit:first-child{margin-top:2px}
 /* One line: tighter rows, and the ⋯ floats over the title's end on hover
