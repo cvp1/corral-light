@@ -174,5 +174,14 @@ Enabled on macOS. It stays held on Linux, whose matrix ran only under the old
 3. **No Review at the end.** Gemini is not in `REVIEW_AT_END_LANES`; whether it
    belongs there (it cards every write) is a separate decision.
 
-Not run, as for the other lanes: a PR via `gh` (outward), and the three-lanes
--at-once step with Gemini as one of the three.
+4. **Gemini asks even under posture `auto`.** Its posture is not mapped, so
+   `mode = default` holds whatever the pane's posture says: in the three-lane
+   run it carded its edit, its test and a `git status`. Safe, but `auto` does
+   not mean unattended for this lane.
+
+**Three lanes at once.** One repo, three files, Gemini (`mod_a`), Claude
+(`mod_b`) and Codex (`mod_c`) in parallel under posture `auto`. Each branch
+changed only its own file, all three were published to the bare remote, and
+`main` did not move. Gemini's mode read `default` after its turn.
+
+Not run, as for the other lanes: a PR via `gh` (an outward step).
