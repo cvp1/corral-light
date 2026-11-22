@@ -174,15 +174,15 @@ MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 # Lanes that passed the Phase 0 matrix ON THIS PLATFORM: Linux in
 # docs/worktree-phase0.md; macOS in docs/worktree-phase0-macos.md (its own run
 # on the Mac host: Codex's sandbox there is Seatbelt, a different mechanism, so
-# a Linux pass never carries over). Gemini is held: with its 2026-11-21 lane
-# default (mode `default`, `yolo` forbidden) it has not passed the Phase 0
-# matrix on either platform (Linux recorded its missing approval rail under the
-# old default; macOS never ran it). Removing `yolo` is not a reason to lift this.
+# a Linux pass never carries over). Gemini, on its 2026-11-21 lane default
+# (mode `default`, `yolo` forbidden): enabled on macOS after its own matrix run
+# there (docs/worktree-phase0-macos.md, 2026-11-22); still held on Linux, where
+# the matrix ran only under the old `yolo` default and recorded no rail.
 # Never host:* (cwd ignored) or ollama (no tools). Override with
 # CORRAL_LIGHT_WORKTREE_LANES=a,b; kill switch CORRAL_LIGHT_WORKTREES_ENABLED=0
 # refuses new worktree panes (existing ones still resume and can be discarded).
 WORKTREE_LANES = {"linux": ("claude", "codex", "grok"),
-                  "darwin": ("claude", "codex", "grok")}
+                  "darwin": ("claude", "codex", "grok", "gemini")}
 PLATFORM_NAMES = {"linux": "Linux", "darwin": "macOS"}
 WORKTREE_PREAMBLE = (
     "[Corral] You are working in a git worktree on your own branch. Work only "

@@ -1849,7 +1849,7 @@ class LifecycleBasics(LifecycleCase):
         self.assertIn("own branch", str(cm.exception))
 
     def test_T_LIF_13_lanes_that_cannot_use_an_own_branch_are_refused(self):
-        for lane in ("host:box", "ollama", "gemini"):
+        for lane in ("host:box", "ollama"):
             self.assertIsNotNone(self.sessions.worktree_refusal(lane), lane)
         self.assertIsNone(self.sessions.worktree_refusal("fake"))
         with mock.patch.dict(os.environ, {"CORRAL_LIGHT_WORKTREE_LANES": ""}):
@@ -1859,7 +1859,7 @@ class LifecycleBasics(LifecycleCase):
                 self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
             with mock.patch.object(self.sessions.sys, "platform", "darwin"):
                 self.assertIsNone(self.sessions.worktree_refusal("claude"))
-                self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
+                self.assertIsNone(self.sessions.worktree_refusal("gemini"))
             with mock.patch.object(self.sessions.sys, "platform", "win32"):
                 why = self.sessions.worktree_refusal("claude")
                 self.assertIn("lane matrix has not run", why or "")
@@ -2126,7 +2126,9 @@ class TheMacAddendum(unittest.TestCase):
         with self.platform("darwin"):       # docs/worktree-phase0-macos.md
             for lane in ("claude", "codex", "grok"):
                 self.assertIsNone(self.sessions.worktree_refusal(lane), lane)
-            self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))   # held (D8)
+            self.assertIsNone(self.sessions.worktree_refusal("gemini"))   # 2026-11-22 run
+        with self.platform("linux"):        # held on Linux (D8): no rail run under mode=default
+            self.assertIsNotNone(self.sessions.worktree_refusal("gemini"))
         with self.platform("win32"):        # no matrix run there: refused, with the reason
             why = self.sessions.worktree_refusal("claude")
             self.assertIsNotNone(why)
