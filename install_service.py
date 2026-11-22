@@ -8,8 +8,11 @@ enables or starts anything. `--print` writes nothing.
 from __future__ import annotations
 
 import argparse
+import plistlib
 import sys
 from pathlib import Path
+from xml.parsers.expat import ExpatError
+from xml.sax.saxutils import escape
 
 HERE = Path(__file__).resolve().parent
 
@@ -45,7 +48,7 @@ WorkingDirectory={root}
 Environment=CORRAL_LIGHT_BIND={bind}
 Environment=CORRAL_LIGHT_PORT={port}
 Environment=CORRAL_OLLAMA_URL={ollama}
-
+{extra}
 Restart=always
 RestartSec=3
 
@@ -99,7 +102,7 @@ MACOS_PLIST = """\
     <string>{port}</string>
     <key>CORRAL_OLLAMA_URL</key>
     <string>{ollama}</string>
-    <!-- For the two npm-installed ACP adapters. launchd's own PATH is
+{extra}    <!-- For the two npm-installed ACP adapters. launchd's own PATH is
          /usr/bin:/bin:/usr/sbin:/sbin and nothing else. -->
     <key>PATH</key>
     <string>{path}</string>
@@ -122,8 +125,27 @@ LABEL = "com.cvp1.corral-light"
 _MAC_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 
+# Written only when set: Tailscale Serve's host[:port] (the pairing origin
+# behind Serve) and the one tailnet login Serve traffic may come from. A
+# reinstall that dropped these would silently unpair the phone.
+OPTIONAL = (("serve_host", "CORRAL_LIGHT_SERVE_HOST"),
+            ("tailscale_login", "CORRAL_TAILSCALE_LOGIN"))
+# Every value this writes, by plan() keyword; what carry_forward() reads back.
+KEYS = (("bind", "CORRAL_LIGHT_BIND"), ("port", "CORRAL_LIGHT_PORT"),
+        ("ollama", "CORRAL_OLLAMA_URL")) + OPTIONAL
+
+
+def _clean(name, value):
+    v = str(value)
+    if any(c in v for c in "\r\n\x00") or (v and v != v.strip()):
+        raise SystemExit(f"install-service: {name} must be one line with no "
+                         f"surrounding spaces")
+    return v
+
+
 def plan(platform=None, root=None, python=None, home=None,
-         bind=DEFAULT_BIND, port=DEFAULT_PORT, ollama=DEFAULT_OLLAMA_URL):
+         bind=DEFAULT_BIND, port=DEFAULT_PORT, ollama=DEFAULT_OLLAMA_URL,
+         serve_host=None, tailscale_login=None):
     """Where the file goes, what is in it, and what to type next. Pure, so
     any platform's answer can be rendered on any host."""
     platform = sys.platform if platform is None else platform
@@ -131,14 +153,21 @@ def plan(platform=None, root=None, python=None, home=None,
     # Not resolved: following symlinks yields a versioned path an upgrade deletes.
     python = str(python or sys.executable)
     home = Path(home or Path.home())
-    common = {"root": root, "python": python, "bind": bind,
-              "port": str(port), "ollama": ollama}
+    vals = {"bind": bind, "port": str(port), "ollama": ollama,
+            "serve_host": serve_host, "tailscale_login": tailscale_login}
+    vals = {k: (_clean(k, v) if v else None) for k, v in vals.items()}
+    optional = [(env, vals[k]) for k, env in OPTIONAL if vals[k]]
+    common = {"root": root, "python": python, "bind": vals["bind"],
+              "port": vals["port"], "ollama": vals["ollama"]}
     if platform == "darwin":
+        extra = "".join(f"    <key>{env}</key>\n    <string>{escape(v)}</string>\n"
+                        for env, v in optional)
+        x = {k: escape(str(v)) for k, v in common.items()}
         return {
             "path": home / "Library/LaunchAgents" / f"{LABEL}.plist",
             "text": MACOS_PLIST.format(
-                label=LABEL, path=_MAC_PATH,
-                log=home / "Library/Logs/corral-light.log", **common),
+                label=LABEL, path=_MAC_PATH, extra=extra,
+                log=escape(str(home / "Library/Logs/corral-light.log")), **x),
             "next": [f"launchctl bootstrap gui/$(id -u) "
                      f"{home / 'Library/LaunchAgents' / (LABEL + '.plist')}",
                      f"launchctl print gui/$(id -u)/{LABEL}"],
@@ -146,7 +175,9 @@ def plan(platform=None, root=None, python=None, home=None,
     if platform.startswith("linux"):
         return {
             "path": home / ".config/systemd/user/corral-light.service",
-            "text": LINUX_UNIT.format(**common),
+            "text": LINUX_UNIT.format(
+                extra="".join(f'Environment="{env}={v}"\n' for env, v in optional),
+                **common),
             "next": ["systemctl --user daemon-reload",
                      "systemctl --user enable --now corral-light",
                      "systemctl --user status corral-light",
@@ -159,6 +190,26 @@ def plan(platform=None, root=None, python=None, home=None,
         f"macOS. Run the hub yourself with `corral-light serve`.")
 
 
+def carry_forward(path):
+    """The values an installed service file already sets, by plan() keyword,
+    so a --force reinstall keeps them unless a flag says otherwise. An
+    unreadable file carries nothing (the caller shows what it will write)."""
+    env = {}
+    try:
+        if path.suffix == ".plist":
+            with open(path, "rb") as f:
+                env = plistlib.load(f).get("EnvironmentVariables") or {}
+        else:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("Environment="):
+                    k, _, v = line[len("Environment="):].strip('"').partition("=")
+                    env[k] = v
+    except (OSError, ValueError, AttributeError, plistlib.InvalidFileException, ExpatError):
+        return {}
+    return {k: str(env[e]) for k, e in KEYS if env.get(e)}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="corral-light install-service",
@@ -166,9 +217,15 @@ def main(argv=None):
                     "enable it and does not start it — that is yours.")
     ap.add_argument("--print", dest="show", action="store_true",
                     help="print the file and write nothing")
-    ap.add_argument("--port", default=DEFAULT_PORT)
-    ap.add_argument("--bind", default=DEFAULT_BIND)
-    ap.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
+    # No defaults here: unset means "keep what the installed file says, else
+    # the shipped default" (resolved below).
+    ap.add_argument("--port")
+    ap.add_argument("--bind")
+    ap.add_argument("--ollama-url")
+    ap.add_argument("--serve-host", help="Tailscale Serve host[:port] the hub "
+                    "is reached through (CORRAL_LIGHT_SERVE_HOST)")
+    ap.add_argument("--tailscale-login", help="the one tailnet login Serve "
+                    "traffic may come from (CORRAL_TAILSCALE_LOGIN)")
     ap.add_argument("--force", action="store_true",
                     help="overwrite an existing file (it is shown first "
                          "otherwise, and nothing is written)")
@@ -182,7 +239,14 @@ def main(argv=None):
               f"  brew services start {kind['formula']}\n"
               f"  brew services info {kind['formula']}", flush=True)
         return 0
-    p = plan(bind=a.bind, port=a.port, ollama=a.ollama_url)
+    flags = {"bind": a.bind, "port": a.port, "ollama": a.ollama_url,
+             "serve_host": a.serve_host, "tailscale_login": a.tailscale_login}
+    target = plan()["path"]
+    kept = carry_forward(target) if target.exists() else {}
+    vals = {"bind": DEFAULT_BIND, "port": DEFAULT_PORT, "ollama": DEFAULT_OLLAMA_URL,
+            **kept, **{k: v for k, v in flags.items() if v is not None}}
+    p = plan(**vals)
+    carried = sorted(k for k in kept if flags[k] is None)
 
     if a.show:
         sys.stdout.write(p["text"])
@@ -199,6 +263,10 @@ def main(argv=None):
     p["path"].parent.mkdir(parents=True, exist_ok=True)
     p["path"].write_text(p["text"], encoding="utf-8")
     print(f"wrote {p['path']}\n", flush=True)
+    if carried:
+        # Names only: a login is an account identifier, kept off the terminal.
+        print("kept from the file it replaced: " + ", ".join(carried) +
+              " (pass the flag to change one)\n", flush=True)
     print("It is NOT enabled and NOT running. To start it:", flush=True)
     for line in p["next"]:
         print(f"  {line}", flush=True)

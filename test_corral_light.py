@@ -8,6 +8,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import subprocess
 import tempfile
 import threading
 import sys
@@ -3628,6 +3630,71 @@ class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
                 else:
                     os.environ["HOME"] = old
 
+    def test_serve_and_login_render_only_when_set_on_both_platforms(self):
+        import install_service
+        with tempfile.TemporaryDirectory() as home:
+            for plat in ("darwin", "linux"):
+                bare = install_service.plan(platform=plat, root=ROOT, home=home)["text"]
+                self.assertNotIn("CORRAL_LIGHT_SERVE_HOST", bare)
+                self.assertNotIn("CORRAL_TAILSCALE_LOGIN", bare)
+                full = install_service.plan(platform=plat, root=ROOT, home=home,
+                                            serve_host="box.example.ts.net:8443",
+                                            tailscale_login="op@example.com")["text"]
+                self.assertIn("box.example.ts.net:8443", full)
+                self.assertIn("op@example.com", full)
+            with self.assertRaises(SystemExit):
+                install_service.plan(platform="linux", root=ROOT, home=home,
+                                     tailscale_login="op@example.com\nEnvironment=X=1")
+
+    def test_a_forced_reinstall_keeps_what_the_installed_file_set(self):
+        """Without this a reinstall dropped Serve + the login binding (unpairing
+        the phone) and reset a LAN bind to loopback."""
+        import contextlib
+        import io
+        import install_service
+        with tempfile.TemporaryDirectory() as home:
+            old = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(install_service.main(
+                        ["--bind", "0.0.0.0", "--serve-host", "box.example.ts.net:8443",
+                         "--tailscale-login", "op@example.com"]), 0)
+                target = install_service.plan(root=ROOT, home=home)["path"]
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(install_service.main(["--force", "--port", "9001"]), 0)
+                kept = install_service.carry_forward(target)
+                self.assertEqual(kept, {"bind": "0.0.0.0", "port": "9001",
+                                        "ollama": install_service.DEFAULT_OLLAMA_URL,
+                                        "serve_host": "box.example.ts.net:8443",
+                                        "tailscale_login": "op@example.com"})
+                self.assertIn("kept from the file it replaced", buf.getvalue())
+                self.assertNotIn("op@example.com", buf.getvalue(),
+                                 "the login is named, never printed")
+                # A flag still wins over what the file said.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    install_service.main(["--force", "--bind", "127.0.0.1"])
+                self.assertEqual(install_service.carry_forward(target)["bind"], "127.0.0.1")
+            finally:
+                if old is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old
+
+    def test_carry_forward_reads_both_formats_and_survives_garbage(self):
+        import install_service
+        with tempfile.TemporaryDirectory() as home:
+            for plat in ("darwin", "linux"):
+                p = install_service.plan(platform=plat, root=ROOT, home=home,
+                                         bind="0.0.0.0", serve_host="a.example:8443")
+                p["path"].parent.mkdir(parents=True, exist_ok=True)
+                p["path"].write_text(p["text"], encoding="utf-8")
+                got = install_service.carry_forward(p["path"])
+                self.assertEqual((got["bind"], got["serve_host"]), ("0.0.0.0", "a.example:8443"))
+                p["path"].write_text("<plist><dict><key>", encoding="utf-8")
+                self.assertIsInstance(install_service.carry_forward(p["path"]), dict)
+
     def test_the_generated_files_name_no_host_or_account(self):
         """The generated service files name no host or account; paths arrive at
         render time.
@@ -4227,6 +4294,38 @@ def orphan_test_classes(namespace, root=ROOT):
                     and f"{f.stem}.{k}" not in CI_EXEMPT):
                 out.append(f"{f.stem}.{k}")
     return out
+
+
+class TestsNeverInheritTheDeployedHub(unittest.TestCase):
+    """A suite run from a Corral pane inherits the live hub's deployment env;
+    testkit drops it, and every module that starts a hub imports testkit."""
+
+    HUB_START = re.compile(r"^\s*import hub\s*$|^\s*from hub import|start_hub\(", re.M)
+
+    def test_importing_testkit_drops_the_hub_deployment_env(self):
+        import testkit
+        env = {**os.environ, **{k: "leaked" for k in testkit.HUB_DEPLOYMENT_ENV}}
+        code = ("import os, testkit; print(sorted(k for k in testkit.HUB_DEPLOYMENT_ENV "
+                "if k in os.environ))")
+        out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.strip(), "[]", out.stderr)
+        # Negative control: without the import the values are there to leak.
+        out = subprocess.run([sys.executable, "-c", "import os; print(os.environ.get("
+                              "'CORRAL_TAILSCALE_LOGIN'))"], env=env,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.strip(), "leaked")
+
+    def test_every_module_that_starts_a_hub_imports_testkit(self):
+        missing = [f.name for f in sorted(ROOT.glob("test_*.py"))
+                   if self.HUB_START.search(f.read_text(encoding="utf-8"))
+                   and "testkit" not in f.read_text(encoding="utf-8")]
+        self.assertEqual(missing, [], "these start a hub without testkit's env scrub")
+
+    def test_the_guard_sees_a_hub_start(self):
+        self.assertTrue(self.HUB_START.search("x\nimport hub\n"))
+        self.assertTrue(self.HUB_START.search("    hub, url = start_hub(state)"))
+        self.assertFalse(self.HUB_START.search("import hublink\n"))
 
 
 class EveryTestClassRunsInCI(unittest.TestCase):
