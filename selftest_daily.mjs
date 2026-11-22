@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 
 const src = readFileSync(new URL('./static/app.js', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./static/style.css', import.meta.url), 'utf8');
+const html = readFileSync(new URL('./static/index.html', import.meta.url), 'utf8');
 
 function fn(name) {
   const start = src.search(new RegExp(`(^|\\n)(async )?function ${name}\\(`));
@@ -146,5 +147,42 @@ check(!/api\(/.test(fn('toggleWide')) && !/api\(/.test(fn('widePane')) && !/api\
       'T-DD-4 focus mode and jumps make no API call');
 check(/S\.solo \|\| S\.wide\)\);/.test(src), 'T-DD-4 seen-on-screen counts the focused pane');
 
+/* ── T-DD-5: the phone's bottom bar, drawer and real viewport height ─── */
+check(/name="viewport" content="[^"]*viewport-fit=cover/.test(html),
+      'T-DD-5 viewport-fit=cover, so safe-area insets are real');
+for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 'mobile-needs'])
+  check(html.includes(`id="${id}"`), `T-DD-5 the phone bar has #${id}`);
+{
+  const phone = css.slice(css.indexOf('The phone\'s controls live in a bottom bar'));
+  check(/\.mobile-actions\{display:flex;position:fixed;left:0;right:0;bottom:0;top:auto;/.test(phone),
+        'T-DD-5 the bar sits at the bottom, in thumb reach');
+  check(/env\(safe-area-inset-bottom/.test(phone), 'T-DD-5 the bar clears the home indicator');
+  check(/\.mobile-actions button,\.mobile-actions select\{height:44px/.test(phone),
+        'T-DD-5 44px touch targets');
+  check(/\.rail\.right\.shut\{display:none\}/.test(phone),
+        'T-DD-5 the 34px strip is gone on a phone (the bar holds the count)');
+}
+// Every 100vh height is followed by its dvh twin: the keyboard must not hide the composer.
+{
+  const found = [...css.matchAll(/(?<![\w-])(?:min-|max-)?height:[^;{}]*\b100vh\b[^;{}]*/g)];
+  const decls = found.map(m => m[0]);
+  // In place: the declaration right after each one is its dvh twin.
+  const twins = found.filter(m => css.startsWith(';' + m[0].replace('100vh', '100dvh'),
+                                                 m.index + m[0].length));
+  eq(twins.length, decls.length, 'T-DD-5 every 100vh height has a 100dvh twin');
+  check(decls.length >= 8, `T-DD-5 the vh heights were found (${decls.length})`);
+}
+{
+  const sd = fn('setDrawer');
+  check(!/api\(/.test(sd) && !/localStorage/.test(sd),
+        'T-DD-5 the drawer is view-only: no API call, no saved preference');
+  check(/isNarrow\(\)/.test(sd), 'T-DD-5 the drawer only opens on a phone');
+  check(/S\.applyLeft/.test(sd), 'T-DD-5 closing hands the rail its own folded state back');
+  check(/S\.solo = id; setDrawer\(false\);/.test(fn('focusPane')),
+        'T-DD-5 opening a pane from the drawer closes it');
+  check(/if \(mn\) \{ mn\.textContent = tab\.textContent; mn\.className = tab\.className; \}/.test(fn('railFold')),
+        'T-DD-5 the bar shows the same Needs-you count as the rail');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar');

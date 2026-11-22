@@ -4177,8 +4177,10 @@ function railFold(items, blocked, quiet = 0, solo = false) {
   // Always a digit, including 0, so an empty rail is distinguishable when collapsed.
   const tab = $('#railtabnum');
   tab.textContent = String(urgent);
+  const mn = $('#mobile-needsnum');
   tab.className = 'railtabnum' + (blocked ? ' hot' : '') + (urgent ? '' : ' zero') +
                   (!urgent && quiet ? ' soft' : '');
+  if (mn) { mn.textContent = tab.textContent; mn.className = tab.className; }
   $('#railtab').title = blocked
     ? `${blocked} agent${blocked > 1 ? 's are' : ' is'} blocked waiting on you`
     : urgent ? `${urgent} waiting` : quiet ? `${quiet} quiet item${quiet > 1 ? 's' : ''}` : 'nothing waiting';
@@ -4214,6 +4216,7 @@ function wireLeftRail() {
                          $('#app').classList.contains('lshut') ? '0' : '1');
     apply();
   };
+  S.applyLeft = apply;
   $('#lrailopen').onclick = () => { if ($('#app').classList.contains('lshut')) S.toggleLeft(); };
   $('#lrailfold').onclick = () => S.toggleLeft();
   window.addEventListener('resize', apply);
@@ -5761,6 +5764,10 @@ const KEYS = [
                 && !isTypingTarget(e.target) && !anyDialogOpen() && !isNarrow()
                 && !!keyPane(),
     run: () => toggleWide(keyPane()) },
+  { combo: 'Esc', where: 'with the phone drawer open', what: 'Close the drawer',
+    match: e => e.key === 'Escape' && !!$('#app')?.classList?.contains('pdrawer')
+                && !anyDialogOpen(),
+    run: () => setDrawer(false) },
   { combo: 'Esc', where: 'in focus mode', what: 'Back to the whole wall',
     match: e => e.key === 'Escape' && !!S.wide && !isTypingTarget(e.target)
                 && !anyDialogOpen() && !document.querySelector('.pmenu'),
@@ -5987,16 +5994,42 @@ function wireKeysButton() {
 function wireMobileActions() {
   $('#mobile-new').onclick = () => $('#new').click();
   $('#mobile-search').onclick = openPalette;
+  $('#mobile-panes').onclick = () => setDrawer(!$('#app').classList.contains('pdrawer'));
+  // Needs you: from a pane or the wall, back to the list; from the list, the wall.
+  $('#mobile-needs').onclick = () => {
+    setDrawer(false);
+    const open = !$('#rrail').classList.contains('shut');
+    if (open) $('#railhead').click(); else $('#railtab').click();
+  };
   $('#mobile-pane').onchange = e => {
     if (e.target.value) focusPane(e.target.value);
   };
+}
+
+/* ── the phone's drawer ──────────────────────────────────────────────────
+ * ☰ shows the left rail (roster, panels, archive, schedule) over the page.
+ * The rail's own folded/open choice is left alone: the drawer always shows it
+ * open, and closing hands the class back to the rail's rule. */
+function setDrawer(open) {
+  const app = $('#app');
+  open = !!open && isNarrow();
+  if (open === app.classList.contains('pdrawer')) return;
+  app.classList.toggle('pdrawer', open);
+  $('#mobile-panes')?.setAttribute('aria-expanded', String(open));
+  document.querySelector('.pveil')?.remove();
+  if (open) {
+    app.classList.remove('lshut');
+    const veil = el('div', 'pveil');
+    veil.onclick = () => setDrawer(false);
+    document.body.appendChild(veil);
+  } else if (S.applyLeft) S.applyLeft();
 }
 
 /* ── focus ───────────────────────────────────────────────────────────────
  * Open a conversation: mark it focused and scroll it into view. */
 function focusPane(id) {
   S.focus = id;
-  if (isNarrow()) S.solo = id;          // a phone shows the opened pane alone
+  if (isNarrow()) { S.solo = id; setDrawer(false); }   // a phone shows the opened pane alone
   render();
   requestAnimationFrame(() =>
     document.querySelector(`[data-pane="${id}"]`)
