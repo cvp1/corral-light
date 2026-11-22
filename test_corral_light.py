@@ -4079,6 +4079,8 @@ class LightHopPause(HopPauseCases, _FakeLaneCase):
 from test_resilience import *                    # noqa: F401,F403,E402
 from test_keeper import *                        # noqa: F401,F403,E402
 from test_panel import *                         # noqa: F401,F403,E402
+# 2026-11-21: install.sh's offline tests were never in CI (Linux bash).
+from test_install_sh import Static as InstallShStatic, Behaviour as InstallShBehaviour  # noqa: F401,E402
 # 2026-11-21: the Gemini lane's model pin, and vendor error frames are failed
 # turns, never answers (consult ok, panel arms, synthesis).
 from test_lane_pin import (TheResolverPicksTheIntendedTier,  # noqa: F401,E402
