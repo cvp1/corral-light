@@ -6036,6 +6036,95 @@ function focusPane(id) {
       ?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
 }
 
+/* ── alerts on this device (Web Push, webpush.py) ───────────────────────────
+ * The bell shows only where push can work: a secure page (the hub behind
+ * Tailscale Serve) with a service worker. On an iPhone that is not yet on the
+ * home screen there is no PushManager, so the bell says how to get one. The
+ * ping carries nothing; sw.js asks the hub what needs you. */
+function pushSupport(w) {
+  if (!w.isSecureContext || !('serviceWorker' in w.navigator)) return 'none';
+  if (!('PushManager' in w) || !('Notification' in w)) return 'install';
+  return 'ok';
+}
+function b64urlBytes(s) {
+  const b = atob(String(s).replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+  return Uint8Array.from(b, c => c.charCodeAt(0));
+}
+async function pushSub() {
+  const reg = await navigator.serviceWorker.ready;
+  return { reg, sub: await reg.pushManager.getSubscription() };
+}
+async function pushPaint() {
+  const b = $('#pushbtn');
+  if (!b) return;
+  const how = pushSupport(window);
+  b.classList.toggle('hide', how === 'none');
+  if (how !== 'ok') { b.classList.remove('on'); b.title = 'Alerts: add Corral to the home screen first'; return; }
+  let on = false;
+  try { on = !!(await pushSub()).sub && Notification.permission === 'granted'; } catch { on = false; }
+  b.classList.toggle('on', on);
+  b.title = on ? 'Alerts are on for this device' : 'Turn on alerts for this device';
+}
+async function pushOn() {
+  const perm = await Notification.requestPermission();      // must come from the tap
+  if (perm !== 'granted') return toast('alerts not allowed: turn them on in this browser\'s settings', true);
+  const k = await api('/api/push/key');
+  if (!k.key) return toast('alerts unavailable: ' + (k.why || 'no key'), true);
+  const { reg, sub: old } = await pushSub();
+  const sub = old || await reg.pushManager.subscribe(
+    { userVisibleOnly: true, applicationServerKey: b64urlBytes(k.key) });
+  await api('/api/push/subscribe', { endpoint: sub.endpoint,
+                                     label: (navigator.userAgent || '').slice(0, 80) });
+  const r = await api('/api/push/test', {});
+  toast(r.sent ? 'alerts on — a test alert is on its way'
+               : 'alerts on, but the test did not send: ' + (r.errors || []).join('; '), !r.sent);
+  pushPaint();
+}
+async function pushOff() {
+  const { sub } = await pushSub();
+  if (sub) {
+    await api('/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+    await sub.unsubscribe().catch(() => {});
+  }
+  toast('alerts off for this device');
+  pushPaint();
+}
+function wirePush() {
+  const b = $('#pushbtn');
+  if (!b) return;
+  b.onclick = async () => {
+    try {
+      const how = pushSupport(window);
+      if (how === 'install') return toast('On iPhone: Share → Add to Home Screen, open Corral from ' +
+                                          'the home screen, then tap 🔔', true);
+      if (!b.classList.contains('on')) return await pushOn();
+      // On: one tap sends a test; a long answer turns them off.
+      if (confirm('Alerts are on for this device.\n\nOK: send a test alert.\nCancel: turn alerts off.')) {
+        const r = await api('/api/push/test', {});
+        toast(r.sent ? 'test alert sent' : 'test did not send: ' + (r.errors || []).join('; '), !r.sent);
+      } else await pushOff();
+    } catch (e) { toast(e.message || String(e), true); }
+  };
+  // A notification tapped while the wall is open: go to its pane.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', e => {
+      const id = e.data && e.data.corralPane;
+      if (id && S.panes.has(id)) focusPane(id);
+    });
+  }
+  pushPaint();
+}
+/* /?pane=<id> (a tapped notification): open that pane once, then tidy the URL. */
+function linkedPane(search, panes) {
+  const id = new URLSearchParams(search || '').get('pane');
+  return id && panes.has(id) ? id : null;
+}
+function openFromLink() {
+  const id = linkedPane(location.search, S.panes);
+  if (location.search.includes('pane=')) history.replaceState(null, '', location.pathname);
+  if (id) focusPane(id);
+}
+
 /* ── PWA ─────────────────────────────────────────────────────────────── */
 // Registered only so the browser offers "Install app"; it caches nothing (see
 // sw.js). Needs a secure context (https or localhost), else it no-ops.
@@ -6060,9 +6149,11 @@ async function start() {
   wireKeysButton();
   wireSecKeys();
   wireMobileActions();
+  wirePush();
   // Stream first, then snapshot, so no event falls in the gap between them.
   connect();
   await refresh();
+  openFromLink();
   // Re-check display state periodically so quiet panes age into `idle`.
   setInterval(displayTick, DISPLAY_TICK_MS);
   setInterval(workingTick, 1000);     // the busy spinners' seconds

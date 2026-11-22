@@ -900,6 +900,13 @@ class UnseenNeedsYouNotifies(unittest.TestCase):
         hub.NOTIFY_GRACE_S = 0.05
         self.addCleanup(setattr, hub.notify, "desktop", real_d)
         self.addCleanup(setattr, hub, "NOTIFY_GRACE_S", real_g)
+        # Never a real push from a test: the state dir may be the live one.
+        self.pushes = []
+        real_p, real_q = hub._push_now, hub.notify.quiet_now
+        hub._push_now = lambda: self.pushes.append(1)
+        hub.notify.quiet_now = lambda now=None: False
+        self.addCleanup(setattr, hub, "_push_now", real_p)
+        self.addCleanup(setattr, hub.notify, "quiet_now", real_q)
         self.pane = types.SimpleNamespace(id="np1", title="Refactor", state="needs-you",
                                           pending={"r1": {}})
         real_panes = hub.MGR.panes
@@ -946,6 +953,26 @@ class UnseenNeedsYouNotifies(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.calls, timeout=3))
         self.assertIn("Refactor asks you", self.calls[0][0])
         self.assertIn("Breaking or Changed?", self.calls[0][1])
+
+    def test_an_unseen_needs_you_also_pings_devices_and_keeps_the_notice(self):
+        self.hub._notify_event(self.ev(8))
+        self.assertTrue(wait_for(lambda: self.calls, timeout=3))
+        self.assertEqual(self.pushes, [1])
+        n = self.hub.webpush.recent(1)[0]
+        self.assertEqual((n["pane"], n["kind"]), ("np1", "permission"))
+        self.assertIn("Refactor needs you", n["title"])
+
+    def test_quiet_hours_keep_the_phone_quiet_too(self):
+        self.hub.notify.quiet_now = lambda now=None: True
+        self.hub._notify_event(self.ev(9))
+        self.assertTrue(wait_for(lambda: self.calls, timeout=3))
+        self.assertEqual(self.pushes, [])
+
+    def test_a_seen_event_pings_no_device(self):
+        self.hub.mark_seen("np1", 10)
+        self.hub._notify_event(self.ev(10))
+        time.sleep(0.3)
+        self.assertEqual(self.pushes, [])
 
     def test_an_answered_question_does_not(self):
         self.pane.pending = {}

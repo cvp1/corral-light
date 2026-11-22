@@ -238,8 +238,11 @@ class StructuralIndependence(unittest.TestCase):
         # /api/hubs: hub links (docs/HUB-LINKS.md, 2026-10-09), the operator's
         # own hubs seeing, taking over and offering work. One prefix, served
         # by hublink.Service; it never answers a card or drives a remote pane.
+        # /api/push/: alerts on the operator's own devices (Web Push, webpush.py,
+        # 2026-11-22). Needs-you, off the glass, the same events the desktop
+        # banner already shows; the ping carries no payload.
         allowed_prefixes = ("/api/session/", "/api/pair/", "/api/content/", "/api/module/",
-                            "/api/hubs/")
+                            "/api/hubs/", "/api/push/")
         allowed_exact = {"/health", "/", "/index.html", "/sw.js",
                          "/manifest.json", "/api/state", "/api/stream",
                          "/api/search",
