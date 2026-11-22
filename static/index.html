@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Corral Light</title>
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
@@ -75,9 +75,13 @@
 
   <nav id="mobile-actions" class="mobile-actions"
        aria-label="Corral Light controls">
+    <button id="mobile-panes" type="button" aria-label="Panes, panels and archive"
+            aria-expanded="false" title="Panes, panels, archive">☰</button>
+    <select id="mobile-pane" aria-label="Conversation"></select>
     <button id="mobile-new" type="button" aria-label="New conversation">＋</button>
     <button id="mobile-search" type="button" aria-label="Search panes and notes">⌕</button>
-    <select id="mobile-pane" aria-label="Conversation"></select>
+    <button id="mobile-needs" type="button" aria-label="Needs you" title="Needs you"><span
+            id="mobile-needsnum" class="railtabnum zero">0</span></button>
   </nav>
 
   <aside id="rrail" class="rail right">
