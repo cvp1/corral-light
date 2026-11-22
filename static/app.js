@@ -901,9 +901,19 @@ function renderLog(p) {
   return log;
 }
 
-function workingLabel(t0) {
-  const secs = t0 ? Math.max(0, Math.round((Date.now() - new Date(t0)) / 1000)) : null;
-  return ' working\u2026' + (secs != null ? ` ${secs}s` : '') + '  ';
+function workingLabel(t0, nowMs) {
+  const now = nowMs === undefined ? Date.now() : nowMs;
+  const secs = t0 ? Math.max(0, Math.round((now - new Date(t0)) / 1000)) : null;
+  return ' working\u2026' + (secs != null ? ` ${fmtElapsed(secs)}` : '') + '  ';
+}
+
+/* A running clock in human units: 45s, 32m, 1h 05m. Seconds only under a
+ * minute, where they still move visibly; past that they are noise. Pure. */
+function fmtElapsed(secs) {
+  const s = Math.max(0, Math.floor(secs || 0));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
 }
 
 /* Once a second: advance every visible spinner's elapsed time without touching
@@ -3288,6 +3298,38 @@ function questionBanner(p) {
 }
 
 /* The roster's one-line preview of the same question. */
+/* What a working pane is doing right now, from its own events: the plan's
+ * in-progress step or the latest tool title, whichever came last in this
+ * turn. Code-derived, never the model's summary. '' when idle or unknown.
+ * Bounded: looks back at most NOW_SCAN events. Pure (Node selftest). */
+const NOW_SCAN = 400, NOW_CHARS = 90;
+function nowLine(p) {
+  if (!['busy', 'uncertain', 'needs-you', 'starting'].includes(p.state)) return '';
+  const evs = p.events || [];
+  // The newest tool event may be a title-less tool_call_update: then the
+  // answer is that call's own earlier title, and anything between is older.
+  let wantId = null;
+  for (let i = evs.length - 1, n = 0; i >= 0 && n < NOW_SCAN; i--, n++) {
+    const e = evs[i], d = e.data || {};
+    if (e.kind === 'user' || e.kind === 'peer' || e.kind === 'cleared' ||
+        e.kind === 'turn_end') break;                  // the turn began here
+    let text = '';
+    if (e.kind === 'tool') {
+      if (wantId) { if (d.id !== wantId || !d.title) continue; text = d.title; }
+      else if (d.title) text = d.title;
+      else if (d.id) { wantId = d.id; continue; }
+    } else if (e.kind === 'plan' && !wantId) {
+      const es = d.entries || [];
+      const step = es.find(x => x && x.status === 'in_progress') ||
+                   es.find(x => x && x.status === 'pending');
+      text = step ? String(step.content || '') : '';
+    }
+    const flat = String(text).replace(/\s+/g, ' ').trim();
+    if (flat) return flat.length > NOW_CHARS ? flat.slice(0, NOW_CHARS - 1) + '…' : flat;
+  }
+  return '';
+}
+
 function askLine(p) {
   const q = p.question;
   if (!q || !q.text) return null;
@@ -3415,6 +3457,8 @@ function render() {
     // Time since the pane last emitted separates "working" from "wedged".
     const quietFor = (p.state === 'busy' || p.state === 'uncertain') && p.idleS >= 30
       ? fmtAge(p.idleS) : '';
+    // Second line: what it is doing now (agent-authored text, set as text).
+    const doing = nowLine(p);
     // Tag the agent for every lane but the default, so a directory name is never
     // mistaken for an agent badge.
     const agentTag = p.agent !== 'claude' ? p.label + ' · ' : '';
@@ -3425,10 +3469,20 @@ function render() {
     it.title = `${p.title || p.label}\n${sub}\nstate: ${p.state}`;
     const ask = askLine(p);            // ask_human: the question, on the row
     if (ask) t.appendChild(ask);
+    else if (doing) {
+      const nl = el('div', 'now', doing); nl.title = doing;
+      t.appendChild(nl);
+    }
     it.appendChild(t);
     // A turn gone quiet earns room on the line; context always does (managing
     // it is the operator's job, so it is never hidden), warn-coloured when full.
-    if (quietFor) {
+    // `uncertain` (the hub thinks it may be wedged) says so in words: it still
+    // reads "working" by state, so without the tag it looked healthy.
+    if (p.state === 'uncertain') {
+      const f = el('span', 'flag quiet', quietFor ? `quiet ${quietFor}` : 'quiet');
+      f.title = 'mid-turn and silent: it may be stuck' + (quietFor ? ` (no output for ${quietFor})` : '');
+      it.appendChild(f);
+    } else if (quietFor) {
       const f = el('span', 'flag', quietFor); f.title = `no output for ${quietFor}`;
       it.appendChild(f);
     }

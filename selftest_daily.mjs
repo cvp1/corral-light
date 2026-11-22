@@ -265,5 +265,44 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   void opt;
 }
 
+// T-DD-8 the roster's now-line, human durations, and a quiet tag on uncertain.
+{
+  const fe = load('fmtElapsed');
+  eq([fe(0), fe(59), fe(60), fe(1955), fe(3599), fe(3600), fe(3900), fe(-4)],
+     ['0s', '59s', '1m', '32m', '59m', '1h 00m', '1h 05m', '0s'],
+     'T-DD-8 32m, not 1955s');
+  const wl = load('workingLabel', ['fmtElapsed']);
+  const t0 = '2026-11-22T20:00:00Z';
+  check(wl(t0, Date.parse(t0) + 1955e3).includes('working\u2026 32m'),
+        'T-DD-8 the spinner reads 32m after 1955 seconds');
+
+  const nl = load('nowLine', [], { NOW_SCAN: 400, NOW_CHARS: 90 });
+  const ev = (kind, data) => ({ kind, data });
+  const pane = (state, events) => ({ state, events });
+  const turn = [ev('user', { text: 'go' }),
+                ev('plan', { entries: [{ content: 'read the code', status: 'completed' },
+                                       { content: 'write the test', status: 'in_progress' }] })];
+  eq(nl(pane('busy', turn)), 'write the test', 'T-DD-8 the plan\'s in-progress step');
+  const t2 = [...turn, ev('tool', { id: 'c1', title: 'Run node selftest_daily.mjs', status: 'in_progress' })];
+  eq(nl(pane('busy', t2)), 'Run node selftest_daily.mjs', 'T-DD-8 a later tool call wins');
+  const t3 = [...t2, ev('tool', { id: 'c2', title: 'Edit app.js' }), ev('tool', { id: 'c1', status: 'completed' })];
+  eq(nl(pane('busy', t3)), 'Run node selftest_daily.mjs',
+     'T-DD-8 a title-less update names its own call, not the one between');
+  eq(nl(pane('ready', t2)), '', 'T-DD-8 an idle pane has no now-line');
+  eq(nl(pane('busy', [ev('tool', { title: 'old turn' }), ev('turn_end', {}), ev('user', {})])), '',
+     'T-DD-8 nothing from a finished turn');
+  eq(nl(pane('uncertain', [ev('tool', { title: 'a\n  b' })])), 'a b', 'T-DD-8 one line, whitespace folded');
+  check(nl(pane('busy', [ev('tool', { title: 'x'.repeat(300) })])).length === 90,
+        'T-DD-8 the line is capped');
+  const long = [ev('tool', { title: 'far back' }), ...Array(500).fill(ev('text', { text: '.' }))];
+  eq(nl(pane('busy', long)), '', 'T-DD-8 the scan is bounded');
+
+  check(/const doing = nowLine\(p\)/.test(src) && /el\('div', 'now', doing\)/.test(src),
+        'T-DD-8 the roster row shows the now-line as text');
+  check(/p\.state === 'uncertain'\) \{\s*const f = el\('span', 'flag quiet'/.test(src),
+        'T-DD-8 an uncertain pane carries a quiet tag');
+  check(/\.rit \.now\{/.test(css), 'T-DD-8 the now-line is styled to one line');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line');
