@@ -24,6 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DURATIONS = Path(__file__).with_name("ci_durations.json")
 DEFAULT = 5.0   # seconds for a class with no recorded time
+# Shard 1 also runs the core and container suites (ci.yml): ~20 s measured
+# 2026-11-22. It starts the split carrying them so it ends with the others.
+SHARD1_EXTRA = 20.0
 
 
 def tests_by_class():
@@ -49,7 +52,7 @@ def tests_by_class():
 
 def split(keys, n):
     secs = json.loads(DURATIONS.read_text()) if DURATIONS.exists() else {}
-    shards = [[0.0, []] for _ in range(n)]
+    shards = [[SHARD1_EXTRA if i == 0 else 0.0, []] for i in range(n)]
     for k in sorted(set(keys), key=lambda x: (-secs.get(x, DEFAULT), x)):
         load = min(range(n), key=lambda i: (shards[i][0], i))
         shards[load][0] += secs.get(k, DEFAULT)
