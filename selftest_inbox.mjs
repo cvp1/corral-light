@@ -170,9 +170,9 @@ eq(railOpens(5, 0, false, null, true), true, 'T-INB-6 solo means nothing on a wi
     requestAnimationFrame: () => {}, document: { querySelector: () => null } })('a');
   eq(wide.solo, null, 'T-INB-6 a wide screen never solos');
 }
-check(src.includes("const back = el('button', 'fbtn', '‹ Needs you');") &&
-      /back\.onclick = \(\) => \{ S\.solo = null; render\(\); \};/.test(src),
-      'T-INB-6 the solo view has a Back control that only clears the solo view');
+check(src.includes("const back = el('button', 'fbtn', narrow ? '‹ Needs you' : '‹ All panes');") &&
+      /back\.onclick = \(\) => \{ S\.solo = null; S\.wide = null; render\(\); \};/.test(src),
+      'T-INB-6 the solo view has a Back control that only clears the solo/focus view');
 
 /* ── T-INB-7: solo never minimizes, so fan-out membership is unchanged ──── */
 {

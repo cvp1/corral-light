@@ -3511,6 +3511,12 @@ class ThePillSaysOnlyWhatIsTrue(unittest.TestCase):
         _run_node_selftest(self, "selftest_inbox.mjs",
                            "the Needs-you rail, solo view and cross-feed dialog")
 
+    def test_the_daily_driver_ergonomics_hold(self):
+        """T-DD-1..4: code-block Copy, the context control, chat drafts and
+        history, desktop focus mode and Alt+N."""
+        _run_node_selftest(self, "selftest_daily.mjs",
+                           "code-block Copy, ctx control, drafts, focus mode")
+
 
 class TheServiceInstallerResolvesAndStopsThere(unittest.TestCase):
     """install_service resolves every path from the running checkout and never

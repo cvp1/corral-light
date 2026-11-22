@@ -52,7 +52,9 @@ function browser(panes, loginState) {
   const deps = { el: mk, S, api, toast: (m, b) => toasts.push([m, !!b]),
                  refresh: async () => {}, isTerm: p => (p.agent || '').startsWith('host:'),
                  termComposer: () => mk('div', 'term'), composablePanes: () => [],
-                 pendingPerm: () => null, permOptions: () => [] };
+                 pendingPerm: () => null, permOptions: () => [],
+                 draftsLoad: () => ({}), draftSave: () => {}, chatHistory: () => [],
+                 requestAnimationFrame: () => {} };
   const names = Object.keys(deps);
   const lib = new Function(...names, `
     ${fn('isLoginCommand')} async ${fn('startLogin')} ${fn('signInButton')} ${fn('loginLine')}

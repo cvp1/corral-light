@@ -14,7 +14,7 @@ function loadDetail() {
   }
 }
 const S = { panes: new Map(), agents: [], focus: null, es: null, railShut: null,
-            solo: null, detail: new Set(loadDetail()) };
+            solo: null, wide: null, active: null, detail: new Set(loadDetail()) };
 const saveDetail = () =>
   localStorage.setItem('corral.detail', JSON.stringify([...S.detail]));
 
@@ -476,11 +476,11 @@ function md(text) {
     const ln = lines[i];
     if (/^```/.test(ln)) {                      // fence; unclosed = to the end
       flushPara(); closeList();
+      const lang = codeLang(ln);
       const code = [];
       for (i++; i < lines.length && !/^```/.test(lines[i]); i++) code.push(lines[i]);
       i++;                                       // past the closing fence
-      const pre = el('pre'); pre.append(el('code', null, code.join('\n')));
-      box.append(pre); continue;
+      box.append(codeBlock(code.join('\n'), lang)); continue;
     }
     const h = /^(#{1,4})\s+(.*)$/.exec(ln);
     if (h) { flushPara(); closeList();
@@ -1055,6 +1055,10 @@ function buildPane(p) {
   const strip = el('div', 'agslot');     // the flow's progress strip, when one runs
   const comp = el('div', 'compslot');
   root.append(head, ask, log, strip, comp);
+  // The pane you last worked in, for f. Not S.focus: that one reorders the
+  // roster, and clicking in a pane should not move the list under you.
+  root.addEventListener('focusin', () => { S.active = p.id; });
+  root.addEventListener('pointerdown', () => { S.active = p.id; });
   log.onscroll = () => {
     // Only whether the log is pinned to the bottom needs tracking.
     const rec = PANES.get(p.id);
@@ -1700,12 +1704,17 @@ function paneHead(p) {
   const pct = ctxPct(p);
   if (pct !== null) {
     const warn = pct >= CTX_WARN_PCT;
-    const c = el('span', 'ctx' + (warn ? ' warn' : ''), `${pct}% ctx`);
-    c.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
+    const c = el('button', 'ctx' + (warn ? ' warn' : ''), `${pct}% ctx`);
+    c.type = 'button';
+    c.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context` +
+              ' — click to compact or carry to a fresh pane';
+    c.onclick = () => openCtxMenu(p, c);
     fact(c);
   } else {
-    const c = el('span', 'ctx unk', 'ctx unknown');
-    c.title = 'this lane has not reported its context use yet';
+    const c = el('button', 'ctx unk', 'ctx unknown');
+    c.type = 'button';
+    c.title = 'this lane has not reported its context use yet — click for options';
+    c.onclick = () => openCtxMenu(p, c);
     fact(c);
   }
   if (p.remote) {
@@ -1736,6 +1745,63 @@ function paneHead(p) {
  * its hover button. Built from fresh state when opened, so nothing in it
  * needs a slot in headSignature. `at` is the button it hangs from, or a
  * {x, y} point for a right-click. */
+/* What the context control offers, from the pane's own facts. Compact only
+ * when the agent advertises a compact command over ACP (no lane is assumed to
+ * have one); Carry for any chat pane. Pure (Node selftest). */
+function ctxActions(p) {
+  const out = [];
+  if (!p || isTerm(p) || p.state === 'dead' || p.state === 'detached') return out;
+  const cmd = (p.commands || []).find(c => String(c.name || '').toLowerCase() === 'compact');
+  if (cmd) out.push({ kind: 'compact', text: '/' + cmd.name,
+                      label: p.state === 'busy' ? 'Compact after this turn' : 'Compact now' });
+  out.push({ kind: 'carry', label: 'Carry to a fresh pane…' });
+  return out;
+}
+
+/* A one-line reading of the context, for the menu head. */
+function ctxSummary(p) {
+  const pct = ctxPct(p), u = (p && p.usage) || {};
+  if (pct === null) return 'context use not reported by this lane';
+  return `${pct}% context · ${u.used.toLocaleString()} of ${u.size.toLocaleString()} tokens`;
+}
+
+function openCtxMenu(p, at) {
+  closePaneMenu();
+  p = S.panes.get(p.id) || p;
+  const veil = el('div', 'pmenu-veil');
+  const m = el('div', 'pmenu');
+  m.setAttribute('role', 'menu');
+  m.appendChild(el('div', 'mh', ctxSummary(p)));
+  const acts = ctxActions(p);
+  if (!acts.length) m.appendChild(el('div', 'mh', 'nothing to do here while the agent is not running'));
+  for (const a of acts) {
+    const b = el('button', 'mi');
+    b.type = 'button'; b.setAttribute('role', 'menuitem');
+    b.appendChild(el('span', 'chk', ''));
+    b.appendChild(el('span', 'ml', a.label));
+    if (a.kind === 'compact') b.title = `sends ${a.text} to the agent`;
+    else b.title = 'start a new pane that reads this transcript — you see the exact pack before it goes';
+    b.onclick = async () => {
+      closePaneMenu();
+      try {
+        if (a.kind === 'compact') {
+          await api('/api/session/send', { pane: p.id, text: a.text });
+          toast(p.state === 'busy' ? 'compact queued behind this turn' : 'compacting…');
+        } else openPort(p);
+      } catch (e) { toast(e.message, true); }
+    };
+    m.appendChild(b);
+  }
+  veil.onclick = closePaneMenu;
+  m.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); closePaneMenu(); } };
+  document.body.append(veil, m);
+  const pad = 8, r = at.getBoundingClientRect();
+  const x = Math.max(pad, Math.min(r.left, window.innerWidth - m.offsetWidth - pad));
+  const y = Math.max(pad, Math.min(r.bottom + 4, window.innerHeight - m.offsetHeight - pad));
+  m.style.left = x + 'px'; m.style.top = y + 'px';
+  m.querySelector('.mi')?.focus();
+}
+
 function closePaneMenu() {
   for (const n of document.querySelectorAll('.pmenu, .pmenu-veil')) n.remove();
 }
@@ -1774,7 +1840,10 @@ function openPaneMenu(p, at) {
   if (p.worktree && p.worktree.phase === 'active') {
     item('Review changes…', () => openReview(p), { key: 'r' });
   }
-  if (!isTerm(p)) item('Carry to another lane…', () => openPort(p));
+  if (!isTerm(p)) item('Carry to a fresh pane…', () => openPort(p),
+                        { title: 'start a new pane, on any agent, that reads this transcript' });
+  if (!isNarrow()) item(S.wide === p.id ? 'Back to the whole wall' : 'Focus — this pane alone',
+                        () => toggleWide(p), { key: 'f', on: S.wide === p.id });
   if (!isTerm(p)) {
     const av = paneAgents(p);
     if (av.agents.length || av.flow) {
@@ -2604,6 +2673,53 @@ function liveLogSelection() {
   return log ? { sel: s, log } : null;
 }
 
+/* The fence's info word ("```python title" -> "python"), or ''. Shown as a
+ * label only; nothing is highlighted, so nothing has to parse the code. */
+function codeLang(fence) {
+  const m = /^```\s*([\w+#.-]{1,20})/.exec(String(fence || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+
+/* A fenced block with a Copy button: selecting a long block by hand is awkward
+ * on a desktop and impossible on a phone. Text only (textContent). */
+function codeBlock(text, lang) {
+  const wrap = el('div', 'codeblk');
+  const pre = el('pre'); pre.append(el('code', null, text));
+  const bar = el('div', 'codebar');
+  if (lang) bar.appendChild(el('span', 'codelang', lang));
+  const b = el('button', 'codecopy', 'Copy');
+  b.type = 'button'; b.title = 'copy this block';
+  b.onclick = e => {
+    e.stopPropagation();
+    copyExact(text).then(ok => {
+      b.textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(() => { b.textContent = 'Copy'; }, 1200);
+    });
+  };
+  bar.appendChild(b);
+  wrap.append(bar, pre);
+  return wrap;
+}
+
+/* Copy exactly `text`. The async clipboard needs a secure context, and the wall
+ * is usually plain http on the LAN, so fall back to a throwaway textarea. */
+async function copyExact(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text); return true;
+    }
+  } catch { /* fall through */ }
+  const ta = el('textarea');
+  ta.value = text; ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
 async function copyText(text, x, y) {
   let ok = false;
   try { await navigator.clipboard.writeText(text); ok = true; }
@@ -2843,6 +2959,45 @@ function termComposer(p) {
   return c;
 }
 
+/* ── drafts and history for the chat box ─────────────────────────────────
+ * An unsent draft survives a reload or a hub restart (localStorage, keyed by
+ * pane id, pruned to live panes). History is derived from the transcript's
+ * own user turns, so nothing extra is stored for it. */
+const DRAFT_KEY = 'corral.drafts';
+const DRAFT_MAX = 20000;                 // chars kept per draft
+const CHAT_HIST_MAX = 50;
+function draftsLoad() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+/* The stored map after saving `text` for `id`: empty deletes, gone panes drop. */
+function draftsWith(m, id, text, liveIds) {
+  const live = new Set(liveIds), out = {};
+  for (const [k, v] of Object.entries(m || {})) if (live.has(k) && k !== id) out[k] = v;
+  const t = String(text || '');
+  if (t.trim()) out[id] = t.slice(0, DRAFT_MAX);
+  return out;
+}
+function draftSave(id, text) {
+  try {
+    localStorage.setItem(DRAFT_KEY,
+      JSON.stringify(draftsWith(draftsLoad(), id, text, [...S.panes.keys()])));
+  } catch { /* storage full or off: the draft just isn't kept */ }
+}
+/* What you typed into this pane before, oldest first: only your own turns
+ * (not peers, rigs, challenges or panels), consecutive repeats collapsed. */
+function chatHistory(events) {
+  const out = [];
+  for (const e of events || []) {
+    if (e.kind !== 'user') continue;
+    const d = e.data || {};
+    if (WAIT_SKIP_VIAS.includes(d.via)) continue;
+    const t = String(d.text || '').trim();
+    if (t && out[out.length - 1] !== t) out.push(t);
+  }
+  return out.slice(-CHAT_HIST_MAX);
+}
+
 // Built once per pane. Never rebuilt while you are typing in it — a
 // composer rebuilt under an agent's event stream eats the draft mid-word.
 function composer(p, kind) {
@@ -2860,7 +3015,11 @@ function composer(p, kind) {
     c.append(note, b);
     return c;
   }
-  const ta = el('textarea'); ta.placeholder = 'Message…  (/ for skills)'; ta.rows = 1;
+  const ta = el('textarea'); ta.placeholder = 'Message…  (/ for skills, ↑ for history)'; ta.rows = 1;
+  ta.value = draftsLoad()[p.id] || '';
+  // ↑/↓ walk: ix indexes the history, null when not walking; `held` is the
+  // draft that was there when the walk began.
+  const walk = { list: [], ix: null, held: '' };
   // Clear only after the server accepts, so a failed send keeps the text.
   // `sending` also ignores a rapid double Enter.
   let sending = false;
@@ -2878,6 +3037,7 @@ function composer(p, kind) {
     try {
       await api('/api/session/send', { pane: p.id, text: t });
       ta.value = ''; ta.style.height = 'auto';
+      walk.ix = null; draftSave(p.id, '');
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -2907,8 +3067,11 @@ function composer(p, kind) {
   };
   const refit = () => { ta.style.height = 'auto';
                         ta.style.height = Math.min(ta.scrollHeight, 130) + 'px'; };
+  if (ta.value) requestAnimationFrame(refit);      // a restored draft
   ta.oninput = () => {
     refit();
+    walk.ix = null;
+    draftSave(p.id, ta.value);
     // Only while typing the NAME. Once there is a space the argument is being
     // written and a popup over it is in the way.
     const m = /^\/([\w-]*)$/.exec(ta.value);
@@ -2928,6 +3091,26 @@ function composer(p, kind) {
       if (e.key === 'ArrowUp') { e.preventDefault(); sel = (sel + hits.length - 1) % hits.length; return paint(); }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); return accept(sel); }
       if (e.key === 'Escape') { e.preventDefault(); return hide(); }
+    }
+    // History: ↑ from an empty box (or mid-walk) recalls what you sent before;
+    // ↓ walks forward and finally restores the draft. A multi-line recall is
+    // still editable: once you type, the walk ends and arrows move the caret.
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey &&
+        !e.metaKey && !e.ctrlKey && !e.altKey &&
+        (walk.ix !== null || (ta.value === '' && e.key === 'ArrowUp'))) {
+      if (walk.ix === null) {
+        walk.list = chatHistory((S.panes.get(p.id) || p).events);
+        if (!walk.list.length) return;
+        walk.held = ta.value; walk.ix = walk.list.length;
+      }
+      e.preventDefault();
+      walk.ix += e.key === 'ArrowUp' ? -1 : 1;
+      if (walk.ix < 0) walk.ix = 0;
+      if (walk.ix >= walk.list.length) { ta.value = walk.held; walk.ix = null; }
+      else ta.value = walk.list[walk.ix];
+      refit();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      return;
     }
     // Native dialog keys, on an empty composer only: with exactly one permission
     // pending, 1..9 answers by number and Esc refuses; otherwise Esc on a busy
@@ -3433,7 +3616,8 @@ function render() {
   const g = $('#grid');
   const narrow = isNarrow();
   if (!narrow || (S.solo && !S.panes.has(S.solo))) S.solo = null;
-  const solo = soloPane(panes, S.solo, narrow);
+  S.wide = widePane(panes, S.wide, narrow);
+  const solo = soloPane(panes, S.solo, narrow) || S.wide;
   const shown = solo ? panes.filter(p => p.id === solo) : panes.filter(p => !p.minimized);
   const mins = solo ? [] : panes.filter(p => p.minimized);
   g.className = 'grid' + (shown.length === 1 ? ' one' : '');
@@ -3468,10 +3652,11 @@ function render() {
   }
   if (solo) {
     const bar = el('div', 'solobar');
-    const back = el('button', 'fbtn', '‹ Needs you');
+    const back = el('button', 'fbtn', narrow ? '‹ Needs you' : '‹ All panes');
     back.type = 'button';
-    back.title = 'back to the Needs-you list and the whole wall';
-    back.onclick = () => { S.solo = null; render(); };
+    back.title = narrow ? 'back to the Needs-you list and the whole wall'
+                        : 'back to the whole wall: f or Esc';
+    back.onclick = () => { S.solo = null; S.wide = null; render(); };
     bar.appendChild(back);
     g.insertBefore(bar, g.firstChild);
   }
@@ -3862,6 +4047,44 @@ function blockedCount(panes) {
 function soloPane(panes, solo, narrow) {
   return narrow && solo && panes.some(p => p.id === solo) ? solo : null;
 }
+/* Desktop focus mode: one pane across the wall, client-side only (nothing is
+ * minimized, so fan-out membership is untouched). Ends on a phone, where the
+ * solo view already does this, and when the pane goes. */
+function widePane(panes, wide, narrow) {
+  return !narrow && wide && panes.some(p => p.id === wide) ? wide : null;
+}
+/* Alt+N: the Nth pane in the order the wall draws them (minimized ones are
+ * not on the wall). n is 1-based; null when there is no such pane. */
+function nthPane(panes, n) {
+  const shown = panes.filter(p => !p.minimized);
+  return n >= 1 && n <= shown.length ? shown[n - 1] : null;
+}
+/* Which digit an Alt/Option+digit chord names. e.code, because Option+1 on a
+ * Mac types "¡" into e.key. */
+function altDigit(e) {
+  if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return null;
+  const m = /^Digit([1-9])$/.exec(e.code || '');
+  return m ? +m[1] : null;
+}
+/* The pane a bare key acts on: the one you last worked in, else the focused one. */
+function keyPane() {
+  return S.panes.get(S.active) || S.panes.get(S.focus) || null;
+}
+function toggleWide(p) {
+  if (!p) return;
+  S.wide = S.wide === p.id ? null : p.id;
+  S.active = p.id;
+  render();
+}
+function jumpToPane(n) {
+  const p = nthPane([...S.panes.values()], n);
+  if (!p) return toast(`there is no pane ${n} on the wall`, true);
+  if (S.wide) S.wide = p.id;             // focus mode follows the jump
+  focusPane(p.id);
+  requestAnimationFrame(() =>
+    document.querySelector(`#grid > .pane[data-pane="${p.id}"] .composer textarea, ` +
+                           `#grid > .pane[data-pane="${p.id}"] .composer input`)?.focus());
+}
 /* Ids of panes a human can actually see: drawn in the grid, overlapping the
  * viewport, not minimized (unless shown alone), and not under the phone's
  * full-width rail. `rectOf(id)` is the pane's box or null when not drawn. */
@@ -4040,7 +4263,7 @@ function markSeen() {
     const vis = new Set(seenPanes(panes,
       id => document.querySelector(`#grid > .pane[data-pane="${id}"]`)
               ?.getBoundingClientRect() || null,
-      window.innerHeight, covered, S.solo));
+      window.innerHeight, covered, S.solo || S.wide));
     for (const p of panes) {
       if (!vis.has(p.id)) continue;
       const seq = p.seq || 0;
@@ -5509,7 +5732,7 @@ function wirePalette() {
   // Global, and not swallowed inside a composer, so ⌘K works while writing.
   document.addEventListener('keydown', e => {
     for (const k of KEYS) {
-      if (k.match && k.match(e)) { e.preventDefault(); k.run(); return; }
+      if (k.match && k.match(e)) { e.preventDefault(); k.run(e); return; }
     }
   });
 }
@@ -5533,6 +5756,18 @@ const KEYS = [
   { combo: 'Esc', what: 'Close this list, or the search',
     match: e => e.key === 'Escape' && $('#keysdlg') && $('#keysdlg').open,
     run: () => toggleKeys(false) },
+  { combo: 'f', where: 'on a focused pane, wide screen', what: 'Show it alone across the wall; again to go back',
+    match: e => e.key === 'f' && !e.metaKey && !e.ctrlKey && !e.altKey
+                && !isTypingTarget(e.target) && !anyDialogOpen() && !isNarrow()
+                && !!keyPane(),
+    run: () => toggleWide(keyPane()) },
+  { combo: 'Esc', where: 'in focus mode', what: 'Back to the whole wall',
+    match: e => e.key === 'Escape' && !!S.wide && !isTypingTarget(e.target)
+                && !anyDialogOpen() && !document.querySelector('.pmenu'),
+    run: () => { S.wide = null; render(); } },
+  { combo: '⌥1…9', alt: 'Alt+1…9', what: 'Jump to that pane on the wall, even while typing',
+    match: e => altDigit(e) !== null && !anyDialogOpen(),
+    run: e => jumpToPane(altDigit(e)) },
   { combo: 'r', where: 'on a focused own-branch pane', what: 'Review its changes',
     match: e => reviewKey(e, reviewTarget(), anyDialogOpen()),
     run: () => openReview(reviewTarget()) },
