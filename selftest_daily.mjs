@@ -344,5 +344,34 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(ok === true, 'T-DD-9 the pane itself opened');
 }
 
+// T-DD-10 New matches the pane you are using, not the agent's own default.
+{
+  const nd = load('newDefaults');
+  const mine = { id: 'm', agent: 'claude', model: null, wantModel: 'opus', wantEffort: 'medium',
+                 cwd: '/u/ai-os', posture: 'auto', title: 'ai-os', state: 'ready', created: '2' };
+  eq(nd(mine, [mine]), { agent: 'claude', model: 'opus', effort: 'medium', cwd: '/u/ai-os',
+                         posture: 'auto', from: 'ai-os' },
+     'T-DD-10 the pane in use seeds lane, model, effort, folder and posture');
+  const older = { id: 'o', agent: 'codex', model: 'gpt-6.2-sol', state: 'ready', created: '1', title: 'old' };
+  const newer = { ...mine, id: 'n', model: 'claude-opus-5-5', effort: 'high', created: '3', title: 'new' };
+  eq(nd(null, [newer, older]).from, 'new', 'T-DD-10 with no pane in use, the newest open one');
+  eq(nd(null, [newer]).model, 'claude-opus-5-5', 'T-DD-10 the live model wins over the asked-for one');
+  const dead = { ...mine, id: 'd', state: 'dead', created: '9' };
+  const remote = { ...mine, id: 'r', remote: { host: 'peer-b' }, created: '8' };
+  eq(nd(dead, [older, dead, remote]).agent, 'codex', 'T-DD-10 never a dead or remote pane');
+  eq(nd(null, []), null, 'T-DD-10 nothing open, nothing copied');
+  check(/newDefaults\(keyPane\(\), \[\.\.\.S\.panes\.values\(\)\]\)/.test(src) &&
+        /fillCfg\(copied \? nd : null\)/.test(src),
+        'T-DD-10 the New dialog seeds its pickers from that pane');
+  const ce = load('catEntry');
+  eq(ce({ reasoning_effort: { options: [{ value: 'high' }] } }, 'effort'), { options: [{ value: 'high' }] },
+     'T-DD-10 Codex effort (reasoning_effort) is a choosable effort');
+  eq(ce({ model: { value: 'x' } }, 'effort'), null, 'T-DD-10 no effort under any id, none offered');
+  check(/catEntry\(cat, cid\)/.test(src) && /catEntry\(cat, 'effort'\)/.test(src),
+        'T-DD-10 New and carry both read effort through the aliases');
+  check(/id="newfrom"/.test(html) && html.indexOf('id="newfrom"') < html.indexOf('id="f-cfg"'),
+        'T-DD-10 the dialog says which pane it copied, outside the fold');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane');
