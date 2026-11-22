@@ -5198,15 +5198,17 @@ function wireDialog() {
     fillCwd();
     // Model/effort options come from the server's catalog for the selected agent,
     // so they work with nothing running.
-    const fillCfg = () => {
+    // `wants` (first fill only) seeds the pickers from the pane being copied;
+    // later fills keep whatever is selected.
+    const fillCfg = wants => {
       const lane = remoteHost() ? remoteLanes().find(x => x.key === chosenAgent()) : null;
       const cat = (remoteHost() ? (lane || {}).catalog : (S.catalog || {})[chosenAgent()]) || {};
       for (const [sel, cid, hintSel] of
            [['#f-model', 'model', '#modelhint'], ['#f-effort', 'effort', '#efforthint']]) {
         const node = $(sel), hint = $(hintSel), label = node.closest('label');
-        const want = node.value;
+        const want = wants && wants[cid] ? wants[cid] : node.value;
         node.innerHTML = '';
-        const entry = cat[cid] || {};
+        const entry = catEntry(cat, cid) || {};
         const opts = entry.options || [];
         if (!opts.length && entry.value) {
           // The agent runs one fixed model: name it instead of a disabled picker.
@@ -5233,6 +5235,11 @@ function wireDialog() {
           for (const o of opts) {
             const n = el('option', null, o.name || o.value); n.value = o.value;
             node.appendChild(n);
+          }
+          // A copied pane's value the list does not name (a full model id) is
+          // still offered, so it is what Start sends rather than silently blank.
+          if (want && !opts.some(o => o.value === want)) {
+            const n = el('option', null, want); n.value = want; node.appendChild(n);
           }
           node.value = want || '';
         }
@@ -5274,10 +5281,27 @@ function wireDialog() {
     $('#f-cwd').oninput = () => probe(300);
     $('#f-wt').onchange = paintRae;
     $('#f-rae').onchange = raeSyncPosture;
+    // Match the pane you are using: lane, model, effort, folder, permissions.
+    const nd = remoteHost() ? null : newDefaults(keyPane(), [...S.panes.values()]);
+    const ndLane = nd && S.agents.find(a => a.key === nd.agent && a.available);
+    if (ndLane) {
+      const v = ndLane.group ? `group:${ndLane.group}` : ndLane.key;
+      if ([...sel.options].some(o => o.value === v && !o.disabled)) sel.value = v;
+      if (nd.cwd) $('#f-cwd').value = nd.cwd;
+    }
     probe(0);
     fillHost();
-    fillCfg();
+    if (ndLane && ndLane.group) $('#f-host').value = ndLane.key;
+    const copied = ndLane && chosenAgent() === ndLane.key;
+    fillCfg(copied ? nd : null);
     fillPosture();
+    const psel = $('#f-posture');
+    if (copied && nd.posture && !psel.disabled &&
+        [...psel.options].some(o => o.value === nd.posture)) {
+      psel.value = nd.posture;
+      $('#posturehint').textContent = HINTS[nd.posture] || '';
+    }
+    $('#newfrom').textContent = copied ? `settings from “${nd.from}”` : '';
     fillRoles();
     $('#f-quick').checked = !!dlg._quickSet; dlg._quickSet = false;
     $('#quickhint').textContent = 'now: ' + quickLabel();
@@ -5490,6 +5514,32 @@ function carryDefaults(src, lane, panes, quick) {
   return { model: '', effort: '', from: '' };
 }
 
+/* A lane's catalog entry for a setting. Effort goes by other ids on some
+ * adapters (Codex reports `reasoning_effort`); the hub applies all of them
+ * (sessions._EFFORT_ALIASES), so the pickers must read all of them too.
+ * Pure (Node selftest). */
+function catEntry(cat, cid) {
+  const ids = cid === 'effort' ? ['effort', 'reasoning_effort', 'reasoningEffort'] : [cid];
+  for (const id of ids) if (cat && cat[id]) return cat[id];
+  return null;
+}
+
+/* What New pre-selects: the settings of the pane you last worked in (else the
+ * focused one, else the newest open pane on this machine), so a new pane matches
+ * the one you are using instead of the agent's own default, which can be a
+ * different model. Remote and dead panes never seed it. Null = nothing to copy.
+ * Pure (Node selftest). */
+function newDefaults(src, panes) {
+  const usable = p => !!(p && p.agent && !p.remote && p.state !== 'dead');
+  const newest = [...(panes || [])].filter(usable)
+    .sort((a, b) => String(a.created || '').localeCompare(String(b.created || ''))).pop();
+  const p = usable(src) ? src : newest;
+  if (!p) return null;
+  return { agent: p.agent, model: p.model || p.wantModel || '',
+           effort: p.effort || p.wantEffort || '', cwd: p.cwd || '',
+           posture: p.posture || '', from: p.title || p.label || 'an open pane' };
+}
+
 /* Fill one model/effort picker from a lane's catalog entry; `want` is kept when
  * offered, added when not (so a pane's live value always shows). Returns a hint
  * for a fixed (unchoosable) value, else ''. */
@@ -5534,7 +5584,7 @@ async function openPort(src) {
     const cat = (S.catalog || {})[sel.value] || {};
     const d = carryDefaults(src, sel.value, S.panes ? S.panes.values() : [], quickPreset());
     const hints = [fillCarryPick($('#p-model'), cat.model, d.model),
-                   fillCarryPick($('#p-effort'), cat.effort, d.effort)].filter(Boolean);
+                   fillCarryPick($('#p-effort'), catEntry(cat, 'effort'), d.effort)].filter(Boolean);
     if (d.from) hints.unshift(`model and effort from ${d.from}`);
     $('#p-cfghint').textContent = hints.join(' · ');
   };
