@@ -939,6 +939,28 @@ class UnseenNeedsYouNotifies(unittest.TestCase):
         self.assertTrue(wait_for(lambda: self.calls, timeout=3))
         self.assertIn("stopped", self.calls[0][0])
 
+    def test_an_unseen_question_notifies_with_its_text(self):
+        self.pane.pending = {}
+        self.pane.question = {"text": "Breaking or Changed?", "at": "t1"}
+        self.hub._notify_event(self.ev(7, kind="question", text="Breaking or Changed?", at="t1"))
+        self.assertTrue(wait_for(lambda: self.calls, timeout=3))
+        self.assertIn("Refactor asks you", self.calls[0][0])
+        self.assertIn("Breaking or Changed?", self.calls[0][1])
+
+    def test_an_answered_question_does_not(self):
+        self.pane.pending = {}
+        self.pane.question = None
+        self.hub._notify_event(self.ev(7, kind="question", text="q", at="t1"))
+        time.sleep(0.3)
+        self.assertEqual(self.calls, [])
+
+    def test_a_replaced_question_does_not_notify_the_old_one(self):
+        self.pane.pending = {}
+        self.pane.question = {"text": "newer", "at": "t2"}
+        self.hub._notify_event(self.ev(7, kind="question", text="older", at="t1"))
+        time.sleep(0.3)
+        self.assertEqual(self.calls, [])
+
     def test_the_browser_reports_seen_only_while_looking(self):
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn("document.visibilityState === 'visible' && document.hasFocus()", js)

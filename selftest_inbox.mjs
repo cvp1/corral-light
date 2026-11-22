@@ -66,7 +66,7 @@ eq(blockedCount([calm]), 0, 'T-INB-1 nothing open blocks nothing');
 eq(railExtras([pane('e', { question: { text: '' } })]).asked.length, 0,
    'T-INB-1 an empty question is not a card');
 
-const questionCard = load('questionCard', ['paneDir'], {
+const questionCard = load('questionCard', ['paneDir', 'ctxTag', 'ctxPct'], {
   el: mk, answerInPane: () => {} });
 let card = questionCard(asker, false);
 check(texts(card).includes(long), 'T-INB-1 the card carries the full question, not a preview');
@@ -338,6 +338,82 @@ check(/\.app,\.app\.railshut,\.app\.lshut\{grid-template-columns:minmax\(0,1fr\)
       'T-LR-3 (static) phone: the strip column does not leak onto the one-column layout');
 check(/@media\(min-width:821px\)\{\s*\.app\.lshut/.test(css),
       'T-LR-3 (static) the strip styles are desktop-only');
+
+/* ── T-WAIT-*: turns that ended on the operator (2026-11-22 panel, item 1) ── */
+{
+  const consts = ['AGENT_ORIGIN_VIAS', 'WAIT_MAX_AGE_S', 'WAIT_EXCERPT', 'WAIT_SKIP_VIAS']
+    .map(k => new RegExp(`^const ${k} = .*;$`, 'm').exec(src)[0]).join('\n');
+  const waitingTurns = new Function(`${consts}\n${fn('paneAge')}\n${fn('waitExcerpt')}\n` +
+                                    `${fn('waitingTurns')}\nreturn waitingTurns;`)();
+  const NOW = Date.parse('2026-11-22T15:00:00Z');
+  const ago = m => new Date(NOW - m * 60000).toISOString();
+  const turn = (endMin, text, x = {}) => [
+    { seq: 1, at: ago(endMin + 5), kind: 'user', data: { text: 'plan it' } },
+    { seq: 2, at: ago(endMin + 4), kind: 'tool', data: { title: 'Read x' } },
+    { seq: 3, at: ago(endMin + 1), kind: 'text', data: { text: text.slice(0, 10) } },
+    { seq: 4, at: ago(endMin + 1), kind: 'text', data: { text: text.slice(10) } },
+    { seq: 5, at: ago(endMin), kind: 'turn_end', data: { stopReason: 'end_turn', ...x } },
+  ];
+  const ask = 'Plan, 4 steps.\n\nWant me to start on step 1?';
+  const ws = waitingTurns([
+    pane('young', { events: turn(5, ask) }),
+    pane('old', { events: turn(45, ask) }),                       // past the 30-min decay
+    pane('replied', { events: [...turn(20, ask), { seq: 6, at: ago(1), kind: 'user', data: {} }] }),
+    pane('busy', { state: 'busy', events: turn(20, ask) }),
+    pane('perm', { pending: ['r'], events: turn(20, ask) }),
+    pane('asked', { question: { text: 'q' }, events: turn(20, ask) }),
+    pane('peer', { turnVia: 'peer', events: turn(20, ask) }),
+    pane('panel', { turnVia: 'panel', events: turn(20, ask) }),
+    pane('stopped', { events: turn(20, ask, { stopReason: 'cancelled' }) }),
+    pane('stale', { events: turn(73 * 60, ask) }),
+    pane('dismissed', { events: turn(20, ask) }),
+    pane('review', { events: turn(20, ask) }),
+  ], { dismissed: 5 }, NOW, new Set(['review']));
+  eq(ws.map(w => w.p.id), ['old', 'young'],
+     'T-WAIT-1 only human turns that ended on the operator, oldest first, past the idle decay');
+  eq(ws[0].excerpt, 'Want me to start on step 1?', 'T-WAIT-2 the excerpt is the end of the joined answer');
+  check(Math.round(ws[0].age) === 45 * 60, 'T-WAIT-3 age is from the turn_end');
+  eq(waitingTurns([pane('d', { events: turn(20, ask) })], { d: 4 }, NOW).length, 1,
+     'T-WAIT-4 a dismissal is for one turn; a newer turn surfaces again');
+  const waitExcerpt = new Function(`${consts}\n${fn('waitExcerpt')}\nreturn waitExcerpt;`)();
+  const cut = waitExcerpt('y'.repeat(500));
+  check(cut.length === 220 && cut.startsWith('…'), 'T-WAIT-5 the excerpt is bounded from the front');
+  // Rendering: quiet (never blocking), with its own section count.
+  const r = fn('render');
+  check(/n\.appendChild\(waitCard\(w, narrow\)\); items\+\+; quiet\+\+;/.test(r),
+        'T-WAIT-6 render counts each wait card as quiet');
+  check(/waits\.slice\(0, WAIT_SHOWN\)/.test(r), 'T-WAIT-7 the rail shows at most WAIT_SHOWN');
+  eq(blockedCount([pane('w', { events: turn(5, ask) })]), 0, 'T-WAIT-8 a wait never counts as blocked');
+}
+
+/* ── T-CNT-1: the header number counts what needs you, not quiet rows ───── */
+{
+  const nodes = {};
+  const $ = q => (nodes[q] ||= { textContent: '', className: '', title: '',
+                                  classList: { toggle() {} } });
+  const railFold = load('railFold', ['railOpens'], {
+    $, isNarrow: () => false, S: { railShut: null } });
+  railFold(5, 1, 3);
+  eq(nodes['#railhead'].textContent, 'Needs you · 2 ▾', 'T-CNT-1 header shows items minus quiet');
+  eq(nodes['#railtabnum'].textContent, '2', 'T-CNT-1 the folded tab digit matches');
+  railFold(3, 0, 3);
+  eq(nodes['#railhead'].textContent, 'Needs you ▾', 'T-CNT-2 only quiet rows: no number');
+  check(/\bsoft\b/.test(nodes['#railtabnum'].className), 'T-CNT-2 the tab is soft, not zero-grey only');
+}
+
+/* ── T-CTX-*: context use is always on screen ───────────────────────────── */
+{
+  const ctxPct = load('ctxPct');
+  const ctxTag = load('ctxTag', ['ctxPct']);
+  eq(ctxTag(pane('k', { usage: { used: 42, size: 100 } })), ' · 42% ctx', 'T-CTX-1 rail cards carry ctx');
+  eq(ctxTag(pane('k')), ' · ctx unknown', 'T-CTX-2 unknown is said, not hidden');
+  check(/ctxTag\(p\)/.test(fn('questionCard')), 'T-CTX-3 question cards carry ctx');
+  check(/'ctx unk', 'ctx unknown'/.test(src), 'T-CTX-4 the pane header says unknown');
+  check(!/ctx !== null && ctx >= CTX_WARN_PCT\) \{\s*const f = el\('span', 'flag warn'/.test(src),
+        'T-CTX-5 the roster no longer hides ctx below the warn line');
+  check(/'flag ctxf'/.test(src), 'T-CTX-5 the roster always draws a ctx flag');
+  void ctxPct;
+}
 
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
 console.log('selftest_inbox: ok');

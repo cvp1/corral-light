@@ -1694,14 +1694,18 @@ function paneHead(p) {
                 strict: 'strict — prompts on dangerous operations' }[p.posture] || p.posture;
     fact(q);
   }
-  // ACP usage_update is unstable and may be missing or zero: show nothing rather
-  // than a misleading "0% ctx".
+  // ACP usage_update is unstable and may be missing or zero: say "unknown"
+  // rather than a misleading "0% ctx", and never hide it.
   const u = p.usage || {};
   const pct = ctxPct(p);
   if (pct !== null) {
     const warn = pct >= CTX_WARN_PCT;
     const c = el('span', 'ctx' + (warn ? ' warn' : ''), `${pct}% ctx`);
     c.title = `${u.used.toLocaleString()} / ${u.size.toLocaleString()} tokens in context`;
+    fact(c);
+  } else {
+    const c = el('span', 'ctx unk', 'ctx unknown');
+    c.title = 'this lane has not reported its context use yet';
     fact(c);
   }
   if (p.remote) {
@@ -3239,14 +3243,18 @@ function render() {
     const ask = askLine(p);            // ask_human: the question, on the row
     if (ask) t.appendChild(ask);
     it.appendChild(t);
-    // Only the exceptions earn room on the line: a turn gone quiet, a full context.
+    // A turn gone quiet earns room on the line; context always does (managing
+    // it is the operator's job, so it is never hidden), warn-coloured when full.
     if (quietFor) {
       const f = el('span', 'flag', quietFor); f.title = `no output for ${quietFor}`;
       it.appendChild(f);
     }
     const ctx = ctxPct(p);
-    if (ctx !== null && ctx >= CTX_WARN_PCT) {
-      const f = el('span', 'flag warn', `${ctx}%`); f.title = `${ctx}% of the context window used`;
+    {
+      const f = el('span', 'flag ctxf' + (ctx === null ? ' unk' : ctx >= CTX_WARN_PCT ? ' warn' : ''),
+                   ctx === null ? '–%' : `${ctx}%`);
+      f.title = ctx === null ? 'this lane has not reported its context use'
+                             : `${ctx}% of the context window used`;
       it.appendChild(f);
     }
 
@@ -3555,7 +3563,7 @@ function render() {
       }
       const c = el('div', 'ncard');
       c.appendChild(el('div', 't', p.title || p.label));
-      c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)}` +
+      c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)}` + ctxTag(p) +
                                    (p.minimized ? ' · minimized' : '')));
       if (ev) {
         c.appendChild(permCard(p, ev.data, null, true));
@@ -3618,7 +3626,18 @@ function render() {
   // the end" pane: its edits ran without cards, so this card is the approval
   // and blocks (counted by blockedCount), with no Not now.
   let quiet = 0;
-  for (const p of wtRailCards(panes, wtSeen())) {
+  const wtCards = wtRailCards(panes, wtSeen());
+  // Turns that ended on the operator: quiet, oldest first, past the idle decay.
+  const waits = waitingTurns(panes, waitSeen(), Date.now(), new Set(wtCards.map(p => p.id)));
+  if (waits.length) {
+    n.appendChild(el('div', 'lab rwait', `Waiting on you · ${waits.length}`));
+    for (const w of waits.slice(0, WAIT_SHOWN)) {
+      n.appendChild(waitCard(w, narrow)); items++; quiet++;
+    }
+    if (waits.length > WAIT_SHOWN) n.appendChild(el('div', 'fnote nmore',
+      `${waits.length - WAIT_SHOWN} more waiting: the oldest are shown first`));
+  }
+  for (const p of wtCards) {
     const due = !!p.worktree.reviewAtEnd;
     const c = el('div', 'ncard wt' + (due ? ' due' : ''));
     c.appendChild(el('div', 't', `${p.title || p.label} — ready to review`));
@@ -3743,6 +3762,94 @@ function railExtras(panes) {
   return { asked: panes.filter(q),
            paused: panes.filter(p => p.state === 'detached' && !q(p)) };
 }
+/* Turns that ended on the operator: an agent finished a turn a human started
+ * ("Want me to start on step 1?") and nobody has written to it since. Quiet,
+ * never blocking, and kept past the 30-minute your-turn → idle decay until the
+ * operator replies or dismisses it (`seen`: pane id → the turn_end seq
+ * dismissed). Oldest wait first. Bounded by WAIT_MAX_AGE_S and, in the rail,
+ * WAIT_SHOWN. A pane with a permission, a question or a review card is left to
+ * that card (`skip`). Panel and agent-started turns are not the human's. */
+const WAIT_MAX_AGE_S = 72 * 3600;
+const WAIT_SHOWN = 5;
+const WAIT_EXCERPT = 220;
+const WAIT_SKIP_VIAS = [...AGENT_ORIGIN_VIAS, 'panel'];
+function waitingTurns(panes, seen, nowMs, skip = new Set()) {
+  const out = [];
+  for (const p of panes) {
+    if (p.state !== 'ready' || skip.has(p.id)) continue;
+    if ((p.pending || []).length || (p.question && p.question.text)) continue;
+    if (WAIT_SKIP_VIAS.includes(p.turnVia)) continue;
+    const evs = p.events || [];
+    let end = null, text = '', inText = false;
+    for (let i = evs.length - 1; i >= 0; i--) {
+      const e = evs[i];
+      if (e.kind === 'user') break;              // the human wrote after it
+      if (!end) { if (e.kind === 'turn_end') end = e; continue; }
+      // The answer is the run of text chunks that closes the turn.
+      if (e.kind === 'text') { inText = true; text = ((e.data || {}).text || '') + text;
+                               if (text.length > 4 * WAIT_EXCERPT) break; continue; }
+      if (inText) break;
+    }
+    if (!end || (end.data || {}).stopReason === 'cancelled') continue;
+    if (seen[p.id] === end.seq) continue;
+    const at = Date.parse(end.at);
+    const age = Number.isFinite(at) ? Math.max(0, (nowMs - at) / 1000) : paneAge(p, nowMs);
+    if (age > WAIT_MAX_AGE_S) continue;
+    out.push({ p, seq: end.seq, age, excerpt: waitExcerpt(text) });
+  }
+  return out.sort((a, b) => b.age - a.age);
+}
+/* The end of an agent's answer, where the ask usually is: its last paragraph,
+ * cut from the front to WAIT_EXCERPT characters. */
+function waitExcerpt(text) {
+  const paras = String(text || '').trim().split(/\n\s*\n/).map(s => s.trim()).filter(Boolean);
+  const last = (paras[paras.length - 1] || '').replace(/\s+/g, ' ');
+  return last.length > WAIT_EXCERPT ? '…' + last.slice(last.length - WAIT_EXCERPT + 1) : last;
+}
+function waitSeen() {
+  try { return JSON.parse(localStorage.getItem('corral.waitSeen') || '{}') || {}; }
+  catch { return {}; }
+}
+/* Dismiss one wait, and drop records for panes that are gone (bounded). */
+function waitDismiss(id, seq, liveIds) {
+  const s = waitSeen(), keep = {};
+  for (const k of Object.keys(s)) if (liveIds.includes(k)) keep[k] = s[k];
+  keep[id] = seq;
+  localStorage.setItem('corral.waitSeen', JSON.stringify(keep));
+}
+/* " · 42% ctx" for a rail card's meta line, or " · ctx unknown" when the lane
+ * did not say: context is always on screen. */
+function ctxTag(p) {
+  const c = ctxPct(p);
+  return c === null ? ' · ctx unknown' : ` · ${c}% ctx`;
+}
+/* Got it: hide this turn's card until the pane ends another turn. */
+function dismissWait(w) {
+  waitDismiss(w.p.id, w.seq, [...S.panes.keys()]);
+  render();
+}
+/* One waiting turn as a quiet rail card: who, how long, the end of the answer,
+ * Reply (opens the pane, composer ready) and Got it (dismiss this turn). */
+function waitCard(w, narrow) {
+  const p = w.p;
+  const c = el('div', 'ncard wait');
+  c.appendChild(el('div', 't', p.title || p.label));
+  c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)} · waiting ${fmtAge(w.age)}` +
+                               ctxTag(p) + (p.minimized ? ' · minimized' : '')));
+  if (w.excerpt) c.appendChild(el('div', 'qtext', w.excerpt));
+  const acts = el('div', 'facts');
+  const go = el('button', 'fbtn', 'Reply');
+  go.type = 'button';
+  go.title = 'open the pane with its message box ready';
+  go.onclick = () => answerInPane(p, narrow);
+  const ok = el('button', 'fbtn', 'Got it');
+  ok.type = 'button';
+  ok.title = 'hide this until the agent finishes another turn';
+  ok.onclick = () => dismissWait(w);
+  acts.append(go, ok);
+  c.appendChild(acts);
+  return c;
+}
 /* Everything that blocks an agent on the human: pending permissions and open
  * questions. Drives the hot count on the folded strip and the phone's pop-open. */
 function blockedCount(panes) {
@@ -3774,7 +3881,7 @@ function questionCard(p, narrow) {
   const c = el('div', 'ncard q' + (hub ? ' hub' : ''));
   c.appendChild(el('div', 't', `${p.title || p.label} — ` +
                                (hub ? 'Corral paused this loop' : 'asks you')));
-  c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)}` +
+  c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)}` + ctxTag(p) +
                                (p.minimized ? ' · minimized' : '') +
                                (p.state === 'detached' ? ' · paused' : '')));
   c.appendChild(el('div', 'qtext', q.text));
@@ -3840,14 +3947,18 @@ function railFold(items, blocked, quiet = 0, solo = false) {
   const open = railOpens(items, quiet, narrow, S.railShut, solo);
   $('#app').classList.toggle('railshut', !open);
   $('#rrail').classList.toggle('shut', !open);
-  $('#railhead').textContent = `Needs you${items ? ' · ' + items : ''} ▾`;
+  // The number is what needs you; quiet rows (waiting turns, paused panes,
+  // review and module notices) carry their own section counts.
+  const urgent = Math.max(0, items - quiet);
+  $('#railhead').textContent = `Needs you${urgent ? ' · ' + urgent : ''} ▾`;
   // Always a digit, including 0, so an empty rail is distinguishable when collapsed.
   const tab = $('#railtabnum');
-  tab.textContent = String(items);
-  tab.className = 'railtabnum' + (blocked ? ' hot' : '') + (items ? '' : ' zero');
+  tab.textContent = String(urgent);
+  tab.className = 'railtabnum' + (blocked ? ' hot' : '') + (urgent ? '' : ' zero') +
+                  (!urgent && quiet ? ' soft' : '');
   $('#railtab').title = blocked
     ? `${blocked} agent${blocked > 1 ? 's are' : ' is'} blocked waiting on you`
-    : items ? `${items} waiting` : 'nothing waiting';
+    : urgent ? `${urgent} waiting` : quiet ? `${quiet} quiet item${quiet > 1 ? 's' : ''}` : 'nothing waiting';
 }
 
 /* Context used, in whole percent, or null when the lane did not say. */

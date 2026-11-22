@@ -254,11 +254,12 @@ def _observe_once():
 
 
 # ── needs-you, off the glass ─────────────────────────────────────────────────
-# Human surfaces report the highest seq they showed per pane; a `permission` or
-# `dead` event still unseen after NOTIFY_GRACE_S becomes a desktop notification.
+# Human surfaces report the highest seq they showed per pane; a `permission`,
+# `question` (ask_human) or `dead` event still unseen after NOTIFY_GRACE_S
+# becomes a desktop notification.
 # An open SSE stream is not proof anyone is looking. Kept in memory only.
 NOTIFY_GRACE_S = 20
-NOTIFY_KINDS = ("permission", "dead")
+NOTIFY_KINDS = ("permission", "question", "dead")
 SEEN = {}                   # pane id -> highest seq a human surface showed
 _NOTIFY_PENDING = {}        # pane id -> newest unseen notifiable event
 _NOTIFY_LOCK = threading.Lock()
@@ -327,6 +328,12 @@ def _notify_check(pane_id):
             return None                     # answered meanwhile
         title = f"{p.title} needs you"
         body = f"permission: {d.get('title') or d.get('kind') or 'a tool call'}"
+    elif ev["kind"] == "question":
+        q = getattr(p, "question", None) or {}
+        if not q.get("text") or (d.get("at") and q.get("at") != d.get("at")):
+            return None                     # answered or replaced meanwhile
+        title = f"{p.title} asks you"
+        body = str(q.get("text"))
     else:
         if p.state != "dead":
             return None                     # already resumed

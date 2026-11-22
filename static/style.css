@@ -222,6 +222,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
   font-weight:600}
 /* A trusted "0" reads calm, not like a stray badge -- borderless, dim. */
 .railtabnum.zero{background:none;border-color:transparent;color:var(--faint)}
+.railtabnum.zero.soft{color:var(--dim)}
 .brand{font-family:var(--serif);font-size:21px;padding:16px 18px 12px;letter-spacing:.4px}
 .new{margin:0 14px 14px;padding:9px 12px;border:1px solid var(--line2);border-radius:8px;
   background:var(--raise);color:var(--ink);font-size:12.5px;text-align:left}
@@ -434,6 +435,7 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 /* Unknown posture: deliberately drab so it never reads as a safety assurance. */
 .ph2 .f.unknown{font-style:italic}
 .ph2 .f.ctx.warn{color:var(--rust)}
+.ph2 .f.ctx.unk{color:var(--faint)}
 /* A pane on another hub this one drives; rust while the link is down. */
 .ph2 .f.remote{color:var(--dusk)}
 .ph2 .f.remote.warn{color:var(--rust)}
@@ -1268,6 +1270,9 @@ a.modlink{color:var(--dusk)}
 .hint.err{color:var(--rust)}
 .ncard.wt{border-left-color:var(--sage)}
 .ncard.wt.due{border-left-color:var(--ember)}
+.ncard.wait{border-left-color:var(--line)}
+.ncard.wait .qtext{color:var(--dim)}
+.needs .lab.rwait{margin-top:12px}
 dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh - 32px))}
 .dlg.rev{height:100%;box-sizing:border-box;gap:9px}
 .dlg.rev .hint{min-height:0}
@@ -1393,6 +1398,7 @@ dialog#revdlg{max-width:none;width:min(1400px,96vw);height:min(920px,calc(100vh 
 .rit .ini{display:none}
 .rit .flag{flex:none;font-family:var(--mono);font-size:10px;color:var(--faint);white-space:nowrap}
 .rit .flag.warn{color:var(--gold)}
+.rit .flag.ctxf.unk{opacity:.6}
 .roster > .rit:first-child{margin-top:2px}
 /* One line: tighter rows, and the ⋯ floats over the title's end on hover
    instead of reserving its width on every row. */
