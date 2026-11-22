@@ -380,7 +380,7 @@ check(/@media\(min-width:821px\)\{\s*\.app\.lshut/.test(css),
   check(cut.length === 220 && cut.startsWith('…'), 'T-WAIT-5 the excerpt is bounded from the front');
   // Rendering: quiet (never blocking), with its own section count.
   const r = fn('render');
-  check(/n\.appendChild\(waitCard\(w, narrow, dismiss\)\); items\+\+; quiet\+\+;/.test(r),
+  check(/n\.appendChild\(waitCard\(w, narrow\)\); items\+\+; quiet\+\+;/.test(r),
         'T-WAIT-6 render counts each wait card as quiet');
   check(/waits\.slice\(0, WAIT_SHOWN\)/.test(r), 'T-WAIT-7 the rail shows at most WAIT_SHOWN');
   eq(blockedCount([pane('w', { events: turn(5, ask) })]), 0, 'T-WAIT-8 a wait never counts as blocked');

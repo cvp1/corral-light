@@ -3631,10 +3631,8 @@ function render() {
   const waits = waitingTurns(panes, waitSeen(), Date.now(), new Set(wtCards.map(p => p.id)));
   if (waits.length) {
     n.appendChild(el('div', 'lab rwait', `Waiting on you · ${waits.length}`));
-    const ids = panes.map(p => p.id);
-    const dismiss = w => { waitDismiss(w.p.id, w.seq, ids); render(); };
     for (const w of waits.slice(0, WAIT_SHOWN)) {
-      n.appendChild(waitCard(w, narrow, dismiss)); items++; quiet++;
+      n.appendChild(waitCard(w, narrow)); items++; quiet++;
     }
     if (waits.length > WAIT_SHOWN) n.appendChild(el('div', 'fnote nmore',
       `${waits.length - WAIT_SHOWN} more waiting: the oldest are shown first`));
@@ -3825,9 +3823,14 @@ function ctxTag(p) {
   const c = ctxPct(p);
   return c === null ? ' · ctx unknown' : ` · ${c}% ctx`;
 }
+/* Got it: hide this turn's card until the pane ends another turn. */
+function dismissWait(w) {
+  waitDismiss(w.p.id, w.seq, [...S.panes.keys()]);
+  render();
+}
 /* One waiting turn as a quiet rail card: who, how long, the end of the answer,
  * Reply (opens the pane, composer ready) and Got it (dismiss this turn). */
-function waitCard(w, narrow, onDismiss) {
+function waitCard(w, narrow) {
   const p = w.p;
   const c = el('div', 'ncard wait');
   c.appendChild(el('div', 't', p.title || p.label));
@@ -3842,7 +3845,7 @@ function waitCard(w, narrow, onDismiss) {
   const ok = el('button', 'fbtn', 'Got it');
   ok.type = 'button';
   ok.title = 'hide this until the agent finishes another turn';
-  ok.onclick = () => onDismiss(w);
+  ok.onclick = () => dismissWait(w);
   acts.append(go, ok);
   c.appendChild(acts);
   return c;
