@@ -184,5 +184,40 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
         'T-DD-5 the bar shows the same Needs-you count as the rail');
 }
 
+/* ── T-DD-6: alerts on this device (Web Push) ────────────────────────── */
+{
+  const pushSupport = load('pushSupport');
+  const nav = { serviceWorker: {} };
+  eq(pushSupport({ isSecureContext: false, navigator: nav, PushManager: 1, Notification: 1 }), 'none',
+     'T-DD-6 plain http (the LAN wall): no bell at all');
+  eq(pushSupport({ isSecureContext: true, navigator: {}, PushManager: 1, Notification: 1 }), 'none',
+     'T-DD-6 no service worker: no bell');
+  eq(pushSupport({ isSecureContext: true, navigator: nav }), 'install',
+     'T-DD-6 iPhone Safari before Add to Home Screen: the bell explains');
+  eq(pushSupport({ isSecureContext: true, navigator: nav, PushManager: 1, Notification: 1 }), 'ok',
+     'T-DD-6 secure, worker and PushManager: alerts can be turned on');
+  const b64urlBytes = load('b64urlBytes', [], { atob: s => Buffer.from(s, 'base64').toString('binary') });
+  const key = Buffer.from(Array.from({ length: 65 }, (_, i) => (i * 37 + 4) % 256));
+  const enc = key.toString('base64url');
+  eq([...b64urlBytes(enc)], [...key], 'T-DD-6 the server key decodes byte for byte (base64url, no padding)');
+  const linkedPane = load('linkedPane');
+  const panes = new Map([['p1', {}]]);
+  eq(linkedPane('?pane=p1', panes), 'p1', 'T-DD-6 a tapped notice opens its pane');
+  eq(linkedPane('?pane=gone', panes), null, 'T-DD-6 a closed pane is ignored');
+  eq(linkedPane('', panes), null, 'T-DD-6 no link, nothing opened');
+  const on = fn('pushOn');
+  check(on.indexOf('Notification.requestPermission') < on.indexOf("api('/api/push/key')"),
+        'T-DD-6 permission is asked first, straight from the tap (iOS requires it)');
+  check(/userVisibleOnly: true/.test(on), 'T-DD-6 every push shows something');
+  const sw = readFileSync(new URL('./static/sw.js', import.meta.url), 'utf8');
+  check(/fetch\('\/api\/push\/latest', \{ credentials: 'same-origin'/.test(sw),
+        'T-DD-6 the worker asks the hub over its own origin, not the push service');
+  check(/catch \{ return FALLBACK; \}/.test(sw) && /if \(!r\.ok\) return FALLBACK;/.test(sw),
+        'T-DD-6 an unreachable hub still shows a notice (a silent push costs the subscription)');
+  check(/new URL\(w\.url\)\.origin !== self\.location\.origin/.test(sw),
+        'T-DD-6 a tap only ever focuses this origin');
+  check(!/innerHTML/.test(sw), 'T-DD-6 the worker parses no HTML');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts');

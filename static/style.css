@@ -378,6 +378,9 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
   background:var(--raise);color:var(--faint);font-size:12px;line-height:1;
   cursor:pointer;flex:none}
 .keysbtn:hover{color:var(--ink);border-color:var(--line2)}
+/* The alerts bell: dim until this device is subscribed. */
+#pushbtn{filter:grayscale(1);opacity:.7}
+#pushbtn.on{filter:none;opacity:1;border-color:var(--gold)}
 .keysbody{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;
   align-items:baseline;margin:6px 0 4px;max-height:60vh;overflow-y:auto}
 .keysrow{display:contents}

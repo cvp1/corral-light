@@ -11,6 +11,7 @@ import os
 import queue
 import re
 import signal
+import subprocess
 import sys
 import threading
 import types
@@ -33,6 +34,7 @@ import hublink
 import claude_login
 import modules
 import notify
+import webpush
 import sessions
 import worktrees
 from corral_core import edge
@@ -79,9 +81,30 @@ BOUND_LOGIN = (os.environ.get("CORRAL_TAILSCALE_LOGIN") or "").strip() or None
 # DESIGN-6 S7: the hostname Tailscale Serve presents for this hub, if any. A
 # key enrolled through Serve is scoped to it (WebAuthn binds a credential to
 # its rpId). It comes from configuration, never from a request's Host.
-SERVE_HOST = (os.environ.get("CORRAL_LIGHT_SERVE_HOST") or "").strip().lower() or None
-if SERVE_HOST and not re.fullmatch(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?", SERVE_HOST):
-    SERVE_HOST = None
+# `host` or `host:port`: Serve on a port other than 443 (on a machine where 443
+# is already taken, e.g. by a public Funnel) changes the page's origin, and a
+# key ceremony is held to the exact origin. The rpId stays the bare host.
+def parse_serve_host(v):
+    """(host, port) from `host` or `host:port`; (None, None) when invalid.
+    Port 443 is the default and reads as None."""
+    m = re.fullmatch(r"([a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?)(?::([0-9]{1,5}))?",
+                     (v or "").strip().lower())
+    if not m:
+        return None, None
+    port = int(m.group(3)) if m.group(3) else None
+    if port is not None and not (0 < port < 65536):
+        return None, None
+    return m.group(1), (None if port == 443 else port)
+
+
+SERVE_HOST, SERVE_PORT = parse_serve_host(os.environ.get("CORRAL_LIGHT_SERVE_HOST"))
+
+
+def serve_origin():
+    """https://host[:port] of the Serve front, or None when not configured."""
+    if not SERVE_HOST:
+        return None
+    return f"https://{SERVE_HOST}" + (f":{SERVE_PORT}" if SERVE_PORT else "")
 KEY_ROUTES = ("/api/pair/key/begin", "/api/pair/key/finish")
 ENROLL_ROUTES = ("/api/pair/key/enroll/begin", "/api/pair/key/enroll/finish",
                  "/api/pair/key/enroll/approve")
@@ -339,8 +362,25 @@ def _notify_check(pane_id):
             return None                     # already resumed
         title = f"{p.title} stopped"
         body = str(d.get("reason") or "the agent exited")
+    webpush.remember(pane_id, ev["kind"], title, body)
+    if not notify.quiet_now():
+        _push_now()
     shown, why = notify.desktop(f"Corral Light — {title}", body)
     return shown, why
+
+
+def push_subject():
+    """VAPID `sub`: who runs this push sender. The Serve origin when there is
+    one (push only works over https, so in practice there always is)."""
+    return serve_origin() or "https://localhost"
+
+
+def _push_now():
+    """Ping subscribed devices off-thread; never raises into the notifier."""
+    try:
+        return webpush.send_async(sessions.STATE, push_subject())
+    except Exception:                                   # noqa: BLE001
+        return None
 
 
 def _notify_loop():
@@ -412,7 +452,8 @@ class Handler(BaseHTTPRequestHandler):
                                           or peer == BIND)
         except ValueError:
             local = False
-        if not local:
+        # Serve's hop arrives from loopback too: a tailnet caller is not local.
+        if not local or edge.via_serve(self.headers, peer):
             return self._json({"error": "peer routes answer only on this machine"}, 403)
         # Same UNIX user, via /proc/net/tcp on Linux (the pane token can be on
         # a world-readable command line); unknown is refused.
@@ -568,6 +609,24 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise ValueError("malformed JSON body")
 
+    def _push_route(self, p, b):
+        """Subscribe or forget this device, or send it a test ping now."""
+        try:
+            if p == "/api/push/subscribe":
+                n = webpush.subscribe(sessions.STATE, b.get("endpoint"), b.get("label"))
+                return self._json({"ok": True, "devices": n})
+            if p == "/api/push/unsubscribe":
+                return self._json({"ok": True,
+                                   "removed": webpush.unsubscribe(sessions.STATE, b.get("endpoint"))})
+            webpush.remember("", "test", "Corral Light", "Test alert: this device will be told "
+                          "when an agent needs you.")
+            r = webpush.send_all(sessions.STATE, push_subject())
+            return self._json(dict(r, ok=not r["errors"]))
+        except webpush.PushError as e:
+            return self._json({"error": str(e)[:200]}, 400)
+        except (OSError, subprocess.SubprocessError) as e:
+            return self._json({"error": f"push unavailable: {e}"[:200]}, 503)
+
     def _local_human(self):
         """Is the clicker at this machine? Loopback socket and no proxy or
         Tailscale Serve header (Serve also arrives via loopback)."""
@@ -591,7 +650,7 @@ class Handler(BaseHTTPRequestHandler):
         hostname when the request came through Serve. Never the Host or any
         forwarded header, which the client writes."""
         if edge.via_serve(self.headers, self._peer()):
-            return (f"https://{SERVE_HOST}", SERVE_HOST) if SERVE_HOST else (None, None)
+            return (serve_origin(), SERVE_HOST) if SERVE_HOST else (None, None)
         return f"http://localhost:{PORT}", "localhost"
 
     def _key_route(self, p, b):
@@ -705,6 +764,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/hubs" or p.startswith("/api/hubs/"):
             return self._hubs_route("GET", p, q, None)
+        if p == "/api/push/key":
+            # The applicationServerKey to subscribe with, or why there is none.
+            try:
+                return self._json({"key": webpush.public_key(sessions.STATE),
+                                   "devices": len(webpush.load_subs(sessions.STATE))})
+            except (webpush.PushError, OSError, subprocess.SubprocessError) as e:
+                return self._json({"key": None, "why": str(e)[:200]})
+        if p == "/api/push/latest":
+            # What the service worker shows after a payload-less ping.
+            return self._json({"notices": webpush.recent(5)})
         if p == "/api/session/worktree/probe":
             return self._worktree_probe((q.get("cwd") or [""])[0])
         if p == "/api/session/worktrees":
@@ -960,6 +1029,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._hubs_route("POST", p, None, b if isinstance(b, dict) else {})
             if p in ENROLL_ROUTES:
                 return self._key_route(p, b if isinstance(b, dict) else {})
+            if p in ("/api/push/subscribe", "/api/push/unsubscribe", "/api/push/test"):
+                return self._push_route(p, b if isinstance(b, dict) else {})
             if p in ("/api/session/rigs/save", "/api/session/rigs/up",
                      "/api/session/rigs/rm"):
                 from corral_core import rigs

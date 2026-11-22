@@ -993,6 +993,34 @@ class Routes(Base):
                                       **{"Tailscale-User-Login": "someone@example.com"})
         self.assertEqual((st, new["keyOrigin"], new["keyAvailable"]), (200, None, False))
 
+    def test_through_serve_on_another_port_the_origin_carries_it(self):
+        """Serve on :8443 (443 taken by a Funnel): the ceremony is held to
+        https://host:8443, and the rpId stays the bare host."""
+        host = "hub.example.ts.net"
+        with mock.patch.object(self.hub, "SERVE_HOST", host), \
+             mock.patch.object(self.hub, "SERVE_PORT", 8443):
+            self.enroll_first(self.a, origin=f"https://{host}:8443", rp_id=host)
+            ts = {"Tailscale-User-Login": "someone@example.com"}
+            st, _, cookie, _ = self.pair_over_http(f"https://{host}:8443", host, **ts)
+        self.assertEqual(st, 200)
+        self.assertIn("Secure", cookie)
+
+    def test_the_serve_host_setting_parses_host_and_port(self):
+        p = self.hub.parse_serve_host
+        self.assertEqual(p("Hub.Example.ts.net"), ("hub.example.ts.net", None))
+        self.assertEqual(p("hub.example.ts.net:8443"), ("hub.example.ts.net", 8443))
+        self.assertEqual(p("hub.example.ts.net:443"), ("hub.example.ts.net", None))
+        for bad in ("", None, "hub:0", "hub:70000", "https://hub", "hub:84a3", "hub/x",
+                    "-hub", "hub:8443:1", "user@hub"):
+            self.assertEqual(p(bad), (None, None), bad)
+
+    def test_peer_routes_refuse_a_caller_that_came_through_serve(self):
+        """Serve's hop arrives from loopback; the identity header gives it away."""
+        st, body, _, _ = self.call("POST", "/api/peer/panel/start", {},
+                                   **{"Tailscale-User-Login": "someone@example.com"})
+        self.assertEqual(st, 403)
+        self.assertIn("only on this machine", body["error"])
+
     def test_serve_without_a_configured_host_refuses(self):
         with mock.patch.object(self.hub, "SERVE_HOST", None):
             st, body, _, _ = self.call("POST", "/api/pair/key/begin", {"code": "x"},
