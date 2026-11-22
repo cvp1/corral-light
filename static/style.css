@@ -521,6 +521,18 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
   border:1px solid var(--line);border-radius:6px;padding:9px 11px;margin-bottom:0;
   overflow-x:auto;white-space:pre}
 .msg.md pre code{background:none;border:0;padding:0}
+.msg.md .codeblk{position:relative;margin:6px 0 0}
+.msg.md .codeblk pre{margin:0}
+.codebar{position:absolute;top:4px;right:6px;display:flex;align-items:center;gap:6px;z-index:1}
+.codelang{font-family:var(--mono);font-size:10.5px;color:var(--faint);text-transform:lowercase}
+.codecopy{font:inherit;font-size:11px;line-height:1;padding:4px 8px;border-radius:5px;cursor:pointer;
+  border:1px solid var(--line2);background:var(--ground);color:var(--dim)}
+.codecopy:hover{color:var(--ink);border-color:var(--ink)}
+/* Pointer devices see the bar on hover; touch screens always see it. */
+@media (hover:hover){.codebar{opacity:0;transition:opacity .12s}
+  .codeblk:hover .codebar,.codecopy:focus-visible{opacity:1}
+  .codeblk:focus-within .codebar{opacity:1}}
+@media (hover:none){.codecopy{padding:8px 12px}.msg.md .codeblk pre{padding-top:38px}}
 .msg.md .mdh{font-weight:650;color:var(--ink);margin:10px 0 2px}
 .msg.md .mdh:first-child{margin-top:0}
 .msg.md .mdh1{font-size:16px}.msg.md .mdh2{font-size:15px}
