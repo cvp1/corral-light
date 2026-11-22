@@ -58,19 +58,30 @@ def split(keys, n):
 
 
 def refresh(log):
-    per, prev = Counter(), None
+    # `gh run view --log` prefixes each line with its job ("shard (2)\t...").
+    # Time a line only against the line before it in the same job: across a
+    # job boundary the gap is two runners' clocks, not a class's duration.
+    per, prev = Counter(), {}
     for line in log.splitlines():
         m = re.search(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6})\d*Z\s+\S+ \(([\w.]+)\.\w+\) \.\.\. ", line)
         if not m:
             continue
+        job = line.split("\t", 1)[0] if "\t" in line[:m.start()] else ""
         t = datetime.datetime.fromisoformat(m[1])
-        if prev:
-            per[m[2].replace("__main__", "test_corral_light")] += (t - prev).total_seconds()
-        prev = t
+        if job in prev:
+            per[m[2].replace("__main__", "test_corral_light")] += (t - prev[job]).total_seconds()
+        prev[job] = t
     if not per:
         sys.exit("no verbose unittest lines with timestamps on stdin")
-    DURATIONS.write_text(json.dumps({k: round(v, 1) for k, v in sorted(per.items())}, indent=0) + "\n")
-    print(f"{len(per)} class durations written to {DURATIONS.name}")
+    # A shard's first class has no line before it to time against, so a log
+    # never times every class. Keep the last known value for the ones it
+    # missed: dropped, the balancer counts a 160 s class at DEFAULT (5 s).
+    old = json.loads(DURATIONS.read_text()) if DURATIONS.exists() else {}
+    kept = {k: v for k, v in old.items() if k not in per and k in tests_by_class()}
+    merged = {**kept, **{k: round(v, 1) for k, v in per.items()}}
+    DURATIONS.write_text(json.dumps(dict(sorted(merged.items())), indent=0) + "\n")
+    print(f"{len(per)} class durations written to {DURATIONS.name}, "
+          f"{len(kept)} kept from before")
 
 
 def main(argv):
