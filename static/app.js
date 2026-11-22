@@ -1115,6 +1115,7 @@ function headSignature(p) {
           (cfg.model || {}).value, (cfg.effort || {}).value, u.size, u.used,
           S.detail.has(p.id) ? 1 : 0, FIND.pane === p.id ? 1 : 0,
           p.portedFrom ? JSON.stringify(p.portedFrom) : '', p.cwd,
+          p.goal ? JSON.stringify(p.goal) : '',
           p.remote ? JSON.stringify(p.remote) : '',
           JSON.stringify(wtPillModel(p.worktree)), JSON.stringify(paneMeta(p))].join('|');
 }
@@ -1635,6 +1636,14 @@ function posturePill(p) {
  * else is plain text that reads only when looked for, not a row of badges.
  * Four controls stay visible (find, the ⋯ menu, minimize, close); every other
  * pane action lives in openPaneMenu, which the roster row opens too. */
+/* The pinned goal's one line and its tooltip, or null. Pure (Node selftest). */
+function goalLine(p) {
+  const g = p && p.goal;
+  if (!g || !g.task) return null;
+  const text = '◎ ' + g.task + (g.done ? `  ·  done when ${g.done}` : '');
+  return { text, title: `goal: ${g.task}` + (g.done ? `\ndone when: ${g.done}` : '') };
+}
+
 function paneHead(p) {
   const h = el('div', 'ph');
   const row = el('div', 'ph1');
@@ -1666,6 +1675,12 @@ function paneHead(p) {
   row.appendChild(ctl);
   h.appendChild(row);
 
+  // The goal it was started with, pinned under the title (text, never markup).
+  const g = goalLine(p);
+  if (g) {
+    const gl = el('div', 'goal', g.text); gl.title = g.title;
+    h.appendChild(gl);
+  }
   // The facts, in the order they are asked for: who, where, on what, how.
   const facts = el('div', 'ph2');
   const fact = node => { node.classList.add('f'); facts.appendChild(node); return node; };
@@ -5050,7 +5065,8 @@ function wireDialog() {
   };
   $('#f-role').onchange = () => {
     const r = (S.roles || []).find(x => x.id === $('#f-role').value);
-    $('#rolehint').textContent = r ? `${r.data_class} · instructions go into the composer; nothing is sent until you press send` : '';
+    $('#rolehint').textContent = r ? `${r.data_class} · with a task, its instructions are sent ` +
+      `ahead of it; without one they go into the composer, unsent` : '';
     if (r && r.lane && [...$('#f-agent').options].some(o => o.value === r.lane)) {
       $('#f-agent').value = r.lane;
       $('#f-agent').dispatchEvent(new Event('change'));
@@ -5265,8 +5281,20 @@ function wireDialog() {
     fillRoles();
     $('#f-quick').checked = !!dlg._quickSet; dlg._quickSet = false;
     $('#quickhint').textContent = 'now: ' + quickLabel();
+    paintCfgSummary();
     dlg.showModal();
+    // Task first: the cursor starts where the work is described.
+    requestAnimationFrame(() => $('#f-task').focus());
   };
+  // The folded settings say what they are, live, so nothing hides behind them.
+  dlg.addEventListener('input', paintCfgSummary);
+  dlg.addEventListener('change', paintCfgSummary);
+  // ⌘/Ctrl+Enter in the task or its finish line is Start.
+  for (const id of ['#f-task', '#f-done']) {
+    $(id).addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('#f-go').click(); }
+    });
+  }
   $('#f-posture').onchange = e => {
     $('#posturehint').textContent = HINTS[e.target.value];
     if (!raeAfterPosture($('#f-rae').checked, e.target.value)) $('#f-rae').checked = false;
@@ -5282,12 +5310,14 @@ function wireDialog() {
     const common = { agent: dlg._chosenAgent(), cwd,
                      model: $('#f-model').value, effort: $('#f-effort').value,
                      role: $('#f-role').value };
+    const task = $('#f-task').value.trim(), doneWhen = $('#f-done').value.trim();
+    if (task) { common.task = task; if (doneWhen) common.doneWhen = doneWhen; }
     const rh = dlg._remoteHost && dlg._remoteHost();
     if (rh) {
       // A pane on another machine: its lane, its folder, run there as you.
       common.host = rh.peer; delete common.role;
       if (posture) common.posture = posture;
-      await startConversation(common);
+      if (await startConversation(common)) clearTask();
       return;
     }
     S.lastCwd = cwd;
@@ -5323,16 +5353,17 @@ function wireDialog() {
       // Later: arm it, open nothing now. The prompt is stored as typed (a
       // role's instructions are inlined server-side when it is armed).
       try {
+        if (!task) { toast('Later needs a task: it is what the pane will be asked', true); return; }
         const r = await api('/api/session/schedule/add', { ...common, when,
-          repeat: $('#f-repeat').value, prompt: $('#f-prompt').value });
+          repeat: $('#f-repeat').value });
         toast(`scheduled for ${new Date(r.job.at).toLocaleString()}`);
         for (const n of (r.job.role_notes || [])) toast(n);
-        $('#f-when').value = ''; $('#f-prompt').value = '';
+        $('#f-when').value = ''; clearTask();
         await refresh();
       } catch (e) { toast(e.message, true); }
       return;
     }
-    await startConversation({ ...common, ...wtPick });
+    if (await startConversation({ ...common, ...wtPick })) clearTask();
   });
   $('#new-quick').onclick = quickStart;
   // Say exactly what ⚡ will start, read at hover time so it never goes stale.
@@ -5355,10 +5386,41 @@ async function startConversation(common) {
     S.focus = d.pane.id;
     render();
     if (d.pane.state === 'dead') toast('agent failed to start: ' + (d.pane.error || ''), true);
+    else if (common.task && !d.sent) {
+      // Never lose what was typed: it goes back into the pane's box, unsent.
+      insertIntoComposer(d.pane.id, common.task + (common.doneWhen
+        ? `\n\nDone when: ${common.doneWhen}` : ''), 'the task was NOT sent: ' +
+        (d.error || 'unknown') + ' — it is in the box');
+      toast('the task was NOT sent: ' + (d.error || 'unknown'), true);
+    }
     else if (d.preamble) insertIntoComposer(d.pane.id, d.preamble + '\n\n---\n\n',
       `role ${common.role}: its instructions are in the box — add your ask and send`);
     for (const n of (d.notes || [])) toast(n);
-  } catch (e) { toast(e.message, true); }
+    return d.pane.state !== 'dead';
+  } catch (e) { toast(e.message, true); return false; }
+}
+
+function clearTask() { $('#f-task').value = ''; $('#f-done').value = ''; }
+
+/* The folded settings' one line: agent · model · effort · posture in folder,
+ * plus the role. Pure (Node selftest). */
+function cfgSummaryText(f) {
+  const bits = [f.agent || 'no agent', f.model || 'default model'];
+  if (f.effort) bits.push(f.effort + ' effort');
+  if (f.posture) bits.push(f.posture);
+  return (f.role ? `role ${f.role} · ` : '') + bits.join(' · ') + ` in ${f.cwd || '~'}`;
+}
+function paintCfgSummary() {
+  const sum = $('#f-cfgsum');
+  if (!sum) return;
+  const txt = sel => { const n = $(sel); return n && n.value && n.selectedIndex >= 0
+    ? n.options[n.selectedIndex].text : ''; };
+  const ag = $('#f-agent'), host = $('#f-host');
+  const agent = ag && ag.value.startsWith('group:') && host && host.value ? txt('#f-host') : txt('#f-agent');
+  sum.textContent = cfgSummaryText({
+    agent, model: txt('#f-model'), effort: txt('#f-effort'),
+    posture: $('#f-posture').disabled ? '' : $('#f-posture').value,
+    cwd: $('#f-cwd').value.trim(), role: $('#f-role').value });
 }
 
 // The lane the dialog would land on: walk agents in menu order and take the

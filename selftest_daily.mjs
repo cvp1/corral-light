@@ -304,5 +304,45 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(/\.rit \.now\{/.test(css), 'T-DD-8 the now-line is styled to one line');
 }
 
+// T-DD-9 task-first New: the task leads, settings fold behind a line, the
+// goal is pinned, and a task that did not send is never lost.
+{
+  const cs = load('cfgSummaryText');
+  eq(cs({ agent: 'Claude Code', model: 'opus', effort: 'high', posture: 'auto', cwd: '~/ai-os' }),
+     'Claude Code · opus · high effort · auto in ~/ai-os', 'T-DD-9 the folded line names every setting');
+  eq(cs({ agent: 'Codex', role: 'reviewer' }), 'role reviewer · Codex · default model in ~',
+     'T-DD-9 a role leads, an unset model says so');
+
+  const gl = load('goalLine');
+  eq(gl({}), null, 'T-DD-9 no goal, no line');
+  eq(gl({ goal: { task: 'fix the flake', done: 'CI green 3x' } }),
+     { text: '◎ fix the flake  ·  done when CI green 3x',
+       title: 'goal: fix the flake\ndone when: CI green 3x' }, 'T-DD-9 the pinned goal');
+  check(/const gl = el\('div', 'goal', g\.text\)/.test(src), 'T-DD-9 the goal is set as text');
+  check(/p\.goal \? JSON\.stringify\(p\.goal\)/.test(fn('headSignature')),
+        'T-DD-9 a goal change repaints the header');
+
+  const iTask = html.indexOf('id="f-task"'), iCfg = html.indexOf('id="f-cfg"'),
+        iAgent = html.indexOf('id="f-agent"'), iEnd = html.indexOf('</details>', iCfg);
+  check(iTask > 0 && iTask < iCfg && iCfg < iAgent && iAgent < iEnd,
+        'T-DD-9 the task comes first and the agent is inside the folded settings');
+  check(!/id="f-prompt"/.test(html) && !/#f-prompt/.test(src),
+        'T-DD-9 Later asks the task above, not a second box');
+  check(/common\.task = task/.test(src), 'T-DD-9 Start carries the task');
+
+  // The not-sent path: the typed task goes back into the pane, unsent.
+  const calls = [];
+  const sc = load('startConversation', [], {
+    api: async () => ({ pane: { id: 'n1', state: 'ready' }, sent: false, error: 'boom' }),
+    S: { panes: new Map() }, render: () => {}, toast: (m, bad) => calls.push(['toast', m, !!bad]),
+    insertIntoComposer: (id, text) => calls.push(['box', id, text]) });
+  const ok = await sc({ agent: 'claude', task: 'do it', doneWhen: 'done' });
+  eq(calls.find(c => c[0] === 'box'), ['box', 'n1', 'do it\n\nDone when: done'],
+     'T-DD-9 an unsent task is put back in the box');
+  check(calls.some(c => c[0] === 'toast' && c[2] && /NOT sent: boom/.test(c[1])),
+        'T-DD-9 and it says so, loudly');
+  check(ok === true, 'T-DD-9 the pane itself opened');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New');
