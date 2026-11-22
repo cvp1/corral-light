@@ -80,13 +80,19 @@ if (!KEYS_SRC) throw new Error('no `const KEYS = [...]` in app.js');
 const openPalette = () => { NODES['#palette'].open = true; };
 // `r` (own-branch review) needs a focused own-branch pane; there is none here.
 const reviewTarget = () => null, openReview = () => {}, anyDialogOpen = () => false;
-const M = new Function('$', 'el', 'openPalette', 'reviewTarget', 'openReview', 'anyDialogOpen', `
+// Focus mode and Alt+N: no pane here, wide screen, nothing in focus mode.
+const S = { wide: null }, isNarrow = () => false, keyPane = () => null,
+      toggleWide = () => {}, jumpToPane = () => {};
+const M = new Function('$', 'el', 'openPalette', 'reviewTarget', 'openReview', 'anyDialogOpen',
+                       'S', 'isNarrow', 'keyPane', 'toggleWide', 'jumpToPane', `
   ${KEYS_SRC[0]}
+  ${fn('altDigit')}
   ${fn('isTypingTarget')}
   ${fn('toggleKeys')}
   ${fn('reviewKey')}
   return { KEYS, toggleKeys, isTypingTarget };
-`)($, el, openPalette, reviewTarget, openReview, anyDialogOpen);
+`)($, el, openPalette, reviewTarget, openReview, anyDialogOpen,
+  S, isNarrow, keyPane, toggleWide, jumpToPane);
 
 /* Every entry is describable — an overlay row with no words is a row that
  * teaches nothing. */
