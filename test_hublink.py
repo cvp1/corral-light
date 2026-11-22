@@ -4,6 +4,7 @@ real git, fake pane managers."""
 import json
 import os
 import socket
+import threading
 import subprocess
 import tempfile
 import time
@@ -19,6 +20,17 @@ def _free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+def stop_together(*hubs):
+    """Stop hubs on parallel threads. Each stop waits out its listener's
+    serve_forever poll (0.5 s): two in turn cost each drive test ~1 s.
+    (HubLinkTest measured no gain, so it stops its hubs in turn.)"""
+    ts = [threading.Thread(target=h.svc.stop) for h in hubs]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
 
 
 def git(*a, cwd):
