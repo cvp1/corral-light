@@ -41,14 +41,32 @@ jobs:
         if: matrix.shard == 1
         run: python3 -m unittest discover -s tests/container -p 'test_*.py'
 
-  # The required check: green only when every shard passed.
+  # T-ISO-1 on its own runner, in parallel with the shards (tests/ci_shard.py
+  # OWN_JOB): one ~141 s class that would otherwise set every run's floor.
+  isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Vendor ACP adapters
+        run: npm ci --prefix spike
+      - name: Own-branch suites in a throwaway HOME
+        run: python3 -m unittest -v test_worktrees_iso
+
+  # The required check: green only when every shard and the isolation job passed.
   test:
-    needs: shard
+    needs: [shard, isolation]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - run: test "${{ needs.shard.result }}" = success
+      - run: test "${{ needs.shard.result }}" = success && test "${{ needs.isolation.result }}" = success
 
   # The module sandbox on macOS (Seatbelt; docs/finops-macos-sandbox.md §6).
   # It must be available here: the sandboxed tests skip without it, so the
