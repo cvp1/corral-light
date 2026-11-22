@@ -27,6 +27,11 @@ DEFAULT = 5.0   # seconds for a class with no recorded time
 # Shard 1 also runs the core and container suites (ci.yml): ~20 s measured
 # 2026-11-22. It starts the split carrying them so it ends with the others.
 SHARD1_EXTRA = 20.0
+# Classes that run in their own CI job, not in a shard: {key: the step ci.yml
+# must run}. Isolation (T-ISO-1) is one ~141 s class that reruns five suites in
+# a throwaway HOME; in a shard it set the floor for the whole run. A shard
+# refuses to start if ci.yml no longer runs the step, so it cannot drop out.
+OWN_JOB = {"test_worktrees_iso.Isolation": "python3 -m unittest -v test_worktrees_iso"}
 
 
 def tests_by_class():
@@ -95,6 +100,11 @@ def main(argv):
         sys.exit(__doc__)
     n = int(argv[-1])
     classes = tests_by_class()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    for key, step in OWN_JOB.items():
+        if key in classes and step not in workflow:
+            sys.exit(f"{key} runs in its own CI job, but ci.yml has no `{step}`")
+        classes.pop(key, None)
     shards = split(classes, n)
     if cmd == "plan":
         for i, (secs, keys) in enumerate(shards, 1):
