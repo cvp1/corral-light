@@ -4161,7 +4161,6 @@ from test_claude_login import (Launcher, RealLauncherPath,  # noqa: F401,E402
                                Route as LoginRoute, Tick, FindsTheCli,
                                TheBrowserHalf)
 from test_drive import DriveTest                           # noqa: F401,E402
-from test_drive_e2e import DriveE2E                        # noqa: F401,E402
 from test_key_pairing import (T71_SameAssertionTwice,  # noqa: F401,E402
                               T711_ConcurrentFinishes, T72_Expiry, T73_Cap,
                               T74_RateLimits, T75_FirstEnrollment,
@@ -4186,6 +4185,16 @@ from test_modules import LinuxInterpreterOutsideUsr        # noqa: F401,E402
 from test_vendor_reports import FindBinary as GrokFindBinary  # noqa: F401,E402
 
 
+# Left out of CI on purpose, each with its reason. Run them locally when the
+# code they name changes.
+CI_EXEMPT = {
+    # 19 s for one test, a third of what the other nine modules cost together.
+    # DriveTest covers the same channel (real mTLS, drop and resume) and
+    # TwoHubs covers two real hubs; run it when drive.py or hubs_cli.py change.
+    "test_drive_e2e.DriveE2E": "drive.py end to end; overlaps DriveTest + TwoHubs",
+}
+
+
 def orphan_test_classes(namespace, root=ROOT):
     """Every root test_*.py class with tests that `namespace` does not hold.
     CI runs this module and nothing else at the root (tests/ci_shard.py), so
@@ -4201,7 +4210,8 @@ def orphan_test_classes(namespace, root=ROOT):
         for k, v in vars(mod).items():
             if (isinstance(v, type) and issubclass(v, unittest.TestCase)
                     and v.__module__ == mod.__name__ and names(v)
-                    and id(v) not in held):
+                    and id(v) not in held
+                    and f"{f.stem}.{k}" not in CI_EXEMPT):
                 out.append(f"{f.stem}.{k}")
     return out
 
