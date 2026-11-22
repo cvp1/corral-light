@@ -5355,12 +5355,74 @@ async function quickStart() {
 /* ── port: carry a conversation to another lane ───────────────────────────
  * The preview is the exact pack; Send posts its sha and the hub refuses if the
  * transcript has grown since. */
+
+/* The model/effort a carry pre-selects for `lane`, and where it came from.
+ * Without a pick the new pane runs the agent's own default, which need not be
+ * what this pane runs (an adapter's default can differ from the model a
+ * pane was opened with). First match wins: the source pane on the same lane, the ⚡ preset for
+ * that lane, the newest other open pane on it, else the agent's default.
+ * Pure (Node selftest). */
+function carryDefaults(src, lane, panes, quick) {
+  const pick = (p, from) => ({ model: p.model || p.wantModel || '',
+                               effort: p.effort || p.wantEffort || '', from });
+  if (src && src.agent === lane && (src.model || src.effort || src.wantModel))
+    return pick(src, 'this pane');
+  if (quick && quick.agent === lane && (quick.model || quick.effort)) return pick(quick, '⚡ preset');
+  const other = [...(panes || [])].reverse().find(p => p && p !== src && p.agent === lane &&
+    p.state !== 'dead' && (p.model || p.effort));
+  if (other) return pick(other, other.title || other.label || 'an open pane');
+  return { model: '', effort: '', from: '' };
+}
+
+/* Fill one model/effort picker from a lane's catalog entry; `want` is kept when
+ * offered, added when not (so a pane's live value always shows). Returns a hint
+ * for a fixed (unchoosable) value, else ''. */
+function fillCarryPick(node, entry, want) {
+  node.replaceChildren();
+  const opts = (entry && entry.options) || [];
+  const label = node.closest('label');
+  if (!opts.length && entry && entry.value) {
+    if (label) label.style.display = 'none';
+    node.disabled = true;
+    return `${entry.name || 'model'}: ${entry.value} — set by the agent.`;
+  }
+  if (label) label.style.display = '';
+  // Same rule as the New dialog: a list with its own "default" entry gets no
+  // second one, and an empty want lands on it.
+  const own = opts.find(o => /^default\b/i.test(o.name || ''));
+  if (!own) {
+    const def = el('option', null, 'Default (agent decides)'); def.value = '';
+    node.appendChild(def);
+  }
+  for (const o of opts) {
+    const n = el('option', null, o.name || o.value); n.value = o.value; node.appendChild(n);
+  }
+  if (want && !opts.some(o => o.value === want)) {
+    const n = el('option', null, want); n.value = want; node.appendChild(n);
+  }
+  node.disabled = !opts.length && !want;
+  node.value = want || (own ? own.value : '');
+  return '';
+}
+
 async function openPort(src) {
   const dlg = $('#portdlg'), sel = $('#p-agent'), go = $('#p-go');
   sel.replaceChildren();
   for (const a of S.agents.filter(a => a.available && !a.key.startsWith('host:'))) {
     const o = el('option', null, a.label); o.value = a.key; sel.appendChild(o);
   }
+  // Start on the source's own lane when it can take the carry (the common case
+  // is a fresh pane on the same agent).
+  if ([...sel.options].some(o => o.value === src.agent)) sel.value = src.agent;
+  const fillCfg = () => {
+    const cat = (S.catalog || {})[sel.value] || {};
+    const d = carryDefaults(src, sel.value, S.panes ? S.panes.values() : [], quickPreset());
+    const hints = [fillCarryPick($('#p-model'), cat.model, d.model),
+                   fillCarryPick($('#p-effort'), cat.effort, d.effort)].filter(Boolean);
+    if (d.from) hints.unshift(`model and effort from ${d.from}`);
+    $('#p-cfghint').textContent = hints.join(' · ');
+  };
+  fillCfg();
   // A seat stays with this pane; the new one starts without one.
   const seatNote = $('#p-seatnote');
   if (seatNote) seatNote.textContent = src.seat
@@ -5377,11 +5439,12 @@ async function openPort(src) {
       go.disabled = false;
     } catch (e) { $('#p-hint').textContent = e.message; $('#p-text').textContent = ''; }
   };
-  sel.onchange = load;
+  sel.onchange = () => { fillCfg(); load(); };
   dlg.onclose = async () => {
     if (dlg.returnValue !== 'ok' || !pack) return;
     try {
-      const r = await api('/api/session/port', { pane: src.id, agent: sel.value, sha: pack.sha });
+      const r = await api('/api/session/port', { pane: src.id, agent: sel.value, sha: pack.sha,
+        model: $('#p-model').value, effort: $('#p-effort').value });
       S.panes.set(r.pane.id, r.pane); S.focus = r.pane.id; render();
       toast(r.delivered ? 'carried — the new pane read the transcript'
                         : 'the pane opened but the transcript was NOT delivered: ' + r.error, !r.delivered);

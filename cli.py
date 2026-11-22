@@ -610,8 +610,12 @@ def v_port(c, a):
     else:
         raise ConsultError(f"no terminal to confirm on: re-run with --sha "
                            f"{pack['sha'][:DIGEST_MIN]}")
-    r = c.post("/api/session/port", {"pane": p["id"], "agent": lane, "sha": pack["sha"]},
-               timeout=consult.HANDSHAKE_S)
+    body = {"pane": p["id"], "agent": lane, "sha": pack["sha"]}
+    # Without --model the new pane runs the lane's own default, not this pane's.
+    for k in ("model", "effort"):
+        if getattr(a, k, None):
+            body[k] = getattr(a, k)
+    r = c.post("/api/session/port", body, timeout=consult.HANDSHAKE_S)
     c.say(f"{r['pane']['id']} " + ("delivered" if r["delivered"] else
                                    f"NOT delivered: {r['error']}"))
     return 0 if r["delivered"] else 1
@@ -776,6 +780,8 @@ def main(argv=None):
     s.add_argument("--lane", required=True)
     s.add_argument("--sha", help=f"≥{DIGEST_MIN} hex chars of the printed sha "
                                  f"(required without a terminal)")
+    s.add_argument("--model", help="exact model for the new pane (default: the lane's own)")
+    s.add_argument("--effort", help="effort for the new pane (default: the lane's own)")
     s.set_defaults(fn=v_port)
 
     s = sub.add_parser("search", help="full-text search of what was said in any pane")

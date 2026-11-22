@@ -239,6 +239,20 @@ class PortOverTheCli(HubCase):
         for line in self.cli("panes")[1].splitlines():
             self.cli("close", line.split()[0])
 
+    def test_port_carries_the_exact_model_through_the_hub(self):
+        pid = self.open()
+        self.cli("say", pid, "remember hazel")
+        _, out, _ = self.cli("port", pid, "--lane", "fake")
+        sha = out.strip().splitlines()[-1].split("sha ")[-1]
+        rc, out, err = self.cli("port", pid, "--lane", "fake", "--sha", sha[:12],
+                                "--model", "opus", "--effort", "high")
+        self.assertEqual(rc, 0, err)
+        new = out.splitlines()[-1].split()[0]
+        meta = json.loads((self.tmp / "state" / "panes" / new / "meta.json").read_text())
+        self.assertEqual((meta["want_model"], meta["want_effort"]), ("opus", "high"))
+        for line in self.cli("panes")[1].splitlines():
+            self.cli("close", line.split()[0])
+
 
 class TheLaneMatrix(HubCase):
     def test_the_fake_lane_remembers_and_refuses(self):
