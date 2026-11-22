@@ -4192,6 +4192,10 @@ from test_text_coalesce import (TextCoalescing,  # noqa: F401,E402
 from test_hublink import PeerStatusLine                    # noqa: F401,E402
 from test_modules import LinuxInterpreterOutsideUsr        # noqa: F401,E402
 from test_vendor_reports import FindBinary as GrokFindBinary  # noqa: F401,E402
+from test_webpush import (EndpointsAreOnlyPushServices,  # noqa: F401,E402
+                          TheSignature as WebPushSignature,
+                          Subscriptions as WebPushSubscriptions,
+                          Sending as WebPushSending, Notices as WebPushNotices)
 
 
 # Left out of CI on purpose, each with its reason. Run them locally when the
