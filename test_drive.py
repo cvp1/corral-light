@@ -8,7 +8,7 @@ import time
 import unittest
 
 import drive
-from test_hublink import Hub
+from test_hublink import Hub, stop_together
 
 
 class FakeDriven:
@@ -140,8 +140,7 @@ class DriveTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.a = Hub(self.tmp.name, "office").up()        # drives
         self.b = Hub(self.tmp.name, "bedroom").up()       # is driven
-        self.addCleanup(self.a.svc.stop)
-        self.addCleanup(self.b.svc.stop)
+        self.addCleanup(stop_together, self.a, self.b)
         self.driven = FakeDriven()
         self.b.svc.hooks["drive"] = self.driven
         tok = self.b.svc.invite("see,drive")["token"]     # b lets a: see, drive
@@ -158,7 +157,9 @@ class DriveTest(unittest.TestCase):
     def test_needs_the_drive_grant(self):
         self.b.svc.grant(self.aid, "see")
         link = self.a.svc.drive_link(self.bid, self.col.on_frame, self.col.cursors)
-        time.sleep(1.0)
+        deadline = time.time() + 10
+        while not link.error and time.time() < deadline:
+            time.sleep(0.02)
         self.assertFalse(link.up.is_set())
         self.assertIn("may not drive", link.error or "")
         # A refusal is not a drop: the link waits long before asking again,
@@ -234,6 +235,18 @@ class DriveTest(unittest.TestCase):
         self.assertEqual(r["pane"], pane)
         sends = [a for op, a in self.driven.ops if op == "send"]
         self.assertEqual(len(sends), 1)
+
+    def test_a_drop_is_noticed_at_once_every_time(self):
+        # 2026-11-22: closing the socket under a blocked read lost the wake one
+        # drop in five on macOS, and the link sat out its 10 s read timeout.
+        # 20 drops: the old code passes this by luck about 1% of the time.
+        link = self.link()
+        pane = link.call("open", {"lane": "fake", "cwd": "~"})["pane"]
+        for i in range(20):
+            link.wire.close()
+            t0 = time.monotonic()
+            link.call("send", {"pane": pane, "text": str(i)}, timeout=15)
+            self.assertLess(time.monotonic() - t0, 2.0, f"drop {i} took a read timeout")
 
     def test_a_channel_does_not_hold_a_listener_slot(self):
         self.link()

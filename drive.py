@@ -139,14 +139,25 @@ class _Wire:
         return obj
 
     def close(self):
+        """Any thread: end the channel and wake its reader. Shutdown only; the
+        descriptor stays the reader's. Closing it here, under a blocked read,
+        lost the wake on macOS one drop in five (the reader sat out its 10 s
+        timeout) and let the number be reused by another socket meanwhile."""
         if self.closed.is_set():
             return
         self.closed.set()
-        for f in (lambda: self.sock.shutdown(socket.SHUT_RDWR), self.sock.close):
-            try:
-                f()
-            except OSError:
-                pass
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def release(self):
+        """The reader, once its loop has ended: close, then free the socket."""
+        self.close()
+        try:
+            self.sock.close()
+        except OSError:
+            pass
 
 
 # ── the peer side: serve one channel ────────────────────────────────────────
@@ -191,7 +202,7 @@ class Served:
             self._read()
         finally:
             self.adapter.unsubscribe(self.q)
-            self.wire.close()
+            self.wire.release()
 
     def _snap(self, pane, since=None):
         since = self.cursors.get(pane, 0) if since is None else since
@@ -547,7 +558,7 @@ class Link:
             self._serve(wire)
             return True
         finally:
-            wire.close()
+            wire.release()
 
     def _serve(self, wire):
         last_beat = time.monotonic()
