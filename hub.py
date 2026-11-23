@@ -918,6 +918,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(folder_diff.changes(pane.cwd))
             except (folder_diff.Refused, worktrees.GitError, worktrees.GitTimeout) as e:
                 return self._json({"error": str(e)[:300]}, 409)
+        if p == "/api/session/files":
+            # `@` in the message box: files under the pane's folder matching
+            # the query (file_mention.py; read only, bounded).
+            import file_mention
+            pane_q = (q.get("pane") or [""])[0]
+            if REMOTE.has(pane_q):
+                return self._json({"error": "not available yet on a pane from another hub"}, 400)
+            pane = MGR.panes.get(pane_q)
+            if pane is None:
+                return self._json({"error": "no such pane"}, 404)
+            try:
+                return self._json(file_mention.suggest(pane.cwd, (q.get("q") or [""])[0]))
+            except (ValueError, worktrees.GitError, worktrees.GitTimeout) as e:
+                return self._json({"error": str(e)[:300]}, 409)
         if p == "/api/session/pending":
             # Authoritative pending permission payloads (from pane.pending, not
             # the bounded event ring), with the digest an approval must carry.

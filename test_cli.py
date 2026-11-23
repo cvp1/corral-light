@@ -538,6 +538,21 @@ class FolderChangesOverTheHub(HubCase):
         self.cli("close", pid)
 
 
+
+class FileMentionsOverTheHub(HubCase):
+    """GET /api/session/files: `@` suggestions from the pane's folder."""
+
+    def test_suggestions_come_from_the_pane_folder(self):
+        (self.tmp / "agent" / "notes-hub.md").write_text("x")
+        pid = self.open()
+        code = ("import sys, json, cli\n"
+                "print(json.dumps(cli.Cli(sys.argv[1]).get('/api/session/files?pane=' + sys.argv[2] + '&q=notes')))\n")
+        r = subprocess.run([sys.executable, "-c", code, self.url, pid], env=self.env, cwd=str(ROOT),
+                           capture_output=True, text=True, timeout=30)
+        self.assertIn("notes-hub.md", json.loads(r.stdout)["files"], r.stderr)
+        self.cli("close", pid)
+
+
 class LaterOverTheCli(HubCase):
     def test_add_list_rm(self):
         rc, out, err = self.cli("later", "add", "--at", "2099-01-01T06:00", "--lane", "fake",
