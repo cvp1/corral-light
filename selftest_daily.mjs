@@ -385,8 +385,8 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
                    canWithdraw: true }, 'T-DD-11 one line per message, full text kept for hover');
   check(m.items[1].text.length === 160 && m.items[1].text.endsWith('…'), 'T-DD-11 long text is cut');
   check(!m.items[2].canWithdraw, 'T-DD-11 another pane\'s message has no buttons');
-  check(!nm({ remote: { host: 'peer-b' }, queued: [{ turn: 't', text: 'a' }] }).items[0].canWithdraw,
-        'T-DD-11 a pane on another machine lists, never offers a withdraw it cannot do');
+  check(nm({ remote: { host: 'peer-b' }, queued: [{ turn: 't', text: 'a' }] }).items[0].canWithdraw,
+        'T-DD-11 a pane on another machine can withdraw too (its hub\'s withdraw command)');
 
   // Edit puts the text back in the box; ✕ only removes; a started one says too late.
   const calls = [];

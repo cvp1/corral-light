@@ -57,7 +57,11 @@ PROTOCOL = "corral-drive/1"
 PATH = "/fed/v1/drive/channel"
 # Commands. Every one but `open` names a pane the caller opened.
 OPS = ("open", "send", "answer", "answer_question", "cancel", "close", "resume",
-       "history", "pending")
+       "history", "pending",
+       # Next up and the rail card's reply. New commands, not new fields on
+       # `send`: an older hub refuses an unknown command loudly, where it
+       # would silently drop an unknown `expect` and send anyway.
+       "withdraw", "reply")
 
 
 class ProtocolError(Exception):
@@ -72,9 +76,9 @@ class Refusal(ConnectionError):
 class DriveError(Exception):
     """A command the peer refused or could not run; `why` is for the operator."""
 
-    def __init__(self, why, status=400):
+    def __init__(self, why, status=400, reason=None):
         super().__init__(why)
-        self.why, self.status = str(why), status
+        self.why, self.status, self.reason = str(why), status, reason
 
 
 # ── frames ──────────────────────────────────────────────────────────────────
@@ -447,7 +451,8 @@ class Link:
                 raise DriveError(self.error or "the other hub did not answer in time", 504)
             res = slot[1]
             if not res.get("ok"):
-                raise DriveError(res.get("error") or "refused", int(res.get("status") or 400))
+                raise DriveError(res.get("error") or "refused", int(res.get("status") or 400),
+                                 reason=res.get("reason"))
             return res.get("result")
         finally:
             with self.lock:
@@ -676,6 +681,8 @@ class Mutations:
                 res = {"ok": True, "result": fn()}
             except DriveError as e:
                 res = {"ok": False, "error": e.why, "status": e.status}
+                if e.reason:
+                    res["reason"] = e.reason
             except (ValueError, KeyError, RuntimeError) as e:
                 res = {"ok": False, "error": str(e)[:300], "status": 400}
             except Exception as e:                       # noqa: BLE001

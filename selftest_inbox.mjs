@@ -432,8 +432,8 @@ check(/@media\(min-width:821px\)\{\s*\.app\.lshut/.test(css),
 
   const can = load('canReplyFromCard');
   check(can(pane('a', { question: { text: 'q' } })), 'T-RR-2 a local question can be answered here');
-  check(!can(pane('a', { remote: true, question: { text: 'q' } })),
-        'T-RR-2 a pane from another hub keeps Answer in pane (its send drops the check)');
+  check(can(pane('a', { remote: { host: 'peer-b' }, question: { text: 'q' } })),
+        'T-RR-2 a pane from another hub answers here too (through its hub\'s reply command)');
   check(!can(pane('a', { question: { text: 'x', source: 'hop-limit' } })),
         'T-RR-2 a hop-limit stop is not a question to answer here');
 
@@ -449,7 +449,7 @@ check(/@media\(min-width:821px\)\{\s*\.app\.lshut/.test(css),
   eq(railSig([k('q:a:1'), k(null, 'Login')]), 'q:a:1|ncard:Login', 'T-RR-4 keyed cards, then title');
   check(railSig([k('w:a:5')]) !== railSig([k('w:a:6')]), 'T-RR-4 a new turn is a different rail');
 
-  // The card carries a reply box bound to the pane; remote cards do not.
+  // The card carries a reply box bound to the pane, remote or not.
   const asker2 = pane('q', { question: { text: 'Ship it?', at: 'T', id: 'qid' } });
   const qc = questionCard(asker2, false);
   const box = find(qc, n => n.tag === 'textarea');
@@ -457,8 +457,8 @@ check(/@media\(min-width:821px\)\{\s*\.app\.lshut/.test(css),
   check(!!find(qc, n => n.textContent === 'Send'), 'T-RR-5 with a Send button');
   check(!!find(qc, n => n.textContent === 'Answer in pane'), 'T-RR-5 and still Answer in pane');
   eq(qc.dataset.key, 'q:q:qid', 'T-RR-5 the card is keyed by its question');
-  const rc = questionCard(pane('r', { remote: true, question: { text: 'Ship?', at: 'T' } }), false);
-  check(!find(rc, n => n.tag === 'textarea'), 'T-RR-5 a remote pane has no reply box');
+  const rc = questionCard(pane('r', { remote: { host: 'peer-b' }, question: { text: 'Ship?', at: 'T' } }), false);
+  check(!!find(rc, n => n.tag === 'textarea'), 'T-RR-5 a remote pane has a reply box too');
   RR_S.railDrafts = { q: { text: 'yes', target: 'q:old' } };
   const qm = questionCard(asker2, false);
   check(texts(qm).includes('this changed since you typed'), 'T-RR-5 a moved draft is marked');
