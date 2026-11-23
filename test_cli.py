@@ -508,6 +508,33 @@ class PastedImagesOverTheHub(HubCase):
         r = subprocess.run([sys.executable, "-c", code, self.url, pid], env=self.env,
                            cwd=str(ROOT), capture_output=True, text=True, timeout=30)
         self.assertIn(f"echo: see [images: image/png {len(PNG_1PX)}B]", r.stdout)
+
+
+class FolderChangesOverTheHub(HubCase):
+    """GET /api/session/changes: a plain pane's folder since HEAD."""
+
+    def test_a_plain_pane_sees_its_changes(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(self.tmp)}
+        for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.invalid"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True, env=env)
+        (repo / "a.txt").write_text("one\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True,
+                       capture_output=True, env=env)
+        (repo / "a.txt").write_text("two\n")
+        rc, out, err = self.cli("open", "--lane", "fake", "--cwd", str(repo))
+        self.assertEqual(rc, 0, err)
+        pid = out.strip()
+        code = ("import sys, json, cli\n"
+                "print(json.dumps(cli.Cli(sys.argv[1]).get('/api/session/changes?pane=' + sys.argv[2])))\n")
+        r = subprocess.run([sys.executable, "-c", code, self.url, pid], env=self.env, cwd=str(ROOT),
+                           capture_output=True, text=True, timeout=30)
+        got = json.loads(r.stdout)
+        self.assertEqual([(f["path"], f["status"]) for f in got["files"]], [("a.txt", "M")])
+        self.assertIn("-one\n+two", got["files"][0]["patch"])
         self.cli("close", pid)
 
 

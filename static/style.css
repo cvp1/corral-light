@@ -1625,3 +1625,16 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 #pandlg label.chk{display:inline-flex;flex-direction:row;align-items:center;gap:6px;font-size:13px;margin:0}
 #pandlg label.chk input{width:auto;margin:0}
 #pan-err{color:var(--rust)}
+
+
+/* Changes in this folder */
+#chgdlg .dlg{max-width:min(1100px,94vw)}
+#chg-list{max-height:62vh;overflow:auto}
+.chgf{border-top:1px solid var(--line);padding:4px 0}
+.chgf summary{cursor:pointer;font-size:12.5px}
+.chgst{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint)}
+.chgst.st-A{color:var(--sage)} .chgst.st-D{color:var(--rust)}
+.chgpatch{font-family:var(--mono);font-size:11.5px;line-height:1.45;overflow:auto;margin:6px 0;padding:6px 8px;
+  background:var(--ground);border-radius:6px;white-space:pre}
+.chgpatch .padd{color:var(--sage)} .chgpatch .pdel{color:var(--rust)}
+.chgpatch .phunk{color:var(--dusk)} .chgpatch .pfile{color:var(--faint)}

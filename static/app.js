@@ -1985,6 +1985,10 @@ function openPaneMenu(p, at) {
   }
   if (!isTerm(p) && !p.remote) item('Ask a panel…', () => openPanel(p),
                         { title: 'the same question to other vendors\' agents, blind; the synthesis reports back here' });
+
+
+  if (!isTerm(p) && !p.remote && !p.worktree) item('Changes in this folder…', () => openChanges(p),
+                        { title: 'what changed since the last commit, read only' });
   if (!isTerm(p)) item('Carry to a fresh pane…', () => openPort(p),
                         { title: 'start a new pane, on any agent, that reads this transcript' });
   if (!isNarrow()) item(S.wide === p.id ? 'Back to the whole wall' : 'Focus — this pane alone',
@@ -6070,6 +6074,59 @@ function openPanel(p) {
   };
   dlg.showModal();
   $('#pan-charge').focus();
+
+
+/* ── Changes in this folder (selftest_daily.mjs T-DD-17) ────────────────────
+ * A plain pane works in your repo itself; this shows what changed there since
+ * HEAD, read only (folder_diff.py runs nothing the repo's config names). */
+const CHG_STATUS = { M: 'changed', A: 'new', D: 'deleted' };
+function changesSummary(r) {
+  if (!r || r.repo === false) return 'This folder is not in a git repository, so there is no last commit to compare with.';
+  const counts = r.counts || {};
+  const n = counts.changed || 0, listed = counts.shown || 0;
+  const on = r.branch ? ' on ' + r.branch : '';
+  if (!n) return 'Nothing changed since the last commit' + on + '.';
+  const firstOnly = listed < n ? ' · first ' + listed + ' listed' : '';
+  return n + (n === 1 ? ' file' : ' files') + ' changed since the last commit' + on + firstOnly +
+         (r.truncated ? ' · some output was cut at the size cap' : '');
+}
+/* One unified-diff line's class: add, del, hunk or context. */
+function patchLineClass(line) {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'pfile';
+  if (line.startsWith('@@')) return 'phunk';
+  if (line.startsWith('+')) return 'padd';
+  if (line.startsWith('-')) return 'pdel';
+  return 'pctx';
+}
+function changesNode(f) {
+  const d = el('details', 'chgf');
+  const s = el('summary');
+  s.append(el('span', 'chgst st-' + f.status, CHG_STATUS[f.status] || f.status), ' ', el('code', null, f.path));
+  d.appendChild(s);
+  if (f.patch) {
+    const pre = el('pre', 'chgpatch');
+    for (const line of f.patch.split('\n')) pre.appendChild(el('span', patchLineClass(line), line + '\n'));
+    d.appendChild(pre);
+  } else {
+    d.appendChild(el('div', 'fnote', f.binary ? 'binary: not shown' : f.too_big ? 'too big to show here'
+                                     : f.status === 'D' ? 'deleted' : 'not shown: past the size cap'));
+  }
+  return d;
+}
+async function openChanges(p) {
+  const dlg = $('#chgdlg');
+  const load = async () => {
+    $('#chg-sum').textContent = 'looking…';
+    $('#chg-list').replaceChildren();
+    try {
+      const r = await api('/api/session/changes?pane=' + encodeURIComponent(p.id));
+      $('#chg-sum').textContent = changesSummary(r);
+      $('#chg-list').replaceChildren(...(r.files || []).map(changesNode));
+    } catch (e) { $('#chg-sum').textContent = e.message; }
+  };
+  $('#chg-again').onclick = load;
+  dlg.showModal();
+  await load();
 }
 
 async function openPort(src) {
