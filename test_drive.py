@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """The drive channel (drive.py) between two real hub-link services on
 loopback, over real mutual TLS, with a fake pane manager on the driven side."""
+import json
+import os
 import queue
 import tempfile
 import threading
@@ -71,7 +73,12 @@ class FakeDriven:
             return {"pane": args["pane"]}
         if op == "close":
             return {"pane": args["pane"], "closed": True}
+        if op in ("image", "image_get"):
+            # Echo the bytes back, so a test sees them cross both ways whole.
+            return {"pane": args["pane"], "data": args.get("data") or self.blob}
         return {"pane": args.get("pane")}
+
+    blob = ""
 
     # test helpers
     def local_pane(self):
@@ -322,6 +329,35 @@ class DriveTest(unittest.TestCase):
         self.assertIn("if ('remoteHosts' in d) S.remoteHosts = d.remoteHosts || [];", js)
         opener = js[js.index("$('#new').onclick"):js.index("const remoteLanes")]
         self.assertIn("api('/api/state?full=1')", opener)
+
+    def test_the_largest_image_crosses_the_channel_whole(self):
+        # sessions.IMAGE_MAX, base64 in a JSON frame, must fit under FRAME_MAX
+        # both ways (paste up, thumbnail down) on a real channel.
+        import base64
+        import sessions
+        link = self.link()
+        pane = link.call("open", {"lane": "fake", "cwd": "~"})["pane"]
+        data = os.urandom(sessions.IMAGE_MAX)
+        b64 = base64.b64encode(data).decode("ascii")
+        self.assertEqual(link.call("image", {"pane": pane, "data": b64})["data"], b64)
+        self.driven.blob = b64
+        self.assertEqual(link.call("image_get", {"pane": pane, "sha": "x"})["data"], b64)
+
+    def test_reads_are_not_kept_for_retries(self):
+        # An image or a patch is megabytes; the retry ledger keeps 500 per
+        # peer on disk. A read just runs again.
+        link = self.link()
+        pane = link.call("open", {"lane": "fake", "cwd": "~"})["pane"]
+        self.driven.blob = "x" * 1000
+        link.call("image_get", {"pane": pane, "sha": "s"}, mid="r" * 16)
+        link.call("image_get", {"pane": pane, "sha": "s"}, mid="r" * 16)
+        self.assertEqual(sum(1 for op, _ in self.driven.ops if op == "image_get"), 2)
+        kept = json.loads((self.b.svc.dir / "drive-mutations.json").read_text())
+        self.assertNotIn("r" * 16, kept.get(self.aid, {}))
+        # Negative control: a command that changes something is kept.
+        link.call("send", {"pane": pane, "text": "y"}, mid="w" * 16)
+        kept = json.loads((self.b.svc.dir / "drive-mutations.json").read_text())
+        self.assertIn("w" * 16, kept.get(self.aid, {}))
 
     def test_frames_are_capped(self):
         with self.assertRaises(drive.ProtocolError):

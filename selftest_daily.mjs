@@ -498,7 +498,7 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   eq(why({ acceptsImages: true }, png, 0), '', 'T-DD-15 a PNG on a lane that takes images');
   eq(why({}, png, 0), '', 'T-DD-15 an older hub (no acceptsImages) lets the hub decide');
   check(/does not take images/.test(why({ acceptsImages: false, label: 'Grok' }, png, 0)), 'T-DD-15 a lane without images says so');
-  check(/another hub/.test(why({ remote: { host: 'b' } }, png, 0)), 'T-DD-15 a remote pane says so');
+  eq(why({ remote: { host: 'b' }, acceptsImages: true }, png, 0), '', 'T-DD-15 a remote pane takes images (stored on its own hub)');
   check(/only PNG/.test(why({}, { type: 'image/svg+xml', size: 10 }, 0)), 'T-DD-15 SVG is refused (it is script)');
   check(/3\.75 MB/.test(why({}, { type: 'image/png', size: 4e6 }, 0)), 'T-DD-15 too big');
   check(/at most 4/.test(why({}, png, 4)), 'T-DD-15 at most four');
@@ -508,7 +508,7 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(/images: shots\.map\(sh => sh\.sha\)/.test(comp), 'T-DD-15 the message names its images');
   check(/if \(!t && !shots\.length\) return;/.test(comp), 'T-DD-15 an image alone can be sent');
   check(/c\.append\(att, ac, ta, b, stopButton\(p\)\)/.test(comp), 'T-DD-15 the row sits above the box');
-  check(/\(d\.images \|\| \[\]\)\.length && !p\.remote\) u\.appendChild\(shotStrip\(p\.id, d\.images\)\)/.test(fn('renderLog')),
+  check(/\(d\.images \|\| \[\]\)\.length\) u\.appendChild\(shotStrip\(p\.id, d\.images\)\)/.test(fn('renderLog')),
         'T-DD-15 the bubble shows what was sent, from the hub');
 }
 
@@ -543,8 +543,8 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   const cls = load('patchLineClass');
   eq(['+++ b/x', '--- a/x', '@@ -1 +1 @@', '+new', '-old', ' same'].map(cls),
      ['pfile', 'pfile', 'phunk', 'padd', 'pdel', 'pctx'], 'T-DD-17 each patch line is classed, never parsed as markup');
-  check(/!isTerm\(p\) && !p\.remote && !p\.worktree\) item\('Changes in this folder…'/.test(src),
-        'T-DD-17 offered only on a plain local pane (own branches have Review)');
+  check(/!isTerm\(p\) && !p\.worktree\) item\('Changes in this folder…'/.test(src),
+        'T-DD-17 offered on a plain pane, here or on another hub (own branches have Review)');
   check(/pre\.appendChild\(el\('span', patchLineClass\(line\), line/.test(fn('changesNode')), 'T-DD-17 patch text goes in as text');
 }
 
@@ -564,7 +564,7 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(/mentionInsert\(ta\.value, mentionAt\(ta\.value, ta\.selectionStart\) \|\| at, cmd\.name\)/.test(comp),
         'T-DD-18 accepting re-reads the word at the caret (typing may have gone on)');
   check(/if \(mine !== askSeq\) return;/.test(comp), 'T-DD-18 a slow answer for an older keystroke is dropped');
-  check(/!isTerm\(p\) && !p\.remote \? mentionAt/.test(comp), 'T-DD-18 not on a terminal or a remote pane');
+  check(/!isTerm\(p\) \? mentionAt/.test(comp), 'T-DD-18 not on a terminal; a remote pane asks its own hub');
 }
 
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
