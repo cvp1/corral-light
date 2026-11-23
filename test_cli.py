@@ -409,6 +409,37 @@ class RemotePanesReplyAndWithdraw(unittest.TestCase):
         self.assertRegex(src, r'except drive_remote\.Conflict as e:\n\s+#[^\n]*\n\s+#[^\n]*\n\s+return self\._json\(\{"error": str\(e\)\[:400\], "reason": e\.reason\}, 409\)')
 
 
+class SayShowsOnlyItsOwnTurn(HubCase):
+    """A `say` queued behind another turn prints what it typed and then only
+    its own turn's output: never the earlier turn's (it once printed the
+    running turn as if it were its reply)."""
+
+    def test_queued_say_skips_the_turn_ahead(self):
+        pid = self.open()
+        first = subprocess.Popen([sys.executable, str(ROOT / "cli.py"), "say", pid, "sleep 2"],
+                                 env=self.env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            end = time.time() + 15
+            while time.time() < end:
+                st = [p for p in json.loads(self.cli("panes", "--json")[1]) if p["id"] == pid][0]["state"]
+                if st == "busy":
+                    break
+                time.sleep(0.1)
+            rc, out, err = self.cli("say", pid, "walnut", timeout=60)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("echo: walnut", out)
+            self.assertNotIn("sleeping", out, "the turn ahead was printed as this one's reply")
+            self.assertEqual(out.count("turn ended"), 1, out)
+            said, _ = first.communicate(timeout=30)
+            self.assertIn("sleeping", said, "the first say lost its own output")
+            self.assertNotIn("echo: walnut", said.split("turn ended")[0])
+        finally:
+            if first.poll() is None:
+                first.kill()
+                first.communicate(timeout=5)
+            self.cli("close", pid)
+
+
 class LaterOverTheCli(HubCase):
     def test_add_list_rm(self):
         rc, out, err = self.cli("later", "add", "--at", "2099-01-01T06:00", "--lane", "fake",

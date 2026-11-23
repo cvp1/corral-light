@@ -763,6 +763,7 @@ function renderLog(p) {
       }
       case 'queue': break;          // the Next up list, not the transcript
       case 'unsent': break;         // for waiting callers; withdrawn/note already say it
+      case 'turn_start': break;     // for `corral-light say`; the transcript shows the turn itself
       // A message from another pane's agent: its own block, never the human bubble,
       // since it is untrusted. textContent only, so markup renders literally.
       case 'peer':

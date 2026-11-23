@@ -433,8 +433,10 @@ button:focus-visible{outline:2px solid var(--ember);outline-offset:2px}
 .ph2 .f.seat{color:var(--ink)}
 .ph2 .f.seat.withheld{color:var(--faint);text-decoration:line-through}
 .ph2 .f.cfg{color:var(--dim)}
-.ph2 .f.strict{color:var(--sage)}
-.ph2 .f.auto{color:var(--rust)}
+/* Posture is a standing setting, not news: quiet, so rust stays for real
+   warnings (context near full, a link down). auto is a shade brighter. */
+.ph2 .f.strict,.ph2 .f.edits{color:var(--faint)}
+.ph2 .f.auto{color:var(--dim)}
 /* Unknown posture: deliberately drab so it never reads as a safety assurance. */
 .ph2 .f.unknown{font-style:italic}
 .ph2 .f.ctx.warn{color:var(--rust)}
