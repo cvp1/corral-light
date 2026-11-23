@@ -3787,13 +3787,15 @@ function render() {
   if (jobs.length) {
     r.appendChild(el('div', 'lab', `Scheduled · ${jobs.length}`));
     for (const j of jobs) {
-      const it = el('div', 'rit arc' + (j.failed ? ' dead' : ''));
+      const it = el('div', 'rit arc' + (j.failed || j.last_error ? ' dead' : ''));
       it.appendChild(el('span', 'dot'));
       const t = el('div', 'txt');
       t.appendChild(el('div', 't', j.title || j.prompt.slice(0, 60)));
       const when = new Date(j.at).toLocaleString();
+      // A repeat keeps running after a failed run: say so, or it fails silently each day.
       t.appendChild(el('div', 's', j.failed ? `failed: ${j.last_error}` :
-        `${j.action} · ${when}${j.repeat ? ' · ' + j.repeat : ''} · ${j.agent}`));
+        `${j.action} · ${when}${j.repeat ? ' · ' + j.repeat : ''} · ${j.agent}` +
+        (j.last_error ? ` · last run failed: ${j.last_error}` : '')));
       it.appendChild(t);
       const x = el('button', 'a', '✕'); x.title = j.failed ? 'dismiss' : 'unschedule';
       x.onclick = async e => {
@@ -4055,6 +4057,9 @@ function render() {
   // Module notices (plan §4.7): information, never a request. Quiet like the
   // review cards: they open the rail on a wide screen, never pop it on a phone,
   // never count as blocking.
+  // Scheduled runs that failed or were missed: the receipt a run that worked
+  // gets from its pane's Waiting-on-you card. Quiet, one per job.
+  for (const m of scheduleMisses(S.schedule, missSeen())) { n.appendChild(missCard(m)); items++; quiet++; }
   const mn = railNotices(S.moduleNotices, noticeSeen());
   for (const nt of mn.shown) { n.appendChild(noticeCard(nt)); items++; quiet++; }
   if (mn.more) n.appendChild(el('div', 'fnote nmore',
@@ -4156,6 +4161,45 @@ function noticeCard(nt) {
   later.title = 'hide this notice until it changes';
   later.onclick = () => { noticeMarkSeen(nt); render(); };
   acts.append(go, later);
+  c.appendChild(acts);
+  return c;
+}
+
+/* ── scheduled runs that did not happen (selftest_inbox.mjs T-SR) ─────────
+ * A run that worked reports through its pane (a Waiting-on-you card when its
+ * turn ends). One that failed or was missed has no pane to report through,
+ * so it gets a quiet card here, one per job, newest run only, until Got it.
+ * `seen`: job id → the `last` stamp dismissed. Bounded by MISS_SHOWN. */
+const MISS_SHOWN = 5;
+function scheduleMisses(jobs, seen) {
+  return (jobs || []).filter(j => j && j.last_error && j.last && seen[j.id] !== j.last)
+    .sort((a, b) => String(b.last).localeCompare(String(a.last)))
+    .slice(0, MISS_SHOWN);
+}
+function missSeen() {
+  try { return JSON.parse(localStorage.getItem('corral.missSeen') || '{}') || {}; }
+  catch { return {}; }
+}
+function missDismiss(j, liveIds) {
+  const s = missSeen(), keep = {};
+  for (const k of Object.keys(s)) if (liveIds.includes(k)) keep[k] = s[k];
+  keep[j.id] = j.last;
+  localStorage.setItem('corral.missSeen', JSON.stringify(keep));
+}
+function missCard(j) {
+  const c = el('div', 'ncard smiss');
+  c.dataset.key = 'm:' + j.id + ':' + j.last;
+  const name = j.title || String(j.prompt || '').slice(0, 60) || j.id;
+  c.appendChild(el('div', 't', `Scheduled — ${name} did not run`));
+  c.appendChild(el('div', 'm', `${new Date(j.last).toLocaleString()} · ${j.repeat || 'once'}` +
+                               (j.repeat ? ' · it will try again at its next time' : '')));
+  c.appendChild(el('div', 'qtext', j.last_error));
+  const acts = el('div', 'facts');
+  const ok = el('button', 'fbtn', 'Got it');
+  ok.type = 'button';
+  ok.title = 'hide this until the job misses again';
+  ok.onclick = () => { missDismiss(j, (S.schedule || []).map(x => x.id)); render(); };
+  acts.appendChild(ok);
   c.appendChild(acts);
   return c;
 }

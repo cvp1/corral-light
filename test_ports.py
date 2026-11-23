@@ -209,6 +209,39 @@ class Later(unittest.TestCase):
         self.assertIn("permission gate", rec["last_error"])
         self.assertEqual(p._queue, [])
 
+    def test_a_run_that_did_not_happen_raises_the_alert(self):
+        """A failed or missed run has no pane to report through: on_miss is
+        the hub's alert. A run that worked never calls it; a broken alert
+        never stops the ticker."""
+        got = []
+        self.s.on_miss = got.append
+        p = self.mgr.create("fake", self.dir)
+        self.s.add("", "", "hello", self.iso(seconds=-5), action="nudge", pane_id=p.id,
+                   repeat="daily")
+        p.pending["r1"] = {}
+        self.s.tick()
+        self.assertEqual(len(got), 1)
+        self.assertIn("permission gate", got[0]["last_error"])
+        self.assertEqual(got[0]["repeat"], "daily", "a repeat's failure alerts too")
+        # A run that worked: no alert.
+        got.clear()
+        self.s.add("fake", self.dir, "remember fig", self.iso(seconds=-5))
+        self.s.on_miss = got.append
+        due = [j for j in self.s.jobs if j.get("action") == "start"]
+        for j in due:
+            self.s._fire(j); self.s._settle(j)
+        self.assertEqual(got, [])
+        # Missed while down: alerts. A raising alert is swallowed.
+        j = self.s.add("fake", self.dir, "late", self.iso(minutes=5))
+        with self.s._lock:
+            j["at"] = self.iso(hours=-5)
+        def boom(job):
+            raise RuntimeError("alert broke")
+        self.s.on_miss = boom
+        self.s.tick()                                    # must not raise
+        rec = [x for x in self.s.list() if x["id"] == j["id"]][0]
+        self.assertIn("missed while Corral Light was down", rec["last_error"])
+
     def test_a_role_is_inlined_when_armed(self):
         import roles
         rdir = Path(tmpdir(self))

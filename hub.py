@@ -369,6 +369,21 @@ def _notify_check(pane_id):
     return shown, why
 
 
+def _notify_schedule_miss(job):
+    """A scheduled run that failed or was missed: alert like a pane that
+    needs you (it has no pane to raise a card in). Quiet hours hold the push."""
+    name = job.get("title") or str(job.get("prompt") or "")[:60] or job.get("id")
+    title = f"scheduled — {name} did not run"
+    body = str(job.get("last_error") or "")
+    webpush.remember("", "schedule", title, body)
+    if not notify.quiet_now():
+        _push_now()
+    return notify.desktop(f"Corral Light — {title}", body)
+
+
+MGR.schedule.on_miss = _notify_schedule_miss
+
+
 def push_subject():
     """VAPID `sub`: who runs this push sender. The Serve origin when there is
     one (push only works over https, so in practice there always is)."""

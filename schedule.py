@@ -57,6 +57,10 @@ class Scheduler:
         self.jobs = self._load()
         self._stop = threading.Event()
         self._thread = None
+        # Called with the job after a run that failed or was missed: the hub
+        # wires it to the desktop/phone alert, since such a run has no pane
+        # to report through. Never allowed to break the ticker.
+        self.on_miss = None
 
     # ── storage ──────────────────────────────────────────────────────────
     def _load(self):
@@ -190,12 +194,14 @@ class Scheduler:
             if (now - parse_when(job["at"])).total_seconds() > CATCHUP_S:
                 self._settle(job, error="missed while Corral Light was down — "
                                         "not run, the moment for it had passed")
+                self._missed(job)
                 continue
             try:
                 self._fire(job)
                 self._settle(job)
             except Exception as e:           # noqa: BLE001
                 self._settle(job, error=str(e)[:200])
+                self._missed(job)
         return due
 
     def _fire_target(self, job):
@@ -233,6 +239,14 @@ class Scheduler:
                                    f"{job.get('repeat') or 'once'})"})
         pane.send(job["prompt"])
         job["pane"] = pane.id
+
+    def _missed(self, job):
+        if self.on_miss is None:
+            return
+        try:
+            self.on_miss(dict(job))
+        except Exception as e:           # noqa: BLE001
+            print(f"corral-light: scheduler alert failed: {e}", file=sys.stderr, flush=True)
 
     def _settle(self, job, error=None):
         """Advance a repeat, or retire a one-shot. Always records the outcome."""

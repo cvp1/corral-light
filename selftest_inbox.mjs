@@ -539,5 +539,32 @@ for (const [label, run] of [
   check(/question'\) p\.question = \{[^}]*id: d\.id/.test(src), 'T-RR-13 the live question keeps its id');
 }
 
+
+/* ── T-SR: a scheduled run that did not happen gets a receipt ───────────── */
+{
+  const misses = load('scheduleMisses', [], { MISS_SHOWN: 5 });
+  const jobs = [
+    { id: 'a', title: 'nightly', last: '2026-11-23T13:00:00Z', last_error: 'its pane is gone', repeat: 'daily' },
+    { id: 'b', title: 'ok', last: '2026-11-23T12:00:00Z', last_error: null },
+    { id: 'c', title: 'once', last: '2026-11-23T14:00:00Z', last_error: 'missed while Corral Light was down', failed: true },
+  ];
+  eq(misses(jobs, {}).map(j => j.id), ['c', 'a'], 'T-SR-1 failed and missed runs, newest first; a good run is not one');
+  eq(misses(jobs, { a: '2026-11-23T13:00:00Z' }).map(j => j.id), ['c'], 'T-SR-2 Got it hides that run');
+  eq(misses([{ ...jobs[0], last: '2026-11-24T13:00:00Z' }], { a: '2026-11-23T13:00:00Z' }).length, 1,
+     'T-SR-2 the next failed run of the same job shows again');
+  eq(misses(null, {}), [], 'T-SR-3 no schedule, no cards');
+  const card = load('missCard', ['missDismiss', 'missSeen'], { el: mk, S: { schedule: jobs },
+    render: () => {}, localStorage: { getItem: () => null, setItem: () => {} } })(jobs[0]);
+  check(texts(card).includes('nightly did not run') && texts(card).includes('its pane is gone'),
+        'T-SR-4 the card names the job and why');
+  check(texts(card).includes('it will try again'), 'T-SR-4 a repeat says it will try again');
+  const r = fn('render');
+  check(/scheduleMisses\(S\.schedule, missSeen\(\)\)\) \{ n\.appendChild\(missCard\(m\)\); items\+\+; quiet\+\+; \}/.test(r),
+        'T-SR-5 quiet in the rail, never blocking');
+  check(/last run failed: \$\{j\.last_error\}/.test(r), 'T-SR-6 a repeat\'s failure shows on its Scheduled row');
+  const hub = readFileSync(new URL('./hub.py', import.meta.url), 'utf8');
+  check(/MGR\.schedule\.on_miss = _notify_schedule_miss/.test(hub), 'T-SR-7 the hub alerts (desktop and phone) on a miss');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
 console.log('selftest_inbox: ok');
