@@ -188,6 +188,7 @@ def keeper_sock_path(pane_id, pane_dir, base="/tmp"):
         return None
     return d / f"k-{pane_id}-{tag}.sock"
 MAX_PROMPT = 200_000
+QUEUE_PREVIEW = 400            # chars of a queued message shown in Next up
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 
 # ── own-branch worktrees (docs/worktree-review-plan.md) ──────────────────────
@@ -1513,6 +1514,51 @@ class Pane(_core.PaneBase):
         self._close_open_turns("paused")
         return super().pause()
 
+    # ── Next up: the type-ahead queue, visible and withdrawable ─────────
+    def queued_view(self):
+        """What waits behind the running turn, in run order: [{turn, text, peer}].
+        `text` is what was typed (capped at QUEUE_PREVIEW); a peer message is
+        listed but cannot be withdrawn here."""
+        out = []
+        # A pane built without __init__ (tests, a half-restored record) has no
+        # queue: that is an empty list, never an error in the snapshot.
+        for it in list(getattr(self, "_queue", None) or []):
+            shown = getattr(it, "shown", None) or str(it)
+            out.append({"turn": getattr(it, "turn", None),
+                        "peer": bool(getattr(it, "peer", False)),
+                        "text": shown[:QUEUE_PREVIEW]})
+        return out
+
+    def _queue_changed(self):
+        """Tell browsers the Next up list changed. Callers hold `_turn_lock`, so
+        these events are in the same order as the queue edits."""
+        self.emit("queue", {"items": self.queued_view()}, activity=False)
+
+    def withdraw(self, turn):
+        """Take back a typed-ahead message before it starts; returns its text
+        (so Edit can put it back in the composer).
+
+        Under `_turn_lock`, the same lock the drain pops under, so a message
+        is either withdrawn or run, never both. Raises LookupError when it
+        already started (or is gone), ValueError for a peer's message."""
+        with self._turn_lock:
+            for i, it in enumerate(self._queue):
+                if turn and getattr(it, "turn", None) == turn:
+                    break
+            else:
+                raise LookupError("that message already started or is no "
+                                  "longer queued")
+            if getattr(it, "peer", False):
+                raise ValueError("a message from another pane cannot be "
+                                 "withdrawn here")
+            self._queue.pop(i)
+            text = getattr(it, "shown", None) or str(it)
+            self.emit("withdrawn", {"turn": turn}, activity=False)
+            self._queue_changed()
+        self._turns().mark(turn, "interrupted", why="withdrawn before it was sent",
+                           was="accepted")
+        return text
+
     def cancel(self):
         """The Stop button (and Esc): stop the running turn AND what is
         queued behind it.
@@ -1526,6 +1572,8 @@ class Pane(_core.PaneBase):
         """
         with self._turn_lock:
             dropped, self._queue = list(self._queue), []
+            if dropped:
+                self._queue_changed()
         lg = self._turns()
         for t in dropped:
             lg.mark(getattr(t, "turn", None), "interrupted",
@@ -2323,7 +2371,10 @@ class Pane(_core.PaneBase):
             if self._preamble_due:            # D15: once, on the first prompt
                 agent_text = WORKTREE_PREAMBLE + "\n\n" + text
                 self._preamble_due = False
-            self._dispatch(_QueuedText(agent_text, tid))
+            item = _QueuedText(agent_text, tid)
+            item.shown = text        # Next up shows what was typed, not the preamble
+            self._dispatch(item)
+            self._queue_changed()
             return tid
 
     def _drain(self):
@@ -2347,6 +2398,7 @@ class Pane(_core.PaneBase):
                     self._turn_running = False   # a hold's release restarts the drain
                     return
                 text = self._queue.pop(0)
+                self._queue_changed()
                 # Re-check for a pending card: a peer turn never runs while one is open.
                 if getattr(text, "peer", False) and self.pending:
                     self._peer_withdrawn(text, "card-pending")
@@ -2363,6 +2415,7 @@ class Pane(_core.PaneBase):
                     return              # /clear or pause already accounted for it
                 if self.held:
                     self._queue.insert(0, text)
+                    self._queue_changed()
                     self._in_flight = None
                     self._turn_running = False
                     return
@@ -2944,6 +2997,8 @@ class Pane(_core.PaneBase):
             # Triage projection over `state`, computed once in the core.
             "display": _core.display_state(self, state=state)["state"],
             "pending": list(self.pending.keys()),
+            # Next up: typed-ahead messages not yet sent to the agent, in order.
+            "queued": self.queued_view(),
             # The pane's address for other panes; a withheld seat is shown, not served.
             "seat": None if self.seat_withheld else self.seat,
             "seatWithheld": self.seat if self.seat_withheld else None,

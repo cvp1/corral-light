@@ -539,6 +539,34 @@ def _simple(route, key="pane"):
     return run
 
 
+def v_next(c, a):
+    """Next up: what waits behind a pane's running turn, in run order."""
+    items = c.pane(a.pane).get("queued") or []
+    if not items:
+        c.say("nothing queued")
+    for i, it in enumerate(items, 1):
+        c.say(f"{i}. {it.get('turn')}" + (" (from another pane)" if it.get("peer") else "")
+              + "  " + " ".join(str(it.get("text") or "").split())[:120])
+    return 0
+
+
+def v_withdraw(c, a):
+    """Take back a queued message (by Next up number or turn id) before it
+    starts; prints its text so it can be edited and sent again."""
+    p = c.pane(a.pane)
+    turn = a.turn
+    if turn.isdigit():
+        items = p.get("queued") or []
+        n = int(turn)
+        if not 1 <= n <= len(items):
+            c.say(f"no queued message #{n} ({len(items)} queued)")
+            return 1
+        turn = items[n - 1].get("turn") or ""
+    r = c.post("/api/session/withdraw", {"pane": p["id"], "turn": turn})
+    c.say(r.get("text", ""))
+    return 0
+
+
 def v_rename(c, a):
     p = c.pane(a.pane)
     c.say(c.post("/api/session/rename", {"pane": p["id"], "title": " ".join(a.title)})["title"])
@@ -758,6 +786,16 @@ def main(argv=None):
         s = sub.add_parser(verb, help=f"{verb} a pane")
         s.add_argument("pane")
         s.set_defaults(fn=_simple(verb))
+
+    s = sub.add_parser("next", help="list the messages queued behind a pane's turn")
+    s.add_argument("pane")
+    s.set_defaults(fn=v_next)
+
+    s = sub.add_parser("withdraw", help="take back a queued message before it starts "
+                                        "(number from `next`, or turn id); prints it")
+    s.add_argument("pane")
+    s.add_argument("turn")
+    s.set_defaults(fn=v_withdraw)
 
     s = sub.add_parser("rename", help="rename a pane")
     s.add_argument("pane")
