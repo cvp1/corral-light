@@ -1086,7 +1086,9 @@ class PaneBase:
         # Keep a hub pause's pair when the agent asks over it.
         if pair is None and prev.get("pair"):
             pair = prev["pair"]
-        q = {"text": text, "at": _now(),
+        # `id` is what a reply from the rail card binds to: `at` has one-second
+        # resolution, so a question replaced within the second would share it.
+        q = {"text": text, "at": _now(), "id": new_turn_id(),
              "turn": getattr(getattr(self, "_in_flight", None), "turn", None)}
         if source:
             q["source"] = source
@@ -1095,6 +1097,7 @@ class PaneBase:
         self.question = q
         self.save_meta()
         self.emit("question", {"text": text, "turn": q["turn"], "at": q["at"],
+                               "id": q["id"],
                                "replaces": prev.get("at"), "source": source},
                   activity=False)
         self.surface_for_operator("it asked you a question")
@@ -1170,6 +1173,8 @@ class PaneBase:
         if isinstance(q, dict) and isinstance(q.get("text"), str) and q["text"]:
             out = {"text": q["text"][:MAX_ASK_CHARS], "at": q.get("at"),
                    "turn": q.get("turn")}
+            if isinstance(q.get("id"), str) and q["id"]:
+                out["id"] = q["id"]
             if q.get("source") == HOP_PAUSE_SOURCE:
                 out["source"] = HOP_PAUSE_SOURCE
             pair = q.get("pair")

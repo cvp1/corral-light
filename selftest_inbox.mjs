@@ -66,8 +66,11 @@ eq(blockedCount([calm]), 0, 'T-INB-1 nothing open blocks nothing');
 eq(railExtras([pane('e', { question: { text: '' } })]).asked.length, 0,
    'T-INB-1 an empty question is not a card');
 
-const questionCard = load('questionCard', ['paneDir', 'ctxTag', 'ctxPct'], {
-  el: mk, answerInPane: () => {} });
+const RR_HELPERS = ['paneDir', 'ctxTag', 'ctxPct', 'canReplyFromCard', 'cardTarget', 'replyMoved',
+                    'railDrafts', 'replyBox', 'sendFromCard'];
+const RR_S = { panes: new Map() };
+const questionCard = load('questionCard', RR_HELPERS, {
+  el: mk, answerInPane: () => {}, S: RR_S, RAIL_REPLY_MAX: 4000 });
 let card = questionCard(asker, false);
 check(texts(card).includes(long), 'T-INB-1 the card carries the full question, not a preview');
 check(texts(card).includes('asks you'), 'T-INB-1 the card says the agent is asking');
@@ -414,6 +417,126 @@ check(/@media\(min-width:821px\)\{\s*\.app\.lshut/.test(css),
         'T-CTX-5 the roster no longer hides ctx below the warn line');
   check(/'flag ctxf'/.test(src), 'T-CTX-5 the roster always draws a ctx flag');
   void ctxPct;
+}
+
+
+/* ── T-RR: reply from the card (build item 7) ───────────────────────────── */
+{
+  const cardTarget = load('cardTarget');
+  eq(cardTarget(pane('a', { question: { text: 'q?', at: 'T', id: 'abc' } })), 'q:abc',
+     'T-RR-1 a question binds to its id');
+  eq(cardTarget(pane('a', { question: { text: 'q?', at: 'T' } })), 'q:T',
+     'T-RR-1 an older question without an id binds to when it was asked');
+  eq(cardTarget(pane('a'), { seq: 7 }), 't:7', 'T-RR-1 a waiting turn binds to its turn_end');
+  eq(cardTarget(pane('a')), null, 'T-RR-1 nothing to answer is no target');
+
+  const can = load('canReplyFromCard');
+  check(can(pane('a', { question: { text: 'q' } })), 'T-RR-2 a local question can be answered here');
+  check(!can(pane('a', { remote: true, question: { text: 'q' } })),
+        'T-RR-2 a pane from another hub keeps Answer in pane (its send drops the check)');
+  check(!can(pane('a', { question: { text: 'x', source: 'hop-limit' } })),
+        'T-RR-2 a hop-limit stop is not a question to answer here');
+
+  const moved = load('replyMoved');
+  check(!moved(null, 'q:a'), 'T-RR-3 no draft, nothing moved');
+  check(!moved({ text: 'hi', target: 'q:a' }, 'q:a'), 'T-RR-3 same card, not moved');
+  check(moved({ text: 'hi', target: 'q:a' }, 'q:b'), 'T-RR-3 a replaced question is moved');
+  check(!moved({ text: '  ', target: 'q:a' }, 'q:b'), 'T-RR-3 an empty draft is never flagged');
+
+  const railSig = load('railSig');
+  const k = (key, t) => Object.assign(mk('div', 'ncard', ''), { dataset: key ? { key } : {},
+    querySelector: () => ({ textContent: t || '' }) });
+  eq(railSig([k('q:a:1'), k(null, 'Login')]), 'q:a:1|ncard:Login', 'T-RR-4 keyed cards, then title');
+  check(railSig([k('w:a:5')]) !== railSig([k('w:a:6')]), 'T-RR-4 a new turn is a different rail');
+
+  // The card carries a reply box bound to the pane; remote cards do not.
+  const asker2 = pane('q', { question: { text: 'Ship it?', at: 'T', id: 'qid' } });
+  const qc = questionCard(asker2, false);
+  const box = find(qc, n => n.tag === 'textarea');
+  check(!!box && box.dataset.reply === 'q', 'T-RR-5 a question card has a reply box for its pane');
+  check(!!find(qc, n => n.textContent === 'Send'), 'T-RR-5 with a Send button');
+  check(!!find(qc, n => n.textContent === 'Answer in pane'), 'T-RR-5 and still Answer in pane');
+  eq(qc.dataset.key, 'q:q:qid', 'T-RR-5 the card is keyed by its question');
+  const rc = questionCard(pane('r', { remote: true, question: { text: 'Ship?', at: 'T' } }), false);
+  check(!find(rc, n => n.tag === 'textarea'), 'T-RR-5 a remote pane has no reply box');
+  RR_S.railDrafts = { q: { text: 'yes', target: 'q:old' } };
+  const qm = questionCard(asker2, false);
+  check(texts(qm).includes('this changed since you typed'), 'T-RR-5 a moved draft is marked');
+  eq(find(qm, n => n.tag === 'textarea').value, 'yes', 'T-RR-5 and its words are kept');
+  RR_S.railDrafts = {};
+
+  const waitCard = load('waitCard', [...RR_HELPERS, 'fmtAge', 'dismissWait', 'waitDismiss', 'waitSeen'],
+    { el: mk, answerInPane: () => {}, S: RR_S, RAIL_REPLY_MAX: 4000, render: () => {},
+      localStorage: { getItem: () => null, setItem: () => {} } });
+  const wc = waitCard({ p: pane('w'), seq: 9, age: 60, excerpt: 'Want me to start?' }, false);
+  eq(wc.dataset.key, 'w:w:9', 'T-RR-6 a waiting card is keyed by its turn');
+  check(!!find(wc, n => n.tag === 'textarea'), 'T-RR-6 a waiting card has a reply box');
+  check(!!find(wc, n => n.textContent === 'Open'), 'T-RR-6 Open still opens the pane');
+}
+
+/* sendFromCard: the target rides along; a 409 keeps the words. */
+for (const [label, run] of [
+  ['ok', async () => {
+    const posted = [], toasts = [];
+    const S = { panes: new Map(), railDrafts: { a: { text: 'yes', target: 't:3' } } };
+    const send = load('sendFromCard', ['railDrafts'], { S, isLoginCommand: () => false,
+      api: async (u, b) => { posted.push([u, b]); return { ok: true }; },
+      toast: (m, bad) => toasts.push([m, !!bad]), refresh: async () => {},
+      document: { querySelector: () => null }, insertIntoComposer: () => {} });
+    const ta = { value: ' yes ' }, b = { disabled: false, textContent: 'Send' };
+    await send(pane('a'), 't:3', ta, b);
+    eq(posted, [['/api/session/send', { pane: 'a', text: 'yes', expect: 't:3' }]],
+       'T-RR-7 the reply carries what the card showed');
+    eq([ta.value, 'a' in S.railDrafts, b.disabled], ['', false, false], 'T-RR-7 sent: box and draft cleared');
+    check(toasts.some(([m, bad]) => !bad && /sent to/.test(m)), 'T-RR-7 says where it went');
+  }],
+  ['moved, card still there', async () => {
+    const toasts = [], inserted = [];
+    const S = { panes: new Map(), railDrafts: {} };
+    const err = Object.assign(new Error('moved'), { status: 409, body: { reason: 'moved' } });
+    const send = load('sendFromCard', ['railDrafts'], { S, isLoginCommand: () => false,
+      api: async () => { throw err; }, toast: (m, bad) => toasts.push([m, !!bad]),
+      refresh: async () => {}, document: { querySelector: () => ({}) },
+      insertIntoComposer: (...a) => inserted.push(a) });
+    const ta = { value: 'yes' };
+    await send(pane('a'), 'q:x', ta, { disabled: false });
+    eq(S.railDrafts.a, { text: 'yes', target: 'moved' }, 'T-RR-8 a stale reply keeps its words, marked');
+    eq(ta.value, 'yes', 'T-RR-8 the box is not cleared');
+    check(toasts.some(([m, bad]) => bad && /not sent/.test(m)), 'T-RR-8 and says it was not sent');
+    eq(inserted.length, 0, 'T-RR-8 the card is still there, so the words stay in it');
+  }],
+  ['moved, card gone', async () => {
+    const inserted = [];
+    const S = { panes: new Map(), railDrafts: {} };
+    const err = Object.assign(new Error('moved'), { status: 409, body: { reason: 'moved' } });
+    const send = load('sendFromCard', ['railDrafts'], { S, isLoginCommand: () => false,
+      api: async () => { throw err; }, toast: () => {}, refresh: async () => {},
+      document: { querySelector: () => null }, insertIntoComposer: (...a) => inserted.push(a) });
+    await send(pane('a'), 'q:x', { value: 'yes' }, { disabled: false });
+    eq(inserted.map(a => a.slice(0, 2)), [['a', 'yes']], 'T-RR-9 no card left: the words go to the pane box');
+    check(!('a' in S.railDrafts), 'T-RR-9 and the rail draft is dropped');
+  }],
+  ['login', async () => {
+    let called = 0; const toasts = [];
+    const send = load('sendFromCard', ['railDrafts'], { S: { panes: new Map() },
+      isLoginCommand: () => true, api: async () => { called++; }, toast: (m, bad) => toasts.push(bad),
+      refresh: async () => {}, document: { querySelector: () => null }, insertIntoComposer: () => {} });
+    await send(pane('a'), 't:1', { value: '/login' }, { disabled: false });
+    eq([called, toasts], [0, [true]], 'T-RR-10 a sign-in is never sent from a card');
+  }],
+]) { try { await run(); } catch (e) { check(false, `T-RR ${label}: ${e.stack}`); } }
+
+{
+  const r = fn('render');
+  check(/const needs = \$\('#needs'\), n = document\.createDocumentFragment\(\)/.test(r),
+        'T-RR-11 the rail is built off-screen');
+  check(/typing\.dataset\.reply && needs\.dataset\.sig === sig/.test(r),
+        'T-RR-11 and kept as it is while a reply box has focus and the cards are the same');
+  check(/box\.setSelectionRange\(caret\[1\], caret\[2\]\)/.test(r),
+        'T-RR-11 a rebuild while typing puts the caret back');
+  check(/\.ncard \.rreply textarea\{/.test(css) && /pointer:coarse\)\{\.ncard \.rreply textarea\{font-size:16px;min-height:44px/.test(css),
+        'T-RR-12 the box is styled, 16px and 44px on touch (no iOS zoom)');
+  check(/question'\) p\.question = \{[^}]*id: d\.id/.test(src), 'T-RR-13 the live question keeps its id');
 }
 
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }

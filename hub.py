@@ -1151,8 +1151,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": r["sent"] > 0, **r})
                 # `turn` is the durable ledger id; `via` is the caller's
                 # origin label ("consult", "cli"), not a control.
-                tid = MGR.get(b.get("pane", "")).send(b.get("text", ""),
-                                                      via=b.get("via") or None)
+                expect = b.get("expect")
+                try:
+                    tid = MGR.get(b.get("pane", "")).send(
+                        b.get("text", ""), via=b.get("via") or None,
+                        expect=None if expect is None else str(expect))
+                except sessions.ReplyMoved as e:
+                    # The rail card was stale: nothing was sent or recorded.
+                    return self._json({"error": str(e), "reason": "moved",
+                                       "current": e.current}, 409)
                 return self._json({"ok": True, "turn": tid})
             if p == "/api/session/quote":
                 # Composer text only, like content attach: nothing is sent

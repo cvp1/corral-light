@@ -1571,3 +1571,12 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 .msg.user.withdrawn{opacity:.55;text-decoration:line-through;text-decoration-color:var(--faint)}
 .msg.user.withdrawn .viatag{text-decoration:none;display:inline-block}
 @media (pointer:coarse){.nextup .nued,.nextup .nurm{min-height:44px;min-width:44px}}
+
+/* reply from the card (build item 7) */
+.ncard .rreply{margin-top:7px}
+.ncard .rrow{display:flex;gap:5px;align-items:flex-end}
+.ncard .rreply textarea{flex:1;min-width:0;resize:vertical;max-height:9em;font-family:var(--sans);font-size:12.5px;
+  background:var(--ground);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 7px}
+.ncard .rreply textarea:focus{outline:none;border-color:var(--ember)}
+.ncard .rmoved{color:var(--ember);margin-bottom:4px}
+@media (pointer:coarse){.ncard .rreply textarea{font-size:16px;min-height:44px}.ncard .rrow .fbtn{min-height:44px}}

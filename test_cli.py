@@ -310,6 +310,66 @@ class NextUpOverTheCli(HubCase):
             self.cli("close", pid)
 
 
+class ReplyFromTheCardOverTheHub(HubCase):
+    """The wall's card reply goes through /api/session/send with `expect`:
+    a stale one is a 409 with reason "moved", and nothing is sent."""
+
+    def _post(self, body):
+        code = ("import json, sys, cli\n"
+                "c = cli.Cli(sys.argv[1])\n"
+                "try:\n"
+                "    print(json.dumps(c.post('/api/session/send', json.loads(sys.argv[2]))))\n"
+                "except Exception as e:\n"
+                "    print('ERR', e)\n")
+        r = subprocess.run([sys.executable, "-c", code, self.url, json.dumps(body)],
+                           env=self.env, cwd=str(ROOT), capture_output=True,
+                           text=True, timeout=30)
+        return r.stdout.strip() + r.stderr.strip()
+
+    def test_stale_is_409_fresh_is_sent(self):
+        pid = self.open()
+        rc, out, err = self.cli("say", pid, "hello")
+        self.assertEqual(rc, 0, err)
+        code = ("import json, sys, cli\n"
+                "p, evs = cli.Cli(sys.argv[1]).events_since(sys.argv[2], 0)\n"
+                "ends = [e['seq'] for e in evs if e['kind'] == 'turn_end']\n"
+                "print(p['state'], ends[-1] if ends else 0)\n")
+        end = time.time() + 15
+        while True:
+            r = subprocess.run([sys.executable, "-c", code, self.url, pid], env=self.env,
+                               cwd=str(ROOT), capture_output=True, text=True, timeout=30)
+            st, seq = r.stdout.split()
+            if st == "ready" or time.time() > end:
+                break
+            time.sleep(0.2)
+        self.assertEqual(st, "ready", r.stderr)
+        out = self._post({"pane": pid, "text": "stale", "expect": f"t:{int(seq) - 1}"})
+        self.assertIn("ERR", out)
+        self.assertIn("moved on", out)
+        out = self._post({"pane": pid, "text": "fresh", "expect": f"t:{seq}"})
+        self.assertIn('"ok": true', out)
+        rc, out, _ = self.cli("say", pid, "after")       # waits for its own turn
+        self.assertEqual(rc, 0)
+
+
+class ACardReplyToARemotePaneIsRefused(unittest.TestCase):
+    """The other hub's send carries only the text: `expect` would be dropped
+    and the reply sent whatever the card showed. Refused here instead."""
+
+    def test_expect_on_a_remote_pane_raises_before_routing(self):
+        import drive_remote
+        calls = []
+        stub = type("R", (), {"call": lambda self, *a: calls.append(a) or {}})()
+        with self.assertRaises(ValueError) as cm:
+            drive_remote.Remote.route(stub, "/api/session/send",
+                                      {"pane": "r1", "text": "x", "expect": "t:3"})
+        self.assertIn("another hub", str(cm.exception))
+        self.assertEqual(calls, [], "the reply reached the other hub")
+        # A plain send (the pane's own box) still goes through.
+        drive_remote.Remote.route(stub, "/api/session/send", {"pane": "r1", "text": "x"})
+        self.assertEqual(calls, [("r1", "send", {"text": "x"})])
+
+
 class LaterOverTheCli(HubCase):
     def test_add_list_rm(self):
         rc, out, err = self.cli("later", "add", "--at", "2099-01-01T06:00", "--lane", "fake",

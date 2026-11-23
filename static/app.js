@@ -3874,7 +3874,8 @@ function render() {
 
   // THE rail. Built directly from the panes; permissions are answered here with
   // their exact bytes, so a minimized pane can still be unblocked.
-  const n = $('#needs'); n.innerHTML = '';
+  // Built into a fragment and swapped in at the end (see railSig).
+  const needs = $('#needs'), n = document.createDocumentFragment();
   let items = 0;
   // The Claude login, ahead of the pane it would kill: expired renders as a dead
   // card, expiring as a plain one, each with the remedy. Hidden when fine.
@@ -4012,6 +4013,21 @@ function render() {
     for (const p of paused) { n.appendChild(pausedRow(p)); items++; quiet++; }
   }
   if (!items) n.appendChild(el('div', 'calm', 'Nothing. Quiet is the steady state.'));
+  // Drafts for panes that are gone are dropped (bounded).
+  for (const id of Object.keys(railDrafts())) if (!S.panes.has(id)) delete railDrafts()[id];
+  const typing = document.activeElement && document.activeElement.dataset &&
+                 needs.contains(document.activeElement) ? document.activeElement : null;
+  const sig = railSig([...n.children]);
+  if (!(typing && typing.dataset.reply && needs.dataset.sig === sig)) {
+    const caret = typing && typing.dataset.reply
+      ? [typing.dataset.reply, typing.selectionStart, typing.selectionEnd] : null;
+    needs.replaceChildren(n);
+    needs.dataset.sig = sig;
+    if (caret) {
+      const box = needs.querySelector(`[data-reply="${caret[0]}"]`);
+      if (box) { box.focus({ preventScroll: true }); box.setSelectionRange(caret[1], caret[2]); }
+    }
+  }
   const mobilePane = $('#mobile-pane');
   if (mobilePane) {
     const selected = S.focus;
@@ -4173,12 +4189,15 @@ function dismissWait(w) {
 function waitCard(w, narrow) {
   const p = w.p;
   const c = el('div', 'ncard wait');
+  c.dataset.key = 'w:' + p.id + ':' + w.seq;
   c.appendChild(el('div', 't', p.title || p.label));
   c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)} · waiting ${fmtAge(w.age)}` +
                                ctxTag(p) + (p.minimized ? ' · minimized' : '')));
   if (w.excerpt) c.appendChild(el('div', 'qtext', w.excerpt));
+  const inline = canReplyFromCard(p);
+  if (inline) c.appendChild(replyBox(p, cardTarget(p, w)));
   const acts = el('div', 'facts');
-  const go = el('button', 'fbtn', 'Reply');
+  const go = el('button', 'fbtn', inline ? 'Open' : 'Reply');
   go.type = 'button';
   go.title = 'open the pane with its message box ready';
   go.onclick = () => answerInPane(p, narrow);
@@ -4257,12 +4276,14 @@ function seenPanes(panes, rectOf, vh, covered, solo) {
 function questionCard(p, narrow) {
   const q = p.question, hub = q.source === 'hop-limit';
   const c = el('div', 'ncard q' + (hub ? ' hub' : ''));
+  c.dataset.key = 'q:' + p.id + ':' + (q.id || q.at || '');
   c.appendChild(el('div', 't', `${p.title || p.label} — ` +
                                (hub ? 'Corral paused this loop' : 'asks you')));
   c.appendChild(el('div', 'm', `${p.label} · ${paneDir(p)}` + ctxTag(p) +
                                (p.minimized ? ' · minimized' : '') +
                                (p.state === 'detached' ? ' · paused' : '')));
   c.appendChild(el('div', 'qtext', q.text));
+  if (canReplyFromCard(p)) c.appendChild(replyBox(p, cardTarget(p)));
   const acts = el('div', 'facts');
   const go = el('button', 'fbtn', hub ? 'Open the pane' : 'Answer in pane');
   go.type = 'button';
@@ -4297,6 +4318,91 @@ async function answerInPane(p, narrow = isNarrow()) {
   requestAnimationFrame(() =>
     document.querySelector(`[data-pane="${p.id}"] .composer textarea`)
       ?.focus({ preventScroll: true }));
+}
+
+/* ── reply from the card (selftest_inbox.mjs T-RR) ─────────────────────────
+ * A short answer to a question or a waiting turn without leaving the rail.
+ * The card's target rides with the send (`expect`, sessions.reply_target):
+ * `q:<question id>` or `t:<turn_end seq>`. If the pane moved on, the hub refuses
+ * with 409 before recording anything and the draft is kept. Drafts live in
+ * S.railDrafts (pane id → {text, target}), since the rail is rebuilt. */
+const RAIL_REPLY_MAX = 4000;
+function cardTarget(p, w) {
+  if (p.question && p.question.text) return 'q:' + (p.question.id || p.question.at || '');
+  return w ? 't:' + w.seq : null;
+}
+/* Remote panes: the other hub would drop the check (hub.py refuses it), so
+ * their cards keep "Answer in pane". A hop-limit stop is the hub's, not a
+ * question: it opens the pane. */
+function canReplyFromCard(p) {
+  return !p.remote && !(p.question && p.question.source === 'hop-limit');
+}
+/* The card under a draft changed since the last keystroke. */
+function replyMoved(d, target) {
+  return !!(d && (d.text || '').trim() && d.target && d.target !== target);
+}
+/* What identifies the rail's cards, in order: the rail is kept as it is while
+ * a reply box there has focus unless this changes (a rebuild would close a
+ * phone's keyboard mid-word). */
+function railSig(cards) {
+  return cards.map(c => (c.dataset && c.dataset.key) ||
+    (c.className + ':' + ((c.querySelector && c.querySelector('.t') || c).textContent || '').slice(0, 80)))
+    .join('|');
+}
+function railDrafts() { return S.railDrafts || (S.railDrafts = {}); }
+function replyBox(p, target) {
+  const wrap = el('div', 'rreply');
+  const d = railDrafts()[p.id];
+  if (replyMoved(d, target)) wrap.appendChild(el('div', 'fnote rmoved',
+    'this changed since you typed: read it again, then send'));
+  const ta = el('textarea');
+  ta.rows = 1; ta.maxLength = RAIL_REPLY_MAX; ta.dataset.reply = p.id;
+  ta.placeholder = 'Reply here…';
+  ta.setAttribute('aria-label', `reply to ${p.title || p.label}`);
+  ta.value = d ? d.text : '';
+  ta.oninput = () => {
+    if (ta.value) railDrafts()[p.id] = { text: ta.value, target };
+    else delete railDrafts()[p.id];
+  };
+  const b = el('button', 'fbtn go', 'Send');
+  b.type = 'button';
+  b.title = 'send this to the pane as your reply; Shift+Enter for a new line';
+  const send = () => sendFromCard(p, target, ta, b);
+  b.onclick = send;
+  ta.onkeydown = e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  };
+  const row = el('div', 'rrow');
+  row.append(ta, b);
+  wrap.appendChild(row);
+  return wrap;
+}
+async function sendFromCard(p, target, ta, b) {
+  const t = ta.value.trim();
+  if (!t || b.disabled) return;
+  if (isLoginCommand(S.panes.get(p.id) || p, t)) {
+    return toast('sign in from the pane, not from the card', true);
+  }
+  b.disabled = true; b.textContent = 'sending…';
+  try {
+    await api('/api/session/send', { pane: p.id, text: t, expect: target });
+    delete railDrafts()[p.id];
+    ta.value = '';
+    toast(`sent to ${p.title || p.label}`);
+  } catch (e) {
+    if (e.status === 409 && (e.body || {}).reason === 'moved') {
+      // Kept, and marked: the card redraws with what it says now.
+      railDrafts()[p.id] = { text: ta.value, target: 'moved' };
+      await refresh().catch(() => {});
+      if (!document.querySelector(`[data-reply="${p.id}"]`)) {
+        // No card to answer any more: the pane's own box keeps the words.
+        delete railDrafts()[p.id];
+        insertIntoComposer(p.id, t, 'not sent: the pane moved on. Your reply is in its box');
+      } else toast('not sent: the pane moved on. Read the card again, then send', true);
+    } else toast(e.message, true);
+  } finally {
+    b.disabled = false; b.textContent = 'Send';
+  }
 }
 
 // Minimize/restore, shared by the roster row, pane header, minbar chip and rail.
@@ -4570,7 +4676,7 @@ function connect() {
     // ask_human: the agent raised (or replaced) its question; a human turn,
     // a close or the agent's death closed it. The server owns both.
     if (ev.kind === 'question') p.question = { text: d.text, at: d.at, turn: d.turn,
-                                              source: d.source || null };
+                                              id: d.id || null, source: d.source || null };
     if (ev.kind === 'question_cleared') p.question = null;
     if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';

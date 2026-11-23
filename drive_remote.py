@@ -330,6 +330,13 @@ class Remote:
         """A wall POST for a mirror -> (status, body)."""
         pane = b.get("pane", "")
         op = ROUTES[path]
+        if op == "send" and b.get("expect") is not None:
+            # A reply from a rail card binds to what the card showed; the
+            # other hub's send takes only the text, so the check would be
+            # dropped and the reply sent anyway. Refuse rather than steer
+            # the wrong turn.
+            raise ValueError("a reply from the card is not available yet on a "
+                             "pane from another hub: open the pane to answer")
         if op == "send":
             r = self.call(pane, "send", {"text": b.get("text", "")})
             return {"ok": True, "turn": r.get("turn")}
