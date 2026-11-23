@@ -266,6 +266,30 @@
   </form>
 </dialog>
 
+<!-- Ask a panel: the same question to other vendors' agents, blind; panel.py runs it
+     and its synthesis reports back to the pane it was asked from. -->
+<dialog id="pandlg">
+  <form method="dialog" class="dlg">
+    <h2>Ask a panel</h2>
+    <p class="hint" id="pan-who"></p>
+    <label>Topic
+      <input id="pan-topic" maxlength="120" placeholder="a few words, for the list"></label>
+    <label>The question each arm answers, blind
+      <textarea id="pan-charge" rows="8" placeholder="What should they weigh in on? Name the files or the decision."></textarea></label>
+    <fieldset id="pan-lanes"><legend>Arms (one per vendor, at most 4)</legend></fieldset>
+    <label>Rounds
+      <select id="pan-rounds">
+        <option value="1">1 — each answers blind (the default)</option>
+        <option value="2">2 — then each sees the others and revises</option>
+      </select></label>
+    <p class="hint" id="pan-err"></p>
+    <menu>
+      <button value="cancel" class="btn">Cancel</button>
+      <button value="ok" class="btn go" id="pan-go">Start the panel</button>
+    </menu>
+  </form>
+</dialog>
+
 <!-- Port: carry this conversation's transcript to another lane. Send is bound to the preview's sha. -->
 <dialog id="portdlg">
   <form method="dialog" class="dlg">
