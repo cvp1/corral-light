@@ -14,6 +14,7 @@ Collected by test_corral_light.py, so `python3 test_corral_light.py` runs it.
 """
 import os
 import signal
+import time
 import unittest
 from pathlib import Path
 
@@ -167,6 +168,91 @@ class EveryDroppedMessageIsAnnounced(FakeLaneCase):
         p.clear_context()
         self.assertTrue(wait_for(lambda: set(self._unsent(p)) >= {a, b}))
         self.assertNotIn(running, self._unsent(p))
+
+
+class ReplyFromTheCard(FakeLaneCase):
+    """A reply typed into a rail card carries what the card showed
+    (`expect` = reply_target()). It lands when that still holds, and is
+    refused with nothing recorded when the pane has moved on: a stale card
+    must never steer a different turn than the one it showed."""
+
+    def _users(self, p):
+        return [e["data"]["text"] for e in p.events if e["kind"] == "user"]
+
+    def _ready_after(self, p, text):
+        p.send(text)
+        self.assertTrue(wait_for(lambda: f"echo: {text}" in self.texts(p)))
+        self.assertTrue(wait_for(lambda: p.state == "ready"))
+
+    def test_a_question_reply_lands_and_answers_it(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        self._ready_after(p, "hello")
+        p.ask("Which branch?")
+        tgt = p.reply_target()
+        self.assertEqual(tgt, f"q:{p.question['id']}")
+        p.send("main", expect=tgt)
+        self.assertTrue(wait_for(lambda: "echo: main" in self.texts(p)))
+        self.assertIsNone(p.question, "the reply did not answer the question")
+
+    def test_a_reply_to_a_replaced_question_is_refused_and_not_recorded(self):
+        import sessions
+        p = self.mgr.create("fake", self.agent_dir)
+        self._ready_after(p, "hello")
+        p.ask("Which branch?")
+        old = p.reply_target()
+        # Same second, on purpose: `at` alone could not tell them apart.
+        p.ask("Actually: which remote?")
+        self.assertNotEqual(p.reply_target(), old)
+        users, turns = self._users(p), len(p._turns().turns())
+        with self.assertRaises(sessions.ReplyMoved) as cm:
+            p.send("main", expect=old)
+        self.assertEqual(cm.exception.current, p.reply_target())
+        self.assertEqual(self._users(p), users, "a refused reply reached the transcript")
+        self.assertEqual(len(p._turns().turns()), turns, "a refused reply was recorded")
+        self.assertEqual(p.question["text"], "Actually: which remote?")
+
+    def test_a_waiting_turn_reply_lands_once(self):
+        import sessions
+        p = self.mgr.create("fake", self.agent_dir)
+        self._ready_after(p, "hello")
+        end = [e for e in p.events if e["kind"] == "turn_end"][-1]
+        tgt = p.reply_target()
+        self.assertEqual(tgt, f"t:{end['seq']}")
+        p.send("go on", expect=tgt)
+        self.assertTrue(wait_for(lambda: "echo: go on" in self.texts(p)))
+        # The same card again (a double tap, a second tab): it moved on.
+        with self.assertRaises(sessions.ReplyMoved):
+            p.send("go on", expect=tgt)
+        self.assertEqual(self._users(p).count("go on"), 1)
+
+    def test_someone_else_writing_first_makes_the_card_stale(self):
+        import sessions
+        p = self.mgr.create("fake", self.agent_dir)
+        self._ready_after(p, "hello")
+        tgt = p.reply_target()
+        p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: "sleeping" in self.texts(p)))
+        self.assertIsNone(p.reply_target(), "a busy pane has nothing to reply to")
+        with self.assertRaises(sessions.ReplyMoved):
+            p.send("late", expect=tgt)
+        self.assertNotIn("late", self._users(p))
+        p.cancel()
+
+    def test_a_question_keeps_its_id_across_a_restart(self):
+        import corral_core.sessions as core
+        q = core.PaneBase.restore_question({"question": {"text": "a", "at": "x", "id": "abc"}})
+        self.assertEqual(q["id"], "abc")
+        q = core.PaneBase.restore_question({"question": {"text": "a", "at": "x"}})
+        self.assertNotIn("id", q)        # older record: reply_target falls back to `at`
+
+    def test_an_empty_or_made_up_target_is_refused(self):
+        import sessions
+        p = self.mgr.create("fake", self.agent_dir)
+        self._ready_after(p, "hello")
+        for bad in ("", "t:0", "q:nope"):
+            with self.assertRaises(sessions.ReplyMoved):
+                p.send("x", expect=bad)
+        self.assertNotIn("x", self._users(p))
 
 
 class ClearIsAFreshConversation(FakeLaneCase):

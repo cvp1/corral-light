@@ -93,6 +93,17 @@ _CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
 _QueuedText = _core.QueuedText
 
 
+class ReplyMoved(Exception):
+    """A reply sent from a rail card no longer matches what that card showed:
+    the question was answered or replaced, or the agent has taken another
+    turn. Refused before anything is recorded; the caller keeps the draft."""
+
+    def __init__(self, current):
+        super().__init__("this pane has moved on since that card was drawn: "
+                         "read it again, then send")
+        self.current = current
+
+
 class _AnnouncesUnsent:
     """The pane's turn ledger, plus one event: `unsent` {turn, why}.
 
@@ -1543,6 +1554,32 @@ class Pane(_core.PaneBase):
         return super().pause()
 
     # ── Next up: the type-ahead queue, visible and withdrawable ─────────
+    def reply_target(self):
+        """What a reply from a rail card would be answering right now, as a
+        token the card carries back: `q:<question id>` (or its `at`, for one asked before ids) for an open question,
+        `t:<seq>` for a turn that ended on the operator with nothing written
+        since, else None. The wall draws its cards from the same events, so
+        the token it holds matches this one until the pane moves on."""
+        q = getattr(self, "question", None)
+        if q and q.get("text"):
+            return f"q:{q.get('id') or q.get('at')}"
+        if self.state != "ready":
+            return None
+        with self._lock:
+            evs = list(self.events)
+        for ev in reversed(evs):
+            k = ev.get("kind")
+            if k in ("user", "peer"):
+                return None
+            if k == "turn_end":
+                return f"t:{ev.get('seq')}"
+        return None
+
+    def _check_reply(self, expect):
+        cur = self.reply_target()
+        if not expect or str(expect) != cur:
+            raise ReplyMoved(cur)
+
     def queued_view(self):
         """What waits behind the running turn, in run order: [{turn, text, peer}].
         `text` is what was typed (capped at QUEUE_PREVIEW); a peer message is
@@ -2334,9 +2371,14 @@ class Pane(_core.PaneBase):
         link_project_memory(d, self.cwd)
         return d
 
-    def send(self, text, via=None):
+    def send(self, text, via=None, expect=None):
         # Validate `via` before anything is resumed, titled or queued.
         via = _core.check_via(via)
+        # A reply from a rail card names what the card showed (`expect`, see
+        # reply_target). Checked first, so a stale one neither resumes, clears
+        # nor titles anything; checked again under the turn lock below.
+        if expect is not None:
+            self._check_reply(expect)
         # /clear is Corral's, on EVERY lane, and it is checked before the
         # resume below: clearing a paused pane means "start it fresh", and
         # loading the old conversation only to throw it away is wasted work.
@@ -2374,6 +2416,8 @@ class Pane(_core.PaneBase):
         # Light intercepts nothing: every message goes to the agent.
         # One turn at a time per pane; extra messages queue in order, bounded.
         with self._turn_lock:
+            if expect is not None:
+                self._check_reply(expect)
             if len(self._queue) >= MAX_QUEUED_TURNS:
                 raise ValueError(
                     f"{MAX_QUEUED_TURNS} messages already waiting on this pane "
