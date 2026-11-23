@@ -6074,7 +6074,7 @@ function openPanel(p) {
   };
   dlg.showModal();
   $('#pan-charge').focus();
-
+}
 
 /* ── Changes in this folder (selftest_daily.mjs T-DD-17) ────────────────────
  * A plain pane works in your repo itself; this shows what changed there since
