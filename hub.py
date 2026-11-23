@@ -1022,7 +1022,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             b = self._body()
             if isinstance(b, dict) and REMOTE.has(str(b.get("pane") or "")):
-                r = self._remote_post(p, b)
+                try:
+                    r = self._remote_post(p, b)
+                except drive_remote.Conflict as e:
+                    # Same answer as a local pane: the wall keeps the draft
+                    # (moved) or says it already started (started).
+                    return self._json({"error": str(e)[:400], "reason": e.reason}, 409)
                 if r is not None:
                     return r
             if p.startswith("/api/hubs/"):

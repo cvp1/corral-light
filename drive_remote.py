@@ -19,7 +19,17 @@ REFRESH_S = 60             # how often unlinked peers are asked what they allow
 # Wall routes a mirror answers itself, and the channel command each one runs.
 ROUTES = {"/api/session/send": "send", "/api/session/permission": "answer",
           "/api/session/cancel": "cancel", "/api/session/close": "close",
-          "/api/session/resume": "resume"}
+          "/api/session/resume": "resume", "/api/session/withdraw": "withdraw"}
+
+
+class Conflict(Exception):
+    """The other hub refused because the pane moved on (409): a stale card
+    reply (`moved`) or a withdraw too late (`started`). The wall shows it as
+    it does for a local pane."""
+
+    def __init__(self, why, reason):
+        super().__init__(why)
+        self.reason = reason
 
 
 class Mirror:
@@ -319,6 +329,11 @@ class Remote:
         try:
             res = link.call(op, {**args, "pane": pane}, **kw)
         except drive.DriveError as e:
+            if e.status == 409 and e.reason:
+                raise Conflict(e.why, e.reason)
+            if op in ("withdraw", "reply") and e.why.startswith("unknown command"):
+                raise ValueError("the other hub runs an older Corral Light that cannot "
+                                 "do this yet: update it, or open the pane")
             raise ValueError(e.why)
         if op == "close":
             with self.lock:
@@ -331,12 +346,14 @@ class Remote:
         pane = b.get("pane", "")
         op = ROUTES[path]
         if op == "send" and b.get("expect") is not None:
-            # A reply from a rail card binds to what the card showed; the
-            # other hub's send takes only the text, so the check would be
-            # dropped and the reply sent anyway. Refuse rather than steer
-            # the wrong turn.
-            raise ValueError("a reply from the card is not available yet on a "
-                             "pane from another hub: open the pane to answer")
+            # A reply from a rail card, bound to what the card showed: its own
+            # command, so an older hub refuses it instead of dropping the check.
+            r = self.call(pane, "reply", {"text": b.get("text", ""),
+                                          "expect": str(b.get("expect"))})
+            return {"ok": True, "turn": r.get("turn")}
+        if op == "withdraw":
+            r = self.call(pane, "withdraw", {"turn": str(b.get("turn") or "")})
+            return {"ok": True, "text": r.get("text")}
         if op == "send":
             r = self.call(pane, "send", {"text": b.get("text", "")})
             return {"ok": True, "turn": r.get("turn")}

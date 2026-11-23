@@ -1231,7 +1231,7 @@ function nextUpModel(p) {
       const flat = String(it.text || '').split(/\s+/).join(' ').trim();
       return { turn: it.turn || '', n: i + 1, full: String(it.text || ''), peer: !!it.peer,
                text: flat.length > NEXT_UP_CHARS ? flat.slice(0, NEXT_UP_CHARS - 1) + '…' : flat,
-               canWithdraw: !it.peer && !p.remote && !!it.turn };
+               canWithdraw: !it.peer && !!it.turn };
     }),
   };
 }
@@ -4384,11 +4384,11 @@ function cardTarget(p, w) {
   if (p.question && p.question.text) return 'q:' + (p.question.id || p.question.at || '');
   return w ? 't:' + w.seq : null;
 }
-/* Remote panes: the other hub would drop the check (hub.py refuses it), so
- * their cards keep "Answer in pane". A hop-limit stop is the hub's, not a
- * question: it opens the pane. */
+/* A hop-limit stop is the hub's, not a question: it opens the pane. A pane
+ * on another hub replies through that hub's own `reply` command, which checks
+ * the same target there (an older hub refuses it, loudly). */
 function canReplyFromCard(p) {
-  return !p.remote && !(p.question && p.question.source === 'hop-limit');
+  return !(p.question && p.question.source === 'hop-limit');
 }
 /* The card under a draft changed since the last keystroke. */
 function replyMoved(d, target) {

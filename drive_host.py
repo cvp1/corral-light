@@ -10,6 +10,8 @@ may work it from afar.
 """
 import os
 import time
+
+import drive
 from pathlib import Path
 
 HISTORY_MAX = 500
@@ -80,6 +82,20 @@ class HostAdapter:
             ok = p.answer(str(args.get("requestId") or ""), str(args.get("optionId") or ""),
                           digest=str(args.get("digest") or ""), via="hub", card=card)
             return {"pane": p.id, "delivered": ok}
+        if op == "reply":
+            # A reply from the driving wall's rail card, bound to what that
+            # card showed; refused (409 moved) when the pane has moved on.
+            try:
+                turn = p.send(str(args.get("text") or ""), expect=str(args.get("expect") or ""))
+            except self.s.ReplyMoved as e:
+                raise drive.DriveError(str(e), 409, reason="moved")
+            return {"pane": p.id, "turn": turn}
+        if op == "withdraw":
+            try:
+                text = p.withdraw(str(args.get("turn") or ""))
+            except LookupError as e:
+                raise drive.DriveError(str(e), 409, reason="started")
+            return {"pane": p.id, "text": text}
         if op == "cancel":
             return {"pane": p.id, "ok": p.cancel()}
         if op == "close":

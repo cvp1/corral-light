@@ -352,22 +352,61 @@ class ReplyFromTheCardOverTheHub(HubCase):
         self.assertEqual(rc, 0)
 
 
-class ACardReplyToARemotePaneIsRefused(unittest.TestCase):
-    """The other hub's send carries only the text: `expect` would be dropped
-    and the reply sent whatever the card showed. Refused here instead."""
+class RemotePanesReplyAndWithdraw(unittest.TestCase):
+    """On a pane from another hub, a card reply and a withdraw go up the
+    channel as their own commands (`reply`, `withdraw`): never as a plain
+    send that would drop the check. A 409 from there stays a 409 here."""
 
-    def test_expect_on_a_remote_pane_raises_before_routing(self):
-        import drive_remote
+    def _stub(self, result=None, error=None):
         calls = []
-        stub = type("R", (), {"call": lambda self, *a: calls.append(a) or {}})()
-        with self.assertRaises(ValueError) as cm:
-            drive_remote.Remote.route(stub, "/api/session/send",
+        def call(self, *a):
+            calls.append(a)
+            if error:
+                raise error
+            return result or {}
+        return type("R", (), {"call": call})(), calls
+
+    def test_a_card_reply_is_the_reply_command_with_its_target(self):
+        import drive_remote
+        stub, calls = self._stub({"turn": "t9"})
+        r = drive_remote.Remote.route(stub, "/api/session/send",
                                       {"pane": "r1", "text": "x", "expect": "t:3"})
-        self.assertIn("another hub", str(cm.exception))
-        self.assertEqual(calls, [], "the reply reached the other hub")
-        # A plain send (the pane's own box) still goes through.
+        self.assertEqual((r, calls), ({"ok": True, "turn": "t9"},
+                                      [("r1", "reply", {"text": "x", "expect": "t:3"})]))
+        stub, calls = self._stub({"turn": "t1"})
         drive_remote.Remote.route(stub, "/api/session/send", {"pane": "r1", "text": "x"})
-        self.assertEqual(calls, [("r1", "send", {"text": "x"})])
+        self.assertEqual(calls, [("r1", "send", {"text": "x"})], "a plain send stays a send")
+
+    def test_withdraw_is_routed(self):
+        import drive_remote
+        self.assertEqual(drive_remote.ROUTES["/api/session/withdraw"], "withdraw")
+        stub, calls = self._stub({"text": "walnut"})
+        r = drive_remote.Remote.route(stub, "/api/session/withdraw", {"pane": "r1", "turn": "tt"})
+        self.assertEqual((r, calls), ({"ok": True, "text": "walnut"},
+                                      [("r1", "withdraw", {"turn": "tt"})]))
+
+    def _call_raising(self, err, op):
+        import drive_remote
+        link = type("L", (), {"call": lambda self, *a, **k: (_ for _ in ()).throw(err)})()
+        mirror = type("M", (), {"peer": "p"})()
+        stub = type("R", (), {"get": lambda self, pane: mirror, "link": lambda self, peer: link})()
+        return drive_remote.Remote.call(stub, "r1", op, {})
+
+    def test_a_409_with_a_reason_stays_a_conflict(self):
+        import drive, drive_remote
+        with self.assertRaises(drive_remote.Conflict) as cm:
+            self._call_raising(drive.DriveError("moved on", 409, reason="moved"), "reply")
+        self.assertEqual(cm.exception.reason, "moved")
+
+    def test_an_older_hub_says_so(self):
+        import drive
+        with self.assertRaises(ValueError) as cm:
+            self._call_raising(drive.DriveError("unknown command 'reply'"), "reply")
+        self.assertIn("older Corral Light", str(cm.exception))
+
+    def test_the_hub_answers_a_conflict_with_409_and_its_reason(self):
+        src = (ROOT / "hub.py").read_text(encoding="utf-8")
+        self.assertRegex(src, r'except drive_remote\.Conflict as e:\n\s+#[^\n]*\n\s+#[^\n]*\n\s+return self\._json\(\{"error": str\(e\)\[:400\], "reason": e\.reason\}, 409\)')
 
 
 class LaterOverTheCli(HubCase):

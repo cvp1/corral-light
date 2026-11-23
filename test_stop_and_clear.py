@@ -255,6 +255,54 @@ class ReplyFromTheCard(FakeLaneCase):
         self.assertNotIn("x", self._users(p))
 
 
+class RemoteParityOnTheDrivenHub(FakeLaneCase):
+    """A pane driven from another hub: `reply` and `withdraw` run the same
+    checks as on this wall, and their refusals cross the channel as 409s
+    with a reason (moved / started), not as a generic error."""
+
+    def _adapter(self):
+        import drive_host, sessions
+        return drive_host.HostAdapter(self.mgr, sessions)
+
+    def test_reply_lands_when_fresh_and_is_refused_when_moved(self):
+        import drive
+        p = self.mgr.create("fake", self.agent_dir)
+        p.send("hello")
+        self.assertTrue(wait_for(lambda: "echo: hello" in self.texts(p)))
+        self.assertTrue(wait_for(lambda: p.state == "ready"))
+        a, tgt = self._adapter(), p.reply_target()
+        r = a.op("reply", {"pane": p.id, "text": "go on", "expect": tgt}, {})
+        self.assertTrue(r["turn"])
+        self.assertTrue(wait_for(lambda: "echo: go on" in self.texts(p)))
+        with self.assertRaises(drive.DriveError) as cm:
+            a.op("reply", {"pane": p.id, "text": "again", "expect": tgt}, {})
+        self.assertEqual((cm.exception.status, cm.exception.reason), (409, "moved"))
+        with self.assertRaises(drive.DriveError):
+            a.op("reply", {"pane": p.id, "text": "no target"}, {})   # empty expect: refused
+
+    def test_withdraw_takes_back_or_says_it_started(self):
+        import drive
+        p = self.mgr.create("fake", self.agent_dir)
+        p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: "sleeping" in self.texts(p)))
+        t = p.send("queued one")
+        a = self._adapter()
+        self.assertEqual(a.op("withdraw", {"pane": p.id, "turn": t}, {})["text"], "queued one")
+        with self.assertRaises(drive.DriveError) as cm:
+            a.op("withdraw", {"pane": p.id, "turn": t}, {})
+        self.assertEqual((cm.exception.status, cm.exception.reason), (409, "started"))
+        p.cancel()
+
+    def test_a_refusal_keeps_its_reason_across_the_channel(self):
+        import drive, tempfile, os
+        d = tempfile.mkdtemp(prefix="corral-mut-")
+        m = drive.Mutations(os.path.join(d, "m.json"))
+        def moved():
+            raise drive.DriveError("moved on", 409, reason="moved")
+        self.assertEqual(m.once("peer", "a" * 12, moved),
+                         {"ok": False, "error": "moved on", "status": 409, "reason": "moved"})
+
+
 class ClearIsAFreshConversation(FakeLaneCase):
 
     def _after_clear(self, p):
