@@ -1598,3 +1598,7 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 .askslot.inview .qbanner .qwho,.askslot.inview .qbanner .qtext{display:none}
 .askslot.inview .qbanner .qjump{display:block}
 @media (pointer:coarse){.askslot.inview .qbanner .qjump{min-height:32px}}
+
+/* a scheduled run that did not happen: rust rule, quiet card */
+.ncard.smiss{border-left-color:var(--rust)}
+.ncard.smiss .qtext{color:var(--dim)}
