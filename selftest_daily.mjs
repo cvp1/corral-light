@@ -489,5 +489,28 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(/case 'turn_start': break;/.test(src), 'T-DD-14 turn_start never draws in the transcript');
 }
 
+
+// T-DD-15 pasted images: refused at paste time where the hub would refuse.
+{
+  const why = load('shotRefusal', [], { SHOT_MAX_BYTES: 3_750_000, SHOTS_PER_MESSAGE: 4,
+    SHOT_TYPES: ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] });
+  const png = { type: 'image/png', size: 1000 };
+  eq(why({ acceptsImages: true }, png, 0), '', 'T-DD-15 a PNG on a lane that takes images');
+  eq(why({}, png, 0), '', 'T-DD-15 an older hub (no acceptsImages) lets the hub decide');
+  check(/does not take images/.test(why({ acceptsImages: false, label: 'Grok' }, png, 0)), 'T-DD-15 a lane without images says so');
+  check(/another hub/.test(why({ remote: { host: 'b' } }, png, 0)), 'T-DD-15 a remote pane says so');
+  check(/only PNG/.test(why({}, { type: 'image/svg+xml', size: 10 }, 0)), 'T-DD-15 SVG is refused (it is script)');
+  check(/3\.75 MB/.test(why({}, { type: 'image/png', size: 4e6 }, 0)), 'T-DD-15 too big');
+  check(/at most 4/.test(why({}, png, 4)), 'T-DD-15 at most four');
+  const comp = fn('composer');
+  check(/if \(!items\.some\(i => i\.type === 'text\/plain'\)\) e\.preventDefault\(\);/.test(comp),
+        'T-DD-15 an image with text on the clipboard still pastes the text');
+  check(/images: shots\.map\(sh => sh\.sha\)/.test(comp), 'T-DD-15 the message names its images');
+  check(/if \(!t && !shots\.length\) return;/.test(comp), 'T-DD-15 an image alone can be sent');
+  check(/c\.append\(att, ac, ta, b, stopButton\(p\)\)/.test(comp), 'T-DD-15 the row sits above the box');
+  check(/\(d\.images \|\| \[\]\)\.length && !p\.remote\) u\.appendChild\(shotStrip\(p\.id, d\.images\)\)/.test(fn('renderLog')),
+        'T-DD-15 the bubble shows what was sent, from the hub');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight, pasted images');

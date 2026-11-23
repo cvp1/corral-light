@@ -345,6 +345,11 @@ class Remote:
         """A wall POST for a mirror -> (status, body)."""
         pane = b.get("pane", "")
         op = ROUTES[path]
+        if op == "send" and b.get("images"):
+            # The other hub's send carries text only: refuse rather than send
+            # the words without the picture they are about.
+            raise ValueError("images are not available yet on a pane from another hub: "
+                             "describe it, or save it there and give the path")
         if op == "send" and b.get("expect") is not None:
             # A reply from a rail card, bound to what the card showed: its own
             # command, so an older hub refuses it instead of dropping the check.

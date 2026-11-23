@@ -624,6 +624,31 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise ValueError("malformed JSON body")
 
+    def _image_upload(self):
+        """POST /api/session/image?pane=<id>: one pasted image as the raw body
+        (its own cap, past MAX_BODY), stored in the pane's folder. Returns its
+        id; the message that uses it names it in `images`."""
+        q = parse_qs(urlparse(self.path).query)
+        pane_id = (q.get("pane") or [""])[0]
+        try:
+            n = parse_content_length(self.headers.get("Content-Length", 0),
+                                     cap=sessions.IMAGE_MAX)
+        except ValueError:
+            return self._json({"error": f"an image may be at most "
+                                        f"{sessions.IMAGE_MAX / 1_000_000:.2f} MB"}, 413)
+        data = self.rfile.read(n)
+        self._body_read = True
+        if REMOTE.has(pane_id):
+            return self._json({"error": "images are not available yet on a pane from "
+                                        "another hub"}, 400)
+        try:
+            pane = MGR.get(pane_id)
+            sha = pane.save_image(data, self.headers.get("Content-Type", ""))
+        except (KeyError, ValueError) as e:
+            return self._json({"error": str(e).strip("'")[:300]}, 400)
+        return self._json({"ok": True, "sha": sha, "type": pane._image_type(sha),
+                           "bytes": len(data)})
+
     def _push_route(self, p, b):
         """Subscribe or forget this device, or send it a test ping now."""
         try:
@@ -865,6 +890,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"roles": out, "dir": str(roles.roles_dir())})
             except Exception as e:                  # noqa: BLE001
                 return self._json({"roles": [], "error": str(e)[-200:]})
+        if p == "/api/session/image":
+            # A pasted image, for the transcript's thumbnail. Same pairing as
+            # every /api route; served as the stored type, never sniffed.
+            pane_q, sha = (q.get("pane") or [""])[0], (q.get("sha") or [""])[0]
+            pane = MGR.panes.get(pane_q)
+            f = pane.image_path(sha) if pane is not None else None
+            if f is None:
+                return self._json({"error": "no such image"}, 404)
+            return self._send(200, f.read_bytes(), pane._image_type(sha))
         if p == "/api/session/pending":
             # Authoritative pending permission payloads (from pane.pending, not
             # the bounded event ring), with the digest an approval must carry.
@@ -1034,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not paired"}, 401)
         if not self._same_origin():
             return self._json({"error": "cross-origin request refused"}, 403)
+        if p == "/api/session/image":
+            return self._image_upload()
         try:
             b = self._body()
             if isinstance(b, dict) and REMOTE.has(str(b.get("pane") or "")):
@@ -1172,10 +1208,13 @@ class Handler(BaseHTTPRequestHandler):
                 # `turn` is the durable ledger id; `via` is the caller's
                 # origin label ("consult", "cli"), not a control.
                 expect = b.get("expect")
+                images = b.get("images") or None
+                if images is not None and not isinstance(images, list):
+                    raise ValueError("images must be a list of image ids")
                 try:
                     tid = MGR.get(b.get("pane", "")).send(
                         b.get("text", ""), via=b.get("via") or None,
-                        expect=None if expect is None else str(expect))
+                        expect=None if expect is None else str(expect), images=images)
                 except sessions.ReplyMoved as e:
                     # The rail card was stale: nothing was sent or recorded.
                     return self._json({"error": str(e), "reason": "moved",

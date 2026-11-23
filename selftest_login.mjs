@@ -35,7 +35,12 @@ const mk = (tag, cls, text) => {
               placeholder: '', rows: 1, scrollHeight: 20,
               appendChild(k) { this.kids.push(k); return k; },
               append(...ks) { this.kids.push(...ks); },
-              replaceChildren(...ks) { this.kids = ks; } };
+              replaceChildren(...ks) { this.kids = ks; },
+              // As a real element: listeners are kept, so a test can fire them.
+              listeners: {}, addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
+              classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
+                           toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+                           contains(c) { return this._s.has(c); } } };
   Object.defineProperty(n, 'innerHTML', { set() { throw new Error('innerHTML'); } });
   return n;
 };

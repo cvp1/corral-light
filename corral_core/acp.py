@@ -785,10 +785,13 @@ class AcpClient:
                              "mcpServers": mcp_servers or []},
                             timeout=HANDSHAKE_TIMEOUT) or {}
 
-    def prompt(self, session_id, text):
-        return self.request("session/prompt", {
-            "sessionId": session_id,
-            "prompt": [{"type": "text", "text": text}]})
+    def prompt(self, session_id, text, images=None):
+        """`images`: [{"mimeType", "data" (base64)}], sent as ACP image blocks
+        after the text (only to an agent whose promptCapabilities.image)."""
+        blocks = [{"type": "text", "text": text}] if text else []
+        blocks += [{"type": "image", "mimeType": i["mimeType"], "data": i["data"]}
+                   for i in (images or [])]
+        return self.request("session/prompt", {"sessionId": session_id, "prompt": blocks})
 
     def cancel(self, session_id):
         try:

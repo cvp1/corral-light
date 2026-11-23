@@ -377,6 +377,15 @@ class RemotePanesReplyAndWithdraw(unittest.TestCase):
         drive_remote.Remote.route(stub, "/api/session/send", {"pane": "r1", "text": "x"})
         self.assertEqual(calls, [("r1", "send", {"text": "x"})], "a plain send stays a send")
 
+    def test_images_to_a_remote_pane_are_refused_not_dropped(self):
+        import drive_remote
+        stub, calls = self._stub({"turn": "t1"})
+        with self.assertRaises(ValueError) as cm:
+            drive_remote.Remote.route(stub, "/api/session/send",
+                                      {"pane": "r1", "text": "see", "images": ["a" * 64]})
+        self.assertIn("another hub", str(cm.exception))
+        self.assertEqual(calls, [], "the words went without the picture")
+
     def test_withdraw_is_routed(self):
         import drive_remote
         self.assertEqual(drive_remote.ROUTES["/api/session/withdraw"], "withdraw")
@@ -438,6 +447,68 @@ class SayShowsOnlyItsOwnTurn(HubCase):
                 first.kill()
                 first.communicate(timeout=5)
             self.cli("close", pid)
+
+
+class PastedImagesOverTheHub(HubCase):
+    """POST /api/session/image stores a pasted image (its own size cap, past
+    the JSON body cap); GET serves it back as its type; a send names it."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["FAKE_IMAGES"] = "1"
+        try:
+            super().setUpClass()
+        finally:
+            os.environ.pop("FAKE_IMAGES", None)
+
+    def _raw(self, method, path, body=None, ctype=None):
+        code = ("import sys, json, http.client, consult\n"
+                "h = consult.connect(sys.argv[1])\n"
+                "c = h._conn()\n"
+                "hd = h._headers()\n"
+                "body = bytes.fromhex(sys.argv[4]) if sys.argv[4] else None\n"
+                "if sys.argv[5]: hd['Content-Type'] = sys.argv[5]\n"
+                "if body is not None: hd['Content-Length'] = str(len(body))\n"
+                "c.request(sys.argv[2], sys.argv[3], body=body, headers=hd)\n"
+                "r = c.getresponse(); d = r.read()\n"
+                "print(r.status, r.getheader('Content-Type'), d.hex() if not r.getheader('Content-Type','').startswith('application/json') else d.decode())\n")
+        r = subprocess.run([sys.executable, "-c", code, self.url, method, path,
+                            (body or b"").hex(), ctype or ""], env=self.env, cwd=str(ROOT),
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st, ct, rest = r.stdout.strip().split(" ", 2)
+        return int(st), ct, rest
+
+    def test_upload_view_and_send(self):
+        from test_stop_and_clear import PNG_1PX
+        pid = self.open()
+        st, _, out = self._raw("POST", f"/api/session/image?pane={pid}", PNG_1PX, "image/png")
+        self.assertEqual(st, 200, out)
+        sha = json.loads(out)["sha"]
+        st, ct, hexbody = self._raw("GET", f"/api/session/image?pane={pid}&sha={sha}")
+        self.assertEqual((st, ct, bytes.fromhex(hexbody)), (200, "image/png", PNG_1PX))
+        st, _, out = self._raw("GET", f"/api/session/image?pane={pid}&sha={'0' * 64}")
+        self.assertEqual(st, 404)
+        st, _, out = self._raw("POST", f"/api/session/image?pane={pid}", b"<svg/>", "image/svg+xml")
+        self.assertEqual(st, 400, out)
+        code = ("import sys, json, cli\n"
+                "print(json.dumps(cli.Cli(sys.argv[1]).post('/api/session/send', "
+                "{'pane': sys.argv[2], 'text': 'see', 'images': [sys.argv[3]]})))\n")
+        r = subprocess.run([sys.executable, "-c", code, self.url, pid, sha], env=self.env,
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=30)
+        self.assertIn('"ok": true', r.stdout, r.stderr)
+        end = time.time() + 15
+        while time.time() < end:
+            rc, out, _ = self.cli("say", pid, "after")      # waits behind the image turn
+            if rc == 0:
+                break
+        code = ("import sys, cli\n"
+                "p, evs = cli.Cli(sys.argv[1]).events_since(sys.argv[2], 0)\n"
+                "print(''.join(e['data'].get('text', '') for e in evs if e['kind'] == 'text'))\n")
+        r = subprocess.run([sys.executable, "-c", code, self.url, pid], env=self.env,
+                           cwd=str(ROOT), capture_output=True, text=True, timeout=30)
+        self.assertIn(f"echo: see [images: image/png {len(PNG_1PX)}B]", r.stdout)
+        self.cli("close", pid)
 
 
 class LaterOverTheCli(HubCase):

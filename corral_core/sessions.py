@@ -396,6 +396,7 @@ class QueuedText(str):
     """A queued prompt (a str) that carries its turn id."""
     turn = None
     peer = False        # True for a message another pane's agent sent
+    images = ()         # shas of pasted images (Pane.save_image) sent with it
 
     def __new__(cls, text, turn):
         s = super().__new__(cls, text)
