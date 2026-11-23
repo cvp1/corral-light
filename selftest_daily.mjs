@@ -531,5 +531,22 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(/!isTerm\(p\) && !p\.remote\) item\('Ask a panel…'/.test(src), 'T-DD-16 not on a terminal or a remote pane');
 }
 
+
+// T-DD-17 Changes in this folder: a plain pane's working tree since HEAD.
+{
+  const sum = load('changesSummary');
+  check(/not in a git repository/.test(sum({ repo: false })), 'T-DD-17 not a repo says so');
+  check(/Nothing changed since the last commit on main/.test(sum({ repo: true, branch: 'main', counts: { changed: 0 } })),
+        'T-DD-17 a clean tree says so');
+  check(/3 files changed since the last commit on main · first 2 listed · some output was cut/.test(
+        sum({ repo: true, branch: 'main', counts: { changed: 3, shown: 2 }, truncated: true })), 'T-DD-17 counts and cuts are said');
+  const cls = load('patchLineClass');
+  eq(['+++ b/x', '--- a/x', '@@ -1 +1 @@', '+new', '-old', ' same'].map(cls),
+     ['pfile', 'pfile', 'phunk', 'padd', 'pdel', 'pctx'], 'T-DD-17 each patch line is classed, never parsed as markup');
+  check(/!isTerm\(p\) && !p\.remote && !p\.worktree\) item\('Changes in this folder…'/.test(src),
+        'T-DD-17 offered only on a plain local pane (own branches have Review)');
+  check(/pre\.appendChild\(el\('span', patchLineClass\(line\), line/.test(fn('changesNode')), 'T-DD-17 patch text goes in as text');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight, pasted images, Ask a panel');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight, pasted images, Ask a panel, folder changes');

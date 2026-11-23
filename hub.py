@@ -899,6 +899,25 @@ class Handler(BaseHTTPRequestHandler):
             if f is None:
                 return self._json({"error": "no such image"}, 404)
             return self._send(200, f.read_bytes(), pane._image_type(sha))
+
+
+        if p == "/api/session/changes":
+            # A plain pane's folder since HEAD, read without running anything
+            # the repo's config names (folder_diff.py). Own-branch panes have
+            # Review; remote panes are on another machine.
+            import folder_diff
+            pane_q = (q.get("pane") or [""])[0]
+            if REMOTE.has(pane_q):
+                return self._json({"error": "not available yet on a pane from another hub"}, 400)
+            pane = MGR.panes.get(pane_q)
+            if pane is None:
+                return self._json({"error": "no such pane"}, 404)
+            if getattr(pane, "worktree_id", None):
+                return self._json({"error": "this pane has its own branch: use Review changes"}, 400)
+            try:
+                return self._json(folder_diff.changes(pane.cwd))
+            except (folder_diff.Refused, worktrees.GitError, worktrees.GitTimeout) as e:
+                return self._json({"error": str(e)[:300]}, 409)
         if p == "/api/session/pending":
             # Authoritative pending permission payloads (from pane.pending, not
             # the bounded event ring), with the digest an approval must carry.

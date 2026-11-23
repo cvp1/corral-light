@@ -286,6 +286,17 @@
     <menu>
       <button value="cancel" class="btn">Cancel</button>
       <button value="ok" class="btn go" id="pan-go">Start the panel</button>
+
+
+<!-- Changes in this folder: a plain pane's working tree since HEAD, read only. -->
+<dialog id="chgdlg">
+  <form method="dialog" class="dlg wide">
+    <h2>Changes in this folder</h2>
+    <p class="hint" id="chg-sum"></p>
+    <div id="chg-list"></div>
+    <menu>
+      <button type="button" class="btn" id="chg-again">Look again</button>
+      <button value="cancel" class="btn go">Close</button>
     </menu>
   </form>
 </dialog>
