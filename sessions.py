@@ -227,6 +227,14 @@ def keeper_sock_path(pane_id, pane_dir, base="/tmp"):
     return d / f"k-{pane_id}-{tag}.sock"
 MAX_PROMPT = 200_000
 QUEUE_PREVIEW = 400            # chars of a queued message shown in Next up
+# Pasted images: stored in the pane's folder by hash, sent as ACP image blocks
+# only to a lane that says it takes them. 3.75 MB raw stays under the 5 MB
+# base64 a frontier API accepts per image.
+IMAGE_MAX = 3_750_000
+IMAGES_PER_MESSAGE = 4
+IMAGES_PER_PANE = 200
+IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+               "image/webp": ".webp"}
 MAX_QUEUED_TURNS = 4           # type-ahead depth per pane; beyond it, say no
 
 # ── own-branch worktrees (docs/worktree-review-plan.md) ──────────────────────
@@ -1489,7 +1497,7 @@ class Pane(_core.PaneBase):
             self.client = acp.AcpClient(argv, self.cwd, env=env, strip_env=strip,
                                         keeper=self._keeper_spec(), **self._bind(gen))
             self._record_pid()
-            self.client.initialize()
+            self._note_caps(self.client.initialize())
             # The agent replays the whole transcript on load. We already have
             # it; emitting it again would double the conversation on screen.
             self._replaying = True
@@ -1554,6 +1562,81 @@ class Pane(_core.PaneBase):
         return super().pause()
 
     # ── Next up: the type-ahead queue, visible and withdrawable ─────────
+    # ── pasted images ────────────────────────────────────────────────────
+    def _note_caps(self, info):
+        """What the agent said it takes in a prompt (ACP promptCapabilities)."""
+        caps = ((info or {}).get("agentCapabilities") or {}).get("promptCapabilities") or {}
+        self._prompt_caps = caps if isinstance(caps, dict) else {}
+
+    def accepts_images(self):
+        return bool((getattr(self, "_prompt_caps", None) or {}).get("image"))
+
+    def _images_dir(self):
+        d = getattr(self, "dir", None)
+        return Path(d) / "images" if d else None
+
+    def save_image(self, data, ctype):
+        """Store one pasted image; returns its sha256. Refuses what is not the
+        type it claims (by its first bytes), too big, or past the pane's cap."""
+        ext = IMAGE_TYPES.get(str(ctype or "").split(";")[0].strip().lower())
+        if not ext:
+            raise ValueError("only PNG, JPEG, GIF or WebP images can be pasted")
+        if not data:
+            raise ValueError("empty image")
+        if len(data) > IMAGE_MAX:
+            raise ValueError(f"image is {len(data) // 1_000_000} MB; the limit is "
+                             f"{IMAGE_MAX / 1_000_000:.2f} MB")
+        sniff = {".png": data[:8] == b"\x89PNG\r\n\x1a\n", ".jpg": data[:3] == b"\xff\xd8\xff",
+                 ".gif": data[:4] == b"GIF8",
+                 ".webp": data[:4] == b"RIFF" and data[8:12] == b"WEBP"}[ext]
+        if not sniff:
+            raise ValueError("that file is not the image type it says it is")
+        d = self._images_dir()
+        if d is None:
+            raise ValueError("this pane keeps no files, so it cannot take an image")
+        d.mkdir(parents=True, exist_ok=True)
+        import hashlib
+        sha = hashlib.sha256(data).hexdigest()
+        f = d / (sha + ext)
+        if not f.exists():
+            if len(list(d.iterdir())) >= IMAGES_PER_PANE:
+                raise ValueError(f"this pane already holds {IMAGES_PER_PANE} images")
+            tmp = d / (sha + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, f)
+        return sha
+
+    def image_path(self, sha):
+        """The stored file for a sha (64 hex), or None."""
+        if not (isinstance(sha, str) and len(sha) == 64
+                and all(c in "0123456789abcdef" for c in sha)):
+            return None
+        d = self._images_dir()
+        if d is None:
+            return None
+        for ext in IMAGE_TYPES.values():
+            f = d / (sha + ext)
+            if f.is_file():
+                return f
+        return None
+
+    def _image_type(self, sha):
+        f = self.image_path(sha)
+        rev = {v: k for k, v in IMAGE_TYPES.items()}
+        return rev.get(f.suffix) if f else None
+
+    def _image_blocks(self, shas):
+        import base64
+        out = []
+        for sha in shas or ():
+            f = self.image_path(sha)
+            if f is not None:
+                out.append({"mimeType": self._image_type(sha),
+                            "data": base64.b64encode(f.read_bytes()).decode("ascii")})
+        return out
+
     def reply_target(self):
         """What a reply from a rail card would be answering right now, as a
         token the card carries back: `q:<question id>` (or its `at`, for one asked before ids) for an open question,
@@ -2104,6 +2187,7 @@ class Pane(_core.PaneBase):
                                         **self._bind(self._generation))
             self._record_pid()
             info = self.client.initialize()
+            self._note_caps(info)
             new = self.client.new_session_full(self.cwd, self._mcp_servers())
             self.acp_session = new.get("sessionId")
             self._absorb_config(new.get("configOptions") or [])
@@ -2371,7 +2455,7 @@ class Pane(_core.PaneBase):
         link_project_memory(d, self.cwd)
         return d
 
-    def send(self, text, via=None, expect=None):
+    def send(self, text, via=None, expect=None, images=None):
         # Validate `via` before anything is resumed, titled or queued.
         via = _core.check_via(via)
         # A reply from a rail card names what the card showed (`expect`, see
@@ -2392,8 +2476,14 @@ class Pane(_core.PaneBase):
         # Dead too, since 2026-09-28 (P0-a'): typing into a pane whose agent
         # stopped means "bring it back", exactly as it does for a paused one.
         # resume() parks — never sends — whatever was queued when it died.
+        images = [str(x) for x in (images or [])]
+        if len(images) > IMAGES_PER_MESSAGE:
+            raise ValueError(f"at most {IMAGES_PER_MESSAGE} images in one message")
+        for sha in images:
+            if self.image_path(sha) is None:
+                raise ValueError("that image is not on this pane any more: paste it again")
         if self.state in self.RESUMABLE:
-            if not (text or "").strip():
+            if not (text or "").strip() and not images:
                 raise ValueError("empty prompt")
             self.resume()            # implicit: typing into a pane means using it
             if self.state == "dead":
@@ -2403,14 +2493,17 @@ class Pane(_core.PaneBase):
         if not self.client or not self.client.alive:
             raise acp.AgentError("agent is not running")
         text = (text or "").strip()
-        if not text:
+        if not text and not images:
             raise ValueError("empty prompt")
+        if images and not self.accepts_images():
+            raise ValueError(f"{AGENTS[self.agent]['label']} does not take images (its agent did not "
+                             f"say it can): describe it, or save it and give the path")
         if len(text) > MAX_PROMPT:
             raise ValueError(f"prompt exceeds {MAX_PROMPT} chars")
         # The first prompt names the conversation. Compare against the default title,
         # not the (bounded) event ring.
         if not self.title_locked and self.title == self._default_title(self.agent, self.cwd):
-            first = " ".join(text.split())[:42]
+            first = " ".join(text.split())[:42] or "an image"
             self.title = first + ("…" if len(" ".join(text.split())) > 42 else "")
             self.save_meta()      # or a restart restores the generic name back
         # Light intercepts nothing: every message goes to the agent.
@@ -2432,6 +2525,8 @@ class Pane(_core.PaneBase):
             # a turn still needs one for its `turn_end` to be matched to it.
             tid = tid or _core.new_turn_id()
             user = {"text": text, "turn": tid}
+            if images:
+                user["images"] = [{"sha": h, "type": self._image_type(h)} for h in images]
             if via:
                 user["via"] = via
             self.emit("user", user)
@@ -2444,7 +2539,8 @@ class Pane(_core.PaneBase):
                 agent_text = WORKTREE_PREAMBLE + "\n\n" + text
                 self._preamble_due = False
             item = _QueuedText(agent_text, tid)
-            item.shown = text        # Next up shows what was typed, not the preamble
+            item.shown = text or f"({len(images)} image{'s' if len(images) != 1 else ''})"
+            item.images = tuple(images)
             self._dispatch(item)
             self._queue_changed()
             return tid
@@ -2496,7 +2592,9 @@ class Pane(_core.PaneBase):
             # a later one (`corral-light say`) shows only its own turn.
             self.emit("turn_start", {"turn": tid}, activity=False)
             try:
-                r = client.prompt(self.acp_session, text)
+                imgs = self._image_blocks(getattr(text, "images", ()))
+                r = (client.prompt(self.acp_session, text, images=imgs) if imgs
+                     else client.prompt(self.acp_session, text))
             except acp.AgentError as e:
                 with self._turn_lock:
                     if self._generation != gen:
@@ -3074,6 +3172,7 @@ class Pane(_core.PaneBase):
             "pending": list(self.pending.keys()),
             # Next up: typed-ahead messages not yet sent to the agent, in order.
             "queued": self.queued_view(),
+            "acceptsImages": self.accepts_images(),
             # The pane's address for other panes; a withheld seat is shown, not served.
             "seat": None if self.seat_withheld else self.seat,
             "seatWithheld": self.seat if self.seat_withheld else None,

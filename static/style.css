@@ -1604,3 +1604,16 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 /* a scheduled run that did not happen: rust rule, quiet card */
 .ncard.smiss{border-left-color:var(--rust)}
 .ncard.smiss .qtext{color:var(--dim)}
+
+
+/* pasted images: a row above the message box, thumbnails in the bubble */
+.composer{flex-wrap:wrap}
+.composer .attachrow{flex-basis:100%;display:flex;gap:6px;flex-wrap:wrap}
+.composer .attachrow.hide{display:none}
+.composer .shot{position:relative;display:inline-block}
+.composer .shot img{height:52px;max-width:120px;border-radius:6px;border:1px solid var(--line2);object-fit:cover;display:block}
+.composer .shotx{position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;
+  border:1px solid var(--line2);background:var(--raise);color:var(--ink);font-size:11px;line-height:1;padding:0;cursor:pointer}
+@media (pointer:coarse){.composer .shotx{width:32px;height:32px;top:-10px;right:-10px}}
+.msg.user .shotrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.msg.user .shotrow img{height:72px;max-width:160px;border-radius:6px;object-fit:cover;display:block}

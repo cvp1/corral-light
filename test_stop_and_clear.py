@@ -12,6 +12,7 @@ the half-real reset this replaces).
 
 Collected by test_corral_light.py, so `python3 test_corral_light.py` runs it.
 """
+import json
 import os
 import signal
 import time
@@ -62,7 +63,7 @@ class StopMeansStop(FakeLaneCase):
     def test_the_composer_has_a_stop_button(self):
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-        self.assertIn("c.append(ac, ta, b, stopButton(p))", js)
+        self.assertIn("c.append(att, ac, ta, b, stopButton(p))", js)
         self.assertIn("'/api/session/pause'", js)        # the force-stop escalation
         self.assertIn(".pane.working .composer .stop", css)
 
@@ -319,6 +320,74 @@ class EachTurnSaysWhenItStarts(FakeLaneCase):
                  if e["kind"] in ("turn_start", "turn_end")]
         self.assertEqual(kinds[:2], [("turn_start", a), ("turn_end", a)],
                          "a turn starts before it ends, and the next waits")
+
+
+PNG_1PX = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                        "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
+
+
+class PastedImages(FakeLaneCase):
+    """An image pasted into the composer: stored by hash in the pane's folder,
+    sent as an ACP image block to a lane that says it takes images, refused
+    by one that does not, and never written into the event log as bytes."""
+
+    def _pane(self, images):
+        if images:
+            os.environ["FAKE_IMAGES"] = "1"
+            self.addCleanup(os.environ.pop, "FAKE_IMAGES", None)
+        p = self.mgr.create("fake", self.agent_dir)
+        self.assertEqual(p.state, "ready", p.error)
+        return p
+
+    def test_an_image_reaches_a_lane_that_takes_them(self):
+        p = self._pane(images=True)
+        self.assertTrue(p.accepts_images())
+        self.assertTrue(p.snapshot()["acceptsImages"])
+        sha = p.save_image(PNG_1PX, "image/png")
+        self.assertEqual(p.save_image(PNG_1PX, "image/png"), sha, "the same image is stored once")
+        p.send("what is this", images=[sha])
+        self.assertTrue(wait_for(lambda: f"echo: what is this [images: image/png {len(PNG_1PX)}B]" in self.texts(p)))
+        user = [e for e in p.events if e["kind"] == "user"][-1]["data"]
+        self.assertEqual(user["images"], [{"sha": sha, "type": "image/png"}])
+        self.assertNotIn("iVBOR", json.dumps(p.events), "image bytes leaked into the event log")
+        self.assertEqual(oct(p.image_path(sha).stat().st_mode & 0o777), "0o600")
+
+    def test_an_image_alone_is_a_message(self):
+        p = self._pane(images=True)
+        sha = p.save_image(PNG_1PX, "image/png")
+        p.send("", images=[sha])
+        self.assertTrue(wait_for(lambda: "[images: image/png" in self.texts(p)))
+        self.assertEqual(p.title, "an image")
+
+    def test_a_lane_without_images_refuses_before_anything_is_sent(self):
+        p = self._pane(images=False)
+        self.assertFalse(p.accepts_images())
+        sha = p.save_image(PNG_1PX, "image/png")
+        users = len([e for e in p.events if e["kind"] == "user"])
+        with self.assertRaises(ValueError) as cm:
+            p.send("look", images=[sha])
+        self.assertIn("does not take images", str(cm.exception))
+        self.assertEqual(len([e for e in p.events if e["kind"] == "user"]), users)
+
+    def test_what_is_refused_at_the_door(self):
+        p = self._pane(images=True)
+        for data, ctype, why in ((PNG_1PX, "image/svg+xml", "only PNG"),
+                                 (b"GIF89a" + b"x" * 10, "image/png", "not the image type"),
+                                 (b"", "image/png", "empty"),
+                                 (b"\x89PNG\r\n\x1a\n" + b"0" * sessions_IMAGE_MAX(), "image/png", "the limit")):
+            with self.assertRaises(ValueError, msg=why) as cm:
+                p.save_image(data, ctype)
+            self.assertIn(why, str(cm.exception))
+        with self.assertRaises(ValueError):
+            p.send("x", images=["0" * 64])               # not on this pane
+        with self.assertRaises(ValueError):
+            p.send("x", images=[p.save_image(PNG_1PX, "image/png")] * 5)   # over the count
+        self.assertIsNone(p.image_path("../../etc/passwd"))
+
+
+def sessions_IMAGE_MAX():
+    import sessions
+    return sessions.IMAGE_MAX
 
 
 class ClearIsAFreshConversation(FakeLaneCase):

@@ -742,6 +742,8 @@ function renderLog(p) {
         } else {
           const u = el('div', 'msg user', d.text || '');
           if (d.turn) u.dataset.turn = d.turn;   // a later `withdrawn` marks it
+          // Pasted images: thumbnails from the hub (never inline bytes).
+          if ((d.images || []).length && !p.remote) u.appendChild(shotStrip(p.id, d.images));
           // A turn sent by a script (consult, the CLI) is marked; `via` is the
           // caller's label, not proof of origin.
           if (d.via) {
@@ -1278,6 +1280,32 @@ async function withdrawQueued(p, turn, edit) {
   if (edit) insertIntoComposer(p.id, (r.text || '') + '\n', 'back in the box, not sent: edit it, then send');
   else toast('removed from Next up; it will not be sent');
   return true;
+}
+
+/* ── pasted images (selftest_daily.mjs T-DD-15) ──────────────────────────────
+ * Why an image cannot be attached here, or '' when it can. Mirrors the hub's
+ * checks (sessions.save_image / send), so the refusal comes at paste time. */
+const SHOT_MAX_BYTES = 3_750_000, SHOTS_PER_MESSAGE = 4;
+const SHOT_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+function shotRefusal(p, f, have) {
+  if (p.remote) return 'images are not available yet on a pane from another hub';
+  if (p.acceptsImages === false) return `${p.label || 'this agent'} does not take images: describe it, or save it and give the path`;
+  if (!SHOT_TYPES.includes(f.type)) return 'only PNG, JPEG, GIF or WebP images can be pasted';
+  if (f.size > SHOT_MAX_BYTES) return `that image is ${(f.size / 1e6).toFixed(1)} MB; the limit is 3.75 MB`;
+  if (have >= SHOTS_PER_MESSAGE) return `at most ${SHOTS_PER_MESSAGE} images in one message`;
+  return '';
+}
+function shotStrip(paneId, images) {
+  const row = el('div', 'shotrow');
+  for (const im of images) {
+    const url = '/api/session/image?pane=' + encodeURIComponent(paneId) + '&sha=' + encodeURIComponent(im.sha);
+    const a = el('a'); a.href = url; a.target = '_blank'; a.rel = 'noopener';
+    a.title = 'open the image you sent';
+    const img = el('img'); img.src = url; img.alt = 'image sent with this message'; img.loading = 'lazy';
+    a.appendChild(img);
+    row.appendChild(a);
+  }
+  return row;
 }
 
 /* ── agents: the savvy-progress mod, on the wall ────────────────────────────
@@ -3132,6 +3160,52 @@ function composer(p, kind) {
   }
   const ta = el('textarea'); ta.placeholder = 'Message…  (/ for skills, ↑ for history)'; ta.rows = 1;
   ta.value = draftsLoad()[p.id] || '';
+  // Pasted or dropped images, uploaded at once and sent with the next message.
+  const shots = [];
+  const att = el('div', 'attachrow hide');
+  const paintShots = () => {
+    att.replaceChildren(...shots.map((sh, i) => {
+      const chip = el('span', 'shot');
+      const img = el('img'); img.src = sh.url; img.alt = 'pasted image';
+      const x = el('button', 'shotx', '✕'); x.type = 'button'; x.title = 'remove this image';
+      x.onclick = () => { URL.revokeObjectURL(sh.url); shots.splice(i, 1); paintShots(); ta.focus(); };
+      chip.append(img, x);
+      return chip;
+    }));
+    att.classList.toggle('hide', !shots.length);
+  };
+  const addShots = async files => {
+    for (const f of files) {
+      const why = shotRefusal(S.panes.get(p.id) || p, f, shots.length);
+      if (why) { toast(why, true); continue; }
+      try {
+        const r = await fetch('/api/session/image?pane=' + encodeURIComponent(p.id),
+                              { method: 'POST', headers: { 'Content-Type': f.type }, body: f });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `${r.status} ${r.statusText}`);
+        shots.push({ sha: d.sha, url: URL.createObjectURL(f) });
+        paintShots();
+      } catch (e) { toast('image not attached: ' + e.message, true); }
+    }
+  };
+  ta.addEventListener('paste', e => {
+    const items = [...((e.clipboardData && e.clipboardData.items) || [])];
+    const files = items.filter(i => i.kind === 'file' && /^image\//.test(i.type))
+                       .map(i => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    // Text on the clipboard too (copied from a page): let the text paste go in.
+    if (!items.some(i => i.type === 'text/plain')) e.preventDefault();
+    addShots(files);
+  });
+  ta.addEventListener('dragover', e => {
+    if ([...(e.dataTransfer && e.dataTransfer.items || [])].some(i => i.kind === 'file')) e.preventDefault();
+  });
+  ta.addEventListener('drop', e => {
+    const files = [...((e.dataTransfer && e.dataTransfer.files) || [])].filter(f => /^image\//.test(f.type));
+    if (!files.length) return;
+    e.preventDefault();
+    addShots(files);
+  });
   // ↑/↓ walk: ix indexes the history, null when not walking; `held` is the
   // draft that was there when the walk began.
   const walk = { list: [], ix: null, held: '' };
@@ -3140,7 +3214,7 @@ function composer(p, kind) {
   let sending = false;
   const send = async () => {
     if (sending) return;
-    const t = ta.value.trim(); if (!t) return;
+    const t = ta.value.trim(); if (!t && !shots.length) return;
     // Fresh state: the composer outlives the snapshot it was built from.
     if (isLoginCommand(S.panes.get(p.id) || p, t)) {   // a sign-in, not a message
       ta.value = '';
@@ -3150,9 +3224,12 @@ function composer(p, kind) {
     hide();
     sending = true;
     try {
-      await api('/api/session/send', { pane: p.id, text: t });
+      await api('/api/session/send', shots.length
+        ? { pane: p.id, text: t, images: shots.map(sh => sh.sha) } : { pane: p.id, text: t });
       ta.value = ''; ta.style.height = 'auto';
       walk.ix = null; draftSave(p.id, '');
+      for (const sh of shots) URL.revokeObjectURL(sh.url);
+      shots.length = 0; paintShots();
     } catch (e) {
       toast(e.message, true);
     } finally {
@@ -3323,7 +3400,7 @@ function composer(p, kind) {
     b._reset = reset;
     return b;
   }
-  c.append(ac, ta, b, stopButton(p));
+  c.append(att, ac, ta, b, stopButton(p));
   return c;
 }
 

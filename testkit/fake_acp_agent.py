@@ -57,6 +57,7 @@ State lives in $FAKE_ACP_DIR: one JSON file per session, plus `pid-<pid>`
 marker files so a test can find and kill the process.
 """
 import json
+import base64
 import os
 import sys
 import threading
@@ -155,6 +156,7 @@ def _file_verb(words, text):
 def prompt(rid, params):
     sid = params.get("sessionId")
     text = "".join(p.get("text", "") for p in params.get("prompt") or [])
+    imgs = [p for p in params.get("prompt") or [] if p.get("type") == "image"]
     if text.startswith("[Corral] ") and "\n\n" in text:
         # An own-branch preamble (sessions.WORKTREE_PREAMBLE): acknowledge it,
         # then treat what follows as the prompt, as a real agent would.
@@ -330,7 +332,9 @@ def prompt(rid, params):
         ev.wait()
         chunk(sid, "permission: " + json.dumps(_answers[pid].get("result")))
     else:
-        chunk(sid, "echo: " + text)
+        chunk(sid, "echo: " + text + (
+            " [images: " + ", ".join(f"{p.get('mimeType')} {len(base64.b64decode(p.get('data') or ''))}B"
+                                      for p in imgs) + "]" if imgs else ""))
     send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
 
 
@@ -347,7 +351,10 @@ def main():
             continue
         if method == "initialize":
             send({"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": 1, "agentCapabilities": {"loadSession": True},
+                "protocolVersion": 1, "agentCapabilities": {
+                    "loadSession": True,
+                    # FAKE_IMAGES=1: a lane that takes images (as Claude's does).
+                    "promptCapabilities": {"image": os.environ.get("FAKE_IMAGES") == "1"}},
                 "agentInfo": {"name": "fake"}}})
         elif method == "session/new":
             sid = uuid.uuid4().hex
