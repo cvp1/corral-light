@@ -4175,6 +4175,7 @@ from test_ports import *                         # noqa: F401,F403,E402
 from test_seats import *                         # noqa: F401,F403,E402
 from test_folder_diff import *                   # noqa: F401,F403,E402
 from test_browser_files import *                 # noqa: F401,F403,E402
+from test_file_mention import *                  # noqa: F401,F403,E402
 # Every consumer of the `peer` kind (port pack, index, digest).
 from test_peer_consumers import ThePortPack, TheIndex   # noqa: F401,E402
 # The seat tools' routes on this hub, over a real socket.

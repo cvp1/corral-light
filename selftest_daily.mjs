@@ -548,5 +548,24 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(/pre\.appendChild\(el\('span', patchLineClass\(line\), line/.test(fn('changesNode')), 'T-DD-17 patch text goes in as text');
 }
 
+
+// T-DD-18 @ mentions: the word at the caret, replaced by the picked path.
+{
+  const at = load('mentionAt');
+  eq(at('see @hu', 7), { start: 4, end: 7, q: 'hu' }, 'T-DD-18 @word after a space');
+  eq(at('@', 1), { start: 0, end: 1, q: '' }, 'T-DD-18 a bare @ at the start lists files');
+  eq(at('mail me@host', 12), null, 'T-DD-18 an e-mail address is not a mention');
+  eq(at('see @hub now', 12), null, 'T-DD-18 a finished mention, caret elsewhere, is not reopened');
+  eq(at('see @hub now', 8), { start: 4, end: 8, q: 'hub' }, 'T-DD-18 the caret decides, not the end of the text');
+  const ins = load('mentionInsert');
+  eq(ins('see @hu and', { start: 4, end: 7 }, 'hub.py'), { value: 'see @hub.py  and', caret: 12 },
+     'T-DD-18 the path replaces the word, caret after it');
+  const comp = fn('composer');
+  check(/mentionInsert\(ta\.value, mentionAt\(ta\.value, ta\.selectionStart\) \|\| at, cmd\.name\)/.test(comp),
+        'T-DD-18 accepting re-reads the word at the caret (typing may have gone on)');
+  check(/if \(mine !== askSeq\) return;/.test(comp), 'T-DD-18 a slow answer for an older keystroke is dropped');
+  check(/!isTerm\(p\) && !p\.remote \? mentionAt/.test(comp), 'T-DD-18 not on a terminal or a remote pane');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight, pasted images, Ask a panel, folder changes');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight, pasted images, Ask a panel, folder changes, @ mentions');

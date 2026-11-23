@@ -1308,6 +1308,20 @@ function shotStrip(paneId, images) {
   return row;
 }
 
+/* ── @ mentions (selftest_daily.mjs T-DD-18) ────────────────────────────────
+ * The `@word` being typed at the caret: `@` at the start or after a space,
+ * then no space, up to 120 chars. {start, end, q} or null. */
+function mentionAt(value, caret) {
+  const before = String(value || '').slice(0, caret);
+  const m = /(^|\s)@([^\s@]{0,120})$/.exec(before);
+  return m ? { start: before.length - m[2].length - 1, end: caret, q: m[2] } : null;
+}
+/* Replace the `@word` with `@path ` and put the caret after it. */
+function mentionInsert(value, at, path) {
+  const ins = '@' + path + ' ';
+  return { value: value.slice(0, at.start) + ins + value.slice(at.end), caret: at.start + ins.length };
+}
+
 /* ── agents: the savvy-progress mod, on the wall ────────────────────────────
  * A strip above the composer (the flow's title, phase, accepted tasks out of
  * planned) and an Agents dialog (running, finished and planned subagents).
@@ -3244,14 +3258,16 @@ function composer(p, kind) {
   };
 
   // Slash-command completion from the commands the agent advertises over ACP.
+  // `@` completes a file path from the pane's folder (file_mention.py); the
+  // path goes in as text, which every agent reads.
   const ac = el('div', 'ac hide');
-  let hits = [], sel = 0;
-  const hide = () => { ac.className = 'ac hide'; hits = []; };
+  let hits = [], sel = 0, mode = 'slash', at = null, askSeq = 0;
+  const hide = () => { ac.className = 'ac hide'; hits = []; at = null; };
   const paint = () => {
     ac.replaceChildren();
     hits.forEach((cmd, i) => {
       const row = el('div', 'acrow' + (i === sel ? ' on' : ''));
-      row.appendChild(el('span', 'acn', '/' + cmd.name));
+      row.appendChild(el('span', 'acn', (mode === 'file' ? '@' : '/') + cmd.name));
       if (cmd.description) row.appendChild(el('span', 'acd', cmd.description));
       row.onmousedown = e => { e.preventDefault(); accept(i); };
       ac.appendChild(row);
@@ -3260,8 +3276,28 @@ function composer(p, kind) {
   };
   const accept = i => {
     const cmd = hits[i]; if (!cmd) return;
+    if (mode === 'file' && at) {
+      // Read the word at the caret now: typing may have gone on since the ask.
+      const r = mentionInsert(ta.value, mentionAt(ta.value, ta.selectionStart) || at, cmd.name);
+      ta.value = r.value;
+      hide(); ta.focus();
+      ta.setSelectionRange(r.caret, r.caret);
+      draftSave(p.id, ta.value);
+      return;
+    }
     ta.value = '/' + cmd.name + ' ';
     hide(); ta.focus();
+  };
+  const askFiles = async m => {
+    const mine = ++askSeq;
+    try {
+      const r = await api('/api/session/files?pane=' + encodeURIComponent(p.id) + '&q=' + encodeURIComponent(m.q));
+      if (mine !== askSeq) return;                 // a newer keystroke asked since
+      mode = 'file'; at = m;
+      hits = (r.files || []).slice(0, 8).map(f => ({ name: f }));
+      sel = 0;
+      hits.length ? paint() : hide();
+    } catch { if (mine === askSeq) hide(); }
   };
   const refit = () => { ta.style.height = 'auto';
                         ta.style.height = Math.min(ta.scrollHeight, 130) + 'px'; };
@@ -3272,8 +3308,12 @@ function composer(p, kind) {
     draftSave(p.id, ta.value);
     // Only while typing the NAME. Once there is a space the argument is being
     // written and a popup over it is in the way.
+    const fm = !isTerm(p) && !p.remote ? mentionAt(ta.value, ta.selectionStart) : null;
+    if (fm) return askFiles(fm);
+    askSeq++;                                     // a pending file ask is now stale
     const m = /^\/([\w-]*)$/.exec(ta.value);
     if (!m) return hide();
+    mode = 'slash';
     const q = m[1].toLowerCase();
     const all = (S.panes.get(p.id) || {}).commands || [];
     hits = all.filter(x => x.name.toLowerCase().includes(q))
