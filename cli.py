@@ -327,6 +327,15 @@ class Cli:
                                 not in consult.CANCEL_REASONS else 1
                     if mine and k in ("dead", "closed"):
                         return 1
+                    # Our message was dropped before the agent saw it
+                    # (withdrawn, stopped, cleared, the agent died): no
+                    # turn_end will ever come for it, so stop waiting.
+                    if k == "unsent" and turn and d.get("turn") == turn:
+                        if state.get("in_text"):
+                            self.say("")
+                            state["in_text"] = False
+                        self.say(f"  · not sent: {d.get('why') or 'dropped'}")
+                        return 1
                     if k == "permission" and self.interactive and \
                             d.get("requestId") not in asked:
                         asked.add(d.get("requestId"))

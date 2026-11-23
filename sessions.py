@@ -91,6 +91,33 @@ _CATALOG_LOCK = threading.Lock()   # one writer at a time for catalog.json
 
 # Re-exported for importers of the old name.
 _QueuedText = _core.QueuedText
+
+
+class _AnnouncesUnsent:
+    """The pane's turn ledger, plus one event: `unsent` {turn, why}.
+
+    Every path that drops a queued message (withdraw, stop, pause, /clear,
+    the agent dying, an internal error) closes it `interrupted` with
+    was="accepted": it never reached the agent. Announcing it here, at the
+    one place they all pass, lets a caller waiting on that turn (`corral-light
+    say`) stop waiting instead of hanging on a turn_end that cannot come.
+    """
+
+    def __init__(self, inner, pane):
+        self._inner, self._pane = inner, pane
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def mark(self, tid, state, why=None, **extra):
+        r = self._inner.mark(tid, state, why=why, **extra)
+        if tid and state == "interrupted" and extra.get("was") == "accepted":
+            try:
+                self._pane.emit("unsent", {"turn": tid, "why": str(why or "")[:300]},
+                                activity=False)
+            except Exception:           # noqa: BLE001 — the ledger never raises
+                pass
+        return r
 TURN_VIAS = _core.TURN_VIAS
 
 # Who answered a permission card, as the client declares it (a label, not a
@@ -1496,6 +1523,7 @@ class Pane(_core.PaneBase):
         if lg is None:
             d = getattr(self, "dir", None)
             lg = ledger.TurnLedger(d / "turns.jsonl") if d else ledger.NullLedger()
+            lg = _AnnouncesUnsent(lg, self)
             self._ledger = lg
         return lg
 

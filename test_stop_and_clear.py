@@ -130,6 +130,45 @@ class NextUpIsWithdrawable(FakeLaneCase):
         self.assertEqual(p.queued_view(), [])
 
 
+class EveryDroppedMessageIsAnnounced(FakeLaneCase):
+    """A queued message dropped before the agent saw it, by any path, emits
+    `unsent` with its turn id, so whoever waits on that turn can stop. The
+    turn already running is NOT announced: its own turn_end still comes."""
+
+    def _unsent(self, p):
+        return [e["data"]["turn"] for e in p.events if e["kind"] == "unsent"]
+
+    def _busy_with_two_queued(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        self.assertEqual(p.state, "ready", p.error)
+        running = p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: "sleeping" in self.texts(p)))
+        return p, running, p.send("one"), p.send("two")
+
+    def test_withdraw(self):
+        p, running, a, b = self._busy_with_two_queued()
+        p.withdraw(a)
+        self.assertEqual(self._unsent(p), [a])
+        p.cancel()
+
+    def test_stop(self):
+        p, running, a, b = self._busy_with_two_queued()
+        p.cancel()
+        self.assertEqual(self._unsent(p), [a, b])
+
+    def test_pause(self):
+        p, running, a, b = self._busy_with_two_queued()
+        p.pause()
+        self.assertTrue(wait_for(lambda: set(self._unsent(p)) >= {a, b}))
+        self.assertNotIn(running, self._unsent(p))
+
+    def test_clear(self):
+        p, running, a, b = self._busy_with_two_queued()
+        p.clear_context()
+        self.assertTrue(wait_for(lambda: set(self._unsent(p)) >= {a, b}))
+        self.assertNotIn(running, self._unsent(p))
+
+
 class ClearIsAFreshConversation(FakeLaneCase):
 
     def _after_clear(self, p):

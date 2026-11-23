@@ -260,8 +260,8 @@ class NextUpOverTheCli(HubCase):
     def test_next_lists_and_withdraw_takes_back(self):
         pid = self.open()
         run = lambda *a: subprocess.Popen([sys.executable, str(ROOT / "cli.py"), "say", pid, *a],
-                                          env=self.env, stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.DEVNULL)
+                                          env=self.env, stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, text=True)
         def until(pred, what):
             end = time.time() + 15
             while time.time() < end:
@@ -283,6 +283,11 @@ class NextUpOverTheCli(HubCase):
             self.assertRegex(out, r"(?s)1\. \S+  walnut one.*2\. \S+  walnut two")
             rc, out, err = self.cli("withdraw", pid, "1")
             self.assertEqual((rc, out.strip()), (0, "walnut one"), err)
+            # The terminal that sent it stops waiting: no turn_end can come.
+            # (It once hung until killed, then printed the next turn as its own.)
+            said, _ = procs[1].communicate(timeout=15)
+            self.assertEqual(procs[1].returncode, 1, said)
+            self.assertIn("not sent: withdrawn before it was sent", said)
             rc, out, _ = self.cli("next", pid)
             self.assertNotIn("walnut one", out)
             self.assertIn("1. ", out)
@@ -291,11 +296,17 @@ class NextUpOverTheCli(HubCase):
             rc, out, err = self.cli("withdraw", pid, "t-not-queued")
             self.assertNotEqual(rc, 0)
             self.assertIn("409", out + err)
+            # Stop drops walnut two too, and its terminal is told the same way.
+            self.cli("cancel", pid)
+            said, _ = procs[2].communicate(timeout=15)
+            self.assertEqual(procs[2].returncode, 1, said)
+            self.assertIn("not sent: stopped before it was sent", said)
         finally:
             self.cli("cancel", pid)
             for pr in procs:
-                pr.kill()
-                pr.wait(5)
+                if pr.poll() is None:
+                    pr.kill()
+                pr.communicate(timeout=5)
             self.cli("close", pid)
 
 
