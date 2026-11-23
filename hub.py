@@ -639,8 +639,12 @@ class Handler(BaseHTTPRequestHandler):
         data = self.rfile.read(n)
         self._body_read = True
         if REMOTE.has(pane_id):
-            return self._json({"error": "images are not available yet on a pane from "
-                                        "another hub"}, 400)
+            # Stored on the pane's own hub, where its agent reads it.
+            try:
+                return self._json({"ok": True, **REMOTE.image(
+                    pane_id, data, self.headers.get("Content-Type", ""))})
+            except ValueError as e:
+                return self._json({"error": str(e)[:300]}, 400)
         try:
             pane = MGR.get(pane_id)
             sha = pane.save_image(data, self.headers.get("Content-Type", ""))
@@ -894,6 +898,17 @@ class Handler(BaseHTTPRequestHandler):
             # A pasted image, for the transcript's thumbnail. Same pairing as
             # every /api route; served as the stored type, never sniffed.
             pane_q, sha = (q.get("pane") or [""])[0], (q.get("sha") or [""])[0]
+            if REMOTE.has(pane_q):
+                # Fetched from the pane's own hub. Its type must be one an
+                # image is stored as here: the other hub never picks what
+                # this origin serves (text/html would be its page on ours).
+                try:
+                    data, ctype = REMOTE.image_get(pane_q, sha)
+                except ValueError:
+                    return self._json({"error": "no such image"}, 404)
+                if ctype not in sessions.IMAGE_TYPES:
+                    return self._json({"error": "no such image"}, 404)
+                return self._send(200, data, ctype)
             pane = MGR.panes.get(pane_q)
             f = pane.image_path(sha) if pane is not None else None
             if f is None:
@@ -908,7 +923,10 @@ class Handler(BaseHTTPRequestHandler):
             import folder_diff
             pane_q = (q.get("pane") or [""])[0]
             if REMOTE.has(pane_q):
-                return self._json({"error": "not available yet on a pane from another hub"}, 400)
+                try:
+                    return self._json(REMOTE.changes(pane_q))
+                except ValueError as e:
+                    return self._json({"error": str(e)[:300]}, 409)
             pane = MGR.panes.get(pane_q)
             if pane is None:
                 return self._json({"error": "no such pane"}, 404)
@@ -924,7 +942,10 @@ class Handler(BaseHTTPRequestHandler):
             import file_mention
             pane_q = (q.get("pane") or [""])[0]
             if REMOTE.has(pane_q):
-                return self._json({"error": "not available yet on a pane from another hub"}, 400)
+                try:
+                    return self._json(REMOTE.files(pane_q, (q.get("q") or [""])[0]))
+                except ValueError as e:
+                    return self._json({"error": str(e)[:300]}, 409)
             pane = MGR.panes.get(pane_q)
             if pane is None:
                 return self._json({"error": "no such pane"}, 404)

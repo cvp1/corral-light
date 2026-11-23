@@ -743,7 +743,7 @@ function renderLog(p) {
           const u = el('div', 'msg user', d.text || '');
           if (d.turn) u.dataset.turn = d.turn;   // a later `withdrawn` marks it
           // Pasted images: thumbnails from the hub (never inline bytes).
-          if ((d.images || []).length && !p.remote) u.appendChild(shotStrip(p.id, d.images));
+          if ((d.images || []).length) u.appendChild(shotStrip(p.id, d.images));
           // A turn sent by a script (consult, the CLI) is marked; `via` is the
           // caller's label, not proof of origin.
           if (d.via) {
@@ -1288,7 +1288,6 @@ async function withdrawQueued(p, turn, edit) {
 const SHOT_MAX_BYTES = 3_750_000, SHOTS_PER_MESSAGE = 4;
 const SHOT_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 function shotRefusal(p, f, have) {
-  if (p.remote) return 'images are not available yet on a pane from another hub';
   if (p.acceptsImages === false) return `${p.label || 'this agent'} does not take images: describe it, or save it and give the path`;
   if (!SHOT_TYPES.includes(f.type)) return 'only PNG, JPEG, GIF or WebP images can be pasted';
   if (f.size > SHOT_MAX_BYTES) return `that image is ${(f.size / 1e6).toFixed(1)} MB; the limit is 3.75 MB`;
@@ -2001,7 +2000,7 @@ function openPaneMenu(p, at) {
                         { title: 'the same question to other vendors\' agents, blind; the synthesis reports back here' });
 
 
-  if (!isTerm(p) && !p.remote && !p.worktree) item('Changes in this folder…', () => openChanges(p),
+  if (!isTerm(p) && !p.worktree) item('Changes in this folder…', () => openChanges(p),
                         { title: 'what changed since the last commit, read only' });
   if (!isTerm(p)) item('Carry to a fresh pane…', () => openPort(p),
                         { title: 'start a new pane, on any agent, that reads this transcript' });
@@ -3308,7 +3307,7 @@ function composer(p, kind) {
     draftSave(p.id, ta.value);
     // Only while typing the NAME. Once there is a space the argument is being
     // written and a popup over it is in the way.
-    const fm = !isTerm(p) && !p.remote ? mentionAt(ta.value, ta.selectionStart) : null;
+    const fm = !isTerm(p) ? mentionAt(ta.value, ta.selectionStart) : null;
     if (fm) return askFiles(fm);
     askSeq++;                                     // a pending file ask is now stale
     const m = /^\/([\w-]*)$/.exec(ta.value);

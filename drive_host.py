@@ -8,6 +8,8 @@ The only extra is `driven_by`, kept in the pane's meta, naming the hub that
 opened it and the pairing generation; only that hub, under that pairing,
 may work it from afar.
 """
+import base64
+import binascii
 import os
 import time
 
@@ -96,6 +98,50 @@ class HostAdapter:
             except LookupError as e:
                 raise drive.DriveError(str(e), 409, reason="started")
             return {"pane": p.id, "text": text}
+        if op == "image":
+            # One pasted image, base64 in the frame (FRAME_MAX holds IMAGE_MAX
+            # with room). Stored and checked exactly as a local paste is.
+            try:
+                data = base64.b64decode(str(args.get("data") or ""), validate=True)
+            except (binascii.Error, ValueError):
+                raise ValueError("that image did not arrive whole: paste it again")
+            sha = p.save_image(data, str(args.get("type") or ""))
+            return {"pane": p.id, "sha": sha, "type": p._image_type(sha), "bytes": len(data)}
+        if op == "image_get":
+            sha = str(args.get("sha") or "")
+            f = p.image_path(sha)
+            if f is None:
+                raise drive.DriveError("no such image", 404)
+            return {"pane": p.id, "type": p._image_type(sha),
+                    "data": base64.b64encode(f.read_bytes()).decode("ascii")}
+        if op == "send_images":
+            # A message with images, from the box or a rail card (`expect`).
+            expect = args.get("expect")
+            images = args.get("images") if isinstance(args.get("images"), list) else []
+            try:
+                turn = p.send(str(args.get("text") or ""),
+                              expect=None if expect is None else str(expect),
+                              images=[str(x) for x in images])
+            except self.s.ReplyMoved as e:
+                raise drive.DriveError(str(e), 409, reason="moved")
+            return {"pane": p.id, "turn": turn}
+        if op == "changes":
+            # Read without running anything the repo's config names.
+            import folder_diff
+            import worktrees
+            if getattr(p, "worktree_id", None):
+                raise ValueError("this pane has its own branch: use Review changes")
+            try:
+                return folder_diff.changes(p.cwd)
+            except (folder_diff.Refused, worktrees.GitError, worktrees.GitTimeout) as e:
+                raise drive.DriveError(str(e)[:300], 409)
+        if op == "files":
+            import file_mention
+            import worktrees
+            try:
+                return file_mention.suggest(p.cwd, str(args.get("q") or ""))
+            except (worktrees.GitError, worktrees.GitTimeout) as e:
+                raise drive.DriveError(str(e)[:300], 409)
         if op == "cancel":
             return {"pane": p.id, "ok": p.cancel()}
         if op == "close":

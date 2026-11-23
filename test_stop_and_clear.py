@@ -304,6 +304,85 @@ class RemoteParityOnTheDrivenHub(FakeLaneCase):
                          {"ok": False, "error": "moved on", "status": 409, "reason": "moved"})
 
 
+class RemoteImagesChangesAndMentions(FakeLaneCase):
+    """The same pane, driven from another hub: a pasted image is stored here
+    and reaches the agent, its thumbnail can be fetched back, and the folder's
+    changes and `@` suggestions are read here, where the files are."""
+
+    def _adapter(self):
+        import drive_host, sessions
+        return drive_host.HostAdapter(self.mgr, sessions)
+
+    def _pane(self, cwd=None):
+        os.environ["FAKE_IMAGES"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_IMAGES", None)
+        p = self.mgr.create("fake", cwd or self.agent_dir)
+        self.assertEqual(p.state, "ready", p.error)
+        return p
+
+    def test_an_image_is_stored_sent_and_fetched_back(self):
+        import base64
+        p, a = self._pane(), self._adapter()
+        b64 = base64.b64encode(PNG_1PX).decode("ascii")
+        r = a.op("image", {"pane": p.id, "data": b64, "type": "image/png"}, {})
+        self.assertEqual((r["type"], r["bytes"]), ("image/png", len(PNG_1PX)))
+        self.assertEqual(r["sha"], p.save_image(PNG_1PX, "image/png"), "stored as a local paste is")
+        a.op("send_images", {"pane": p.id, "text": "what is this", "images": [r["sha"]]}, {})
+        self.assertTrue(wait_for(lambda: f"echo: what is this [images: image/png "
+                                         f"{len(PNG_1PX)}B]" in self.texts(p)))
+        back = a.op("image_get", {"pane": p.id, "sha": r["sha"]}, {})
+        self.assertEqual((base64.b64decode(back["data"]), back["type"]), (PNG_1PX, "image/png"))
+
+    def test_bad_images_are_refused_as_a_local_paste_is(self):
+        import base64, drive
+        p, a = self._pane(), self._adapter()
+        with self.assertRaises(ValueError):
+            a.op("image", {"pane": p.id, "data": "not base64!", "type": "image/png"}, {})
+        with self.assertRaises(ValueError):          # says PNG, is not
+            a.op("image", {"pane": p.id, "data": base64.b64encode(b"<svg/>").decode(),
+                           "type": "image/png"}, {})
+        with self.assertRaises(drive.DriveError) as cm:
+            a.op("image_get", {"pane": p.id, "sha": "0" * 64}, {})
+        self.assertEqual(cm.exception.status, 404)
+        with self.assertRaises(ValueError):          # a sha that was never stored
+            a.op("send_images", {"pane": p.id, "text": "x", "images": ["0" * 64]}, {})
+
+    def test_a_card_reply_with_an_image_keeps_its_check(self):
+        import base64, drive
+        p, a = self._pane(), self._adapter()
+        p.send("hello")
+        self.assertTrue(wait_for(lambda: "echo: hello" in self.texts(p)))
+        self.assertTrue(wait_for(lambda: p.state == "ready"))
+        tgt = p.reply_target()
+        sha = a.op("image", {"pane": p.id, "data": base64.b64encode(PNG_1PX).decode(),
+                             "type": "image/png"}, {})["sha"]
+        a.op("send_images", {"pane": p.id, "text": "this", "images": [sha], "expect": tgt}, {})
+        self.assertTrue(wait_for(lambda: "echo: this [images" in self.texts(p)))
+        with self.assertRaises(drive.DriveError) as cm:
+            a.op("send_images", {"pane": p.id, "text": "again", "images": [sha],
+                                 "expect": tgt}, {})
+        self.assertEqual((cm.exception.status, cm.exception.reason), (409, "moved"))
+
+    def test_changes_and_files_are_read_where_the_files_are(self):
+        import subprocess, tempfile
+        repo = Path(tempfile.mkdtemp(prefix="corral-rp-"))
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(repo),
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t"}
+        for c in (["init", "-q", "-b", "main"], ):
+            subprocess.run(["git", *c], cwd=repo, check=True, capture_output=True, env=env)
+        (repo / "keep.txt").write_text("one\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "b"], cwd=repo, check=True,
+                       capture_output=True, env=env)
+        (repo / "keep.txt").write_text("two\n")
+        p, a = self._pane(cwd=str(repo)), self._adapter()
+        r = a.op("changes", {"pane": p.id}, {})
+        self.assertEqual([(f["path"], f["status"]) for f in r["files"]], [("keep.txt", "M")])
+        self.assertIn("+two", r["files"][0]["patch"])
+        self.assertEqual(a.op("files", {"pane": p.id, "q": "kee"}, {})["files"], ["keep.txt"])
+
+
 class EachTurnSaysWhenItStarts(FakeLaneCase):
     """`turn_start` {turn} marks the moment the agent takes a queued message,
     in queue order, once each: what `corral-light say` waits for."""

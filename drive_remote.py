@@ -22,6 +22,13 @@ ROUTES = {"/api/session/send": "send", "/api/session/permission": "answer",
           "/api/session/resume": "resume", "/api/session/withdraw": "withdraw"}
 
 
+# Commands an older hub does not know; it refuses them loudly, and the wall
+# says why in words.
+NEWER = ("withdraw", "reply", "image", "image_get", "send_images", "changes", "files")
+IMAGE_WAIT_S = 120         # an image is megabytes up a link that may be slow
+IMAGE_CACHE_BYTES = 32 << 20   # fetched thumbnails kept here, newest first
+
+
 class Conflict(Exception):
     """The other hub refused because the pane moved on (409): a stale card
     reply (`moved`) or a withdraw too late (`started`). The wall shows it as
@@ -97,6 +104,7 @@ class Remote:
         self.mirrors = {}                 # pane id -> Mirror
         self.peers = {}                   # peer id -> {name, lanes, home, ...}
         self.opened = {}                  # pane id -> threading.Event (open waits)
+        self._images = {}                 # (pane, sha) -> (bytes, type), oldest first
 
     # ── life ─────────────────────────────────────────────────────────────
     def start(self):
@@ -331,7 +339,7 @@ class Remote:
         except drive.DriveError as e:
             if e.status == 409 and e.reason:
                 raise Conflict(e.why, e.reason)
-            if op in ("withdraw", "reply") and e.why.startswith("unknown command"):
+            if op in NEWER and e.why.startswith("unknown command"):
                 raise ValueError("the other hub runs an older Corral Light that cannot "
                                  "do this yet: update it, or open the pane")
             raise ValueError(e.why)
@@ -346,10 +354,15 @@ class Remote:
         pane = b.get("pane", "")
         op = ROUTES[path]
         if op == "send" and b.get("images"):
-            # The other hub's send carries text only: refuse rather than send
-            # the words without the picture they are about.
-            raise ValueError("images are not available yet on a pane from another hub: "
-                             "describe it, or save it there and give the path")
+            # Its own command, so an older hub refuses it rather than sending
+            # the words without the picture they are about. The images were
+            # stored over there by image() and are named by sha.
+            args = {"text": b.get("text", ""),
+                    "images": [str(x) for x in (b.get("images") or [])]}
+            if b.get("expect") is not None:
+                args["expect"] = str(b.get("expect"))
+            r = self.call(pane, "send_images", args)
+            return {"ok": True, "turn": r.get("turn")}
         if op == "send" and b.get("expect") is not None:
             # A reply from a rail card, bound to what the card showed: its own
             # command, so an older hub refuses it instead of dropping the check.
@@ -378,6 +391,45 @@ class Remote:
             self.call(pane, "resume", {})
             return {"ok": True, "pane": self.get(pane).view(0, self._remote(self.get(pane).peer))}
         raise ValueError("not supported on a pane from another hub")
+
+    def image(self, pane, data, ctype):
+        """A pasted image, stored on the pane's own hub -> {sha, type, bytes}."""
+        import base64
+        r = self.call(pane, "image", {"data": base64.b64encode(data).decode("ascii"),
+                                      "type": ctype}, timeout=IMAGE_WAIT_S)
+        return {"sha": r.get("sha"), "type": r.get("type"), "bytes": r.get("bytes")}
+
+    def image_get(self, pane, sha):
+        """(bytes, type) of an image stored on the pane's own hub."""
+        import base64
+        import binascii
+        import hashlib
+        key = (pane, str(sha))
+        with self.lock:
+            hit = self._images.pop(key, None)
+            if hit:
+                self._images[key] = hit                 # most recent last
+                return hit
+        r = self.call(pane, "image_get", {"sha": sha}, timeout=IMAGE_WAIT_S)
+        try:
+            data = base64.b64decode(str(r.get("data") or ""), validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("that image did not arrive whole")
+        if hashlib.sha256(data).hexdigest() != sha:
+            raise ValueError("that image did not arrive whole")
+        # Named by its own hash, so a kept copy can never go stale. Kept so
+        # a transcript re-render is not megabytes up the link each time.
+        with self.lock:
+            self._images[key] = (data, r.get("type"))
+            while sum(len(d) for d, _t in self._images.values()) > IMAGE_CACHE_BYTES:
+                self._images.pop(next(iter(self._images)))
+        return data, r.get("type")
+
+    def changes(self, pane):
+        return self.call(pane, "changes", {})
+
+    def files(self, pane, q):
+        return self.call(pane, "files", {"q": q})
 
     def pending(self, pane):
         return self.call(pane, "pending", {})

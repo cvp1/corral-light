@@ -377,14 +377,56 @@ class RemotePanesReplyAndWithdraw(unittest.TestCase):
         drive_remote.Remote.route(stub, "/api/session/send", {"pane": "r1", "text": "x"})
         self.assertEqual(calls, [("r1", "send", {"text": "x"})], "a plain send stays a send")
 
-    def test_images_to_a_remote_pane_are_refused_not_dropped(self):
+    def test_images_to_a_remote_pane_are_their_own_command(self):
+        # Never a plain `send` that an older hub would run without the picture.
         import drive_remote
         stub, calls = self._stub({"turn": "t1"})
-        with self.assertRaises(ValueError) as cm:
-            drive_remote.Remote.route(stub, "/api/session/send",
+        r = drive_remote.Remote.route(stub, "/api/session/send",
                                       {"pane": "r1", "text": "see", "images": ["a" * 64]})
-        self.assertIn("another hub", str(cm.exception))
-        self.assertEqual(calls, [], "the words went without the picture")
+        self.assertEqual((r, calls), ({"ok": True, "turn": "t1"},
+                                      [("r1", "send_images", {"text": "see", "images": ["a" * 64]})]))
+        stub, calls = self._stub({"turn": "t2"})
+        drive_remote.Remote.route(stub, "/api/session/send",
+                                  {"pane": "r1", "text": "", "images": ["b" * 64], "expect": "q:1"})
+        self.assertEqual(calls, [("r1", "send_images", {"text": "", "images": ["b" * 64],
+                                                        "expect": "q:1"})],
+                         "a card reply with an image keeps its check")
+
+    def test_an_older_hub_refuses_the_new_commands_in_words(self):
+        import drive
+        for op in ("image", "image_get", "send_images", "changes", "files"):
+            with self.assertRaises(ValueError) as cm:
+                self._call_raising(drive.DriveError(f"unknown command {op!r}"), op)
+            self.assertIn("older Corral Light", str(cm.exception), op)
+
+    def _image_remote(self, data, sha):
+        import base64, drive_remote, threading
+        fetched = []
+        def call(pane, op, args, timeout=None):
+            fetched.append(args["sha"])
+            return {"data": base64.b64encode(data).decode(), "type": "image/png"}
+        r = type("R", (), {})()
+        r.lock, r._images, r.call = threading.RLock(), {}, call
+        get = lambda: drive_remote.Remote.image_get(r, "r1", sha)     # noqa: E731
+        return get, fetched
+
+    def test_a_fetched_image_must_match_its_name_and_is_kept(self):
+        import hashlib
+        data = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+        sha = hashlib.sha256(data).hexdigest()
+        get, fetched = self._image_remote(data, sha)
+        self.assertEqual(get(), (data, "image/png"))
+        self.assertEqual(get(), (data, "image/png"))
+        self.assertEqual(len(fetched), 1, "a re-render does not fetch it again")
+        get, _ = self._image_remote(b"something else", sha)
+        with self.assertRaises(ValueError):
+            get()
+
+    def test_the_hub_serves_a_remote_image_only_as_an_image_type(self):
+        # The other hub never picks what this origin serves.
+        src = (ROOT / "hub.py").read_text(encoding="utf-8")
+        self.assertRegex(src, r'data, ctype = REMOTE\.image_get\(pane_q, sha\)[\s\S]{0,200}'
+                              r'if ctype not in sessions\.IMAGE_TYPES:\n\s+return self\._json')
 
     def test_withdraw_is_routed(self):
         import drive_remote

@@ -61,7 +61,15 @@ OPS = ("open", "send", "answer", "answer_question", "cancel", "close", "resume",
        # Next up and the rail card's reply. New commands, not new fields on
        # `send`: an older hub refuses an unknown command loudly, where it
        # would silently drop an unknown `expect` and send anyway.
-       "withdraw", "reply")
+       "withdraw", "reply",
+       # Pasted images, the folder's changes and `@` file suggestions. Also
+       # new commands: an older hub refuses them, where a new `images` field
+       # on `send` would be dropped and the words sent without the picture.
+       "image", "image_get", "send_images", "changes", "files")
+# Commands that only read. Their results are not kept for retries (a retry
+# just reads again): an image or a patch is megabytes, and the ledger keeps
+# MUTATIONS_KEEP results per peer on disk.
+READS = ("history", "pending", "image_get", "changes", "files")
 
 
 class ProtocolError(Exception):
@@ -353,7 +361,8 @@ class Served:
             if not (8 <= len(mid) <= 64) or not mid.replace("-", "").isalnum():
                 return self._safe_send({"t": "res", "id": mid, "ok": False,
                                         "error": "bad command id", "status": 400})
-            res = self.svc.drive_once(self.pid, mid, lambda: self._run(op, args))
+            run = lambda: self._run(op, args)                # noqa: E731
+            res = outcome(run) if op in READS else self.svc.drive_once(self.pid, mid, run)
             self._safe_send({"t": "res", "id": mid, **res})
             if res.get("ok") and op == "open":
                 pane = (res.get("result") or {}).get("pane")
@@ -639,6 +648,23 @@ def _read_head(sock, cap=16384):
 
 
 # ── command results, kept so a retry gets the first answer ─────────────────
+def outcome(fn):
+    """Run one command -> the result frame's fields; never raises."""
+    try:
+        return {"ok": True, "result": fn()}
+    except DriveError as e:
+        res = {"ok": False, "error": e.why, "status": e.status}
+        if e.reason:
+            res["reason"] = e.reason
+        return res
+    except (ValueError, KeyError, RuntimeError) as e:
+        return {"ok": False, "error": str(e)[:300], "status": 400}
+    except Exception as e:                               # noqa: BLE001
+        print(f"corral-light: drive: {type(e).__name__}: {e}", file=sys.stderr,
+              flush=True)
+        return {"ok": False, "error": "internal error on the other hub", "status": 500}
+
+
 class Mutations:
     """{peer: {mid: result}} on disk, plus the commands running now."""
 
@@ -677,19 +703,7 @@ class Mutations:
                     break
             ev.wait(CALL_TIMEOUT_S)
         try:
-            try:
-                res = {"ok": True, "result": fn()}
-            except DriveError as e:
-                res = {"ok": False, "error": e.why, "status": e.status}
-                if e.reason:
-                    res["reason"] = e.reason
-            except (ValueError, KeyError, RuntimeError) as e:
-                res = {"ok": False, "error": str(e)[:300], "status": 400}
-            except Exception as e:                       # noqa: BLE001
-                print(f"corral-light: drive: {type(e).__name__}: {e}", file=sys.stderr,
-                      flush=True)
-                res = {"ok": False, "error": "internal error on the other hub",
-                       "status": 500}
+            res = outcome(fn)
             with self.lock:
                 d = self._load().setdefault(peer, {})
                 d[mid] = {**res, "at": int(time.time())}
