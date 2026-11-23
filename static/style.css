@@ -1590,3 +1590,11 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 .shelfchip .sa{font-family:var(--mono);font-size:10.5px;color:var(--faint);flex:none}
 .shelfbar .fbtn{flex:none;height:32px;white-space:nowrap}
 .grid.one:has(> .minbar + .minbar){grid-template-rows:auto auto minmax(0,1fr)}
+
+/* the question once: while its transcript bubble is on screen the banner is one line */
+.qbanner .qjump{display:none;background:none;border:0;padding:0;font-family:var(--mono);
+  font-size:10.5px;letter-spacing:.5px;color:var(--gold);cursor:pointer;text-align:left}
+.askslot.inview .qbanner{padding:4px 10px}
+.askslot.inview .qbanner .qwho,.askslot.inview .qbanner .qtext{display:none}
+.askslot.inview .qbanner .qjump{display:block}
+@media (pointer:coarse){.askslot.inview .qbanner .qjump{min-height:32px}}

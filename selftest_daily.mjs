@@ -461,5 +461,24 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
         'T-DD-12 styled, and a one-pane grid makes room for both bars');
 }
 
+
+// T-DD-13 the question once: the banner shrinks while the transcript's copy is on screen.
+{
+  const shown = load('questionShown');
+  const E = (vis, h, root, on = true) => ({ isIntersecting: on, rootBounds: { height: root },
+    boundingClientRect: { height: h }, intersectionRect: { height: vis } });
+  check(shown(E(80, 100, 400)), 'T-DD-13 most of a short question on screen counts');
+  check(!shown(E(30, 100, 400)), 'T-DD-13 a sliver does not');
+  check(shown(E(220, 900, 400)), 'T-DD-13 a tall question filling half the log counts');
+  check(!shown(E(0, 100, 400, false)), 'T-DD-13 off screen is off screen');
+  check(!shown({ isIntersecting: true, rootBounds: null, boundingClientRect: { height: 1 }, intersectionRect: { height: 1 } }),
+        'T-DD-13 no root measurement is not proof it was seen');
+  check(/b\.dataset\.qat = d\.at \|\| ''/.test(src), 'T-DD-13 the transcript bubble names its question');
+  check(/questionInView\(rec, p\);/.test(fn('updatePane')), 'T-DD-13 every update re-finds the bubble');
+  check(/'Question awaiting your reply ↓'/.test(fn('questionBanner')), 'T-DD-13 the banner carries its one-line jump');
+  check(/\.askslot\.inview \.qbanner \.qwho,\.askslot\.inview \.qbanner \.qtext\{display:none\}/.test(css),
+        'T-DD-13 in view: the full text hides, the jump shows');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once');
