@@ -1580,3 +1580,13 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 .ncard .rreply textarea:focus{outline:none;border-color:var(--ember)}
 .ncard .rmoved{color:var(--ember);margin-bottom:4px}
 @media (pointer:coarse){.ncard .rreply textarea{font-size:16px;min-height:44px}.ncard .rrow .fbtn{min-height:44px}}
+
+/* the quiet shelf (build item 8): the minimized bar's pattern, its own label */
+.shelfbar::before{content:'Quiet'}
+.shelfbar.off::before{content:'Quiet panes in the grid'}
+.shelfchip{opacity:.85}
+.shelfchip.d-paused .d{background:transparent;border:1px solid var(--line2)}
+.shelfchip.d-idle .d{background:var(--line2)}
+.shelfchip .sa{font-family:var(--mono);font-size:10.5px;color:var(--faint);flex:none}
+.shelfbar .fbtn{flex:none;height:32px;white-space:nowrap}
+.grid.one:has(> .minbar + .minbar){grid-template-rows:auto auto minmax(0,1fr)}

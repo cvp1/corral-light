@@ -160,7 +160,7 @@ eq(railOpens(5, 0, false, null, true), true, 'T-INB-6 solo means nothing on a wi
   const touched = [];
   const localStorage = new Proxy({}, { get: (_, k) => { touched.push(k); return () => {}; } });
   let renders = 0;
-  const focusPane = load('focusPane', [], { setDrawer: () => {},
+  const focusPane = load('focusPane', ['shelfOpen'], { setDrawer: () => {},
     S, isNarrow: () => true, render: () => renders++, localStorage,
     requestAnimationFrame: () => {}, document: { querySelector: () => null } });
   focusPane('b');
@@ -169,7 +169,7 @@ eq(railOpens(5, 0, false, null, true), true, 'T-INB-6 solo means nothing on a wi
   eq(touched, [], 'T-INB-6 solo never writes corral.railShut');
   check(renders === 1, 'T-INB-6 one render');
   const wide = { focus: null, solo: null };
-  load('focusPane', [], { setDrawer: () => {}, S: wide, isNarrow: () => false, render: () => {},
+  load('focusPane', ['shelfOpen'], { setDrawer: () => {}, S: wide, isNarrow: () => false, render: () => {},
     requestAnimationFrame: () => {}, document: { querySelector: () => null } })('a');
   eq(wide.solo, null, 'T-INB-6 a wide screen never solos');
 }
@@ -189,7 +189,7 @@ check(src.includes("const back = el('button', 'fbtn', narrow ? '‹ Needs you' :
               setDrawer: () => {},
               document: { querySelector: () => null },
               setMin: async () => apis.push('/api/session/minimize') };
-  const focusPane = load('focusPane', [], g);
+  const focusPane = load('focusPane', ['shelfOpen'], g);
   const openFromRail = load('openFromRail', [], { ...g, focusPane });
   await openFromRail(S.panes.get('b'), true);
   await openFromRail(S.panes.get('a'), true);

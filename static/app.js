@@ -3773,8 +3773,14 @@ function render() {
   if (!narrow || (S.solo && !S.panes.has(S.solo))) S.solo = null;
   S.wide = widePane(panes, S.wide, narrow);
   const solo = soloPane(panes, S.solo, narrow) || S.wide;
-  const shown = solo ? panes.filter(p => p.id === solo) : panes.filter(p => !p.minimized);
   const mins = solo ? [] : panes.filter(p => p.minimized);
+  // The quiet shelf: idle and paused panes fold to chips on a wide screen
+  // (client-side only, like solo: nothing is minimized on the hub).
+  // Not on a phone, where an opened pane already shows alone.
+  const sh = solo ? { cells: panes.filter(p => p.id === solo), shelf: [], held: 0 }
+           : narrow ? { cells: panes.filter(p => !p.minimized), shelf: [], held: 0 }
+           : shelfSplit(panes, { on: shelfOn(), keep: shelfKeep(panes) });
+  const shown = sh.cells;
   g.className = 'grid' + (shown.length === 1 ? ' one' : '');
 
   // Clear only the disposable children (minbar, empty state); panes reconcile by identity.
@@ -3805,6 +3811,10 @@ function render() {
     }
     g.insertBefore(bar, g.firstChild);          // above the panes, which stay put
   }
+  if (sh.shelf.length || sh.held) {
+    const minbar = g.querySelector(':scope > .minbar');
+    g.insertBefore(shelfBar(sh), minbar ? minbar.nextSibling : g.firstChild);
+  }
   if (solo) {
     const bar = el('div', 'solobar');
     const back = el('button', 'fbtn', narrow ? '‹ Needs you' : '‹ All panes');
@@ -3827,7 +3837,9 @@ function render() {
   }
   // A retired pane must not leave its find highlights registered page-wide.
   if (FIND.pane && !PANES.has(FIND.pane)) { FIND.pane = null; clearFindPaint(); }
-  let prev = g.querySelector(':scope > .minbar, :scope > .solobar');
+  // After the last bar (minimized, quiet shelf, solo): the panes follow it.
+  const bars = g.querySelectorAll(':scope > .minbar, :scope > .solobar');
+  let prev = bars.length ? bars[bars.length - 1] : null;
   for (const p of shown) {
     let rec = PANES.get(p.id);
     if (!rec) { PANES.set(p.id, rec = buildPane(p)); }
@@ -4411,6 +4423,81 @@ async function setMin(p, flag) {
     await api('/api/session/minimize', { pane: p.id, minimized: flag });
     p.minimized = flag; p.background = false; render();
   } catch (e) { toast(e.message, true); }
+}
+
+/* ── the quiet shelf (build item 8; selftest_daily.mjs T-DD-12) ────────────
+ * Idle and paused panes fold to one-line chips above the grid on a wide
+ * screen, so the live work gets the room. Needs-you, working, your-turn and
+ * dead panes keep their cells, and so do pinned panes, the one you are in,
+ * one opened from a chip, the roster or Alt+N (until it next works), and any
+ * pane with unsent text in its box. Nothing moves when you click elsewhere: a
+ * pane joins the shelf only when it goes quiet. Client-side only (nothing is
+ * minimized), off on a phone, and "Keep them in the grid" turns it off. */
+function quietPane(p, nowMs) {
+  const d = displayState(p, nowMs);
+  return d === 'idle' || d === 'paused';
+}
+/* {cells, shelf, held}: `held` counts quiet panes left in the grid because the
+ * shelf is off. A wall that is all quiet keeps its cells: there is no live
+ * work to give the room to. Order is the roster's, so nothing reshuffles. */
+function shelfSplit(panes, o, nowMs) {
+  const vis = panes.filter(p => !p.minimized);
+  const fold = vis.filter(p => quietPane(p, nowMs) && !p.pinned && !o.keep.has(p.id));
+  if (!fold.length || fold.length === vis.length) return { cells: vis, shelf: [], held: 0 };
+  if (!o.on) return { cells: vis, shelf: [], held: fold.length };
+  const out = new Set(fold.map(p => p.id));
+  return { cells: vis.filter(p => !out.has(p.id)), shelf: fold, held: 0 };
+}
+function shelfOn() { return localStorage.getItem('corral.shelf') !== 'off'; }
+function shelfSet(on) {
+  if (on) localStorage.removeItem('corral.shelf'); else localStorage.setItem('corral.shelf', 'off');
+  render();
+}
+/* Opened panes stay in the grid until they next work (then a later quiet
+ * shelves them again). Pruned here, so the set never outgrows the wall. */
+function shelfOpen(id) { (S.unshelved || (S.unshelved = new Set())).add(id); }
+function shelfKeep(panes, nowMs) {
+  const open = S.unshelved || (S.unshelved = new Set());
+  const byId = new Map(panes.map(p => [p.id, p]));
+  for (const id of [...open]) {
+    const p = byId.get(id);
+    if (!p || !quietPane(p, nowMs)) open.delete(id);
+  }
+  const keep = new Set(open);
+  for (const id of [S.active, S.focus]) if (id) keep.add(id);
+  const drafts = draftsLoad();
+  for (const p of panes) if ((drafts[p.id] || '').trim()) keep.add(p.id);
+  return keep;
+}
+function shelfBar(sh) {
+  const bar = el('div', 'minbar shelfbar' + (sh.held ? ' off' : ''));
+  if (sh.held) {
+    const b = el('button', 'fbtn', `Fold ${sh.held} quiet pane${sh.held === 1 ? '' : 's'}`);
+    b.type = 'button';
+    b.title = 'move idle and paused panes to one-line chips here, so the live ones get the room';
+    b.onclick = () => shelfSet(true);
+    bar.appendChild(b);
+    return bar;
+  }
+  for (const p of sh.shelf) {
+    const d = displayState(p);
+    const c = el('button', 'minchip shelfchip d-' + d + ' ' + p.state);
+    c.type = 'button';
+    c.appendChild(el('span', 'd'));
+    c.appendChild(el('span', 'mt', p.title || p.label));
+    c.appendChild(el('span', 'sa', d === 'paused' ? 'paused' : fmtAge(paneAge(p, Date.now()))));
+    const full = `${p.title || p.label} — ${DISPLAY_LABEL[d] || d}, on the quiet shelf; click to open it`;
+    c.title = full;
+    c.setAttribute('aria-label', full);
+    c.onclick = () => focusPane(p.id);
+    bar.appendChild(c);
+  }
+  const off = el('button', 'fbtn shelfoff', 'Keep them in the grid');
+  off.type = 'button';
+  off.title = 'turn the quiet shelf off on this browser';
+  off.onclick = () => shelfSet(false);
+  bar.appendChild(off);
+  return bar;
 }
 
 /* ── the needs-you rail folds ─────────────────────────────────────────────
@@ -6456,6 +6543,7 @@ function setDrawer(open) {
  * Open a conversation: mark it focused and scroll it into view. */
 function focusPane(id) {
   S.focus = id;
+  shelfOpen(id);              // opened from anywhere: off the quiet shelf
   if (isNarrow()) { S.solo = id; setDrawer(false); }   // a phone shows the opened pane alone
   render();
   requestAnimationFrame(() =>
