@@ -418,5 +418,48 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
   check(/\.nextup\{/.test(css) && /\.msg\.user\.withdrawn\{/.test(css), 'T-DD-11 styled');
 }
 
+
+// T-DD-12 the quiet shelf: idle and paused fold to chips; the live work keeps its cells.
+{
+  const NOW = 1e12;
+  const DS = { paneAge: (p) => p.idleS || 0, IDLE_DISPLAY_S: 1800, AGENT_ORIGIN_VIAS: ['peer', 'rig', 'challenge'] };
+  const split = load('shelfSplit', ['quietPane', 'displayState', 'paneAge'], DS);
+  const P = (id, x = {}) => Object.assign({ id, state: 'ready', pending: [], question: null, idleS: 0 }, x);
+  const work = P('w', { state: 'busy' }), ask = P('a', { question: { text: '?' } });
+  const turn = P('t', { idleS: 60 }), idle = P('i', { idleS: 7200 }), paused = P('p', { state: 'detached' });
+  const dead = P('d', { state: 'dead' }), pinned = P('n', { idleS: 7200, pinned: true });
+  const all = [work, idle, ask, paused, turn, dead, pinned];
+  const ids = xs => xs.map(p => p.id);
+  let r = split(all, { on: true, keep: new Set() }, NOW);
+  eq(ids(r.shelf), ['i', 'p'], 'T-DD-12 idle and paused go to the shelf, in roster order');
+  eq(ids(r.cells), ['w', 'a', 't', 'd', 'n'], 'T-DD-12 working, needs-you, your-turn, dead and pinned keep their cells, in order');
+  r = split(all, { on: true, keep: new Set(['i']) }, NOW);
+  eq(ids(r.shelf), ['p'], 'T-DD-12 a kept pane (you are in it, opened it, or have a draft) stays');
+  r = split(all, { on: false, keep: new Set() }, NOW);
+  eq([ids(r.shelf), r.cells.length, r.held], [[], 7, 2], 'T-DD-12 off: everything in the grid, the quiet ones counted');
+  r = split([idle, paused], { on: true, keep: new Set() }, NOW);
+  eq([r.shelf.length, r.cells.length, r.held], [0, 2, 0], 'T-DD-12 an all-quiet wall keeps its cells');
+  r = split([work, P('m', { idleS: 7200, minimized: true })], { on: true, keep: new Set() }, NOW);
+  eq([ids(r.cells), r.shelf.length], [['w'], 0], 'T-DD-12 a minimized pane stays in the minimized bar, not the shelf');
+  r = split([work, P('x', { idleS: 60, turnVia: 'peer' })], { on: true, keep: new Set() }, NOW);
+  eq(ids(r.shelf), ['x'], 'T-DD-12 a turn another agent started is idle, so it folds');
+
+  const S = { panes: new Map(), unshelved: new Set(['i', 'w', 'gone']), active: 't', focus: 'p' };
+  const keep = load('shelfKeep', ['quietPane', 'displayState', 'paneAge'],
+    { ...DS, S, draftsLoad: () => ({ n: 'half a thought', d: '   ' }) });
+  const k = keep(all, NOW);
+  eq([...S.unshelved].sort(), ['i'], 'T-DD-12 opened panes are forgotten once they work again or are gone');
+  eq([...k].sort(), ['i', 'n', 'p', 't'], 'T-DD-12 kept: opened, active, focused, and a real draft (not blanks)');
+
+  const focusSrc = fn('focusPane');
+  check(/shelfOpen\(id\)/.test(focusSrc), 'T-DD-12 opening a pane from anywhere takes it off the shelf');
+  const r2 = fn('render');
+  check(/narrow \? \{ cells: panes\.filter\(p => !p\.minimized\), shelf: \[\], held: 0 \}/.test(r2),
+        'T-DD-12 never on a phone');
+  check(/bars\[bars\.length - 1\]/.test(r2), 'T-DD-12 panes follow the last bar, so a second bar cannot split the grid');
+  check(/\.shelfbar::before\{content:'Quiet'\}/.test(css) && /\.grid\.one:has\(> \.minbar \+ \.minbar\)/.test(css),
+        'T-DD-12 styled, and a one-pane grid makes room for both bars');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf');
