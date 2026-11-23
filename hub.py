@@ -1279,6 +1279,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._worktree_post(p.rsplit("/", 1)[1], b)
             if p == "/api/session/cancel":
                 return self._json({"ok": MGR.get(b.get("pane", "")).cancel()})
+            if p == "/api/session/withdraw":
+                # Next up: take back a typed-ahead message before it starts.
+                # 409 when it already started: it ran, nothing was withdrawn.
+                pane = MGR.get(b.get("pane", ""))
+                try:
+                    text = pane.withdraw(str(b.get("turn") or ""))
+                except LookupError as e:
+                    return self._json({"error": str(e), "reason": "started"}, 409)
+                return self._json({"ok": True, "text": text})
             if p == "/api/session/close":
                 MGR.close(b.get("pane", ""))
                 return self._json({"ok": True})

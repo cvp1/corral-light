@@ -1556,3 +1556,18 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 /* The pinned goal under a pane's title: one quiet line, full text on hover. */
 .ph .goal{font-size:11.5px;color:var(--dim);white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;padding:1px 0 2px}
+
+/* Next up: messages typed ahead of the running turn, above the composer. */
+.nextup{border-top:1px solid var(--line);background:var(--raise);padding:6px 9px 4px;
+  font-size:12px;max-height:9.5em;overflow-y:auto}
+.nextup .nuh{font-family:var(--mono);font-size:10px;letter-spacing:.6px;text-transform:uppercase;
+  color:var(--faint);margin-bottom:3px}
+.nextup .nurow{display:flex;align-items:center;gap:6px;min-height:26px}
+.nextup .nun{color:var(--faint);font-family:var(--mono);flex:none}
+.nextup .nut{flex:1;min-width:0;color:var(--dusk);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nextup .nued,.nextup .nurm{flex:none;padding:1px 8px;font-size:11px;min-height:22px}
+.nextup .nurm:hover{color:var(--rust);border-color:var(--rust)}
+.nextup .nutag{flex:none;color:var(--faint);font-size:11px}
+.msg.user.withdrawn{opacity:.55;text-decoration:line-through;text-decoration-color:var(--faint)}
+.msg.user.withdrawn .viatag{text-decoration:none;display:inline-block}
+@media (pointer:coarse){.nextup .nued,.nextup .nurm{min-height:44px;min-width:44px}}

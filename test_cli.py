@@ -252,6 +252,52 @@ class TaskFirstOverTheCli(HubCase):
         self.cli("close", pid)
 
 
+class NextUpOverTheCli(HubCase):
+    """`next` lists what waits behind a running turn; `withdraw` takes one back
+    through the hub route the browser uses, and prints it."""
+
+    def test_next_lists_and_withdraw_takes_back(self):
+        pid = self.open()
+        run = lambda *a: subprocess.Popen([sys.executable, str(ROOT / "cli.py"), "say", pid, *a],
+                                          env=self.env, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL)
+        def until(pred, what):
+            end = time.time() + 15
+            while time.time() < end:
+                if pred():
+                    return
+                time.sleep(0.2)
+            self.fail(what)
+        state = lambda: [p for p in json.loads(self.cli("panes", "--json")[1])
+                         if p["id"] == pid][0]["state"]
+        procs = [run("sleep 30")]
+        try:
+            until(lambda: state() == "busy", "the pane never started its turn")
+            procs.append(run("walnut one"))
+            until(lambda: "1." in self.cli("next", pid)[1], "walnut one never queued")
+            procs.append(run("walnut two"))
+            until(lambda: "2." in self.cli("next", pid)[1], "walnut two never queued")
+            rc, out, err = self.cli("next", pid)
+            self.assertEqual(rc, 0, err)
+            self.assertRegex(out, r"(?s)1\. \S+  walnut one.*2\. \S+  walnut two")
+            rc, out, err = self.cli("withdraw", pid, "1")
+            self.assertEqual((rc, out.strip()), (0, "walnut one"), err)
+            rc, out, _ = self.cli("next", pid)
+            self.assertNotIn("walnut one", out)
+            self.assertIn("1. ", out)
+            rc, out, err = self.cli("withdraw", pid, "5")
+            self.assertEqual(rc, 1, "an out-of-range number must fail")
+            rc, out, err = self.cli("withdraw", pid, "t-not-queued")
+            self.assertNotEqual(rc, 0)
+            self.assertIn("409", out + err)
+        finally:
+            self.cli("cancel", pid)
+            for pr in procs:
+                pr.kill()
+                pr.wait(5)
+            self.cli("close", pid)
+
+
 class LaterOverTheCli(HubCase):
     def test_add_list_rm(self):
         rc, out, err = self.cli("later", "add", "--at", "2099-01-01T06:00", "--lane", "fake",

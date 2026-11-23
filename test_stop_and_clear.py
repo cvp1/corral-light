@@ -66,6 +66,70 @@ class StopMeansStop(FakeLaneCase):
         self.assertIn(".pane.working .composer .stop", css)
 
 
+class NextUpIsWithdrawable(FakeLaneCase):
+    """Next up: messages typed ahead of a running turn are listed in order and
+    can be taken back before they start, never after; a withdrawn one is never
+    sent, and the ledger closes it `interrupted`."""
+
+    def _queue_events(self, p):
+        return [e["data"]["items"] for e in p.events if e["kind"] == "queue"]
+
+    def test_a_withdrawn_message_never_runs_and_the_next_one_does(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        self.assertEqual(p.state, "ready", p.error)
+        p.send("sleep 2")
+        self.assertTrue(wait_for(lambda: "sleeping" in self.texts(p)))
+        t1 = p.send("first queued")
+        p.send("second queued")
+        self.assertEqual([i["text"] for i in p.queued_view()],
+                         ["first queued", "second queued"], "Next up is not in run order")
+        self.assertEqual([i["text"] for i in p.snapshot()["queued"]],
+                         ["first queued", "second queued"], "the snapshot does not carry Next up")
+        self.assertEqual(p.withdraw(t1), "first queued", "withdraw must return what was typed")
+        self.assertEqual([i["text"] for i in p.queued_view()], ["second queued"])
+        self.assertTrue(wait_for(lambda: "echo: second queued" in self.texts(p), timeout=15))
+        self.assertNotIn("echo: first queued", self.texts(p), "a withdrawn message ran")
+        rec = p._turns().turns()[t1]
+        self.assertEqual((rec["state"], rec.get("why")),
+                         ("interrupted", "withdrawn before it was sent"))
+        self.assertIn(t1, [e["data"]["turn"] for e in p.events if e["kind"] == "withdrawn"])
+        self.assertTrue(wait_for(lambda: self._queue_events(p)[-1:] == [[]]),
+                        "the last Next up event does not say the list is empty")
+
+    def test_a_started_message_cannot_be_withdrawn(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        tid = p.send("hello")
+        self.assertTrue(wait_for(lambda: "echo: hello" in self.texts(p)))
+        with self.assertRaises(LookupError):
+            p.withdraw(tid)
+        with self.assertRaises(LookupError):
+            p.withdraw("")
+
+    def test_another_panes_message_is_listed_not_withdrawable(self):
+        import sessions
+        p = self.mgr.create("fake", self.agent_dir)
+        p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: "sleeping" in self.texts(p)))
+        item = sessions._QueuedText("from a peer", "t-peer")
+        item.peer = True
+        with p._turn_lock:
+            p._queue.append(item)
+        self.assertEqual(p.queued_view(), [{"turn": "t-peer", "peer": True, "text": "from a peer"}])
+        with self.assertRaises(ValueError):
+            p.withdraw("t-peer")
+        self.assertEqual(len(p.queued_view()), 1, "a refused withdraw changed the queue")
+        p.cancel()
+
+    def test_stop_says_the_list_is_empty(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        p.send("sleep 30")
+        self.assertTrue(wait_for(lambda: "sleeping" in self.texts(p)))
+        p.send("queued")
+        p.cancel()
+        self.assertEqual(self._queue_events(p)[-1], [])
+        self.assertEqual(p.queued_view(), [])
+
+
 class ClearIsAFreshConversation(FakeLaneCase):
 
     def _after_clear(self, p):

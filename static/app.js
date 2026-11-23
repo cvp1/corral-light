@@ -741,6 +741,7 @@ function renderLog(p) {
           log.appendChild(c);
         } else {
           const u = el('div', 'msg user', d.text || '');
+          if (d.turn) u.dataset.turn = d.turn;   // a later `withdrawn` marks it
           // A turn sent by a script (consult, the CLI) is marked; `via` is the
           // caller's label, not proof of origin.
           if (d.via) {
@@ -751,6 +752,16 @@ function renderLog(p) {
           log.appendChild(u);
         }
         break;
+      // Next up: a typed-ahead message taken back before it started. Its bubble
+      // stays (it was typed) but says it was never sent.
+      case 'withdrawn': {
+        flush();
+        const u = d.turn && [...log.querySelectorAll('.msg.user')].find(x => x.dataset.turn === d.turn);
+        if (u) { u.classList.add('withdrawn'); u.prepend(el('span', 'viatag', 'withdrawn — not sent')); }
+        else log.appendChild(el('div', 'sys', 'a queued message was withdrawn — not sent'));
+        break;
+      }
+      case 'queue': break;          // the Next up list, not the transcript
       // A message from another pane's agent: its own block, never the human bubble,
       // since it is untrusted. textContent only, so markup renders literally.
       case 'peer':
@@ -1063,8 +1074,9 @@ function buildPane(p) {
   const ask = el('div', 'askslot');       // ask_human's banner, when open
   const log = el('div', 'log');
   const strip = el('div', 'agslot');     // the flow's progress strip, when one runs
+  const next = el('div', 'nextslot');    // Next up: messages typed ahead of the turn
   const comp = el('div', 'compslot');
-  root.append(head, ask, log, strip, comp);
+  root.append(head, ask, log, strip, next, comp);
   // The pane you last worked in, for f. Not S.focus: that one reorders the
   // roster, and clicking in a pane should not move the list under you.
   root.addEventListener('focusin', () => { S.active = p.id; });
@@ -1081,7 +1093,7 @@ function buildPane(p) {
       updatePane(rec, p);
     }
   };
-  return { root, head, ask, log, strip, comp, kind: null, pinned: true };
+  return { root, head, ask, log, strip, next, comp, kind: null, pinned: true };
 }
 
 function composerKind(p) {
@@ -1176,6 +1188,15 @@ function updatePane(rec, p) {
     if (AGDLG.pane === p.id && AGDLG.view !== av) renderAgents();
   }
 
+  if (rec.next) {
+    const m = nextUpModel(p);
+    const nsig = JSON.stringify(m);
+    if (nsig !== rec.nextSig) {
+      rec.nextSig = nsig;
+      rec.next.replaceChildren(...(m ? [nextUpEl(p, m)] : []));
+    }
+  }
+
   const kind = composerKind(p);
   if (kind !== rec.kind) {            // only a SHAPE change rebuilds it
     rec.kind = kind;
@@ -1188,6 +1209,70 @@ function updatePane(rec, p) {
     if (sb && sb._reset) sb._reset();
   }
   return rec.root;
+}
+
+/* ── Next up: the messages typed ahead of a running turn ──────────────────
+ * The hub lists them in run order (pane.queued, live `queue` events). Edit takes
+ * one back into the composer, ✕ removes it; either way it is never sent. One
+ * that already started cannot be taken back: the hub answers 409 and says so.
+ * A message from another pane is listed, not withdrawable here, and panes on
+ * another machine list theirs without the buttons (no remote route yet). */
+const NEXT_UP_CHARS = 160;
+function nextUpModel(p) {
+  const items = (p && p.queued) || [];
+  if (!items.length) return null;
+  return {
+    title: `Next up · ${items.length}`,
+    items: items.map((it, i) => {
+      const flat = String(it.text || '').split(/\s+/).join(' ').trim();
+      return { turn: it.turn || '', n: i + 1, full: String(it.text || ''), peer: !!it.peer,
+               text: flat.length > NEXT_UP_CHARS ? flat.slice(0, NEXT_UP_CHARS - 1) + '…' : flat,
+               canWithdraw: !it.peer && !p.remote && !!it.turn };
+    }),
+  };
+}
+function nextUpEl(p, m) {
+  const box = el('div', 'nextup');
+  box.appendChild(el('div', 'nuh', m.title));
+  for (const it of m.items) {
+    const row = el('div', 'nurow' + (it.peer ? ' peer' : ''));
+    row.appendChild(el('span', 'nun', it.n + '.'));
+    const t = el('span', 'nut', it.text);
+    t.title = it.full;
+    row.appendChild(t);
+    if (it.canWithdraw) {
+      const ed = el('button', 'btn nued', 'Edit');
+      ed.type = 'button';
+      ed.title = 'take it back into the box to change it; nothing is sent until you send again';
+      ed.onclick = () => withdrawQueued(p, it.turn, true);
+      const rm = el('button', 'btn nurm', '✕');
+      rm.type = 'button';
+      rm.title = 'remove it; it will not be sent';
+      rm.setAttribute('aria-label', 'remove from Next up');
+      rm.onclick = () => withdrawQueued(p, it.turn, false);
+      row.append(ed, rm);
+    } else if (it.peer) {
+      row.appendChild(el('span', 'nutag', 'from another pane'));
+    }
+    box.appendChild(row);
+  }
+  return box;
+}
+async function withdrawQueued(p, turn, edit) {
+  let r;
+  try {
+    r = await api('/api/session/withdraw', { pane: p.id, turn });
+  } catch (e) {
+    toast(e.status === 409 ? 'too late: that message already started' : e.message, true);
+    refresh().catch(() => {});
+    return false;
+  }
+  // Mirror the hub until its `queue` event lands.
+  p.queued = (p.queued || []).filter(x => x.turn !== turn);
+  scheduleRender();
+  if (edit) insertIntoComposer(p.id, (r.text || '') + '\n', 'back in the box, not sent: edit it, then send');
+  else toast('removed from Next up; it will not be sent');
+  return true;
 }
 
 /* ── agents: the savvy-progress mod, on the wall ────────────────────────────
@@ -4488,6 +4573,12 @@ function connect() {
     if (ev.kind === 'question_cleared') p.question = null;
     if (ev.kind === 'peer_result' && d.delivered === false) refresh().catch(() => {});
     if (ev.kind === 'turn_end') p.state = p.pending.length ? 'needs-you' : 'ready';
+    // Next up: the hub sends the whole list on every edit. A stop, pause, /clear,
+    // death or held review can empty it in bulk; the snapshot then says what is left.
+    if (ev.kind === 'queue') p.queued = d.items || [];
+    if ((p.queued || []).length &&
+        ['cancelled', 'paused', 'cleared', 'dead', 'resumed', 'note'].includes(ev.kind))
+      refresh().catch(() => {});
     if (ev.kind === 'dead') { p.state = 'dead'; p.error = d.reason; p.deadCause = d.cause || null; }
     if (ev.kind === 'closed') { p.state = 'dead'; p.error = null; refresh(); }
     if (ev.kind === 'ready') p.state = 'ready';

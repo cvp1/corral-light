@@ -373,5 +373,50 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
         'T-DD-10 the dialog says which pane it copied, outside the fold');
 }
 
+// T-DD-11 Next up: what waits behind the turn, with Edit and ✕.
+{
+  const nm = load('nextUpModel', [], { NEXT_UP_CHARS: 160 });
+  eq(nm({ queued: [] }), null, 'T-DD-11 nothing queued, no strip');
+  const m = nm({ queued: [{ turn: 't1', text: 'fix\n  the   flake', peer: false },
+                          { turn: 't2', text: 'x'.repeat(300), peer: false },
+                          { turn: 't3', text: 'hi from b', peer: true }] });
+  eq(m.title, 'Next up · 3', 'T-DD-11 the strip counts what waits');
+  eq(m.items[0], { turn: 't1', n: 1, full: 'fix\n  the   flake', peer: false, text: 'fix the flake',
+                   canWithdraw: true }, 'T-DD-11 one line per message, full text kept for hover');
+  check(m.items[1].text.length === 160 && m.items[1].text.endsWith('…'), 'T-DD-11 long text is cut');
+  check(!m.items[2].canWithdraw, 'T-DD-11 another pane\'s message has no buttons');
+  check(!nm({ remote: { host: 'peer-b' }, queued: [{ turn: 't', text: 'a' }] }).items[0].canWithdraw,
+        'T-DD-11 a pane on another machine lists, never offers a withdraw it cannot do');
+
+  // Edit puts the text back in the box; ✕ only removes; a started one says too late.
+  const calls = [];
+  const mkWq = (api) => load('withdrawQueued', [], {
+    api, scheduleRender: () => {}, refresh: async () => calls.push(['refresh']),
+    toast: (msg, bad) => calls.push(['toast', msg, !!bad]),
+    insertIntoComposer: (id, text) => calls.push(['box', id, text]) });
+  const p = { id: 'p1', queued: [{ turn: 't1', text: 'a' }, { turn: 't2', text: 'b' }] };
+  let posted;
+  const ok = mkWq(async (path, body) => { posted = [path, body]; return { ok: true, text: 'a' }; });
+  check(await ok(p, 't1', true) === true, 'T-DD-11 Edit withdraws');
+  eq(posted, ['/api/session/withdraw', { pane: 'p1', turn: 't1' }], 'T-DD-11 the route and its body');
+  eq(p.queued.map(x => x.turn), ['t2'], 'T-DD-11 the row goes at once');
+  eq(calls.find(c => c[0] === 'box'), ['box', 'p1', 'a\n'], 'T-DD-11 Edit puts it back in the box');
+  calls.length = 0;
+  await ok(p, 't2', false);
+  check(!calls.some(c => c[0] === 'box'), 'T-DD-11 ✕ does not touch the box');
+  calls.length = 0;
+  const late = mkWq(async () => { const e = new Error('409'); e.status = 409; throw e; });
+  check(await late({ id: 'p1', queued: [{ turn: 't9' }] }, 't9', true) === false, 'T-DD-11 too late fails');
+  check(calls.some(c => c[0] === 'toast' && c[2] && /already started/.test(c[1])) &&
+        !calls.some(c => c[0] === 'box'), 'T-DD-11 too late says so and puts nothing in the box');
+
+  check(/root\.append\(head, ask, log, strip, next, comp\)/.test(src), 'T-DD-11 Next up sits above the composer');
+  check(/if \(ev\.kind === 'queue'\) p\.queued = d\.items \|\| \[\];/.test(src), 'T-DD-11 the list updates live');
+  check(/case 'withdrawn':/.test(src) && /u\.dataset\.turn = d\.turn/.test(src),
+        'T-DD-11 a withdrawn bubble says it was not sent');
+  check(/const t = el\('span', 'nut', it\.text\)/.test(src), 'T-DD-11 queued text is set as text');
+  check(/\.nextup\{/.test(css) && /\.msg\.user\.withdrawn\{/.test(css), 'T-DD-11 styled');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up');
