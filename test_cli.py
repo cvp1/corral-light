@@ -8,6 +8,7 @@ Collected by test_corral_light.py.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -375,3 +376,24 @@ class TheLaneMatrix(HubCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EveryCliVerbReachesTheWrapper(unittest.TestCase):
+    """The shell wrapper routes cli.py verbs by an explicit list. A verb added
+    to cli.py but not to that list works in tests (which call cli.py) and
+    fails for the operator with the wrapper's usage line — Next up shipped
+    that way once. Run every top-level verb through the real wrapper."""
+
+    def test_each_top_level_cli_verb_is_routed_to_cli_py(self):
+        src = (ROOT / "cli.py").read_text(encoding="utf-8")
+        verbs = sorted(set(re.findall(r'\bsub\.add_parser\("([a-z-]+)"', src)))
+        self.assertIn("next", verbs)
+        self.assertIn("withdraw", verbs)
+        missing = []
+        for v in verbs:
+            if v == "watch":  # bare watch is the hub watcher; pane watch is covered by its own branch
+                continue
+            r = subprocess.run(["bash", str(ROOT / "corral-light"), v, "--help"],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode != 0 or "usage: corral-light " + v not in r.stdout:
+                missing.append(v)
+        self.assertEqual(missing, [], "verbs the wrapper does not route to cli.py")
