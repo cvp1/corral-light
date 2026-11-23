@@ -295,6 +295,7 @@ class Cli:
         th.start()
         state, last = {}, seq0
         mine = turn is None
+        started, held = False, []        # see "Queued behind other turns" below
         asked = set()
         try:
             # Backfill after the stream is up, so nothing falls in a gap.
@@ -318,6 +319,30 @@ class Cli:
                     k = ev.get("kind")
                     if k == "user" and turn and d.get("turn") == turn:
                         mine = True
+                        self.render(ev, state)          # what was typed, at once
+                        self.mark_seen(pid, last, state)
+                        continue
+                    if mine and turn and not started and k not in ("dead", "closed", "unsent"):
+                        # Queued behind other turns: their output is not ours.
+                        # Our own starts at our `turn_start` (shown live from
+                        # there). A hub without turn_start: hold, drop what
+                        # each earlier turn_end closes, show the rest at ours.
+                        if k == "turn_start":
+                            if d.get("turn") == turn:
+                                started = True
+                                held.clear()
+                            continue
+                        if k == "turn_end" and d.get("turn") != turn:
+                            held.clear()
+                            continue
+                        if not (k == "turn_end" and d.get("turn") == turn):
+                            held.append(ev)
+                            if len(held) > 2000:        # bounded
+                                del held[:1000]
+                            continue
+                        for h in held:
+                            self.render(h, state)
+                        held.clear()
                     if mine or turn is None:
                         self.render(ev, state)
                     self.mark_seen(pid, last, state)

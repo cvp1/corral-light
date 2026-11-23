@@ -2492,6 +2492,9 @@ class Pane(_core.PaneBase):
                     self._turn_running = False
                     return
             lg.mark(tid, "dispatched")
+            # Which queued message the agent is on now: a terminal waiting on
+            # a later one (`corral-light say`) shows only its own turn.
+            self.emit("turn_start", {"turn": tid}, activity=False)
             try:
                 r = client.prompt(self.acp_session, text)
             except acp.AgentError as e:

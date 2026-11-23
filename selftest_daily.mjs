@@ -480,5 +480,14 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
         'T-DD-13 in view: the full text hides, the jump shows');
 }
 
+
+// T-DD-14 header weight: posture is quiet; rust is kept for real warnings.
+{
+  check(!/\.ph2 \.f\.auto\{color:var\(--rust\)\}/.test(css), 'T-DD-14 auto posture is no longer rust');
+  check(/\.ph2 \.f\.strict,\.ph2 \.f\.edits\{color:var\(--faint\)\}/.test(css), 'T-DD-14 strict and edits are quiet');
+  check(/\.ph2 \.f\.ctx\.warn\{color:var\(--rust\)\}/.test(css), 'T-DD-14 a context warning is still rust');
+  check(/case 'turn_start': break;/.test(src), 'T-DD-14 turn_start never draws in the transcript');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight');

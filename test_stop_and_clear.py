@@ -303,6 +303,24 @@ class RemoteParityOnTheDrivenHub(FakeLaneCase):
                          {"ok": False, "error": "moved on", "status": 409, "reason": "moved"})
 
 
+class EachTurnSaysWhenItStarts(FakeLaneCase):
+    """`turn_start` {turn} marks the moment the agent takes a queued message,
+    in queue order, once each: what `corral-light say` waits for."""
+
+    def test_turn_start_in_order(self):
+        p = self.mgr.create("fake", self.agent_dir)
+        a = p.send("sleep 1")
+        b = p.send("one")
+        c = p.send("two")
+        self.assertTrue(wait_for(lambda: "echo: two" in self.texts(p), timeout=15))
+        starts = [e["data"]["turn"] for e in p.events if e["kind"] == "turn_start"]
+        self.assertEqual(starts, [a, b, c])
+        kinds = [(e["kind"], (e.get("data") or {}).get("turn")) for e in p.events
+                 if e["kind"] in ("turn_start", "turn_end")]
+        self.assertEqual(kinds[:2], [("turn_start", a), ("turn_end", a)],
+                         "a turn starts before it ends, and the next waits")
+
+
 class ClearIsAFreshConversation(FakeLaneCase):
 
     def _after_clear(self, p):
