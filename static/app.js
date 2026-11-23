@@ -813,6 +813,7 @@ function renderLog(p) {
         {
           const hub = d.source === 'hop-limit';
           const b = el('div', 'msg question' + (hub ? ' hub' : ''));
+          b.dataset.qat = d.at || '';        // the banner shrinks while this is on screen
           b.appendChild(el('div', 'qwho', hub ? 'Corral paused this loop — not the agent'
             : d.replaces ? 'the agent asks you, replacing its earlier question'
                          : 'the agent asks you'));
@@ -1177,6 +1178,8 @@ function updatePane(rec, p) {
     // A rebuild abandons the find highlights' ranges; re-anchor on fresh DOM.
     if (FIND.pane === p.id) applyFind(p.id);
   }
+
+  questionInView(rec, p);
 
   if (rec.strip && !isTerm(p)) {
     const av = paneAgents(p);
@@ -3390,12 +3393,50 @@ function questionBanner(p) {
     ? 'Corral paused this loop — send any message to let it continue'
     : `${who} asks you — answer by sending a message`));
   b.appendChild(el('div', 'qtext', q.text));
+  // Shown instead of the above while the transcript's own copy is on screen
+  // (questionInView), so the question is never drawn twice in one view.
+  const j = el('button', 'qjump', hub ? 'Corral paused this loop ↓' : 'Question awaiting your reply ↓');
+  j.type = 'button';
+  j.title = 'it is in the transcript below; click to show it';
+  b.appendChild(j);
   b.title = hub
     ? 'Raised by Corral, not by the agent: a message between panes was refused '
       + 'at the limit. It stays until you send this pane a message.'
     : 'Raised by this pane\'s agent with ask_human. It stays until you '
       + 'send this pane a message, or the pane closes or stops.';
   return b;
+}
+
+/* The open question's own bubble in the transcript, watched: while at least
+ * half of it (or half the log, for a tall one) is on screen, the banner above
+ * shrinks to a one-line jump, so the question is not drawn twice in one view;
+ * scrolled away, the full banner is back. Re-found every update (the log is
+ * rebuilt), observed only when it changed. */
+function questionInView(rec, p) {
+  const q = p.question;
+  const bubble = q && q.text && rec.log && rec.ask
+    ? [...rec.log.querySelectorAll('.msg.question')].filter(b => b.dataset.qat === String(q.at || '')).pop() || null
+    : null;
+  const jump = rec.ask && rec.ask.querySelector('.qjump');
+  if (jump) jump.onclick = () => rec.qBubble && rec.qBubble.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (bubble === rec.qBubble) return;
+  if (rec.qObs && rec.qBubble) rec.qObs.unobserve(rec.qBubble);
+  rec.qBubble = bubble;
+  if (rec.ask) rec.ask.classList.remove('inview');
+  if (!bubble || typeof IntersectionObserver === 'undefined') return;
+  rec.qObs = rec.qObs || new IntersectionObserver(es => {
+    for (const e of es) {
+      if (e.target !== rec.qBubble) continue;
+      rec.ask.classList.toggle('inview', questionShown(e));
+    }
+  }, { root: rec.log, threshold: [0, 0.25, 0.5, 0.75, 1] });
+  rec.qObs.observe(bubble);
+}
+/* Pure (selftest): enough of the bubble is visible to count as seen. */
+function questionShown(e) {
+  if (!e.isIntersecting || !e.rootBounds) return false;
+  const need = Math.min(e.boundingClientRect.height, e.rootBounds.height) * 0.5;
+  return e.intersectionRect.height >= need;
 }
 
 /* The roster's one-line preview of the same question. */
