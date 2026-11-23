@@ -512,5 +512,24 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
         'T-DD-15 the bubble shows what was sent, from the hub');
 }
 
+
+// T-DD-16 Ask a panel: the browser's way into panel.py.
+{
+  const req = load('panelRequest', [], { PANEL_MAX_ARMS: 4 });
+  const p = { id: 'pa', cwd: '/work/repo' };
+  let r = req(p, { topic: ' x ', charge: ' Which cache? ', rounds: '2', lanes: ['codex', 'grok'] });
+  eq(r.errors, [], 'T-DD-16 a filled form has no errors');
+  eq(r.body, { charge: 'Which cache?', lanes: ['codex', 'grok'], cwd: '/work/repo', topic: 'x', rounds: 2,
+               author: 'pa', callerPane: 'pa' }, 'T-DD-16 the request: the pane is the author and the caller');
+  r = req(p, { charge: '', lanes: [] });
+  eq(r.errors.length, 2, 'T-DD-16 an empty question and no arms are both said');
+  check(/at most 4/.test(req(p, { charge: 'q', lanes: ['a', 'b', 'c', 'd', 'e'] }).errors.join()), 'T-DD-16 at most four arms');
+  eq(req(p, { charge: 'q', lanes: ['a'], rounds: '7' }).body.rounds, 1, 'T-DD-16 rounds is 1 unless 2 was picked');
+  const html = readFileSync(new URL('./static/index.html', import.meta.url), 'utf8');
+  check(/<dialog id="pandlg">/.test(html) && /id="pan-charge"/.test(html), 'T-DD-16 the dialog exists');
+  check(/item\('Ask a panel…', \(\) => openPanel\(p\)/.test(src), 'T-DD-16 the pane menu opens it');
+  check(/!isTerm\(p\) && !p\.remote\) item\('Ask a panel…'/.test(src), 'T-DD-16 not on a terminal or a remote pane');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
-console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight, pasted images');
+console.log('OK — daily driver: code-block Copy, the context control, drafts and history, focus mode and Alt+N, the phone bar, device alerts, carry model pick, the now-line, task-first New, New follows your pane, Next up, the quiet shelf, the question once, header weight, pasted images, Ask a panel');

@@ -1983,6 +1983,8 @@ function openPaneMenu(p, at) {
   if (p.worktree && p.worktree.phase === 'active') {
     item('Review changes…', () => openReview(p), { key: 'r' });
   }
+  if (!isTerm(p) && !p.remote) item('Ask a panel…', () => openPanel(p),
+                        { title: 'the same question to other vendors\' agents, blind; the synthesis reports back here' });
   if (!isTerm(p)) item('Carry to a fresh pane…', () => openPort(p),
                         { title: 'start a new pane, on any agent, that reads this transcript' });
   if (!isNarrow()) item(S.wide === p.id ? 'Back to the whole wall' : 'Focus — this pane alone',
@@ -6017,6 +6019,57 @@ function fillCarryPick(node, entry, want) {
   node.disabled = !opts.length && !want;
   node.value = want || (own ? own.value : '');
   return '';
+}
+
+/* ── Ask a panel (selftest_daily.mjs T-DD-16) ───────────────────────────────
+ * panel.py had a start route and a CLI but no way in from the browser. The
+ * form fills the same request; the pane it was asked from is the author, so
+ * the synthesis reports back to it (and its own lane never synthesizes). */
+const PANEL_MAX_ARMS = 4;
+/* {body, errors}: what /api/session/panels/start gets, and why not yet. */
+function panelRequest(p, f) {
+  const lanes = (f.lanes || []).filter(Boolean);
+  const errors = [];
+  if (!String(f.charge || '').trim()) errors.push('write the question the arms answer');
+  if (!lanes.length) errors.push('pick at least one arm');
+  if (lanes.length > PANEL_MAX_ARMS) errors.push(`at most ${PANEL_MAX_ARMS} arms`);
+  const body = { charge: String(f.charge || '').trim(), lanes, cwd: p.cwd,
+                 topic: String(f.topic || '').trim(), rounds: f.rounds === '2' ? 2 : 1,
+                 author: p.id, callerPane: p.id };
+  return { body, errors };
+}
+function openPanel(p) {
+  const dlg = $('#pandlg'), box = $('#pan-lanes'), go = $('#pan-go');
+  const lanes = chlLanes(S.agents, null);
+  box.querySelectorAll('label').forEach(l => l.remove());
+  // One per vendor, the first few checked; the asking pane's own lane may be
+  // an arm (it never synthesizes, panel.py).
+  lanes.forEach((a, i) => {
+    const l = el('label', 'chk');
+    const cb = el('input'); cb.type = 'checkbox'; cb.value = a.key; cb.checked = i < 3;
+    l.append(cb, ' ' + a.label);
+    box.appendChild(l);
+  });
+  $('#pan-who').textContent = `asked from ${p.title || p.label}, in ${paneDir(p)}; the synthesis comes back here`;
+  $('#pan-topic').value = ''; $('#pan-charge').value = ''; $('#pan-rounds').value = '1';
+  $('#pan-err').textContent = '';
+  go.onclick = async e => {
+    e.preventDefault();
+    const r = panelRequest(p, {
+      topic: $('#pan-topic').value, charge: $('#pan-charge').value, rounds: $('#pan-rounds').value,
+      lanes: [...box.querySelectorAll('input:checked')].map(x => x.value) });
+    if (r.errors.length) { $('#pan-err').textContent = r.errors.join('; '); return; }
+    go.disabled = true;
+    try {
+      await api('/api/session/panels/start', r.body);
+      dlg.close();
+      toast(`panel started: ${r.body.lanes.length} arm${r.body.lanes.length === 1 ? '' : 's'}; it shows under Panels`);
+      await refresh();
+    } catch (err) { $('#pan-err').textContent = err.message; }
+    finally { go.disabled = false; }
+  };
+  dlg.showModal();
+  $('#pan-charge').focus();
 }
 
 async function openPort(src) {
