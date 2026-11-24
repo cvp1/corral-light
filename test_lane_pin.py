@@ -7,6 +7,7 @@ for two weeks, and only a pane-log note said so. The lane now resolves
 refuses to start rather than run a weaker tier.
 """
 import unittest
+import unittest.mock
 
 from testkit.scratch import default_state  # noqa: F401  (binds STATE before sessions)
 
@@ -246,6 +247,62 @@ class LaterSwitchesAndKeepers(unittest.TestCase):
                 self.assertEqual(got is not None, expect_keeper, agent)
             else:
                 self.assertIsNone(got)
+
+
+class ThePostureIsTheLanesOwnMode(unittest.TestCase):
+    """2026-11-23: POSTURE_MODE's "auto" is not one of Antigravity's modes, so
+    every Gemini pane ran in its lane default with postureEnforced: false,
+    whatever its posture. The lane now maps each posture to its own modes and
+    reads the result back from the vendor's reply."""
+
+    def _attach(self, posture, **vendor):
+        p = _pane(TODAY, "gemini-4-neon-high", **vendor)
+        p.posture = posture
+        p._apply_lane_defaults()                   # mode=default, verified first
+        return p, p._apply_posture()
+
+    def test_auto_is_auto_edit_read_back(self):
+        p, enforced = self._attach("auto")
+        self.assertTrue(enforced)
+        self.assertEqual(p.vendor.state["mode"], "auto_edit")
+        self.assertEqual(p.sets[-1], ("mode", "auto_edit"))
+        self.assertTrue(any("posture auto on Antigravity (Gemini): mode auto_edit" in n for n in p.notes))
+
+    def test_strict_stays_default(self):
+        p, enforced = self._attach("strict")
+        self.assertTrue(enforced)
+        self.assertEqual(p.vendor.state["mode"], "default")
+
+    def test_edits_is_auto_edit(self):
+        p, enforced = self._attach("edits")
+        self.assertTrue(enforced)
+        self.assertEqual(p.vendor.state["mode"], "auto_edit")
+
+    def test_the_lane_reports_its_posture_enforceable(self):
+        self.assertTrue(sessions.posture_enforceable(sessions.AGENTS["gemini"]))
+
+    def test_a_vendor_without_auto_edit_is_not_enforced(self):
+        p, enforced = self._attach("auto", modes=("default", "yolo"))
+        self.assertFalse(enforced)
+        self.assertEqual(p.vendor.state["mode"], "default")
+        self.assertTrue(any("does not offer permission mode 'auto_edit'" in n for n in p.notes))
+
+    def test_an_ack_that_does_not_take_is_not_enforced(self):
+        p = _pane(TODAY, "gemini-4-neon-high")
+        p.posture = "auto"
+        p._apply_lane_defaults()
+        p.vendor.ignore.add("mode")                # acked, not applied
+        self.assertFalse(p._apply_posture())
+        self.assertEqual(p.vendor.state["mode"], "default")
+        self.assertTrue(any("it reports 'default'" in n for n in p.notes))
+
+    def test_a_posture_map_never_reaches_a_forbidden_mode(self):
+        spec = sessions.AGENTS["gemini"]
+        with unittest.mock.patch.dict(spec, {"posture_modes": {"auto": "yolo"}}):
+            p, enforced = self._attach("auto")
+        self.assertFalse(enforced)
+        self.assertNotIn(("mode", "yolo"), p.sets)
+        self.assertEqual(p.vendor.state["mode"], "default")
 
 
 if __name__ == "__main__":

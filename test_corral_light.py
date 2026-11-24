@@ -4161,7 +4161,9 @@ from test_install_sh import Static as InstallShStatic, Behaviour as InstallShBeh
 # turns, never answers (consult ok, panel arms, synthesis).
 from test_lane_pin import (TheResolverPicksTheIntendedTier,  # noqa: F401,E402
                            ThePaneLandsOnTheIntendedModel, TheLaneNeverRunsInYolo,
-                           LaterSwitchesAndKeepers)
+                           LaterSwitchesAndKeepers,
+                           # 2026-11-23: the lane's posture as its own modes.
+                           ThePostureIsTheLanesOwnMode)
 from test_vendor_errors import (TheDetector, ConsultOk,  # noqa: F401,E402
                                 PanelRefusesVendorErrors)
 from test_stop_and_clear import *                # noqa: F401,F403,E402
