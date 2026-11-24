@@ -1638,3 +1638,10 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
   background:var(--ground);border-radius:6px;white-space:pre}
 .chgpatch .padd{color:var(--sage)} .chgpatch .pdel{color:var(--rust)}
 .chgpatch .phunk{color:var(--dusk)} .chgpatch .pfile{color:var(--faint)}
+
+/* Dictate (dictate.py): the composer's 🎙. `.on` is the page's best guess
+   that the device's tool is listening; the tool's own indicator is the truth. */
+.composer .dictate{padding:0 10px;border:1px solid var(--line2);border-radius:9px;background:var(--panel);
+  cursor:pointer;font-size:15px;line-height:1}
+.composer .dictate:hover{border-color:var(--ember)}
+.composer .dictate.on{background:#c0392b;border-color:#c0392b}

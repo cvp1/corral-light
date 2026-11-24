@@ -3160,6 +3160,56 @@ function chatHistory(events) {
   return out.slice(-CHAT_HIST_MAX);
 }
 
+/* ── Dictate (dictate.py) ────────────────────────────────────────────────
+ * The composer's 🎙 starts the dictation tool of the device you are at; that
+ * tool types into the composer, which keeps focus throughout. At the hub's
+ * own machine the hub runs it (VoiceInk via Shortcuts, or voxtype). Another
+ * Mac or Linux box is started by URL on that box; a phone or tablet gets the
+ * composer focused, so the keyboard's own mic is one tap away. */
+let DICTATE = null;                     // GET /api/dictate, fetched once
+function dictatePlatform() {
+  const ua = navigator.userAgent || '';
+  const touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;   // iPadOS
+  if (/iPhone|iPad|iPod|Android/.test(ua) || touchMac) return 'touch';
+  if (/Macintosh|Mac OS X/.test(ua)) return 'mac';
+  if (/Linux|X11|CrOS/.test(ua)) return 'linux';
+  return 'other';
+}
+function dictateButton(ta) {
+  const b = el('button', 'dictate', '🎙');
+  b.type = 'button';
+  b.title = 'Dictate into this message — click again to stop';
+  b.setAttribute('aria-label', 'Dictate into this message');
+  // Keep focus in the composer: the dictation tool types into whatever has it.
+  b.onmousedown = e => e.preventDefault();
+  b.onclick = async () => {
+    ta.focus();
+    const plat = dictatePlatform();
+    if (plat === 'touch') { toast('Tap the mic on your keyboard to dictate'); return; }
+    try {
+      if (!DICTATE) DICTATE = await api('/api/dictate');
+    } catch (e) { toast(e.message, true); return; }
+    if (DICTATE.local) {
+      try {
+        await api('/api/dictate', {});
+        b.classList.toggle('on');
+      } catch (e) { toast(e.message, true); }
+      ta.focus();
+      return;
+    }
+    if (plat === 'mac') {
+      location.href = 'shortcuts://run-shortcut?name=' + encodeURIComponent(DICTATE.macShortcut);
+    } else if (plat === 'linux') {
+      location.href = DICTATE.linuxScheme + '://toggle';
+    } else {
+      toast('No dictation tool known for this device', true); return;
+    }
+    b.classList.toggle('on');
+    setTimeout(() => ta.focus(), 300);
+  };
+  return b;
+}
+
 // Built once per pane. Never rebuilt while you are typing in it — a
 // composer rebuilt under an agent's event stream eats the draft mid-word.
 function composer(p, kind) {
@@ -3445,7 +3495,7 @@ function composer(p, kind) {
     b._reset = reset;
     return b;
   }
-  c.append(att, ac, ta, b, stopButton(p));
+  c.append(att, ac, ta, dictateButton(ta), b, stopButton(p));
   return c;
 }
 

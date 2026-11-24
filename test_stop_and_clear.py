@@ -63,7 +63,7 @@ class StopMeansStop(FakeLaneCase):
     def test_the_composer_has_a_stop_button(self):
         js = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-        self.assertIn("c.append(att, ac, ta, b, stopButton(p))", js)
+        self.assertIn("c.append(att, ac, ta, dictateButton(ta), b, stopButton(p))", js)
         self.assertIn("'/api/session/pause'", js)        # the force-stop escalation
         self.assertIn(".pane.working .composer .stop", css)
 

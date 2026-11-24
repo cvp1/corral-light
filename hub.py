@@ -36,6 +36,7 @@ import modules
 import notify
 import webpush
 import sessions
+import dictate
 import worktrees
 from corral_core import edge
 
@@ -815,6 +816,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "devices": len(webpush.load_subs(sessions.STATE))})
             except (webpush.PushError, OSError, subprocess.SubprocessError) as e:
                 return self._json({"key": None, "why": str(e)[:200]})
+        if p == "/api/dictate":
+            # The composer's 🎙: may the hub toggle dictation for this browser
+            # (it sits at the hub's machine), and how to start it elsewhere.
+            try:
+                cfg = dictate.load()
+            except dictate.DictateError as e:
+                return self._json({"local": False, "why": str(e)[:200]})
+            local = self._local_human() and dictate.local_command(cfg) is not None
+            return self._json({"local": local, **dictate.client(cfg)})
         if p == "/api/push/latest":
             # What the service worker shows after a payload-less ping.
             return self._json({"notices": webpush.recent(5)})
@@ -1147,6 +1157,16 @@ class Handler(BaseHTTPRequestHandler):
                 r = rigs.route(MGR, "POST", p, b, by=user)
                 if r is not None:
                     return self._json(r[1], r[0])
+            if p == "/api/dictate":
+                # Only for a browser at this machine: a click elsewhere must never
+                # switch on this machine's microphone (dictate.py).
+                if not self._local_human():
+                    return self._json({"error": "dictation starts on the machine you are at",
+                                       "reason": "remote"}, 409)
+                try:
+                    return self._json(dictate.toggle(dictate.load()))
+                except dictate.DictateError as e:
+                    return self._json({"error": str(e)[:300]}, 502)
             if p == "/api/claude/login":
                 # Only allow-listed values describe the requester; no request text.
                 where = b.get("from") if b.get("from") in LOGIN_FROM else None

@@ -255,7 +255,11 @@ class StructuralIndependence(unittest.TestCase):
                          # The installed modules' list (module seam, 2026-10-07).
                          "/api/modules",
                          # Hub links: this hub's links, peers, inbox (docs/HUB-LINKS.md).
-                         "/api/hubs"}
+                         "/api/hubs",
+                         # The composer's 🎙 (dictate.py, 2026-11-24): toggles the
+                         # dictation tool of the hub's own machine, for a browser at
+                         # that machine only. Never a microphone anywhere else.
+                         "/api/dictate"}
         for r in routes:
             if r in allowed_exact or r.startswith(allowed_prefixes):
                 continue
@@ -4170,6 +4174,7 @@ from test_stop_and_clear import *                # noqa: F401,F403,E402
 from test_worktrees import *                     # noqa: F401,F403,E402
 # 2026-09-30: the Claude login foreseen (claude_auth) and survived (auth_sweep).
 from test_claude_auth import *                   # noqa: F401,F403,E402
+from test_dictate import *                       # noqa: F401,F403,E402
 from test_cli import *                           # noqa: F401,F403,E402
 from test_update import *                        # noqa: F401,F403,E402
 from test_ports import *                         # noqa: F401,F403,E402

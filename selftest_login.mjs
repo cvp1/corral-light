@@ -59,7 +59,10 @@ function browser(panes, loginState) {
                  termComposer: () => mk('div', 'term'), composablePanes: () => [],
                  pendingPerm: () => null, permOptions: () => [],
                  draftsLoad: () => ({}), draftSave: () => {}, chatHistory: () => [],
-                 requestAnimationFrame: () => {} };
+                 requestAnimationFrame: () => {},
+                 // The 🎙 has its own selftest (selftest_daily T-DD-19); a span here
+                 // keeps Send the composer's first button.
+                 dictateButton: () => mk('span', 'dictate') };
   const names = Object.keys(deps);
   const lib = new Function(...names, `
     ${fn('isLoginCommand')} async ${fn('startLogin')} ${fn('signInButton')} ${fn('loginLine')}
