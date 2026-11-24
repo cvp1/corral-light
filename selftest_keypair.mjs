@@ -116,7 +116,7 @@ for (const avail of [false, true]) for (const secure of [false, true]) for (cons
   check(p.dom.pairkey.classList.contains('hide') === !want, 'T8.1 the slot hides when nothing is offered');
   check(p.dom.paircmd.textContent === 'corral-light pair ABC-DEF', 'T8.1 the code stays');
   if (want) {
-    check(btn.textContent === 'Touch your key', 'T8.1 the button says Touch your key');
+    check(btn.textContent === 'Use passkey or key', 'T8.1 the button says Use passkey or key');
     check(/^Or pair from a shell/.test(p.dom.pairhow.textContent), 'T8.1 the code reads as "or pair from a shell"');
   } else {
     check(/^Run this in a shell/.test(p.dom.pairhow.textContent), 'T8.1 no button: the code is the way');

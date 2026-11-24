@@ -141,6 +141,7 @@
 "test_key_pairing.T712_BeginNeedsTheLiveCode": 0.1,
 "test_key_pairing.T714_VerifierUnavailable": 0.1,
 "test_key_pairing.T715_Recover": 0.0,
+"test_key_pairing.T716_PasskeysEnroll": 0.0,
 "test_key_pairing.T71_SameAssertionTwice": 0.1,
 "test_key_pairing.T72_Expiry": 0.1,
 "test_key_pairing.T73_Cap": 0.0,
