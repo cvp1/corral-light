@@ -325,5 +325,6 @@
 "test_worktrees_cli.ThePurge": 0.3,
 "test_worktrees_cli.TheResolve": 0.3,
 "test_worktrees_cli.TheRestore": 0.3,
-"test_worktrees_iso.Isolation": 140.8
+"test_worktrees_iso.Isolation": 140.8,
+"test_talk.TalkTurns": 5.0
 }

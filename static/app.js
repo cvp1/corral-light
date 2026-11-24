@@ -2259,7 +2259,8 @@ function reviewKey(e, target, dialogOpen) {
   return e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey &&
          !isTypingTarget(e.target) && !!target && !dialogOpen;
 }
-function anyDialogOpen() { return !!document.querySelector('dialog[open]'); }
+// The Talk drawer is non-modal: it never blocks the wall's own keys.
+function anyDialogOpen() { return !!document.querySelector('dialog[open]:not(#talkdlg)'); }
 function reviewTarget() {
   const p = S.panes.get(S.focus);
   return p && p.worktree && p.worktree.phase === 'active' ? p : null;
@@ -6578,6 +6579,10 @@ const KEYS = [
     match: e => e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey
                 && !isTypingTarget(e.target),
     run: () => toggleKeys() },
+  { combo: 'v', what: 'Open or close Talk (the voice agent)',
+    match: e => e.key === 'v' && !e.metaKey && !e.ctrlKey && !e.altKey
+                && !isTypingTarget(e.target) && !!TALK.cfg && !anyDialogOpen(),
+    run: () => toggleTalk() },
   { combo: '[', what: 'Fold or unfold the sidebar',
     match: e => e.key === '[' && !e.metaKey && !e.ctrlKey && !e.altKey
                 && !isTypingTarget(e.target) && !anyDialogOpen(),
@@ -6817,6 +6822,172 @@ function wireKeysButton() {
   if (b) b.onclick = () => toggleKeys();
 }
 
+/* ── Talk (talk.py) ──────────────────────────────────────────────────────
+ * 🎙 opens a non-modal drawer to the hub's configured Assist agent. Typed
+ * text, or a clip held on the mic (16 kHz mono PCM, capped), goes to
+ * POST /api/talk; the reply is drawn as text and, with "speak", played.
+ * The page never names the agent: the hub's talk.json does. */
+const TALK = { cfg: null, conv: null, rec: null, busy: false };
+
+async function wireTalk() {
+  let c;
+  try { c = await api('/api/talk'); } catch (e) { return; }
+  if (!c || !c.enabled) return;
+  TALK.cfg = c;
+  $('#talkbtn').classList.remove('hide');
+  $('#mobile-talk').classList.remove('hide');
+  $('#talktitle').textContent = c.title || 'Talk';
+  $('#talkbtn').title = `Chat or talk with ${c.title || 'the voice agent'} (V)`;
+  const sp = $('#talkspeak');
+  sp.checked = c.speak && localStorage.getItem('talk.speak') !== '0';
+  sp.disabled = !c.speak;
+  sp.onchange = () => localStorage.setItem('talk.speak', sp.checked ? '1' : '0');
+  if (!c.talk) { $('#talkmic').classList.add('hide'); $('#talkin').placeholder = 'Type a message'; }
+  $('#talkbtn').onclick = () => toggleTalk();
+  $('#mobile-talk').onclick = () => toggleTalk();
+  $('#talkx').onclick = () => toggleTalk(false);
+  $('#talknew').onclick = () => { TALK.conv = null; $('#talklog').textContent = '';
+                                  talkLine('sys', 'New conversation'); };
+  $('#talkform').onsubmit = e => {
+    e.preventDefault();
+    const t = $('#talkin').value.trim();
+    if (!t || TALK.busy) return;
+    $('#talkin').value = '';
+    talkTurn({ text: t }, t);
+  };
+  $('#talkdlg').addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); toggleTalk(false); }
+  });
+  wireTalkMic($('#talkmic'));
+}
+
+function toggleTalk(open) {
+  const d = $('#talkdlg');
+  if (!TALK.cfg) return;
+  const want = open === undefined ? !d.open : open;
+  if (want && !d.open) { d.show(); setTimeout(() => $('#talkin').focus(), 0); }
+  if (!want && d.open) { talkStop(true); d.close(); }
+}
+
+function talkLine(who, text) {
+  const el = document.createElement('div');
+  el.className = 'talkmsg ' + who;
+  el.textContent = text;
+  const log = $('#talklog');
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+async function talkTurn(body, shown) {
+  TALK.busy = true;
+  $('#talksend').disabled = true;
+  const mine = shown ? talkLine('me', shown) : talkLine('me', '🎙 …');
+  const wait = talkLine('sys', 'thinking…');
+  try {
+    const r = await api('/api/talk', { ...body, conversationId: TALK.conv,
+                                       speak: $('#talkspeak').checked });
+    TALK.conv = r.conversationId || TALK.conv;
+    if (r.heard != null) mine.textContent = r.heard;
+    wait.remove();
+    talkLine('it', r.reply || '(no reply)');
+    if (r.speakError) talkLine('sys', 'not spoken: ' + r.speakError);
+    if (r.audio) {
+      const a = new Audio(`data:${r.audio.mime};base64,${r.audio.b64}`);
+      a.play().catch(() => talkLine('sys', 'the browser blocked playback'));
+    }
+  } catch (e) {
+    wait.remove();
+    if (!shown) mine.remove();
+    talkLine('sys bad', e.message);
+  } finally {
+    TALK.busy = false;
+    $('#talksend').disabled = false;
+  }
+}
+
+/* Hold to talk; a quick click instead toggles (click again to send). */
+function wireTalkMic(btn) {
+  let downAt = 0;
+  btn.addEventListener('pointerdown', async e => {
+    e.preventDefault();
+    if (TALK.busy) return;
+    if (TALK.rec) { talkStop(false); return; }       // second click of a toggle
+    downAt = Date.now();
+    btn.setPointerCapture?.(e.pointerId);
+    await talkStart();
+  });
+  const up = () => {
+    if (!TALK.rec || !downAt) return;
+    const held = Date.now() - downAt;
+    downAt = 0;
+    if (held > 350) talkStop(false);                 // a hold: release sends
+  };
+  btn.addEventListener('pointerup', up);
+  btn.addEventListener('pointercancel', up);
+}
+
+async function talkStart() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (e) {
+    talkLine('sys bad', 'no microphone: ' + (e.message || e.name)
+             + (location.protocol === 'https:' || location.hostname === 'localhost'
+                ? '' : ' (the mic needs https or localhost)'));
+    return;
+  }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  const max = (TALK.cfg.maxSeconds || 15) * ctx.sampleRate;
+  let n = 0;
+  node.onaudioprocess = ev => {
+    const d = ev.inputBuffer.getChannelData(0);
+    chunks.push(new Float32Array(d));
+    n += d.length;
+    if (n >= max) talkStop(false);
+  };
+  src.connect(node); node.connect(ctx.destination);
+  TALK.rec = { stream, ctx, src, node, chunks, rate: ctx.sampleRate };
+  $('#talkmic').classList.add('rec');
+}
+
+function talkStop(discard) {
+  const r = TALK.rec;
+  if (!r) return;
+  TALK.rec = null;
+  $('#talkmic').classList.remove('rec');
+  try { r.node.disconnect(); r.src.disconnect(); } catch (e) { }
+  r.stream.getTracks().forEach(t => t.stop());
+  r.ctx.close();
+  if (discard) return;
+  const pcm = talkPcm16k(r.chunks, r.rate);
+  if (pcm.length < 16000 * 0.3) { talkLine('sys', 'too short — hold 🎙 while you speak'); return; }
+  let bin = '';
+  const u8 = new Uint8Array(pcm.buffer);
+  for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  talkTurn({ audio: btoa(bin) });
+}
+
+/* Float32 at the device rate → Int16 at 16 kHz (box-average downsample). */
+function talkPcm16k(chunks, rate) {
+  let len = 0; for (const c of chunks) len += c.length;
+  const all = new Float32Array(len);
+  let o = 0; for (const c of chunks) { all.set(c, o); o += c.length; }
+  const ratio = rate / 16000;
+  const out = new Int16Array(Math.floor(len / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(len, Math.floor((i + 1) * ratio));
+    let s = 0; for (let j = a; j < b; j++) s += all[j];
+    const v = Math.max(-1, Math.min(1, s / Math.max(1, b - a)));
+    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  return out;
+}
+
 function wireMobileActions() {
   $('#mobile-new').onclick = () => $('#new').click();
   $('#mobile-search').onclick = openPalette;
@@ -6976,6 +7147,7 @@ async function start() {
   wireKeysButton();
   wireSecKeys();
   wireMobileActions();
+  wireTalk();
   wirePush();
   // Stream first, then snapshot, so no event falls in the gap between them.
   connect();
