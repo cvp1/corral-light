@@ -769,8 +769,11 @@ def enroll_begin(cookie, code, origin, rp_id, now=None):
             "pubKeyCredParams": [{"type": "public-key", "alg": webauthn.ALG_ES256}],
             # Every key on this rpId, so an authenticator never enrolls twice.
             "excludeCredentials": [k["id"] for k in keys if k["rpId"] == rp_id],
-            "authenticatorSelection": {"authenticatorAttachment": "cross-platform",
-                                       "residentKey": "discouraged",
+            # No authenticatorAttachment: a phone or tablet's own passkey
+            # (Face ID / Touch ID) enrolls as well as a USB/NFC key, so a
+            # device with no terminal can re-pair with one touch. A synced
+            # passkey is only as strong as the Apple/Google account behind it.
+            "authenticatorSelection": {"residentKey": "discouraged",
                                        "userVerification": "required"},
             "attestation": "none", "timeout": CHALLENGE_TTL * 1000, "first": first}
 

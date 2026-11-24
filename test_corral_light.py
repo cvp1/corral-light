@@ -4248,6 +4248,7 @@ from test_key_pairing import (T71_SameAssertionTwice,  # noqa: F401,E402
                               T76_LaterEnrollment, T77_KeyOnly, T78_Corrupt,
                               T710_FileDiscipline, T712_BeginNeedsTheLiveCode,
                               T714_VerifierUnavailable, T715_Recover,
+                              T716_PasskeysEnroll,
                               BindingsTheMutantsFound, T91_SecurityNotices,
                               T91_TheBannerIsSilentAndLocal, T10_SessionLifetime,
                               Routes as KeyPairingRoutes)
