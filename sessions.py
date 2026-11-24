@@ -426,6 +426,16 @@ AGENTS = {
         # attachment; "yolo" is forbidden (refused at start, resume and set_config).
         "default_config": {"mode": "default"},
         "forbidden_modes": ("yolo",),
+        # The pane's posture, as Antigravity's own modes (2026-11-23). Gemini has
+        # no "auto" (a classifier) mode, so POSTURE_MODE's "auto" was never
+        # offered: every posture fell back to the lane default and the pane
+        # reported postureEnforced: false. auto_edit is its nearest: edits
+        # auto-approved, every shell command still asks (a card). strict stays
+        # "default". Applied after the lane default and read back from the reply;
+        # a reviewer's mode (REVIEWER_CONFIG) and a pane's explicit mode are
+        # applied after this and win.
+        "posture_via_acp_mode": True,
+        "posture_modes": {"strict": "default", "edits": "auto_edit", "auto": "auto_edit"},
         # No keeper: a kept agent is picked back up without re-checking its mode,
         # so a hub restart ends a Gemini agent and resume re-verifies it.
         "keeper": False,
@@ -2273,7 +2283,12 @@ class Pane(_core.PaneBase):
         if not spec.get("posture_via_acp_mode"):
             # Config-dir lanes: the posture was set (or not) at spawn.
             return posture_enforceable(spec)
-        want = POSTURE_MODE.get(self.posture)
+        want = (spec.get("posture_modes") or POSTURE_MODE).get(self.posture)
+        if want in (spec.get("forbidden_modes") or ()):
+            # Belt and braces: a posture map must never reach a forbidden mode.
+            self.emit("note", {"text": f"posture {self.posture!r} maps to {want!r}, which "
+                                       f"{label} never runs in; left at its lane default"})
+            return False
         cfg = self.config.get("mode") or {}
         allowed = {o["value"] for o in cfg.get("options") or []}
         if want is None:
@@ -2306,6 +2321,11 @@ class Pane(_core.PaneBase):
             self.emit("note", {"text": f"asked {label} for permission mode "
                                        f"{want!r}; it reports {got!r}"})
             return False
+        if spec.get("posture_modes"):
+            # A lane's own mode names say little on their own: say what this one does.
+            self.emit("note", {"text": f"posture {self.posture} on {label}: mode {got}"
+                                       + (" (edits auto-approved; shell commands still ask)"
+                                          if got == "auto_edit" else "")})
         return True
 
     # Values no lane default may carry, per config id.
