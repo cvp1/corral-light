@@ -1639,26 +1639,9 @@ dialog#agentsdlg{max-width:none;width:min(720px,96vw)}
 .chgpatch .padd{color:var(--sage)} .chgpatch .pdel{color:var(--rust)}
 .chgpatch .phunk{color:var(--dusk)} .chgpatch .pfile{color:var(--faint)}
 
-/* ── Talk drawer (talk.py) ─────────────────────────────────────────── */
-dialog.talkdlg{position:fixed;inset:auto 18px 18px auto;margin:0;padding:0;width:min(420px,calc(100vw - 24px));
-  max-height:min(560px,calc(100dvh - 36px));display:none;flex-direction:column;z-index:50}
-dialog.talkdlg[open]{display:flex}
-.talkhead{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}
-.talktitle{flex:1;font-weight:600}
-.talkspeak{font-size:12px;color:var(--dim);display:flex;gap:4px;align-items:center;cursor:pointer}
-.talknew,.talkx{background:none;border:1px solid var(--line);color:var(--dim);border-radius:6px;padding:2px 8px;cursor:pointer}
-.talknew:hover,.talkx:hover{color:var(--ink);border-color:var(--line2)}
-.talklog{flex:1;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:120px}
-.talkmsg{max-width:85%;padding:7px 10px;border-radius:10px;line-height:1.4;white-space:pre-wrap;word-break:break-word}
-.talkmsg.me{align-self:flex-end;background:var(--raise);border:1px solid var(--line2)}
-.talkmsg.it{align-self:flex-start;border:1px solid var(--line)}
-.talkmsg.sys{align-self:center;font-size:12px;color:var(--dim);border:none;padding:2px}
-.talkmsg.bad{color:var(--bad,#e66)}
-.talkrow{display:flex;gap:6px;padding:10px 12px;border-top:1px solid var(--line)}
-.talkrow input{flex:1;min-width:0;background:var(--raise);color:var(--ink);border:1px solid var(--line2);border-radius:8px;padding:6px 9px;font:inherit}
-.talksend{background:var(--raise);color:var(--ink);border:1px solid var(--line2);border-radius:8px;padding:0 12px;cursor:pointer}
-.talksend:disabled{opacity:.5}
-.talkmic{font-size:16px;width:40px;border-radius:8px;border:1px solid var(--line2);background:var(--raise);cursor:pointer;touch-action:none;user-select:none;-webkit-user-select:none}
-.talkmic.rec{background:#c0392b;border-color:#c0392b;animation:talkpulse 1s infinite}
-@keyframes talkpulse{50%{opacity:.6}}
-@media (max-width:640px){dialog.talkdlg{inset:auto 6px 64px 6px;width:auto}}
+/* Dictate (dictate.py): the composer's 🎙. `.on` is the page's best guess
+   that the device's tool is listening; the tool's own indicator is the truth. */
+.composer .dictate{padding:0 10px;border:1px solid var(--line2);border-radius:9px;background:var(--panel);
+  cursor:pointer;font-size:15px;line-height:1}
+.composer .dictate:hover{border-color:var(--ember)}
+.composer .dictate.on{background:#c0392b;border-color:#c0392b}

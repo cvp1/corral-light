@@ -507,7 +507,7 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
         'T-DD-15 an image with text on the clipboard still pastes the text');
   check(/images: shots\.map\(sh => sh\.sha\)/.test(comp), 'T-DD-15 the message names its images');
   check(/if \(!t && !shots\.length\) return;/.test(comp), 'T-DD-15 an image alone can be sent');
-  check(/c\.append\(att, ac, ta, b, stopButton\(p\)\)/.test(comp), 'T-DD-15 the row sits above the box');
+  check(/c\.append\(att, ac, ta, dictateButton\(ta\), b, stopButton\(p\)\)/.test(comp), 'T-DD-15 the row sits above the box');
   check(/\(d\.images \|\| \[\]\)\.length\) u\.appendChild\(shotStrip\(p\.id, d\.images\)\)/.test(fn('renderLog')),
         'T-DD-15 the bubble shows what was sent, from the hub');
 }
@@ -565,6 +565,21 @@ for (const id of ['mobile-panes', 'mobile-pane', 'mobile-new', 'mobile-search', 
         'T-DD-18 accepting re-reads the word at the caret (typing may have gone on)');
   check(/if \(mine !== askSeq\) return;/.test(comp), 'T-DD-18 a slow answer for an older keystroke is dropped');
   check(/!isTerm\(p\) \? mentionAt/.test(comp), 'T-DD-18 not on a terminal; a remote pane asks its own hub');
+}
+
+// T-DD-19 the composer's 🎙 (dictate.py): the device decides the tool.
+{
+  const plat = (ua, touch = 0) => load('dictatePlatform', [], {
+    navigator: { userAgent: ua, maxTouchPoints: touch } })();
+  eq(plat('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/140'), 'mac', 'T-DD-19 a Mac');
+  eq(plat('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605', 5), 'touch', 'T-DD-19 an iPad asking for the desktop site');
+  eq(plat('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)'), 'touch', 'T-DD-19 an iPhone');
+  eq(plat('Mozilla/5.0 (Linux; Android 15; SM-X210) Chrome/140 Safari/537.36'), 'touch', 'T-DD-19 the tablet (Android before Linux)');
+  eq(plat('Mozilla/5.0 (X11; Linux x86_64) Chrome/140'), 'linux', 'T-DD-19 a Linux desktop');
+  const btn = fn('dictateButton');
+  check(/b\.onmousedown = e => e\.preventDefault\(\);/.test(btn), 'T-DD-19 the click never takes focus from the composer');
+  check(/if \(DICTATE\.local\)/.test(btn) && /shortcuts:\/\/run-shortcut\?name=/.test(btn)
+        && /DICTATE\.linuxScheme \+ ':\/\/toggle'/.test(btn), 'T-DD-19 hub, Shortcuts URL, Linux handler');
 }
 
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
