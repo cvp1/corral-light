@@ -2,14 +2,16 @@
 operator is at, and that tool types into the focused composer.
 
 The hub only acts for a browser on its own machine (loopback, no proxy or
-Serve header). It runs that machine's toggle: on macOS a Shortcuts shortcut
-that holds VoiceInk's "Toggle VoiceInk Recorder" action, on Linux
+Serve header). It runs that machine's toggle: on macOS the Shortcuts shortcut
+"Corral Dictate" (VoiceInk's "Toggle VoiceInk Recorder" with Show When Run
+OFF: shown, its dialog takes focus and the transcript pastes nowhere;
+packaging/make-voiceink-shortcut.py builds it), on Linux
 `voxtype record toggle`. A browser elsewhere starts its own machine's tool
 with a URL (see `client()`), so a click on one machine never turns on a
 microphone on another.
 
 Config (optional): ~/.config/corral-light/dictate.json
-  {"mac_shortcut": "VoiceInk Toggle",            the shortcut's exact name
+  {"mac_shortcut": "Corral Dictate",             the shortcut's exact name
    "local_command": ["voxtype", "record", "toggle"]}   overrides the default
 """
 import json
@@ -21,7 +23,7 @@ from pathlib import Path
 
 CONFIG = Path(os.environ.get("CORRAL_LIGHT_CONFIG_DIR",
                              Path.home() / ".config/corral-light")) / "dictate.json"
-DEFAULT_SHORTCUT = "VoiceInk Toggle"
+DEFAULT_SHORTCUT = "Corral Dictate"
 LINUX_SCHEME = "corral-dictate"          # packaging/corral-dictate-handler.sh
 TIMEOUT_S = 15
 
@@ -86,7 +88,7 @@ def toggle(cfg, run=subprocess.run):
         err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
         hint = ""
         if argv[:2] == ["shortcuts", "run"]:
-            hint = (f' (is there a Shortcuts shortcut named "{argv[2]}" holding '
-                    f'VoiceInk\'s "Toggle VoiceInk Recorder" action?)')
+            hint = (f' (no Shortcuts shortcut named "{argv[2]}"? '
+                    f'packaging/make-voiceink-shortcut.py builds it)')
         raise DictateError(((err[-1] if err else f"exit {r.returncode}") + hint)[:300])
     return {"ok": True, "ran": argv[0]}

@@ -28,9 +28,9 @@ class Dictate(unittest.TestCase):
         c = dictate.load(self.dir / "absent.json")
         self.assertEqual(c, {})
         self.assertEqual(dictate.local_command(c, "darwin"),
-                         ["shortcuts", "run", "VoiceInk Toggle"])
+                         ["shortcuts", "run", "Corral Dictate"])
         self.assertEqual(dictate.client(c),
-                         {"macShortcut": "VoiceInk Toggle", "linuxScheme": "corral-dictate"})
+                         {"macShortcut": "Corral Dictate", "linuxScheme": "corral-dictate"})
 
     def test_linux_uses_voxtype_only_when_installed(self):
         with mock.patch("shutil.which", return_value="/usr/bin/voxtype"):
@@ -64,8 +64,8 @@ class Dictate(unittest.TestCase):
         def run(argv, **kw):
             return SimpleNamespace(returncode=1, stderr=b"Error: The shortcut could not be found.\n")
         with mock.patch.object(dictate, "local_command",
-                               return_value=["shortcuts", "run", "VoiceInk Toggle"]):
-            with self.assertRaisesRegex(dictate.DictateError, "Toggle VoiceInk Recorder"):
+                               return_value=["shortcuts", "run", "Corral Dictate"]):
+            with self.assertRaisesRegex(dictate.DictateError, "make-voiceink-shortcut"):
                 dictate.toggle({}, run=run)
 
     def test_timeout_and_missing_binary_are_readable(self):
