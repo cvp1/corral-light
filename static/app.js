@@ -299,7 +299,7 @@ function showKeyOffer(code, d) {
   $('#pairhow').textContent = offer.kind === 'here'
     ? 'Or pair from a shell you trust:' : 'Run this in a shell you trust:';
   if (offer.kind === 'here') {
-    const b = el('button', 'btn go keybtn', 'Touch your key');
+    const b = el('button', 'btn go keybtn', 'Use passkey or key');
     b.type = 'button';
     b.onclick = () => pairByKey(code, b);
     box.appendChild(b);

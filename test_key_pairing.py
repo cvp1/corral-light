@@ -327,6 +327,25 @@ class T75_FirstEnrollment(Base):
         self.assertEqual(auth.policy()[0], "key-only")
 
 
+class T716_PasskeysEnroll(Base):
+    """A phone or tablet's own passkey (Face ID / Touch ID) must be offered,
+    so a device with no terminal can pair by touch. Platform passkeys report
+    signCount 0 on every assertion; that must keep pairing."""
+
+    def test_enrollment_does_not_pin_cross_platform(self):
+        code, _ = auth.mint_enroll_code()
+        opts = auth.enroll_begin(COOKIE, code, ORIGIN, RP)
+        self.assertNotIn("authenticatorAttachment", opts["authenticatorSelection"])
+        self.assertEqual(opts["authenticatorSelection"]["userVerification"], "required")
+
+    def test_a_zero_counter_passkey_pairs_repeatedly(self):
+        self.enroll_first(self.a)
+        for _ in range(3):
+            self.a.count = -1                      # get() bumps it to 0, as a synced passkey sends
+            self.assertEqual(self.pair_by_key(self.a), w.b64url(self.a.cred))
+        self.assertEqual(self.keys()[0]["signCount"], 0)
+
+
 class T76_LaterEnrollment(Base):
     def setUp(self):
         super().setUp()

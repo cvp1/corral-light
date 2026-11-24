@@ -901,7 +901,7 @@ With `CORRAL_TAILSCALE_LOGIN` set, a request that arrives through Serve must car
 
 ### Pairing with a security key
 
-Once a key is enrolled, the pairing screen offers **Touch your key** next to the code. Touching a FIDO2 security key (a YubiKey, for example) pairs the browser without walking to a shell. The code stays on the screen as "or pair from a shell", and it keeps working.
+A phone or tablet's built-in passkey (Face ID / Touch ID) enrolls the same way as a USB or NFC key, so a device with no terminal can re-pair with one touch; a synced passkey is only as strong as the Apple or Google account behind it. Once a key is enrolled, the pairing screen offers **Use passkey or key** next to the code. Touching a FIDO2 security key (a YubiKey, for example) pairs the browser without walking to a shell. The code stays on the screen as "or pair from a shell", and it keeps working.
 
 ```
 ./corral-light key enroll        # a one-time code for the first key (300 s, single use)
