@@ -154,6 +154,7 @@
 "test_lane_pin.LaterSwitchesAndKeepers": 0.0,
 "test_lane_pin.TheLaneNeverRunsInYolo": 0.0,
 "test_lane_pin.ThePaneLandsOnTheIntendedModel": 0.0,
+"test_lane_pin.ThePostureIsTheLanesOwnMode": 0.0,
 "test_lane_pin.TheResolverPicksTheIntendedTier": 0.0,
 "test_lanes.AFailingProbe": 0.0,
 "test_lanes.APassingProbe": 0.0,
