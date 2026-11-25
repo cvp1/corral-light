@@ -4059,11 +4059,17 @@ function render() {
   for (const p of shown) {
     let rec = PANES.get(p.id);
     if (!rec) { PANES.set(p.id, rec = buildPane(p)); }
-    updatePane(rec, p);
-    // Full-size state as a class on the persistent root; CSS renders the tag.
-    rec.root.classList.toggle('solo', shown.length === 1);
+    // Attach before updating: a detached log has no layout, so updatePane's
+    // pin-to-bottom (scrollTop = scrollHeight) is a no-op and a reloaded pane
+    // opened at its first message. Detaching also drops scroll position, so a
+    // pinned pane coming back (reload, un-minimize) re-pins to the last message.
+    const attached = rec.root.isConnected;
     const slot = prev ? prev.nextSibling : g.firstChild;
     if (rec.root !== slot) g.insertBefore(rec.root, slot);
+    updatePane(rec, p);
+    if (!attached && rec.pinned) rec.log.scrollTop = rec.log.scrollHeight;
+    // Full-size state as a class on the persistent root; CSS renders the tag.
+    rec.root.classList.toggle('solo', shown.length === 1);
     prev = rec.root;
   }
 
