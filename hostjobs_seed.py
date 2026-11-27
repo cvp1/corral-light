@@ -212,12 +212,12 @@ def main(argv):
         else:
             raise Refused(f"unknown verb {verb!r}")
     except Refused as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        print(json.dumps({"ok": False, "error": str(e)}), flush=True)
         return 1
     except Exception as e:           # noqa: BLE001
-        print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}))
+        print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]}), flush=True)
         return 1
-    print(json.dumps({"ok": True, **out}))
+    print(json.dumps({"ok": True, **out}), flush=True)
     return 0
 
 
