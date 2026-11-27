@@ -4406,6 +4406,62 @@ function schedSummary(jobs) {
   return [`${on} on`, off ? `${off} off` : '', failed ? `${failed} did not run` : '']
     .filter(Boolean).join(' · ');
 }
+/* This machine's own scheduler (hostjobs.py): Seed's jobs, which never open
+ * a pane. Fetched when the page opens, not carried in /state. */
+const CRON_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function cronText(expr) {
+  const f = String(expr || '').trim().split(/\s+/);
+  if (f.length !== 5) return String(expr || '');
+  const [m, h, dom, mon, dow] = f;
+  const num = x => /^\d{1,2}$/.test(x);
+  const hm = () => `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
+  if (dom !== '*' || mon !== '*') return expr;
+  const every = /^\*\/(\d+)$/.exec(m);
+  if (every && h === '*' && dow === '*') return `every ${every[1]} min`;
+  if (num(m) && h === '*' && dow === '*') return `hourly at :${m.padStart(2, '0')}`;
+  if (num(m) && num(h) && dow === '*') return `daily ${hm()}`;
+  if (num(m) && num(h) && /^[0-7]$/.test(dow)) return `${CRON_DAYS[+dow]} ${hm()}`;
+  return expr;
+}
+function hostLine(j) {
+  const last = !j.last ? 'never ran'
+    : `last run ${new Date(j.last).toLocaleString()}` + (j.last_ok === false ? ' failed' : '');
+  if (j.paused) return `off · ${cronText(j.schedule)}` + (j.until ? ` · quiet until ${j.until}` : '')
+                       + (j.why ? ` · ${j.why}` : '');
+  return `${cronText(j.schedule)} · ${last}` +
+    (j.last_ok === false && j.last_note ? `: ${j.last_note}` : '');
+}
+let SCHED_HOST = null;                  // the last /api/session/hostjobs answer
+function hostRow(j) {
+  const key = 'host:' + j.name;
+  const row = el('div', 'schedrow' + (j.paused ? ' off' : j.last_ok === false ? ' bad' : ''));
+  const sw = el('label', 'schedsw');
+  const box = el('input'); box.type = 'checkbox'; box.checked = !j.paused;
+  box.setAttribute('aria-label', `${j.name}: on`);
+  box.onchange = () => schedAct('/api/session/hostjobs/pause', { name: j.name, paused: !box.checked });
+  sw.append(box, el('span', 'knob'), el('span', 'swtxt', j.paused ? 'off' : 'on'));
+  sw.title = j.paused ? 'off: its runs are skipped until turned on' : 'on: turn it off to skip its runs';
+  row.appendChild(sw);
+  const t = el('div', 'txt');
+  t.appendChild(el('div', 't', j.name));
+  t.appendChild(el('div', 's', hostLine(j)));
+  t.title = j.command || '';
+  row.appendChild(t);
+  const rm = el('button', 'btn', SCHED_ARMED === key ? 'Delete — sure?' : 'Delete');
+  rm.type = 'button';
+  // Two clicks: this takes the job out of the machine's scheduler.
+  rm.onclick = () => {
+    if (SCHED_ARMED !== key) { SCHED_ARMED = key; renderSched(true); return; }
+    SCHED_ARMED = null;
+    schedAct('/api/session/hostjobs/remove', { name: j.name });
+  };
+  row.appendChild(rm);
+  return row;
+}
+async function loadHostJobs() {
+  try { SCHED_HOST = await api('/api/session/hostjobs'); }
+  catch (e) { SCHED_HOST = { available: true, jobs: [], error: e.message }; }
+}
 let SCHED_ARMED = null, SCHED_KEY = null;
 function schedRow(j) {
   const row = el('div', 'schedrow' + (j.failed ? ' bad' : j.paused ? ' off' : ''));
@@ -4443,6 +4499,7 @@ async function schedAct(path, body) {
   try { await api(path, body); }
   catch (e) { $('#sched-error').textContent = e.message; }
   try { await refresh(); } catch { /* the page keeps its last list */ }
+  if (path.includes('/hostjobs/')) await loadHostJobs();
   renderSched(true);                       // a refused switch snaps back
 }
 /* Rebuilt only when the jobs (or the armed Delete) change: render() calls
@@ -4451,11 +4508,31 @@ function renderSched(force) {
   const dlg = $('#scheddlg');
   if (!dlg || !dlg.open) return;
   const jobs = S.schedule || [];
-  const key = JSON.stringify([jobs, SCHED_ARMED]);
+  const host = SCHED_HOST || {};
+  const key = JSON.stringify([jobs, SCHED_ARMED, host]);
   if (!force && key === SCHED_KEY) return;
   SCHED_KEY = key;
-  $('#sched-sum').textContent = schedSummary(jobs);
-  $('#sched-list').replaceChildren(...jobs.map(schedRow));
+  const hj = host.jobs || [];
+  const kids = [];
+  if (host.available) {
+    kids.push(el('div', 'lab', `Corral · ${jobs.length}`));
+    if (!jobs.length) kids.push(el('div', 'hint', 'Nothing is scheduled to open a pane.'));
+  }
+  kids.push(...jobs.map(schedRow));
+  if (host.available) {
+    kids.push(el('div', 'lab', `This machine · ${hj.length}`));
+    if (host.error) kids.push(el('div', 'hint err', host.error));
+    kids.push(...hj.map(hostRow));
+  }
+  $('#sched-sum').textContent = host.available
+    ? schedSummary([...jobs, ...hj.map(j => ({ paused: j.paused }))])
+    : schedSummary(jobs);
+  $('#sched-hosthint').textContent = host.available
+    ? "This machine's jobs are AI-OS Seed's scheduler. Off skips a job's runs and keeps " +
+      'its freshness check quiet until the date shown. Delete takes it out of the manifest ' +
+      'and the scheduler; the entry is kept in Corral\'s data folder under hostjobs-removed.'
+    : '';
+  $('#sched-list').replaceChildren(...kids);
 }
 function openSched() {
   const dlg = $('#scheddlg');
@@ -4465,6 +4542,7 @@ function openSched() {
   if (!dlg.open) dlg.showModal();
   renderSched(true);
   refresh().then(() => renderSched(), () => {});
+  loadHostJobs().then(() => renderSched());
 }
 function wireSched() {
   const b = $('#schedbtn');

@@ -602,5 +602,33 @@ for (const [label, run] of [
   check(/"\/api\/session\/schedule\/pause"/.test(hub), 'T-SP-10 the hub has the pause route');
 }
 
+/* ── T-SH: this machine's own jobs on the same page ─────────────────────── */
+{
+  const cron = load('cronText', [], { CRON_DAYS: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] });
+  eq(['*/10 * * * *', '25 * * * *', '0 6 * * *', '30 6 * * 1', '0 10 1 * *', 'junk'].map(cron),
+     ['every 10 min', 'hourly at :25', 'daily 06:00', 'Mon 06:30', '0 10 1 * *', 'junk'],
+     'T-SH-1 a schedule reads as words, and one it cannot read stays as typed');
+  const line = load('hostLine', ['cronText'], { CRON_DAYS: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] });
+  const j = { name: 'scrape', schedule: '0 6 * * *', paused: false, last: '2026-11-27T13:00:00Z', last_ok: true };
+  check(/^daily 06:00 · last run /.test(line(j)) && !/failed/.test(line(j)), 'T-SH-2 a healthy job: when, and its last run');
+  check(/failed: disk full$/.test(line({ ...j, last_ok: false, last_note: 'disk full' })), 'T-SH-2 a failed last run says why');
+  eq(line({ ...j, last: null }), 'daily 06:00 · never ran', 'T-SH-2 never ran is said');
+  eq(line({ ...j, paused: true, until: '2026-12-19', why: 'no repeater' }),
+     'off · daily 06:00 · quiet until 2026-12-19 · no repeater', 'T-SH-3 an off job says until when, and why');
+  const calls = [];
+  const row = load('hostRow', ['hostLine', 'cronText'], { el: mk, SCHED_ARMED: null,
+    CRON_DAYS: [], renderSched: () => calls.push('render'), schedAct: (p, b) => calls.push([p, b]) });
+  const r1 = row(j);
+  const box = find(r1, n => n.tag === 'input');
+  box.checked = false; box.onchange();
+  eq(calls.pop(), ['/api/session/hostjobs/pause', { name: 'scrape', paused: true }], 'T-SH-4 the switch is Seed\'s switch');
+  find(r1, n => n.tag === 'button').onclick();
+  eq(calls.pop(), 'render', 'T-SH-5 the first Delete click only arms');
+  check(!calls.length && /schedAct\('\/api\/session\/hostjobs\/remove'/.test(fn('hostRow')), 'T-SH-5 the second removes');
+  check(/loadHostJobs\(\)\.then/.test(fn('openSched')), 'T-SH-6 the page asks for them when it opens');
+  check(!/hostjobs/.test(fn('refresh')), 'T-SH-6 and never on the state poll');
+  check(/host\.available/.test(fn('renderSched')), 'T-SH-7 no Seed, no section');
+}
+
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }
 console.log('selftest_inbox: ok');

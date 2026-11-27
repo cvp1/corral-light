@@ -884,6 +884,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"text": transcripts.digest(hours, live=live)})
         if p == "/api/session/schedule":
             return self._json({"jobs": MGR.schedule.list()})
+        if p == "/api/session/hostjobs":
+            # This machine's own scheduler (hostjobs.py); a subprocess, so it
+            # is asked for by the Scheduled jobs page, never in /state.
+            import hostjobs
+            return self._json(hostjobs.list_jobs())
         if p == "/api/session/panels":
             pid = (q.get("id") or [""])[0]
             if pid:
@@ -1371,6 +1376,13 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/session/schedule/remove":
                 return self._json({"ok": True,
                                    "removed": MGR.schedule.remove(b.get("id", ""))})
+            if p in ("/api/session/hostjobs/pause", "/api/session/hostjobs/remove"):
+                import hostjobs
+                if p.endswith("/remove"):
+                    return self._json(hostjobs.remove(b.get("name", ""), sessions.STATE))
+                if not isinstance(b.get("paused"), bool):
+                    raise ValueError("paused must be true or false")
+                return self._json(hostjobs.set_paused(b.get("name", ""), b["paused"]))
             if p == "/api/session/schedule/pause":
                 if not isinstance(b.get("paused"), bool):
                     raise ValueError("paused must be true or false")

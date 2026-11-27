@@ -1504,6 +1504,9 @@ dialog#scheddlg{max-width:none;width:min(760px,96vw)}
 .schedsw input:focus-visible + .knob{outline:2px solid var(--dusk);outline-offset:2px}
 .schedsw .swtxt{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim)}
 .rit.off .t{color:var(--faint)}
+.schedlist .lab{padding:12px 2px 4px}
+.schedlist .lab:first-child{padding-top:0}
+.schedlist .lab + .schedrow{border-top:0}
 @media (max-width:820px){.schedrow{flex-wrap:wrap}.schedrow .txt{flex-basis:60%}}
 
 /* Hub links: rosters of paired hubs, an inbox, one pane's detail. */
