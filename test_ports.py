@@ -485,3 +485,181 @@ class ComposeTask(unittest.TestCase):
                          (sessions.GOAL_TASK_CHARS, sessions.GOAL_DONE_CHARS))
         with self.assertRaises(ValueError):
             sessions.compose_task("x" * (sessions.TASK_MAX + 1))
+
+
+FAKE_SEED_SYNC = '''
+import json, os, re, sys
+from pathlib import Path
+HERE = Path(__file__).resolve().parent
+MANIFEST = HERE / "manifest.yml"
+def load_jobs():
+    jobs, cur, fold = [], None, None
+    for raw in MANIFEST.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line == "jobs:":
+            continue
+        m = re.match(r"- name: (.*)", line)
+        if m:
+            cur = {"name": m.group(1)}; jobs.append(cur); fold = None; continue
+        m = re.match(r"(\\w+): (.*)", line)
+        if m and cur is not None:
+            k, v = m.group(1), m.group(2).strip('"')
+            fold = k if v == ">-" else None
+            cur[k] = "" if v == ">-" else v
+        elif fold:
+            cur[fold] = (cur[fold] + " " + line).strip()
+        else:
+            sys.exit("bad manifest line: " + line)
+    return jobs
+if __name__ == "__main__":
+    if (HERE / "refuse").exists():
+        print("RISK: refusing", file=sys.stderr); sys.exit(2)
+    (HERE / "installed.json").write_text(json.dumps([j["name"] for j in load_jobs()]))
+'''
+
+FAKE_SEED_SWITCHES = '''
+import json
+from pathlib import Path
+PATH = Path(__file__).resolve().parent / "switches.json"
+def _load():
+    try: return json.loads(PATH.read_text())
+    except (OSError, ValueError): return {}
+def load_strict(): return _load(), None
+def disabled_jobs(): return set(_load().get("disabled", []))
+def set_disabled(job, disabled, *, why=None, owner=None):
+    d = _load(); cur = set(d.get("disabled", [])); r = d.get("reasons", {})
+    if disabled: cur.add(job); r[job] = {"why": why, "owner": owner, "until": "2099-01-01"}
+    else: cur.discard(job); r.pop(job, None)
+    PATH.write_text(json.dumps({"disabled": sorted(cur), "reasons": r}))
+'''
+
+FAKE_SEED_MANIFEST = """# the scheduler's source of truth
+jobs:
+  - name: alpha
+    schedule: "*/10 * * * *"
+    command: >-
+      /usr/bin/python3 log_run.py --job alpha --
+      /usr/bin/python3 alpha.py
+
+  # beta backs things up nightly
+  - name: beta
+    schedule: "0 2 * * *"
+    command: >-
+      /bin/sh beta.sh
+
+  - name: gamma
+    schedule: "30 6 * * 1"
+    command: >-
+      /bin/sh gamma.sh
+"""
+
+
+class HostJobs(unittest.TestCase):
+    """hostjobs.py: this machine's Seed scheduler on the Scheduled jobs page.
+    Driven against a stand-in Seed: its own sync and switches do the work."""
+
+    def setUp(self):
+        import sqlite3
+        import hostjobs
+        self.h = hostjobs
+        self.root = Path(tmpdir(self)) / "seed"
+        (self.root / "scheduler").mkdir(parents=True)
+        (self.root / "observability" / "data").mkdir(parents=True)
+        (self.root / "scheduler" / "sync.py").write_text(FAKE_SEED_SYNC)
+        (self.root / "observability" / "switches.py").write_text(FAKE_SEED_SWITCHES)
+        self.manifest = self.root / "scheduler" / "manifest.yml"
+        self.manifest.write_text(FAKE_SEED_MANIFEST)
+        os.chmod(self.manifest, 0o600)
+        (self.root / "observability" / "freshness.json").write_text(json.dumps(
+            {"_comment": "c", "jobs": {n: {"max_age": "1h"} for n in ("alpha", "beta", "gamma")}}))
+        c = sqlite3.connect(self.root / "observability" / "data" / "runs.db")
+        c.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY, job TEXT, started_at TEXT, "
+                  "ok INTEGER, summary TEXT, error_tail TEXT)")
+        c.executemany("INSERT INTO runs (job, started_at, ok, summary, error_tail) VALUES (?,?,?,?,?)",
+                      [("alpha", "2026-11-26T10:00:00+00:00", 1, "old", None),
+                       ("alpha", "2026-11-27T10:00:00+00:00", 1, "fine", None),
+                       ("beta", "2026-11-27T09:00:00+00:00", 0, "", "disk full")])
+        c.commit(); c.close()
+        self.state = Path(tmpdir(self)) / "state"
+        keep = {k: os.environ.get(k) for k in ("CORRAL_SEED_ROOT", "CC_OBS_DB")}
+        os.environ["CORRAL_SEED_ROOT"] = str(self.root)
+        os.environ.pop("CC_OBS_DB", None)
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None
+                                 else os.environ.__setitem__(k, v) for k, v in keep.items()])
+
+    def jobs(self):
+        return {j["name"]: j for j in self.h.list_jobs()["jobs"]}
+
+    def test_no_seed_is_not_an_error(self):
+        os.environ["CORRAL_SEED_ROOT"] = str(self.root / "nope")
+        self.assertEqual(self.h.list_jobs(), {"available": False, "jobs": [], "error": ""})
+        with self.assertRaises(ValueError):
+            self.h.set_paused("alpha", True)
+
+    def test_the_list_is_the_manifest_with_each_jobs_newest_run(self):
+        d = self.h.list_jobs()
+        self.assertTrue(d["available"])
+        self.assertEqual([j["name"] for j in d["jobs"]], ["alpha", "beta", "gamma"])
+        j = self.jobs()
+        self.assertEqual(j["alpha"]["schedule"], "*/10 * * * *")
+        self.assertEqual((j["alpha"]["last"], j["alpha"]["last_ok"]),
+                         ("2026-11-27T10:00:00+00:00", True))
+        self.assertEqual((j["beta"]["last_ok"], j["beta"]["last_note"]), (False, "disk full"))
+        self.assertIsNone(j["gamma"]["last"])
+
+    def test_off_and_on_are_seeds_own_switch(self):
+        self.h.set_paused("beta", True)
+        sw = json.loads((self.root / "observability" / "switches.json").read_text())
+        self.assertEqual(sw["disabled"], ["beta"])
+        self.assertIn("Scheduled jobs page", sw["reasons"]["beta"]["why"])
+        self.assertIsNone(sw["reasons"]["beta"]["owner"], "the owner is Seed's to default")
+        j = self.jobs()["beta"]
+        self.assertTrue(j["paused"])
+        self.assertEqual(j["until"], "2099-01-01")
+        self.assertEqual(self.manifest.read_text(), FAKE_SEED_MANIFEST, "off edited the manifest")
+        self.h.set_paused("beta", False)
+        self.assertFalse(self.jobs()["beta"]["paused"])
+        for bad in ("nope", "../x", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                self.h.set_paused(bad, True)
+
+    def test_delete_goes_through_the_manifest_and_seeds_sync(self):
+        self.h.set_paused("beta", True)
+        r = self.h.remove("beta", self.state)
+        text = self.manifest.read_text()
+        self.assertNotIn("beta", text, "the entry or its own comment stayed")
+        self.assertIn("# the scheduler's source of truth", text)
+        self.assertEqual(self.manifest.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(self.jobs()), ["alpha", "gamma"])
+        self.assertEqual(json.loads((self.root / "scheduler" / "installed.json").read_text()),
+                         ["alpha", "gamma"], "Seed's sync was not run")
+        fresh = json.loads((self.root / "observability" / "freshness.json").read_text())
+        self.assertEqual(sorted(fresh["jobs"]), ["alpha", "gamma"])
+        self.assertEqual(fresh["_comment"], "c")
+        self.assertEqual(json.loads((self.root / "observability" / "switches.json")
+                                    .read_text())["disabled"], [])
+        kept = Path(r["saved"])
+        self.assertEqual(kept.parent, self.state / "hostjobs-removed")
+        self.assertIn("# beta backs things up nightly", kept.read_text())
+        self.assertIn("/bin/sh beta.sh", kept.read_text())
+        # The last entry, with no entry after it.
+        self.h.remove("gamma", self.state)
+        self.assertEqual(sorted(self.jobs()), ["alpha"])
+
+    def test_a_sync_that_refuses_puts_the_job_back(self):
+        (self.root / "scheduler" / "refuse").write_text("")
+        with self.assertRaises(ValueError) as ar:
+            self.h.remove("alpha", self.state)
+        self.assertIn("put back", str(ar.exception))
+        self.assertEqual(self.manifest.read_text(), FAKE_SEED_MANIFEST)
+        self.assertIn("alpha", json.loads(
+            (self.root / "observability" / "freshness.json").read_text())["jobs"])
+
+    def test_the_hub_has_the_routes_and_imports_nothing_of_seed(self):
+        hub = (ROOT / "hub.py").read_text(encoding="utf-8")
+        for route in ("/api/session/hostjobs", "/api/session/hostjobs/pause",
+                      "/api/session/hostjobs/remove"):
+            self.assertIn(f'"{route}"', hub)
+        src = (ROOT / "hostjobs.py").read_text(encoding="utf-8")
+        self.assertNotIn("import sync", src)
+        self.assertNotIn("import switches", src)

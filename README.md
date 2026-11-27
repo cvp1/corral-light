@@ -1119,7 +1119,7 @@ Key files:
   class time (`tests/ci_durations.json`); `plan 4` shows the split, and
   `gh run view <id> --log | python3 tests/ci_shard.py refresh` re-measures it
 
-This repo is the window. It does not import Seed’s `_lib`, fleet, scheduler, or vault, and it does not add hub routes for `/status`. Contributions should keep the project lightweight, local by default, and explicit about what an assistant can access or do.
+This repo is the window. It does not import Seed’s `_lib`, fleet, scheduler, or vault, and it does not add hub routes for `/status`. The one place it reaches Seed is the Scheduled jobs page (`hostjobs.py`): it lists Seed's scheduled jobs and can turn one off, on, or remove it, by running Seed's own `sync.py` and `switches.py` in a subprocess (`hostjobs_seed.py`), never by importing them. Point it at a Seed that is not in `~/aios` with `CORRAL_SEED_ROOT`, or `"seed_root"` in `~/.config/corral-light/hostjobs.json`. Contributions should keep the project lightweight, local by default, and explicit about what an assistant can access or do.
 
 ### `corral_core` — one copy of the parts that must not drift
 
