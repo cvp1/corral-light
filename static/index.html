@@ -66,6 +66,9 @@
               aria-label="Security keys">⚿</button>
       <button class="keysbtn" id="hubsbtn" type="button" title="Other hubs: what they are working on"
               aria-label="Other hubs">⇆</button>
+      <button class="keysbtn" id="schedbtn" type="button"
+              title="Scheduled jobs: turn them on, off, or delete them"
+              aria-label="Scheduled jobs">◷</button>
       <button class="keysbtn hide" id="pushbtn" type="button" title="Alerts on this device"
               aria-label="Alerts on this device">🔔</button>
       <div class="themes" id="themes"></div></div>
@@ -186,6 +189,22 @@
     <p class="hint" id="rig-savehint"></p>
     <p class="hint err" id="rig-error"></p>
     <div id="rig-out" class="rigout"></div>
+    <menu>
+      <button value="cancel" class="btn">Close</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- Scheduled jobs (schedule.py): every job on one page. Off keeps the job
+     and skips its runs; Delete takes two clicks, since there is no undo. -->
+<dialog id="scheddlg">
+  <form method="dialog" class="dlg sched">
+    <h2>Scheduled jobs</h2>
+    <p class="hint" id="sched-sum"></p>
+    <div id="sched-list" class="schedlist"></div>
+    <p class="hint err" id="sched-error"></p>
+    <p class="hint">Schedule a new one from <b>＋ New</b> → <b>Later…</b>, or
+      <code>corral-light later add</code>.</p>
     <menu>
       <button value="cancel" class="btn">Close</button>
     </menu>

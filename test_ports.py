@@ -200,6 +200,47 @@ class Later(unittest.TestCase):
         self.assertGreater(nxt, datetime.now(timezone.utc))
         self.assertLess((nxt - datetime.now(timezone.utc)).total_seconds(), 86400)
 
+    def test_a_job_turned_off_is_kept_and_passed_over(self):
+        from datetime import datetime, timedelta, timezone
+        j = self.s.add("fake", self.dir, "morning", self.iso(seconds=-30), repeat="daily")
+        self.assertTrue(self.s.set_paused(j["id"], True)["paused"])
+        self.assertEqual(self.s.tick(), [], "an off job fired")
+        self.assertEqual(self.mgr.panes, {})
+        rec = self.s.list()[0]
+        self.assertIsNone(rec["last"], "an off job was settled as if it ran")
+        self.assertTrue(json.loads(self.s.path.read_text())["jobs"][0]["paused"],
+                        "off did not survive a restart")
+        # Back on: the next future slot, never a late run of the one it slept through.
+        on = self.s.set_paused(j["id"], False)
+        self.assertNotIn("paused", on)
+        self.assertGreater(self.later.parse_when(on["at"]), datetime.now(timezone.utc))
+        self.assertEqual(self.s.tick(), [])
+        self.assertEqual(self.mgr.panes, {})
+
+    def test_turning_on_refuses_what_cannot_run(self):
+        from datetime import datetime, timedelta, timezone
+        once = self.s.add("fake", self.dir, "once", self.iso(minutes=1))
+        self.s.set_paused(once["id"], True)
+        # Off across a hub that was down for hours: not missed, not failed.
+        self.s.tick(now=datetime.now(timezone.utc) + timedelta(hours=5))
+        self.assertNotIn("failed", self.s.list()[0])
+        next(x for x in self.s.jobs if x["id"] == once["id"])["at"] = self.iso(minutes=-1)
+        with self.assertRaises(ValueError) as ar:
+            self.s.set_paused(once["id"], False)
+        self.assertIn("passed while it was off", str(ar.exception))
+        self.assertTrue(self.s.list()[0]["paused"], "a refused switch still turned it on")
+        with self.assertRaises(ValueError):
+            self.s.set_paused("s-nope", True)
+        stale = self.s.add("fake", self.dir, "too late", self.iso(minutes=1))
+        self.s.tick(now=datetime.now(timezone.utc) + timedelta(hours=5))
+        with self.assertRaises(ValueError) as ar:
+            self.s.set_paused(stale["id"], True)
+        self.assertIn("record", str(ar.exception))
+        # Off then on before its time: it still runs.
+        soon = self.s.add("fake", self.dir, "soon", self.iso(minutes=5))
+        self.s.set_paused(soon["id"], True)
+        self.assertEqual(self.s.set_paused(soon["id"], False)["at"], soon["at"])
+
     def test_a_nudge_never_queues_behind_a_permission(self):
         p = self.mgr.create("fake", self.dir)
         self.s.add("", "", "hello", self.iso(seconds=-5), action="nudge", pane_id=p.id)

@@ -3,6 +3,7 @@
 
 A job opens a pane and sends a prompt (or lands a nudge/resume on an existing
 pane) at its time; it never answers permission gates and never retries.
+A job turned off (`paused`) stays on the list and is passed over.
 Missed runs older than CATCHUP_S are skipped, not stampeded.
 """
 from __future__ import annotations
@@ -161,6 +162,36 @@ class Scheduler:
             self._save()
         return job_id
 
+    def set_paused(self, job_id, paused):
+        """Turn a job off (the ticker passes over it) or back on. Turning a
+        repeat on walks it to its next future slot; nothing it slept through
+        runs late. A one-shot whose time passed while off is not revived."""
+        paused = bool(paused)
+        with self._lock:
+            job = next((j for j in self.jobs if j.get("id") == job_id), None)
+            if job is None:
+                raise ValueError(f"no scheduled job {job_id}")
+            if job.get("failed"):
+                raise ValueError("that run already failed or was missed — it "
+                                 "is a record now; delete it")
+            if not paused and job.get("paused"):
+                step = {"daily": timedelta(days=1),
+                        "weekly": timedelta(weeks=1)}.get(job.get("repeat"))
+                nxt, now = parse_when(job["at"]), _now()
+                if step:
+                    while nxt <= now:
+                        nxt += step
+                    job["at"] = _iso(nxt)
+                elif nxt <= now:
+                    raise ValueError("its time passed while it was off — "
+                                     "delete it and schedule it again")
+            if paused:
+                job["paused"] = True
+            else:
+                job.pop("paused", None)
+            self._save()
+            return dict(job)
+
     def list(self):
         with self._lock:
             return sorted((dict(j) for j in self.jobs), key=lambda j: j.get("at") or "")
@@ -189,7 +220,8 @@ class Scheduler:
         now = now or _now()
         with self._lock:
             due = [j for j in self.jobs
-                   if not j.get("failed") and parse_when(j["at"]) <= now]
+                   if not j.get("failed") and not j.get("paused")
+                   and parse_when(j["at"]) <= now]
         for job in due:
             if (now - parse_when(job["at"])).total_seconds() > CATCHUP_S:
                 self._settle(job, error="missed while Corral Light was down — "
