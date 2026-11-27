@@ -561,9 +561,45 @@ for (const [label, run] of [
   const r = fn('render');
   check(/scheduleMisses\(S\.schedule, missSeen\(\)\)\) \{ n\.appendChild\(missCard\(m\)\); items\+\+; quiet\+\+; \}/.test(r),
         'T-SR-5 quiet in the rail, never blocking');
-  check(/last run failed: \$\{j\.last_error\}/.test(r), 'T-SR-6 a repeat\'s failure shows on its Scheduled row');
+  check(/schedLine\(j\)/.test(r) && /last run failed: \$\{j\.last_error\}/.test(fn('schedLine')),
+        'T-SR-6 a repeat\'s failure shows on its Scheduled row');
   const hub = readFileSync(new URL('./hub.py', import.meta.url), 'utf8');
   check(/MGR\.schedule\.on_miss = _notify_schedule_miss/.test(hub), 'T-SR-7 the hub alerts (desktop and phone) on a miss');
+}
+
+/* ── T-SP: the Scheduled jobs page: on, off, delete ─────────────────────── */
+{
+  const line = load('schedLine');
+  const on = { id: 'a', title: 'nightly', action: 'start', at: '2026-11-28T13:00:00Z', repeat: 'daily', agent: 'claude' };
+  check(/^start · .* · daily · claude$/.test(line(on)), 'T-SP-1 an armed job reads as before');
+  eq(line({ ...on, paused: true }), 'off · start · daily · claude', 'T-SP-2 an off repeat names its rhythm, not a stale date');
+  check(line({ ...on, paused: true, repeat: '' }).startsWith('off · start · '), 'T-SP-2 an off one-shot keeps its time');
+  eq(line({ ...on, failed: true, last_error: 'boom' }), 'failed: boom', 'T-SP-3 a failed run says why');
+  const sum = load('schedSummary');
+  eq(sum([]), 'Nothing is scheduled.', 'T-SP-4 an empty page says so');
+  eq(sum([on, { ...on, paused: true }, { ...on, failed: true }]), '1 on · 1 off · 1 did not run', 'T-SP-4 the count by state');
+  const calls = [];
+  const env = { el: mk, S: { schedule: [] }, SCHED_ARMED: null, renderSched: () => calls.push('render'),
+    schedAct: (p, b) => calls.push([p, b]) };
+  const row = load('schedRow', ['schedLine'], env);
+  const r1 = row(on);
+  const box = find(r1, n => n.tag === 'input');
+  check(box && box.checked === true, 'T-SP-5 an armed job\'s switch is on');
+  box.checked = false; box.onchange();
+  eq(calls.pop(), ['/api/session/schedule/pause', { id: 'a', paused: true }], 'T-SP-5 switching off pauses, it does not delete');
+  check(find(row({ ...on, paused: true }), n => n.tag === 'input').checked === false, 'T-SP-6 an off job\'s switch is off');
+  check(!find(row({ ...on, failed: true, last_error: 'x' }), n => n.tag === 'input'),
+        'T-SP-7 a failed record has no switch, only Delete');
+  const rm = find(r1, n => n.tag === 'button');
+  rm.onclick();
+  eq(calls.pop(), 'render', 'T-SP-8 the first Delete click only arms');
+  check(!calls.length, 'T-SP-8 nothing was removed on one click');
+  check(/SCHED_ARMED = null;\s*schedAct\('\/api\/session\/schedule\/remove'/.test(fn('schedRow')),
+        'T-SP-8 the second click removes');
+  check(/id="scheddlg"/.test(html) && /id="schedbtn"/.test(html), 'T-SP-9 the page and its button exist');
+  check(/lab\.onclick = openSched/.test(fn('render')), 'T-SP-9 the rail\'s Scheduled label opens it');
+  const hub = readFileSync(new URL('./hub.py', import.meta.url), 'utf8');
+  check(/"\/api\/session\/schedule\/pause"/.test(hub), 'T-SP-10 the hub has the pause route');
 }
 
 if (bad) { console.error(`${bad} failure(s)`); process.exit(1); }

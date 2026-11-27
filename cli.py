@@ -692,7 +692,7 @@ def v_port(c, a):
 
 
 def v_later(c, a):
-    """Scheduled prompts (schedule.py): list, add, rm."""
+    """Scheduled prompts (schedule.py): list, add, rm, on, off."""
     if a.later_cmd == "list":
         jobs = c.get("/api/session/schedule")["jobs"]
         if not jobs:
@@ -700,7 +700,14 @@ def v_later(c, a):
         for j in jobs:
             c.say(f"{j['id']}  {j['at']}  {(j.get('repeat') or 'once'):<6} "
                   f"{j['action']:<6} {j.get('agent') or '':<8} "
-                  f"{'FAILED: ' + str(j.get('last_error')) if j.get('failed') else j.get('title')}")
+                  f"{'FAILED: ' + str(j.get('last_error')) if j.get('failed') else j.get('title')}"
+                  f"{'  (off)' if j.get('paused') else ''}")
+        return 0
+    if a.later_cmd in ("on", "off"):
+        j = c.post("/api/session/schedule/pause",
+                   {"id": a.id, "paused": a.later_cmd == "off"})["job"]
+        c.say(f"{j['id']} is off — it will not run until turned on" if j.get("paused")
+              else f"{j['id']} is on — next at {j['at']}")
         return 0
     if a.later_cmd == "rm":
         c.say("removed " + c.post("/api/session/schedule/remove", {"id": a.id})["removed"])
@@ -876,11 +883,14 @@ def main(argv=None):
     s.add_argument("--hours", type=float, default=24)
     s.set_defaults(fn=v_digest)
 
-    s = sub.add_parser("later", help="scheduled prompts: list | add | rm")
+    s = sub.add_parser("later", help="scheduled prompts: list | add | rm | on | off")
     lsub = s.add_subparsers(dest="later_cmd", required=True)
     lsub.add_parser("list")
     x = lsub.add_parser("rm")
     x.add_argument("id")
+    for _verb in ("on", "off"):
+        x = lsub.add_parser(_verb, help=f"turn a scheduled job {_verb}")
+        x.add_argument("id")
     x = lsub.add_parser("add")
     x.add_argument("--at", required=True, help="local YYYY-MM-DDTHH:MM, or …Z for UTC")
     x.add_argument("--repeat", choices=("daily", "weekly"))

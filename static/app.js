@@ -3958,17 +3958,17 @@ function render() {
   // Scheduled jobs, plus failed or missed one-shots kept until dismissed.
   const jobs = S.schedule || [];
   if (jobs.length) {
-    r.appendChild(el('div', 'lab', `Scheduled · ${jobs.length}`));
+    const lab = el('div', 'lab clicky', `Scheduled · ${jobs.length}`);
+    lab.title = 'open the Scheduled jobs page: turn jobs on, off, or delete them';
+    lab.onclick = openSched;
+    r.appendChild(lab);
     for (const j of jobs) {
-      const it = el('div', 'rit arc' + (j.failed || j.last_error ? ' dead' : ''));
+      const it = el('div', 'rit arc' + (j.failed || j.last_error ? ' dead' : '')
+                           + (j.paused ? ' off' : ''));
       it.appendChild(el('span', 'dot'));
       const t = el('div', 'txt');
       t.appendChild(el('div', 't', j.title || j.prompt.slice(0, 60)));
-      const when = new Date(j.at).toLocaleString();
-      // A repeat keeps running after a failed run: say so, or it fails silently each day.
-      t.appendChild(el('div', 's', j.failed ? `failed: ${j.last_error}` :
-        `${j.action} · ${when}${j.repeat ? ' · ' + j.repeat : ''} · ${j.agent}` +
-        (j.last_error ? ` · last run failed: ${j.last_error}` : '')));
+      t.appendChild(el('div', 's', schedLine(j)));
       it.appendChild(t);
       const x = el('button', 'a', '✕'); x.title = j.failed ? 'dismiss' : 'unschedule';
       x.onclick = async e => {
@@ -3980,6 +3980,7 @@ function render() {
       r.appendChild(it);
     }
   }
+  renderSched();
   }
 
   // grid. On a phone, an opened pane shows alone (client-side only: nothing
@@ -4381,6 +4382,93 @@ function missCard(j) {
   acts.appendChild(ok);
   c.appendChild(acts);
   return c;
+}
+
+/* ── the Scheduled jobs page (selftest_inbox.mjs T-SP) ────────────────────
+ * Every scheduled job in one dialog: a switch per job (off keeps the job and
+ * skips its runs), and Delete. A failed or missed one-shot is a record: it
+ * has no switch, only Delete. */
+function schedLine(j) {
+  if (j.failed) return `failed: ${j.last_error}`;
+  const when = new Date(j.at).toLocaleString();
+  // A repeat keeps running after a failed run: say so, or it fails silently each day.
+  const tail = ` · ${j.agent}` + (j.last_error ? ` · last run failed: ${j.last_error}` : '');
+  // Off: a repeat's stored time may be behind us, so name the rhythm, not a date.
+  if (j.paused) return `off · ${j.action} · ${j.repeat || when}${tail}`;
+  return `${j.action} · ${when}${j.repeat ? ' · ' + j.repeat : ''}${tail}`;
+}
+function schedSummary(jobs) {
+  jobs = jobs || [];
+  if (!jobs.length) return 'Nothing is scheduled.';
+  const failed = jobs.filter(j => j.failed).length;
+  const off = jobs.filter(j => !j.failed && j.paused).length;
+  const on = jobs.length - failed - off;
+  return [`${on} on`, off ? `${off} off` : '', failed ? `${failed} did not run` : '']
+    .filter(Boolean).join(' · ');
+}
+let SCHED_ARMED = null, SCHED_KEY = null;
+function schedRow(j) {
+  const row = el('div', 'schedrow' + (j.failed ? ' bad' : j.paused ? ' off' : ''));
+  if (j.failed) {
+    row.appendChild(el('span', 'pill', 'did not run'));
+  } else {
+    const sw = el('label', 'schedsw');
+    const box = el('input'); box.type = 'checkbox'; box.checked = !j.paused;
+    box.setAttribute('aria-label', `${j.title || j.id}: on`);
+    box.onchange = () => schedAct('/api/session/schedule/pause', { id: j.id, paused: !box.checked });
+    sw.append(box, el('span', 'knob'), el('span', 'swtxt', j.paused ? 'off' : 'on'));
+    sw.title = j.paused ? 'off: it will not run until turned on' : 'on: turn it off to skip its runs';
+    row.appendChild(sw);
+  }
+  const t = el('div', 'txt');
+  t.appendChild(el('div', 't', j.title || String(j.prompt || '').slice(0, 60) || j.id));
+  t.appendChild(el('div', 's', schedLine(j)));
+  const more = [j.cwd, j.last && !j.failed ? `last run ${new Date(j.last).toLocaleString()}` : '']
+    .filter(Boolean).join(' · ');
+  if (more) t.appendChild(el('div', 's dim', more));
+  row.appendChild(t);
+  const rm = el('button', 'btn', SCHED_ARMED === j.id ? 'Delete — sure?' : 'Delete');
+  rm.type = 'button';
+  // Two clicks: a deleted job is gone, and there is no undo.
+  rm.onclick = () => {
+    if (SCHED_ARMED !== j.id) { SCHED_ARMED = j.id; renderSched(true); return; }
+    SCHED_ARMED = null;
+    schedAct('/api/session/schedule/remove', { id: j.id });
+  };
+  row.appendChild(rm);
+  return row;
+}
+async function schedAct(path, body) {
+  $('#sched-error').textContent = '';
+  try { await api(path, body); }
+  catch (e) { $('#sched-error').textContent = e.message; }
+  try { await refresh(); } catch { /* the page keeps its last list */ }
+  renderSched(true);                       // a refused switch snaps back
+}
+/* Rebuilt only when the jobs (or the armed Delete) change: render() calls
+ * this on every event, and a rebuild would drop focus mid-click. */
+function renderSched(force) {
+  const dlg = $('#scheddlg');
+  if (!dlg || !dlg.open) return;
+  const jobs = S.schedule || [];
+  const key = JSON.stringify([jobs, SCHED_ARMED]);
+  if (!force && key === SCHED_KEY) return;
+  SCHED_KEY = key;
+  $('#sched-sum').textContent = schedSummary(jobs);
+  $('#sched-list').replaceChildren(...jobs.map(schedRow));
+}
+function openSched() {
+  const dlg = $('#scheddlg');
+  if (!dlg) return;
+  SCHED_ARMED = null; SCHED_KEY = null;
+  $('#sched-error').textContent = '';
+  if (!dlg.open) dlg.showModal();
+  renderSched(true);
+  refresh().then(() => renderSched(), () => {});
+}
+function wireSched() {
+  const b = $('#schedbtn');
+  if (b) b.onclick = openSched;
 }
 
 /* ── the rail's pure parts (selftest_inbox.mjs) ─────────────────────────── */
@@ -7022,6 +7110,7 @@ async function start() {
   wireDialog();
   wireRigDialog();
   wireHubs();
+  wireSched();
   wireModuleDialog();
   wireRail();
   wireLeftRail();

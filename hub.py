@@ -1371,6 +1371,11 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/session/schedule/remove":
                 return self._json({"ok": True,
                                    "removed": MGR.schedule.remove(b.get("id", ""))})
+            if p == "/api/session/schedule/pause":
+                if not isinstance(b.get("paused"), bool):
+                    raise ValueError("paused must be true or false")
+                return self._json({"ok": True, "job": MGR.schedule.set_paused(
+                    b.get("id", ""), b["paused"])})
             if p in ("/api/session/panels/start", "/api/session/panels/next",
                      "/api/session/panels/ack", "/api/session/panels/cancel"):
                 import panel as _panel
